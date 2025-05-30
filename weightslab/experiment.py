@@ -388,15 +388,16 @@ class Experiment:
 
     def train_step_or_eval_full(self):
         """Train the model for one step or evaluate the model on the full."""
-        if self.performed_train_steps() % \
-                self.eval_full_to_train_steps_ratio == 0:
+        step = self.performed_train_steps()
+
+        # Skip eval/dump on first step
+        if step > 0 and step % self.eval_full_to_train_steps_ratio == 0:
             self.eval_full()
-        if self.performed_train_steps() % \
-                self.experiment_dump_to_train_steps_ratio == 0:
+
+        if step > 0 and step % self.experiment_dump_to_train_steps_ratio == 0:
             self.dump()
 
-        if self.train_loop_clbk_call and self.performed_train_steps() % \
-                self.train_loop_clbk_freq == 0:
+        if self.train_loop_clbk_call and step % self.train_loop_clbk_freq == 0:
             for callback_fn in self.train_loop_callbacks:
                 callback_fn()
         self.train_one_step()
