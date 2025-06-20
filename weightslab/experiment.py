@@ -16,6 +16,13 @@ from weightslab.monitoring import NeuronStatsWithDifferencesMonitor
 
 
 from threading import Lock
+from enum import Enum, auto
+
+class ArchitectureOpType(Enum):
+    ADD_NEURONS = auto()
+    PRUNE = auto()
+    REINITIALIZE = auto()
+    FREEZE = auto()
 
 
 class Experiment:
@@ -112,6 +119,7 @@ class Experiment:
             lambda model: self._update_optimizer(model))
 
         self.lock = Lock()
+        self.architecture_guard = Lock()
         self.model.to(self.device)
 
     def __repr__(self):
@@ -260,27 +268,30 @@ class Experiment:
 
     def train_one_step(self):
         """Train the model for one step."""
+        #TODO: reduce critical section to bare minimum, no nested critical section, keep only the updates on architecture inside the critical section
         with self.lock:
             if self.is_training is False:
                 return
             self.occured_train_steps += 1
 
-        self.model.train()
-        self.model.set_tracking_mode(TrackingMode.TRAIN)
-        self.optimizer.zero_grad()
-        model_age = self.model.get_age()
-        try:
-            input, output = self._pass_one_batch(self.train_iterator)
-        except StopIteration:
-            self.train_iterator = iter(self.train_loader)
-            input, output = self._pass_one_batch(self.train_iterator)
+        with self.architecture_guard:
+            self.model.train()
+            self.model.set_tracking_mode(TrackingMode.TRAIN)
+            self.optimizer.zero_grad()
+            model_age = self.model.get_age()
+            try:
+                input, output = self._pass_one_batch(self.train_iterator)
+            except StopIteration:
+                self.train_iterator = iter(self.train_loader)
+                input, output = self._pass_one_batch(self.train_iterator)
 
-        losses_batch = F.cross_entropy(
-            output, input.label_batch, reduction='none')
+            losses_batch = F.cross_entropy(
+                output, input.label_batch, reduction='none')
 
-        loss = th.mean(losses_batch)
-        loss.backward()
-        pred = output.argmax(dim=1, keepdim=True)
+            loss = th.mean(losses_batch)
+            loss.backward()
+            pred = output.argmax(dim=1, keepdim=True)
+            self.optimizer.step()
 
         with self.lock:
             self.train_loader.dataset.update_batch_sample_stats(
@@ -297,7 +308,7 @@ class Experiment:
             global_step=model_age)
         self.logger.add_scalars(
             'train-acc', {self.name: accuracy}, global_step=model_age)
-        self.optimizer.step()
+        # self.optimizer.step()
 
         with self.lock:
             self.training_steps_to_do -= 1
@@ -328,14 +339,15 @@ class Experiment:
     @th.no_grad()
     def eval_one_step(self):
         """Evaluate the model for one step."""
-        self.occured_eval__steps += 1
-        self.model.eval()
-        self.model.set_tracking_mode(TrackingMode.EVAL)
-        try:
-            input, output = self._pass_one_batch(self.eval_iterator)
-        except StopIteration:
-            self.eval_iterator = iter(self.eval_loader)
-            input, output = self._pass_one_batch(self.eval_iterator)
+        with self.architecture_guard:
+            self.occured_eval__steps += 1
+            self.model.eval()
+            self.model.set_tracking_mode(TrackingMode.EVAL)
+            try:
+                input, output = self._pass_one_batch(self.eval_iterator)
+            except StopIteration:
+                self.eval_iterator = iter(self.eval_loader)
+                input, output = self._pass_one_batch(self.eval_iterator)
 
         losses_batch = F.cross_entropy(
             output, input.label_batch, reduction='none')
@@ -459,3 +471,33 @@ class Experiment:
     def set_name(self, name: str):
         with self.lock:
             self.name = name
+
+    def apply_architecture_op(self, op_type, **kwargs):
+        #TODO Convert strings to enum, remove reinitialization and freezing
+        if op_type == ArchitectureOpType.ADD_NEURONS:
+            with self.architecture_guard:
+                self.model.add_neurons(
+                    layer_id=kwargs['layer_id'],
+                    neuron_count=kwargs['neuron_count'],
+                    skip_initialization=kwargs.get('skip_initialization', False)
+                )
+        elif op_type == ArchitectureOpType.PRUNE:
+            with self.architecture_guard:
+                self.model.prune(
+                    layer_id=kwargs['layer_id'],
+                    neuron_indices=kwargs['neuron_indices']
+                )
+        elif op_type == ArchitectureOpType.REINITIALIZE:
+            with self.architecture_guard:
+                self.model.reinit_neurons(
+                    layer_id=kwargs['layer_id'],
+                    neuron_indices=kwargs['neuron_indices']
+                )
+        elif op_type == ArchitectureOpType.FREEZE:
+            with self.architecture_guard:
+                self.model.freeze(
+                    layer_id=kwargs['layer_id'],
+                    neuron_ids=kwargs['neuron_ids']
+                )
+        else:
+            raise ValueError(f"Unsupported op_type: {op_type}")
