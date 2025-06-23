@@ -41,6 +41,8 @@ class Experiment:
             device,
             learning_rate: float,
             batch_size: int,
+            criterion=None,
+            metrics=None,
             training_steps_to_do: int = 256,
             name: str = "baseline",
             root_log_dir: str = "root_experiment",
@@ -55,6 +57,8 @@ class Experiment:
         self.model = model
         self.device = device
         self.batch_size = batch_size
+        self.criterion = criterion or th.nn.CrossEntropyLoss()
+        self.metrics = metrics or {}
         self.eval_dataset = eval_dataset
         self.tqdm_display = tqdm_display
         self.learning_rate = learning_rate
@@ -268,7 +272,6 @@ class Experiment:
 
     def train_one_step(self):
         """Train the model for one step."""
-        #TODO: reduce critical section to bare minimum, no nested critical section, keep only the updates on architecture inside the critical section
         with self.lock:
             if self.is_training is False:
                 return
@@ -285,12 +288,14 @@ class Experiment:
                 self.train_iterator = iter(self.train_loader)
                 input, output = self._pass_one_batch(self.train_iterator)
 
-            losses_batch = F.cross_entropy(
-                output, input.label_batch, reduction='none')
-
+            losses_batch = self.criterion(output, input.label_batch)
+            if losses_batch.ndim == 0:
+                losses_batch = losses_batch.unsqueeze(0)
+            pred = output.argmax(dim=1, keepdim=True)
+            if pred.ndim == 0:
+                pred = pred.unsqueeze(0)
             loss = th.mean(losses_batch)
             loss.backward()
-            pred = output.argmax(dim=1, keepdim=True)
             self.optimizer.step()
 
         with self.lock:
@@ -300,15 +305,26 @@ class Experiment:
                 losses_batch.detach().cpu().numpy(),
                 pred.detach().cpu().numpy())
 
-        correct = pred.eq(input.label_batch.view_as(pred)).sum().item()
-        accuracy = 100. * correct / pred.shape[0]  # batch_size
-
         self.logger.add_scalars(
             'train-loss', {self.name: loss.detach().cpu().numpy()},
             global_step=model_age)
-        self.logger.add_scalars(
-            'train-acc', {self.name: accuracy}, global_step=model_age)
-        # self.optimizer.step()
+
+        for name, metric in self.metrics.items():
+             # torchmetrics.Metric
+            if hasattr(metric, 'to'): 
+                metric = metric.to(self.device)
+                metric_value = metric(output, input.label_batch)
+                if hasattr(metric, 'compute'):
+                    metric_value = metric.compute().item()
+                    metric.reset()
+            else:
+                # custom metric
+                metric_value = metric(output, input.label_batch)
+                if hasattr(metric_value, 'item'):
+                    metric_value = metric_value.item()
+
+            self.logger.add_scalars(
+                f'train-{name}', {self.name: metric_value}, global_step=model_age)
 
         with self.lock:
             self.training_steps_to_do -= 1
@@ -349,10 +365,18 @@ class Experiment:
                 self.eval_iterator = iter(self.eval_loader)
                 input, output = self._pass_one_batch(self.eval_iterator)
 
-        losses_batch = F.cross_entropy(
-            output, input.label_batch, reduction='none')
-        test_loss = th.sum(losses_batch)
+        losses_batch = self.criterion(output, input.label_batch)
+        if losses_batch.ndim == 0:
+            losses_batch = losses_batch.unsqueeze(0)
+
+        if losses_batch.ndim > 0:
+            test_loss = th.sum(losses_batch)
+        else:
+            test_loss = losses_batch
+
         pred = output.argmax(dim=1, keepdim=True)
+        if pred.ndim == 0:
+            pred = pred.unsqueeze(0)
 
         model_age = self.model.get_age()
         self.eval_loader.dataset.update_batch_sample_stats(
@@ -361,42 +385,64 @@ class Experiment:
                 losses_batch.detach().cpu().numpy(),
                 pred.detach().cpu().numpy())
 
-        correct = pred.eq(input.label_batch.view_as(pred)).cpu().sum().item()
-        return test_loss, correct
+        metric_results = {}
+        for name, metric in self.metrics.items():
+            if hasattr(metric, 'to'):
+                metric = metric.to(self.device)
+                metric_value = metric(output, input.label_batch)
+                if hasattr(metric, 'compute'):
+                    metric_value = metric.compute().item()
+                    metric.reset()
+            else:
+                metric_value = metric(output, input.label_batch)
+                if hasattr(metric_value, 'item'):
+                    metric_value = metric_value.item()
+            metric_results[name] = metric_value
+
+        return test_loss, metric_results
 
     @th.no_grad()
     def eval_n_steps(self, n: int):
-        losses, correct = 0, 0
+        losses = 0.0
+        metric_totals = {name: 0.0 for name in self.metrics}
+        count = 0
         eval_range = range(n)
         try:
             for _ in eval_range:
-                step_loss, step_corrects = self.eval_one_step()
+                step_loss, metric_results = self.eval_one_step()
                 losses += step_loss
-                correct += step_corrects
+                for name, value in metric_results.items():
+                    metric_totals[name] += value
+                count += 1
         except KeyboardInterrupt:
             pass
-        return losses.cpu(), correct
+
+        if count == 0:
+            mean_loss = 0.0
+            mean_metrics = {name: 0.0 for name in self.metrics}
+        else:
+            mean_loss = losses / count
+            mean_metrics = {name: metric_totals[name] / count for name in self.metrics}
+        return mean_loss.cpu(), mean_metrics
 
     @th.no_grad()
     def eval_full(self, skip_tensorboard: bool = False):
         """Evaluate the model on the full dataset."""
 
-        losses, correct = self.eval_n_steps(len(self.eval_loader))
+        mean_loss, mean_metrics = self.eval_n_steps(len(self.eval_loader))
 
-        losses /= len(self.eval_loader.dataset)
-        accuracy = 100. * correct / len(self.eval_loader.dataset)
-
-        print("eval full: ", losses, accuracy)
+        print("eval full: ", mean_loss, mean_metrics)
 
         if not skip_tensorboard:
             self.logger.add_scalars(
-                'eval-loss', {self.name: losses},
+                'eval-loss', {self.name: mean_loss},
                 global_step=self.model.get_age())
-            self.logger.add_scalars(
-                'eval-acc', {self.name: accuracy},
-                global_step=self.model.get_age())
+            for name, value in mean_metrics.items():
+                self.logger.add_scalars(
+                    f'eval-{name}', {self.name: value},
+                    global_step=self.model.get_age())
             self.report_parameters_count()
-        return losses, accuracy
+        return mean_loss, mean_metrics
 
     def train_step_or_eval_full(self):
         """Train the model for one step or evaluate the model on the full."""
