@@ -1,5 +1,6 @@
 """ Wrappers over common pytorch modules that allow for interactive changes. """
 import collections
+import hashlib
 
 from typing import Set, List, Union
 from torch import nn
@@ -293,7 +294,12 @@ class LinearWithNeuronOps(nn.Linear, LayerWiseOperations):
             self.eval_dataset_tracker == other.eval_dataset_tracker
 
     def __hash__(self):
-        return hash(str(self))
+        params = (
+            self.in_features,
+            self.out_features,
+            self.bias is not None
+        )
+        return int(hashlib.sha256(str(params).encode()).hexdigest(), 16)
 
     def get_tracker(self) -> Tracker:
         if self.tracking_mode == TrackingMode.TRAIN:
@@ -595,7 +601,19 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
             missing_keys, unexpected_keys, error_msgs)
 
     def __hash__(self):
-        return hash(str(self))
+        parameters = (
+            self.in_channels,
+            self.out_channels,
+            self.kernel_size,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+            # getattr(self, 'bias', None) is not None,
+            self.padding_mode
+        )
+        # Convert the tuple to a string representation and hash it using hashlib
+        return int(hashlib.sha256(str(parameters).encode()).hexdigest(), 16)
 
     def __eq__(self, other: "LinearWithNeuronOps") -> bool:
         return self.weight.device == other.weight.device and \
@@ -871,16 +889,24 @@ class BatchNorm2dWithNeuronOps(nn.BatchNorm2d, LayerWiseOperations):
             num_features, eps, momentum, affine, track_running_stats, device, dtype
         )
         self.neuron_count = num_features
-        
+
         self.assign_id()
         self.device = device
 
     def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self.device = args[0] if args else kwargs.get('device')
+        device = args[0] if args else kwargs.get('device')
+        self.device = device
+        super().to(device)
 
     def __hash__(self):
-        return hash(str(self))
+        params = (
+            self.num_features,
+            self.eps,
+            self.momentum,
+            self.affine,
+            self.track_running_stats
+        )
+        return int(hashlib.sha256(str(params).encode()).hexdigest(), 16)
 
     def __eq__(self, other: "BatchNorm2dWithNeuronOps") -> bool:
         if self.device != other.device:
@@ -918,9 +944,9 @@ class BatchNorm2dWithNeuronOps(nn.BatchNorm2d, LayerWiseOperations):
                         self.device)
 
             self.running_mean = th.index_select(
-                self.running_mean, dim=0, index=idx_tnsr)
+                self.running_mean, dim=0, index=idx_tnsr).to(self.device)
             self.running_var = th.index_select(
-                self.running_var, dim=0, index=idx_tnsr)
+                self.running_var, dim=0, index=idx_tnsr).to(self.device)
 
     def prune(self, indices: List[int]):
         print(f"BatchNorm2dWithNeuronOps[{self.get_module_id()}].prune {indices}")
@@ -935,7 +961,6 @@ class BatchNorm2dWithNeuronOps(nn.BatchNorm2d, LayerWiseOperations):
 
         with th.no_grad():
             if self.weight is not None:
-                print(self.weight.data.shape, idx_tnsr)
                 self.weight.data = nn.Parameter(
                     th.index_select(self.weight.data, dim=0, index=idx_tnsr)).to(
                         self.device)
@@ -944,9 +969,9 @@ class BatchNorm2dWithNeuronOps(nn.BatchNorm2d, LayerWiseOperations):
                         self.device)
 
             self.running_mean = th.index_select(
-                self.running_mean, dim=0, index=idx_tnsr)
+                self.running_mean, dim=0, index=idx_tnsr).to(self.device)
             self.running_var = th.index_select(
-                self.running_var, dim=0, index=idx_tnsr)
+                self.running_var, dim=0, index=idx_tnsr).to(self.device)
 
         self.num_features = len(kept_neurons)
         self.neuron_count = self.num_features
