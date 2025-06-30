@@ -46,7 +46,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.dummy_network.set_tracking_mode(TrackingMode.TRAIN)
         self.dummy_network.maybe_update_age(self.tracked_input)
         self.assertEqual(self.dummy_network.get_age(), 2)
-
+        
     def test_store_and_load(self):
         self.dummy_network.set_tracking_mode(TrackingMode.TRAIN)
         _ = self.dummy_network.forward(self.tracked_input)
@@ -172,7 +172,27 @@ class NetworkWithOpsTest(unittest.TestCase):
         corrects_after_reinit = self.eval_one_epoch()
         self.assertLessEqual(
             corrects_first_epoch, corrects_after_reinit)
+        
+    def test_zerofy(self):
+        print("Initial neuron count:", self.dummy_network.conv0.neuron_count)
+        layer_id = self.dummy_network.conv0.get_module_id()
+        self.dummy_network.add_neurons(layer_id, 1)
+        new_neuron_id = self.dummy_network.conv0.neuron_count - 1
+
+        # self.dummy_network.conv0.train_dataset_tracker.set_neuron_age(new_neuron_id, 0)
+        age = self.dummy_network.conv0.train_dataset_tracker.triggrs_by_neuron[new_neuron_id] = 0
+        for nid in range(self.dummy_network.linear0.neuron_count):
+            # self.dummy_network.linear0.train_dataset_tracker.set_neuron_age(nid, 5)
+            age = self.dummy_network.linear0.train_dataset_tracker.triggrs_by_neuron[nid] = 5
+
+        self.dummy_network.zerofy(layer_id)
+
+        for old_id in range(self.dummy_network.linear0.neuron_count):
+            weight_val = self.dummy_network.linear0.weight[old_id, new_neuron_id].item()
+            self.assertEqual(weight_val, 0.0)
 
 
 if __name__ == '__main__':
     unittest.main()
+
+#test    

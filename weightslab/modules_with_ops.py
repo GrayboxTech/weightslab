@@ -179,6 +179,13 @@ class LayerWiseOperations(NeuronWiseOperations):
         for neuron_id in neuron_ids:
             self.incoming_neuron_2_lr[neuron_id] = lr
 
+    def zerofy_connections_from(self, from_neuron_ids: Set[int], to_neuron_ids: Set[int]):
+        with th.no_grad():
+            for to_id in to_neuron_ids:
+                for from_id in from_neuron_ids:
+                    if to_id < self.weight.shape[0] and from_id < self.weight.shape[1]:
+                        self.weight[to_id, from_id] = 0.0
+
     def register_grad_hook(self):
         # This is meant to be called in the children classes.
         def weight_grad_hook(weight_grad):
