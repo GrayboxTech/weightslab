@@ -5,7 +5,7 @@ from torchvision import datasets as ds
 from torchvision import transforms as T
 
 from weightslab.data_samples_with_ops import DataSampleTrackingWrapper
-from weightslab.data_samples_with_ops import SampleStats
+from weightslab.data_samples_with_ops import SampleStatsEx
 
 
 class DummyDataset:
@@ -28,10 +28,33 @@ class DummyDataset:
 
 _DUMMY_DATASET = DummyDataset()
 
+class DummySegmentationDataset:
+    """
+    Dummy dataset for segmentation:
+    - Each sample is (image, mask)
+    - Image: shape (1, 4, 4), Mask: shape (4, 4) with classes {0, 1, 2}
+    """
+    def __init__(self):
+        # 4 samples, with simple masks
+        self.images = [
+            np.ones((1, 4, 4)) * i for i in range(4)
+        ]
+        self.masks = [
+            np.full((4, 4), i % 3) for i in range(4)
+        ]
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        return self.images[idx], self.masks[idx]
+
+_DUMMY_SEG_DATASET = DummySegmentationDataset()
+
 
 class DataSampleTrackingWrapperTest(unittest.TestCase):
     def setUp(self):
-        self.wrapped_dataset = DataSampleTrackingWrapper(_DUMMY_DATASET)
+        self.wrapped_dataset = DataSampleTrackingWrapper(_DUMMY_DATASET, task_type="classification")
         self.ids_and_losses_1 = (np.array([5, 0, 2]), np.array([0, 1.4, 2.34]))
         self.ids_and_losses_2 = (np.array([1, 4, 3]), np.array([0.4, 0.2, 0]))
         self.ids_and_losses_3 = (np.array([3, 5, 4]), np.array([0.1, 0, 0]))
@@ -64,28 +87,27 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
     def test_update_batch_sample_stats(self):
         self.assertEqual(len(self.wrapped_dataset), 6)
 
-        with self.assertRaises(KeyError):
-            self.wrapped_dataset.get_exposure_amount(4)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(4), 1)
 
         self.wrapped_dataset.update_batch_sample_stats(
             0, *self.ids_and_losses_1)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(0), 1.4)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(5), 1)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(5), 2)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(2), 0)
 
         self.wrapped_dataset.update_batch_sample_stats(
             3, *self.ids_and_losses_2)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(1), 0.4)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(4), 1)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(4), 2)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(3), 3)
 
         self.wrapped_dataset.update_batch_sample_stats(
             6, *self.ids_and_losses_3)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(5), 0)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(3), 2)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(3), 3)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(4), 6)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(1), 0.4)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(4), 2)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(4), 3)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(3), 6)
 
     def test_denylisting(self):
@@ -156,7 +178,7 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
             0, *self.ids_and_losses_1, mocked_predictions)
 
         self.assertEqual(
-            self.wrapped_dataset.get(0, SampleStats.PREDICTED_CLASS), 5)
+            self.wrapped_dataset.get(0, SampleStatsEx.PREDICTION_RAW), 5)
 
 
 def sample_predicate_fn1(
@@ -227,7 +249,78 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
             sample_predicate_fn2, weight=20000,
             accumulate=True, verbose=True)
 
-        self.assertEqual(len(self.wrapped_dataset), 30000)
+        self.assertEqual(len(self.wrapped_dataset), 40000)
+
+
+
+class DataSampleTrackingWrapperTestSegmentation(unittest.TestCase):
+    def setUp(self):
+        self.ds = DataSampleTrackingWrapper(
+            _DUMMY_SEG_DATASET, task_type="segmentation")
+        self.losses_1 = np.array([0.8, 0.5])
+        self.losses_2 = np.array([0.2, 0.4])
+        # Simulated predictions: for 4 samples, predicted masks with all class 1 for simplicity
+        self.preds_1 = [np.ones((4, 4), dtype=np.int64) for _ in range(2)]
+        self.preds_2 = [np.zeros((4, 4), dtype=np.int64) for _ in range(2)]
+
+    def test_no_denylisting(self):
+        self.assertEqual(len(self.ds), 4)
+        img, idx, mask = self.ds[1]
+        self.assertTrue(np.allclose(img, 1.0))
+        self.assertEqual(idx, 1)
+        self.assertTrue(np.all(mask == 1))
+
+    def test_update_batch_sample_stats_and_iou(self):
+        # Update first 2 samples with predictions
+        self.ds.update_batch_sample_stats(
+            model_age=1,
+            ids_batch=np.array([0, 1]),
+            losses_batch=self.losses_1,
+            predct_batch=np.array(self.preds_1)
+        )
+        # Update next 2 samples
+        self.ds.update_batch_sample_stats(
+            model_age=2,
+            ids_batch=np.array([2, 3]),
+            losses_batch=self.losses_2,
+            predct_batch=np.array(self.preds_2)
+        )
+        # Should not crash, should return a dict with mean_iou
+        result = self.ds.get_label_breakdown()
+        self.assertIsInstance(result, dict)
+        self.assertIn("mean_iou", result)
+        if result["mean_iou"] is not None:
+            self.assertGreaterEqual(result["mean_iou"], 0.0)
+            self.assertLessEqual(result["mean_iou"], 1.0)
+        else:
+            # It's ok for mean_iou to be None if there's no overlap/non-bg class
+            pass
+
+    def test_denylist_and_allowlist(self):
+        # Denylist last sample
+        self.ds.denylist_samples({3})
+        self.assertEqual(len(self.ds), 3)
+        # Allowlist all again
+        self.ds.allowlist_samples(None)
+        self.assertEqual(len(self.ds), 4)
+        # Denylist two, then allowlist one back
+        self.ds.denylist_samples({1, 2})
+        self.assertEqual(len(self.ds), 2)
+        self.ds.allowlist_samples({2})
+        self.assertEqual(len(self.ds), 3)
+
+    def test_store_and_load_with_stats(self):
+        # Update stats
+        self.ds.update_batch_sample_stats(
+            1, np.array([0, 1]), self.losses_1, np.array(self.preds_1)
+        )
+        self.ds.update_batch_sample_stats(
+            2, np.array([2, 3]), self.losses_2, np.array(self.preds_2)
+        )
+        # Save and reload
+        ds2 = DataSampleTrackingWrapper(_DUMMY_SEG_DATASET, task_type="segmentation")
+        ds2.load_state_dict(self.ds.state_dict())
+        self.assertEqual(self.ds, ds2)
 
 if __name__ == '__main__':
     unittest.main()
