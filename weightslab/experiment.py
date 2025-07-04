@@ -43,6 +43,7 @@ class Experiment:
             batch_size: int,
             criterion=None,
             metrics=None,
+            task_type = "classification",
             training_steps_to_do: int = 256,
             name: str = "baseline",
             root_log_dir: str = "root_experiment",
@@ -59,6 +60,7 @@ class Experiment:
         self.batch_size = batch_size
         self.criterion = criterion or th.nn.CrossEntropyLoss()
         self.metrics = metrics or {}
+        self.task_type = task_type
         self.eval_dataset = eval_dataset
         self.tqdm_display = tqdm_display
         self.learning_rate = learning_rate
@@ -288,12 +290,16 @@ class Experiment:
                 self.train_iterator = iter(self.train_loader)
                 input, output = self._pass_one_batch(self.train_iterator)
 
-            losses_batch = self.criterion(output, input.label_batch)
+            if self.task_type == "segmentation":
+                losses_batch = self.criterion(output, input.label_batch.long())
+                # Output: (N, C, H, W), argmax over channel dim
+                pred = output.argmax(dim=1)
+            else:
+                losses_batch = self.criterion(output, input.label_batch)
+                pred = output.argmax(dim=1, keepdim=True)
+
             if losses_batch.ndim == 0:
                 losses_batch = losses_batch.unsqueeze(0)
-            pred = output.argmax(dim=1, keepdim=True)
-            if pred.ndim == 0:
-                pred = pred.unsqueeze(0)
             loss = th.mean(losses_batch)
             loss.backward()
             self.optimizer.step()
@@ -324,7 +330,8 @@ class Experiment:
                     metric_value = metric_value.item()
 
             self.logger.add_scalars(
-                f'train-{name}', {self.name: metric_value}, global_step=model_age)
+                f'train-{name}', {self.name: metric_value}, global_step=model_age
+            )
 
         with self.lock:
             self.training_steps_to_do -= 1
@@ -365,25 +372,25 @@ class Experiment:
                 self.eval_iterator = iter(self.eval_loader)
                 input, output = self._pass_one_batch(self.eval_iterator)
 
-        losses_batch = self.criterion(output, input.label_batch)
+        if self.task_type == "segmentation":
+            # For segmentation: output (N, C, H, W), label (N, H, W)
+            losses_batch = self.criterion(output, input.label_batch.long())
+            pred = output.argmax(dim=1)
+        else:
+            losses_batch = self.criterion(output, input.label_batch)
+            pred = output.argmax(dim=1, keepdim=True)
         if losses_batch.ndim == 0:
             losses_batch = losses_batch.unsqueeze(0)
 
-        if losses_batch.ndim > 0:
-            test_loss = th.sum(losses_batch)
-        else:
-            test_loss = losses_batch
-
-        pred = output.argmax(dim=1, keepdim=True)
-        if pred.ndim == 0:
-            pred = pred.unsqueeze(0)
+        test_loss = th.sum(losses_batch) if losses_batch.ndim > 0 else losses_batch
 
         model_age = self.model.get_age()
         self.eval_loader.dataset.update_batch_sample_stats(
-                model_age,
-                input.in_id_batch.detach().cpu().numpy(),
-                losses_batch.detach().cpu().numpy(),
-                pred.detach().cpu().numpy())
+            model_age,
+            input.in_id_batch.detach().cpu().numpy(),
+            losses_batch.detach().cpu().numpy(),
+            pred.detach().cpu().numpy()
+        )
 
         metric_results = {}
         for name, metric in self.metrics.items():
