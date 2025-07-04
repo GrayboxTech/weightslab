@@ -9,22 +9,6 @@ from torch.utils.data import Dataset
 
 SamplePredicateFn = Callable[[], bool]
 
-
-# class SampleStats(str, Enum):
-#     PREDICTION_AGE = "prediction_age"
-#     PREDICTION_LOSS = "prediction_loss"
-#     PREDICTED_CLASS = "predicted_class"
-#     # how many times this sample has been seen
-#     EXPOSURE_AMOUNT = "exposure_amount"
-#     DENY_LISTED = "deny_listed"
-#     LABEL = "label"
-#     SAMPLE_ID = "sample_id"
-
-#     @classmethod
-#     def ALL(cls):
-#         return list(map(lambda c: c.value, cls))
-
-
 #TODO samplestats_extended
 class SampleStatsEx(str, Enum):
     PREDICTION_AGE = "prediction_age"
@@ -32,12 +16,12 @@ class SampleStatsEx(str, Enum):
     PREDICTION_RAW = "prediction_raw"
     TARGET = "target"
     SAMPLE_ID = "sample_id" 
-    SAMPLE_CRC = "sample_crc" #potential
-    AVAILABLE = "available"
+    # SAMPLE_CRC = "sample_crc" #potential
+    # AVAILABLE = "available"
     DENY_LISTED = "deny_listed"
     ENCOUNTERED = "encountered"
-    METADATA = "metadata" 
-    ANNOTATIONS = "annotations"
+    # METADATA = "metadata" 
+    # ANNOTATIONS = "annotations"
 
     @classmethod
     def ALL(cls):
@@ -54,9 +38,8 @@ class _StateDictKeys(str, Enum):
         return list(map(lambda c: c.value, cls))
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset, task_type="classification"):
+    def __init__(self, wrapped_dataset: Dataset):
         self.wrapped_dataset = wrapped_dataset
-        self.task_type = task_type
         self._denied_samples_ids = set()
         self.denied_sample_cnt = 0
         self.idx_to_idx_remapp = dict()
@@ -73,6 +56,7 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_AGE.value: -1,
                     SampleStatsEx.PREDICTION_RAW.value: -1,
                     SampleStatsEx.PREDICTION_LOSS.value: -1,
+                    SampleStatsEx.DENY_LISTED.value: False,
                 }
             )
 
@@ -165,8 +149,10 @@ class DataSampleTrackingWrapper(Dataset):
         self._raise_if_invalid_stat_name(stat_name)
         if sample_id in self.sample_statistics[stat_name]:
             value = self.sample_statistics[stat_name][sample_id]
-        elif stat_name == SampleStatsEx.TARGET:
-            value = self[sample_id][2]  # 0 -> data; 1 -> index; 2 -> label;
+            if value is not None:
+                return value
+        if stat_name == SampleStatsEx.TARGET:
+            value = self[sample_id][2]
             if raw:
                 value = self._getitem_raw(sample_id)[2]
             self.sample_statistics[stat_name][sample_id] = value
@@ -176,6 +162,10 @@ class DataSampleTrackingWrapper(Dataset):
             if raw:
                 value = self._getitem_raw(sample_id)[1]
             self.sample_statistics[stat_name][sample_id] = value
+        elif stat_name == SampleStatsEx.DENY_LISTED:
+            value = False
+            self.sample_statistics[stat_name][sample_id] = value
+
         else:
             # New code: raise or return None or handle KeyError
             raise KeyError(f"Stat {stat_name} not found for sample_id {sample_id}")
@@ -215,81 +205,18 @@ class DataSampleTrackingWrapper(Dataset):
             self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
         self.set(sample_id=sample_id, stat_name=SampleStatsEx.SAMPLE_ID, stat_value=sample_id)
 
-    def get_label_breakdown(self):
-        """
-        For classification:
-            - Returns a dictionary {label: accuracy} over seen samples.
-        For segmentation:
-            - Returns mean IoU (Intersection over Union) for all non-background classes.
-        """
-        if self.task_type == "classification":
-            from collections import defaultdict
-            label_to_stats = defaultdict(lambda: [0, 0])
-            for sample_id in self.sample_statistics[SampleStatsEx.PREDICTION_AGE]:
-                target = self.get(sample_id, SampleStatsEx.TARGET, raw=True)
-                pred_raw = self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
-                # Handle torch.Tensor, numpy array, or scalar
-                if hasattr(pred_raw, "argmax"):
-                    pred_class = int(pred_raw.argmax().item() if hasattr(pred_raw.argmax(), "item") else pred_raw.argmax())
-                else:
-                    pred_class = int(pred_raw)
-                # Handle torch.Tensor, numpy array, or scalar for target as well
-                if hasattr(target, "item"):
-                    target = int(target.item())
-                else:
-                    target = int(target)
-                label_to_stats[target][0] += int(pred_class == target)
-                label_to_stats[target][1] += 1
-            return {
-                label: correct / total if total > 0 else 0
-                for label, (correct, total) in label_to_stats.items()
-            }
 
-        elif self.task_type == "segmentation":
-            # Mean IoU for all classes (excluding background class 0)
-            ious = []
-            for sample_id in self.sample_statistics[SampleStatsEx.PREDICTION_AGE]:
-                gt_mask = self.get(sample_id, SampleStatsEx.TARGET, raw=True)
-                pred_mask = self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
-                if hasattr(pred_mask, "ndim") and pred_mask.ndim > 2:
-                    # If shape is (C, H, W), take argmax over C
-                    pred_mask = pred_mask.argmax(axis=0)
-                if hasattr(gt_mask, "ndim") and gt_mask.ndim > 2:
-                    # If shape is (C, H, W), take argmax over C
-                    gt_mask = gt_mask.argmax(axis=0)
-                if (
-                    gt_mask is not None
-                    and pred_mask is not None
-                    and hasattr(gt_mask, "shape")
-                    and hasattr(pred_mask, "shape")
-                    and gt_mask.shape == pred_mask.shape
-                ):
-                    # Compute per-class IoU for all classes except 0
-                    classes = np.unique(gt_mask)
-                    for c in classes:
-                        if c == 0:
-                            continue  # skip background
-                        gt_c = (gt_mask == c)
-                        pred_c = (pred_mask == c)
-                        intersection = np.logical_and(gt_c, pred_c).sum()
-                        union = np.logical_or(gt_c, pred_c).sum()
-                        if union > 0:
-                            ious.append(intersection / union)
-            return {"mean_iou": float(np.mean(ious)) if ious else None}
-        else:
-            raise ValueError(f"Unsupported task_type: {self.task_type}")
-
-
-    def update_batch_sample_stats(self,
-                                  model_age: int,
-                                  ids_batch: np.ndarray,
-                                  losses_batch: np.ndarray,
-                                  predct_batch: np.ndarray | None = None):
+    def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None):
         self.dataframe = None
         if predct_batch is None:
             predct_batch = [None] * len(ids_batch)
-        for sample_identifier, sample_loss, sample_pred in zip(
-                ids_batch, losses_batch, predct_batch):
+        for sample_identifier, sample_loss, sample_pred in zip(ids_batch, losses_batch, predct_batch):
+            # patch for segmentation
+            if isinstance(sample_pred, np.ndarray):
+                if sample_pred.ndim == 1:
+                    sz = int(np.sqrt(sample_pred.size))
+                    if sz * sz == sample_pred.size:
+                        sample_pred = sample_pred.reshape((sz, sz))
             self.update_sample_stats(
                 sample_identifier,
                 {
@@ -365,7 +292,7 @@ class DataSampleTrackingWrapper(Dataset):
                 exposure_amount = self.get_exposure_amount(sample_id)
 
                 prediction_class = self.get(
-                    sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
+                    sample_id, SampleStatsEx.PREDICTION_RAW.value, raw=True)
                 label = self.get(sample_id, SampleStatsEx.TARGET, raw=True)
             except KeyError as e:
                 print(f"Sample {sample_id}: KeyError {e}")
@@ -504,7 +431,7 @@ class DataSampleTrackingWrapper(Dataset):
             for stat_name in SampleStatsEx.ALL():
                 row[stat_name] = self.get(sample_id, stat_name)
             rows.append(row)
-            denied += int(row[SampleStatsEx.DENY_LISTED])
+            denied += int(bool(row.get(SampleStatsEx.DENY_LISTED, False)))
         return rows
 
     def get_actual_index(self, index: int) -> int:
@@ -517,22 +444,32 @@ class DataSampleTrackingWrapper(Dataset):
             self.dataframe = self._get_stats_dataframe(limit=limit)
         return self.dataframe
 
-    def _getitem_raw(self, index: int) -> Tuple[Any, Any]:
-        item, target = self.wrapped_dataset[index]
-        return item, index, target
+    def __getitem__(self, index: int):
+        data = self.wrapped_dataset[index]
+        if len(data) == 2:
+            item, target = data
+            return item, index, target
+        elif len(data) == 3:
+            item, target, idx = data
+            return item, idx, target
+        else:
+            raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
 
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        # print("DataSampleTrackingWrapper.__getitem__[raw_index=", index, end='')
-        if self.idx_to_idx_remapp:
-            try:
-                # This should keep indexes consistent during the data slicing.
-                index = self.idx_to_idx_remapp[index]
-            except KeyError as err:
-                raise IndexError() from err
-        # print("index=", index, end='')
-        item, target = self.wrapped_dataset[index]
-        # print("id+label", index, target, end=']\r')
-        return item, index, target
+    def _getitem_raw(self, index: int):
+        data = self.wrapped_dataset[index]
+        if len(data) == 2:
+            item, target = data
+            return item, index, target
+        elif len(data) == 3:
+            item, target, idx = data
+            return item, idx, target
+        else:
+            raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
+
 
     def __len__(self):
         return len(self.wrapped_dataset) - self.denied_sample_cnt
+    
+    def get_prediction_mask(self, sample_id):
+        return self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
+
