@@ -8,6 +8,8 @@ import torch as th
 from .neuron_ops import NeuronWiseOperations
 
 
+_TRACKING_TENSOR_DISPLAY_LIMIT = 8
+
 class TrackingMode(str, enum.Enum):
     """ Tracking mode w.r.t the dataset. """
 
@@ -35,22 +37,22 @@ def add_tracked_attrs_to_input_tensor(
     label_batch: th.Tensor
         A tensor containing the labels ids of the samples in the batch.
     """
+    if type(indata) is th.Tensor:
+        if indata is not None:
+            setattr(indata, 'batch_size', indata.shape[0])
 
-    if indata is not None:
-        setattr(indata, 'batch_size', indata.shape[0])
+        if indata.batch_size != label_batch.shape[0]:
+            raise ValueError(
+                f"Augmented input ensor: batch size {indata.batch_size} "
+                f"differs from label batch size {label_batch.shape[0]}.")
+        setattr(indata, "label_batch", label_batch)
 
-    if indata.batch_size != label_batch.shape[0]:
-        raise ValueError(
-            f"Augmented input ensor: batch size {indata.batch_size} "
-            f"differs from label batch size {label_batch.shape[0]}.")
-    setattr(indata, "label_batch", label_batch)
-
-    if indata.batch_size != in_id_batch.shape[0]:
-        raise ValueError(
-            f"Augmented input ensor: batch size {indata.batch_size} "
-            f"differs from input id size {in_id_batch.shape[0]}.")
-    setattr(indata, "in_id_batch", in_id_batch)
-
+        if indata.batch_size != in_id_batch.shape[0]:
+            raise ValueError(
+                f"Augmented input ensor: batch size {indata.batch_size} "
+                f"differs from input id size {in_id_batch.shape[0]}.")
+        setattr(indata, "in_id_batch", in_id_batch)
+    return indata
 
 def copy_forward_tracked_attrs(
         indata: th.Tensor, indata_w_attrs: th.Tensor):
@@ -129,12 +131,23 @@ class TriggersTracker(Tracker):
             self.device)
 
     def __hash__(self):
-        return hash(str(self))
+        triggers_tuple = tuple(self.triggrs_by_neuron.tolist())
+        updates_tuple = tuple(self.updates_by_neuron.tolist())
+
+        return hash(
+            (
+                str(self.device),  # Convert device to string or another immutable representation
+                self.number_of_neurons,
+                triggers_tuple,
+                updates_tuple
+            )
+        )
 
     def __repr__(self) -> str:
         return "TriggersTracker[#%d]: [%s] & [%s]" % (\
-            self.number_of_neurons, str(self.triggrs_by_neuron),
-            str(self.updates_by_neuron)
+            self.number_of_neurons,
+            str(self.triggrs_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT]),
+            str(self.updates_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT])
         )
 
     def __eq__(self, other: "TriggersTracker") -> bool:
@@ -194,10 +207,11 @@ class TriggersTracker(Tracker):
         # Assumes that triggers per neuron have been pre-processed already.
         # Shape is expected to be in the form [batch_size x neuron_count]
         if len(tensor.shape) > 2:
-            raise ValueError(
-                f"Neuron stats are updated on a per neuron level, hence only"
-                f"two dims are expected [batch_size x neuron_count] but "
-                f"activation map has shape: {str(tensor.shape)}")
+            # raise ValueError(
+            #     f"Neuron stats are updated on a per neuron level, hence only "
+            #     f"two dims are expected [batch_size x neuron_count] but "
+            #     f"activation map has shape: {str(tensor.shape)}")
+            tensor = tensor.view(-1, self.number_of_neurons)
         try:
             bs = tensor.shape[0]
             self.triggrs_by_neuron += th.sum(
@@ -205,9 +219,10 @@ class TriggersTracker(Tracker):
             self.updates_by_neuron += th.ones(
                 self.number_of_neurons).long().to(self.device) * bs
         except RuntimeError as err:
-            raise ValueError(
-                f"Number of neurons in the input {tensor.shape[1]} differs "
-                f"from tracked neurons {self.number_of_neurons}.") from err
+            raise err
+            # raise ValueError(
+            #     f"Number of neurons in the input {tensor.shape[1]} differs "
+            #     f"from tracked neurons {self.number_of_neurons}.") from err
 
     def reorder(self, indices: List[int]):
         neurons = set(range(self.number_of_neurons))
@@ -337,7 +352,8 @@ class TriggersTrackerClazzAndSampleID(TriggersTracker):
             dict(def_dict) for def_dict in self.triggers_by_class]
         return "TrackerClazzAndSampleID[#%d]: [%s] & [%s] & [%s] & [%s]" % (\
             self.number_of_neurons,
-            str(self.triggrs_by_neuron), str(self.updates_by_neuron),
+            str(self.triggrs_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT]),
+            str(self.updates_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT]),
             str(self.triggers_by_in_id), str(triggers_by_class))
 
     def __eq__(self, other: "TriggersTrackerClazzAndSampleID") -> bool:
