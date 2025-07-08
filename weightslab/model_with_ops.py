@@ -339,45 +339,8 @@ class NetworkWithOps(nn.Module):
         module.add_neurons(
                 neuron_count, skip_initialization=skip_initialization)
 
-        self.zerofy(layer_id)
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
-    
-    def zerofy(self, layer_id: int):
-        print("ZEROFY CALLED")
-        src_layer = self.get_layer_by_id(layer_id)
-        new_neurons = [
-            i for i in range(src_layer.neuron_count)
-            if hasattr(src_layer, 'train_dataset_tracker') and
-            src_layer.train_dataset_tracker.get_neuron_age(i) == 0
-        ]
-        if not new_neurons:
-            print(f"[ZEROFY] No new neurons in layer {layer_id}")
-            return
-
-        for dst_layer in self.layers[:-1]: # skipping the output layer
-            if dst_layer.get_module_id() <= layer_id:
-                continue
-            if not hasattr(dst_layer, 'train_dataset_tracker'):
-                continue
-            if not hasattr(dst_layer, 'weight'):
-                continue # skip non-weighted layers like BatchNorm
-            older_neurons = [
-                j for j in range(dst_layer.neuron_count)
-                if dst_layer.train_dataset_tracker.get_neuron_triggers(j) > 0
-                ]
-
-            if not older_neurons:
-                continue
-
-            with th.no_grad():
-                for to_id in older_neurons:
-                    for from_id in new_neurons:
-                        if to_id < dst_layer.weight.shape[0] and from_id < dst_layer.weight.shape[1]:
-                            print(f"[ZEROFY] Zeroing weight[{to_id}, {from_id}]")
-                            dst_layer.weight[to_id, from_id] = 0.0
-
-
 
     def reorder(self,
                 layer_id: int,
