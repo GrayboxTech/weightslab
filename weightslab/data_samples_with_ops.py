@@ -234,13 +234,16 @@ class DataSampleTrackingWrapper(Dataset):
 
         return not self.sample_statistics[SampleStatsEx.DENY_LISTED][sample_id]
 
-    def denylist_samples(self, denied_samples_ids: Set[int] | None, override: bool = False):
+    def denylist_samples(self, denied_samples_ids: Set[int] | None, override: bool = False,  accumulate: bool = False):
         self.dataframe = None
+        prev_denied = {sid for sid, is_denied in self.sample_statistics[SampleStatsEx.DENY_LISTED].items() if is_denied}
         if not denied_samples_ids:
             for sample_id in range(len(self.wrapped_dataset)):
                 self.sample_statistics[SampleStatsEx.DENY_LISTED][sample_id] = False
             self.denied_sample_cnt = 0
         else:
+            if accumulate:
+                denied_samples_ids = set(denied_samples_ids) | prev_denied
             cnt = 0
             for sample_id in range(len(self.wrapped_dataset)):
                 is_denied = sample_id in denied_samples_ids
