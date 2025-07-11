@@ -142,6 +142,9 @@ class DataSampleTrackingWrapper(Dataset):
         # Only update counter if DENY_LISTED and prev_value is not None
         if stat_name == SampleStatsEx.DENY_LISTED and prev_value is not None and prev_value != stat_value:
             self._handle_deny_listed_updates(stat_value)
+        if stat_name == SampleStatsEx.PREDICTION_LOSS:
+            if self.sample_statistics[SampleStatsEx.DENY_LISTED].get(sample_id, False):
+                raise Exception(f"Tried to update loss for discarded sample_id={sample_id}")
         self.sample_statistics[stat_name][sample_id] = stat_value
 
 
@@ -448,6 +451,14 @@ class DataSampleTrackingWrapper(Dataset):
         return self.dataframe
 
     def __getitem__(self, index: int):
+
+        if self.idx_to_idx_remapp:
+            try:
+                # This should keep indexes consistent during the data slicing.
+                index = self.idx_to_idx_remapp[index]
+            except KeyError as err:
+                raise IndexError() from err
+            
         data = self.wrapped_dataset[index]
         if len(data) == 2:
             item, target = data
