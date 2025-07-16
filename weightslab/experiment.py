@@ -209,8 +209,8 @@ class Experiment:
         Args:
             checkpoint_id (int): the checkpoint id to be loaded
         """
-        self.chkpt_manager.load(checkpoint_id, self)
         self.optimizer.zero_grad()
+        self.chkpt_manager.load(checkpoint_id, self)
 
     def print_checkpoints_tree(self):
         """Display the checkpoints tree."""
