@@ -6,7 +6,8 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 from pathlib import Path
-
+import os
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 from weightslab.checkpoint import CheckpointManager
 from weightslab.data_samples_with_ops import DataSampleTrackingWrapper
@@ -209,6 +210,7 @@ class Experiment:
             checkpoint_id (int): the checkpoint id to be loaded
         """
         self.chkpt_manager.load(checkpoint_id, self)
+        self.optimizer.zero_grad()
 
     def print_checkpoints_tree(self):
         """Display the checkpoints tree."""
@@ -526,7 +528,6 @@ class Experiment:
             self.name = name
 
     def apply_architecture_op(self, op_type, **kwargs):
-        #TODO Convert strings to enum, remove reinitialization and freezing
         if op_type == ArchitectureOpType.ADD_NEURONS:
             with self.architecture_guard:
                 self.model.add_neurons(
