@@ -110,14 +110,30 @@ class CheckpointManager(object):
         self.id_to_path = state_dict[_CheckpointMetadataDictKeys.ID_2_PATH]
         self.id_to_prnt = state_dict[_CheckpointMetadataDictKeys.ID_2_PRNT]
 
-    def dump(self, experiment: "Experiment"):
-        current_ckpt_id = self._generate_checkpoint_id()
-        _logger.info(
-            "Dumping experiment: %d", current_ckpt_id)
-        self.id_to_prnt[current_ckpt_id] = self.prnt_id
-        self.prnt_id = current_ckpt_id
-        file_name = "ckpt_" + str(current_ckpt_id) + "_" + str(uuid.uuid4())
-        ckpt_save_path = self.root_directory.joinpath(Path(file_name))
+    def dump(self, experiment: "Experiment", override_filepath = None, loaded_ckpt_batch_size=None):
+        if override_filepath == 'debug_ckpt':
+            debug_info = {
+                'current_experiment_batch_size': experiment.batch_size,
+                'loaded_ckpt_batch_size': loaded_ckpt_batch_size
+            }
+            import json
+            debug_path = self.root_directory.joinpath('debug_ckpt.json')
+            with open(debug_path, 'w') as f:
+                json.dump(debug_info, f, indent=2)
+            return -1
+        elif override_filepath:
+            current_ckpt_id = -1
+            ckpt_save_path = self.root_directory.joinpath(Path(override_filepath))
+        else:    
+            current_ckpt_id = self._generate_checkpoint_id()
+            _logger.info(
+                "Dumping experiment: %d", current_ckpt_id)
+            self.id_to_prnt[current_ckpt_id] = self.prnt_id
+            self.prnt_id = current_ckpt_id
+            file_name = "ckpt_" + str(current_ckpt_id) + "_" + str(uuid.uuid4())
+            ckpt_save_path = self.root_directory.joinpath(Path(file_name))
+            self.id_to_path[current_ckpt_id] = str(ckpt_save_path)
+            self._dump_metadata()
 
         th.save({
             _CheckpointDictKeys.ENAME: experiment.name,
@@ -131,8 +147,7 @@ class CheckpointManager(object):
                 experiment.train_loader.dataset.state_dict(),
         }, ckpt_save_path)
 
-        self.id_to_path[current_ckpt_id] = str(ckpt_save_path)
-        self._dump_metadata()
+
         return current_ckpt_id
 
     def load(self, checkpoint_id: int | str, experiment: "Experiment"):
@@ -161,9 +176,14 @@ class CheckpointManager(object):
         experiment.learning_rate = ckpt_dict[_CheckpointDictKeys.LRATE]
         experiment.model.load_state_dict(
             ckpt_dict[_CheckpointDictKeys.MODEL], strict=False)
+        experiment.last_loaded_ckpt_batch_size = ckpt_dict.get(_CheckpointDictKeys.BSIZE, None)
+        # experiment.optimizer.zero_grad()
+        
         try:
-            experiment.optimizer.load_state_dict(
-                ckpt_dict[_CheckpointDictKeys.OPTIM])
+            # experiment.optimizer.load_state_dict(
+            #     ckpt_dict[_CheckpointDictKeys.OPTIM])
+            experiment.optimizer = experiment.optimizer_class(
+                experiment.model.parameters(), lr=experiment.learning_rate)
         except ValueError:
             print(
                 f"Checkpoint {checkpoint_id} does not contain the same "

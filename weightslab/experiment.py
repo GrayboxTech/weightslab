@@ -74,6 +74,7 @@ class Experiment:
         self.last_input = None
         self.is_training = False
         self.training_steps_to_do = training_steps_to_do
+        self.last_loaded_ckpt_batch_size = None
 
         if not self.root_log_dir.exists():
             self.root_log_dir.mkdir(parents=True, exist_ok=True)
@@ -210,7 +211,8 @@ class Experiment:
             checkpoint_id (int): the checkpoint id to be loaded
         """
         self.optimizer.zero_grad()
-        self.chkpt_manager.load(checkpoint_id, self)
+        with self.architecture_guard:
+            self.chkpt_manager.load(checkpoint_id, self)
 
     def print_checkpoints_tree(self):
         """Display the checkpoints tree."""
@@ -303,7 +305,22 @@ class Experiment:
             if losses_batch.ndim == 0:
                 losses_batch = losses_batch.unsqueeze(0)
             loss = th.mean(losses_batch)
-            loss.backward()
+            try:
+                loss.backward()
+            except Exception as e:
+                #self.chkpt_manager.dump(self, 'debug_ckpt', loaded_ckpt_batch_size=None)
+                self.chkpt_manager.dump(
+                    self,
+                    'debug_ckpt',
+                    loaded_ckpt_batch_size=self.last_loaded_ckpt_batch_size
+                )
+                print(
+                    'Loss backward error, losses_batch shape:',
+                    losses_batch.shape,
+                    'current batch_size:', self.batch_size,
+                    'ckpt batch_size:', self.last_loaded_ckpt_batch_size,
+                    'error:', str(e)
+                )
             self.optimizer.step()
 
         with self.lock:
