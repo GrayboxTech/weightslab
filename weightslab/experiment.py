@@ -16,7 +16,7 @@ from weightslab.tracking import add_tracked_attrs_to_input_tensor
 from weightslab.monitoring import NeuronStatsWithDifferencesMonitor
 
 
-from threading import Lock
+from threading import Lock, RLock
 from enum import Enum, auto
 
 class ArchitectureOpType(Enum):
@@ -74,7 +74,6 @@ class Experiment:
         self.last_input = None
         self.is_training = False
         self.training_steps_to_do = training_steps_to_do
-        self.last_loaded_ckpt_batch_size = None
 
         if not self.root_log_dir.exists():
             self.root_log_dir.mkdir(parents=True, exist_ok=True)
@@ -127,7 +126,7 @@ class Experiment:
             lambda model: self._update_optimizer(model))
 
         self.lock = Lock()
-        self.architecture_guard = Lock()
+        self.architecture_guard = RLock()
         self.model.to(self.device)
 
     def __repr__(self):
@@ -211,8 +210,7 @@ class Experiment:
             checkpoint_id (int): the checkpoint id to be loaded
         """
         self.optimizer.zero_grad()
-        with self.architecture_guard:
-            self.chkpt_manager.load(checkpoint_id, self)
+        self.chkpt_manager.load(checkpoint_id, self)
 
     def print_checkpoints_tree(self):
         """Display the checkpoints tree."""
@@ -308,17 +306,11 @@ class Experiment:
             try:
                 loss.backward()
             except Exception as e:
-                #self.chkpt_manager.dump(self, 'debug_ckpt', loaded_ckpt_batch_size=None)
-                self.chkpt_manager.dump(
-                    self,
-                    'debug_ckpt',
-                    loaded_ckpt_batch_size=self.last_loaded_ckpt_batch_size
-                )
+                self.chkpt_manager.dump(self, f"crash_{self.name}_bs{self.batch_size}_step{self.performed_train_steps()}")
                 print(
                     'Loss backward error, losses_batch shape:',
                     losses_batch.shape,
                     'current batch_size:', self.batch_size,
-                    'ckpt batch_size:', self.last_loaded_ckpt_batch_size,
                     'error:', str(e)
                 )
             self.optimizer.step()
