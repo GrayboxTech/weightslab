@@ -179,12 +179,29 @@ class LayerWiseOperations(NeuronWiseOperations):
         for neuron_id in neuron_ids:
             self.incoming_neuron_2_lr[neuron_id] = lr
 
+    # def zerofy_connections_from(self, from_neuron_ids: Set[int], to_neuron_ids: Set[int]):
+    #     with th.no_grad():
+    #         for to_id in to_neuron_ids:
+    #             for from_id in from_neuron_ids:
+    #                 if to_id < self.weight.shape[0] and from_id < self.weight.shape[1]:
+    #                     self.weight[to_id, from_id] = 0.0
+
     def zerofy_connections_from(self, from_neuron_ids: Set[int], to_neuron_ids: Set[int]):
+        if not hasattr(self, "weight") or self.weight is None:
+            return
+        if self.weight.ndim != 2:
+            # Child classes (e.g. Conv2d) should override.
+            return
+        in_max = self.weight.shape[1]
+        out_max = self.weight.shape[0]
         with th.no_grad():
             for to_id in to_neuron_ids:
+                if to_id < 0 or to_id >= out_max:
+                    continue
                 for from_id in from_neuron_ids:
-                    if to_id < self.weight.shape[0] and from_id < self.weight.shape[1]:
-                        self.weight[to_id, from_id] = 0.0
+                    if from_id < 0 or from_id >= in_max:
+                        continue
+                    self.weight[to_id, from_id] = 0.0
 
     def register_grad_hook(self):
         # This is meant to be called in the children classes.
@@ -509,6 +526,21 @@ class LinearWithNeuronOps(nn.Linear, LayerWiseOperations):
             self.weight.data = nn.Parameter(
                 th.cat((self.weight.data, new_wght), dim=1)).to(self.device)
         super().to(self.device)
+
+    def zerofy_connections_from(self, from_neuron_ids: set[int], to_neuron_ids: set[int]):
+        if not hasattr(self, "weight") or self.weight is None:
+            return
+        in_max = self.weight.shape[1]
+        out_max = self.weight.shape[0]
+        rows = [i for i in to_neuron_ids   if 0 <= i < out_max]
+        cols = [j for j in from_neuron_ids if 0 <= j < in_max]
+        if not rows or not cols:
+            return
+        import torch as th
+        r = th.tensor(rows, device=self.weight.device, dtype=th.long)
+        c = th.tensor(cols, device=self.weight.device, dtype=th.long)
+        with th.no_grad():
+            self.weight[r.unsqueeze(1), c.unsqueeze(0)] = 0.0
 
     def register(
             self,
@@ -841,6 +873,21 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
         self.in_channels += neuron_count
         self.incoming_neuron_count = self.in_channels
         super().to(self.device)
+
+    def zerofy_connections_from(self, from_neuron_ids: Set[int], to_neuron_ids: Set[int]):
+        if not hasattr(self, "weight") or self.weight is None:
+            return
+        in_max = self.weight.shape[1]
+        out_max = self.weight.shape[0]
+        from_idx = [i for i in from_neuron_ids if 0 <= i < in_max]
+        to_idx = [i for i in to_neuron_ids if 0 <= i < out_max]
+        if not from_idx or not to_idx:
+            return
+        with th.no_grad():
+            w = self.weight
+            for o in to_idx:
+                w[o, from_idx, :, :] = 0.0
+
 
     def register(self, activation_map: th.Tensor):
         tracker = self.get_tracker()
