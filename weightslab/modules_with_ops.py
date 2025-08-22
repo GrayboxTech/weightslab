@@ -187,8 +187,6 @@ class LayerWiseOperations(NeuronWiseOperations):
     #                     self.weight[to_id, from_id] = 0.0
 
     def zerofy_connections_from(self, from_neuron_ids: Set[int], to_neuron_ids: Set[int]):
-        if not hasattr(self, "weight") or self.weight is None:
-            return
         if self.weight.ndim != 2:
             # Child classes (e.g. Conv2d) should override.
             return
@@ -528,8 +526,6 @@ class LinearWithNeuronOps(nn.Linear, LayerWiseOperations):
         super().to(self.device)
 
     def zerofy_connections_from(self, from_neuron_ids: set[int], to_neuron_ids: set[int]):
-        if not hasattr(self, "weight") or self.weight is None:
-            return
         in_max = self.weight.shape[1]
         out_max = self.weight.shape[0]
         rows = [i for i in to_neuron_ids   if 0 <= i < out_max]
@@ -731,6 +727,7 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
         super().to(self.device)
 
     def prune_incoming_neurons(self, indices: Set[int]):
+        indices = set(indices)
         print(f"Conv2dWithNeuronOps[{self.get_module_id()}].prune_incoming {indices}")
         curr_neurons = set(range(self.in_channels))
         if not set(indices) & curr_neurons:
@@ -875,8 +872,6 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
         super().to(self.device)
 
     def zerofy_connections_from(self, from_neuron_ids: Set[int], to_neuron_ids: Set[int]):
-        if not hasattr(self, "weight") or self.weight is None:
-            return
         in_max = self.weight.shape[1]
         out_max = self.weight.shape[0]
         from_idx = [i for i in from_neuron_ids if 0 <= i < in_max]
@@ -911,7 +906,7 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
         if not skip_register:
             self.register(activation_map)
         if intermediary is not None:
-            print("forward iwth intermediary: ", self.get_module_id())
+            print("forward with intermediary: ", self.get_module_id())
             intermediary[self.get_module_id()] = activation_map
         return activation_map
 
