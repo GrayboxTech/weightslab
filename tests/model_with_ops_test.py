@@ -13,6 +13,12 @@ from os import path
 from weightslab.tracking import TrackingMode
 
 from .test_utils import MNISTModel
+from weightslab.model_with_ops import NetworkWithOps, DepType
+from weightslab.modules_with_ops import (
+    Conv2dWithNeuronOps,
+    BatchNorm2dWithNeuronOps,
+    LinearWithNeuronOps,
+)
 
 
 th.manual_seed(0)
@@ -64,9 +70,9 @@ class NetworkWithOpsTest(unittest.TestCase):
         _ = self.dummy_network.forward(self.tracked_input)
         self.assertNotEqual(self.dummy_network, replicated_model)
 
-        self.dummy_network.add_neurons(id(self.dummy_network.conv0), 2)
+        self.dummy_network.add_neurons(self.dummy_network.conv0.get_module_id(), 2)
         self.dummy_network.prune(
-            id(self.dummy_network.linear0), set([0, 1, 2]))
+            self.dummy_network.linear0.get_module_id(), set([0, 1, 2]))
 
         state_dict_file_path = path.join(self.test_dir, 'mnist_model.txt')
         th.save(self.dummy_network.state_dict(), state_dict_file_path)
@@ -105,7 +111,7 @@ class NetworkWithOpsTest(unittest.TestCase):
     def test_train_add_neurons_train(self):
         self.dummy_network.set_tracking_mode(TrackingMode.TRAIN)
         corrects_first_epochs = self.train_one_epoch(cutoff=200)
-        self.dummy_network.add_neurons(id(self.dummy_network.conv0), 10)
+        self.dummy_network.add_neurons(self.dummy_network.conv0.get_module_id(), 10)
         corrects_secnd_epochs = self.train_one_epoch(cutoff=200)
         self.assertNotEqual(
             corrects_first_epochs, corrects_secnd_epochs)
@@ -115,7 +121,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.train_one_epoch()
         corrects_first_epoch = self.eval_one_epoch()
         self.dummy_network.reorder_neurons_by_trigger_rate(
-            id(self.dummy_network.conv0))
+            self.dummy_network.conv0.get_module_id())
         corrects_after_reorder = self.eval_one_epoch()
         self.assertEqual(corrects_first_epoch, corrects_after_reorder)
 
@@ -127,7 +133,7 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         corrects_first_epoch = self.eval_one_epoch()
         self.dummy_network.reorder_neurons_by_trigger_rate(
-            id(self.dummy_network.conv0))
+            self.dummy_network.conv0.get_module_id())
 
         to_remove_ids = set()
         tracker = self.dummy_network.conv0.train_dataset_tracker
@@ -140,7 +146,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         if not to_remove_ids:
             to_remove_ids.add(15)
         self.dummy_network.prune(
-            id(self.dummy_network.conv0), to_remove_ids)
+            self.dummy_network.conv0.get_module_id(), to_remove_ids)
         corrects_after_prunning = self.eval_one_epoch()
         self.assertNotEqual(
             corrects_first_epoch, corrects_after_prunning)
@@ -153,7 +159,7 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         corrects_first_epoch = self.eval_one_epoch()
         self.dummy_network.reorder_neurons_by_trigger_rate(
-            id(self.dummy_network.conv0))
+            self.dummy_network.conv0.get_module_id())
 
         to_reinit_ids = set()
         tracker = self.dummy_network.conv0.train_dataset_tracker
@@ -166,33 +172,149 @@ class NetworkWithOpsTest(unittest.TestCase):
         if not to_reinit_ids:
             to_reinit_ids.add(15)
         self.dummy_network.reinit_neurons(
-            id(self.dummy_network.conv0), to_reinit_ids)
+            self.dummy_network.conv0.get_module_id(), to_reinit_ids)
         for _ in range(5):
             self.train_one_epoch()
         corrects_after_reinit = self.eval_one_epoch()
         self.assertLessEqual(
             corrects_first_epoch, corrects_after_reinit)
-        
-    def test_zerofy(self):
-        print("Initial neuron count:", self.dummy_network.conv0.neuron_count)
-        layer_id = self.dummy_network.conv0.get_module_id()
-        self.dummy_network.add_neurons(layer_id, 1)
-        new_neuron_id = self.dummy_network.conv0.neuron_count - 1
 
-        # self.dummy_network.conv0.train_dataset_tracker.set_neuron_age(new_neuron_id, 0)
-        age = self.dummy_network.conv0.train_dataset_tracker.triggrs_by_neuron[new_neuron_id] = 0
-        for nid in range(self.dummy_network.linear0.neuron_count):
-            # self.dummy_network.linear0.train_dataset_tracker.set_neuron_age(nid, 5)
-            age = self.dummy_network.linear0.train_dataset_tracker.triggrs_by_neuron[nid] = 5
+        #TODO DEfine a nn with 3 conv layers(2x3x3) + 1 linear. Skip conn L0 -> L2, bn in between
+        # define dataset, optimizers etc.
 
-        self.dummy_network.zerofy(layer_id)
+        # Case1:
+        # train the model for 1 epoch
+        # add 1 neuron in L2, makke sure that L0 3rd channel activation map is full 0
 
-        for old_id in range(self.dummy_network.linear0.neuron_count):
-            weight_val = self.dummy_network.linear0.weight[old_id, new_neuron_id].item()
-            self.assertEqual(weight_val, 0.0)
+        # Case2:
+        # train the model for 1 epoch
+        # add 1 neuron in L1, make sure that L0 3rd channel activation map is full 0
+
+        # Case3:
+        # train the model for 1 epoch
+        # add 1 neuron in L0, make sure that L0 3rd channel activation map is non-zero, L2 should be 0
+
+class TinyNet(NetworkWithOps):
+    def __init__(self):
+        super().__init__()
+        self.conv0 = Conv2dWithNeuronOps(1, 2, kernel_size=3, stride=1, padding=1)
+        self.bn0   = BatchNorm2dWithNeuronOps(2)
+        self.conv1 = Conv2dWithNeuronOps(2, 2, kernel_size=3, stride=1, padding=1)
+        self.bn1   = BatchNorm2dWithNeuronOps(2)
+        self.conv2 = Conv2dWithNeuronOps(2, 2, kernel_size=3, stride=1, padding=1)
+        self.bn2   = BatchNorm2dWithNeuronOps(2)
+        # self.flatten_conv_id = self.conv2.get_module_id()
+        self.flatten_conv_id = self.bn2.get_module_id()
+
+        self.flatten = th.nn.Flatten()
+        self.linear0 = LinearWithNeuronOps(28*28*2, 10)
+
+    def children(self):
+        return [self.conv0, self.bn0, self.conv1, self.bn1, self.conv2, self.bn2, self.linear0]
+
+    def define_deps(self):
+        self.register_dependencies([
+            (self.conv0, self.bn0,   DepType.SAME),
+            (self.bn0,   self.conv1, DepType.INCOMING),
+            (self.conv1, self.bn1,   DepType.SAME),
+            (self.bn1,   self.conv2, DepType.INCOMING),
+            (self.conv2, self.bn2,   DepType.SAME),
+            (self.bn2, self.linear0, DepType.INCOMING),
+            (self.conv0, self.conv2, DepType.INCOMING),
+        ])
+
+    def forward(self, x, intermediary=None):
+        self.maybe_update_age(x)
+        x0_pre = self.conv0(x, intermediary=intermediary)
+        x0 = F.relu(self.bn0(x0_pre))
+
+        x1_pre = self.conv1(x0, intermediary=intermediary)
+        x1 = F.relu(self.bn1(x1_pre))
+
+        x2_pre = self.conv2(x0 + x1, intermediary=intermediary)
+        x2 = F.relu(self.bn2(x2_pre))
+
+        out = self.flatten(F.relu(x2))
+        return self.linear0(out)
+
+class TestAddViaSkipConn(unittest.TestCase):
+    def setUp(self):
+        self.model = TinyNet()
+        self.model.define_deps()
+        self.model.set_tracking_mode(TrackingMode.TRAIN)
+        self.opt = opt.SGD(self.model.parameters(), lr=1e-3)
+        tfm = T.Compose([T.ToTensor()])
+        self.ds_train = ds.MNIST("../data", train=True, transform=tfm, download=True)
+        self.loader = th.utils.data.DataLoader(self.ds_train, batch_size=128, shuffle=True)
+
+    def _train_one_epoch(self):
+        print("starting one epoch...")
+        self.model.train()
+        for b, (imgs, labels) in enumerate(self.loader):
+            logits = self.model(imgs)
+            loss = F.cross_entropy(logits, labels)
+            self.opt.zero_grad()
+            loss.backward()
+            self.opt.step()
+        print("epoch done.")
+
+    def _infer_once(self):
+        self.model.eval()
+        imgs, _ = next(iter(self.loader))
+        with th.no_grad():
+            infer = {}
+            _ = self.model(imgs, intermediary=infer)
+        return infer
+
+    def test_case1_add_in_L2(self):
+        self._train_one_epoch()
+
+        l2_id = self.model.conv2.get_module_id()
+        print(f"[Case1] add 1 neuron in L2 (conv2) id={l2_id}")
+        self.model.add_neurons(l2_id, 1)
+
+        infer = self._infer_once()
+        a0 = infer[self.model.conv0.get_module_id()]   # after conv0 (recorded in conv0)
+        a1 = infer[self.model.conv1.get_module_id()]   # after conv1
+        a2 = infer[self.model.conv2.get_module_id()]   # after conv2
+
+        self.assertEqual(a0.shape[1], 2)
+        self.assertEqual(a1.shape[1], 2)
+        self.assertEqual(a2.shape[1], 3)
+
+    def test_case2_add_in_L1(self):
+        self._train_one_epoch()
+        l1_id = self.model.conv1.get_module_id()
+        print(f"[Case2] add 1 neuron in L1 (conv1) id={l1_id}")
+        self.model.add_neurons(l1_id, 1)
+
+        infer = self._infer_once()
+        a0 = infer[self.model.conv0.get_module_id()]
+        a1 = infer[self.model.conv1.get_module_id()]
+
+        self.assertEqual(a1.shape[1], 3)
+        self.assertEqual(a0.shape[1], 3)
+        self.assertTrue(th.all(a0[:, 2, :, :] == 0.0).item())
+
+    def test_case3_add_in_L0(self):
+        self._train_one_epoch()
+
+        l0_id = self.model.conv0.get_module_id()
+        print(f"[Case3] add 1 neuron in L0 (conv0) id={l0_id}")
+        self.model.add_neurons(l0_id, 1)
+
+        infer = self._infer_once()
+        a0 = infer[self.model.conv0.get_module_id()]
+        a1 = infer[self.model.conv1.get_module_id()]
+        a2 = infer[self.model.conv2.get_module_id()]
+
+        self.assertEqual(a0.shape[1], 3)
+        self.assertGreater(th.abs(a0[:, 2, :, :]).sum().item(), 0.0)
+        self.assertEqual(a1.shape[1], 3)
+        self.assertTrue(th.all(a1[:, 2, :, :] == 0.0).item())
+        self.assertEqual(a2.shape[1], 2)
+
 
 
 if __name__ == '__main__':
     unittest.main()
-
-#test    

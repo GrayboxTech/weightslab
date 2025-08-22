@@ -3,7 +3,7 @@ import collections
 import enum
 import functools
 
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 from torch import nn
 
 import numpy as np
@@ -90,6 +90,13 @@ class _ModulesDependencyManager:
             List[int]: The ids of the dependent modules.
         """
         return list(self.dependency_2_id_2_id[dep_type][idd])
+
+    def get_parent_ids(self, child_id: int, dep_type: DepType) -> List[int]:
+        parents = []
+        for parent_id, children in self.dependency_2_id_2_id[dep_type].items():
+            if child_id in children:
+                parents.append(parent_id)
+        return parents
 
     def get_registered_ids(self) -> Set[int]:
         """Get the ids of the registered modules.
@@ -246,6 +253,49 @@ class NetworkWithOps(nn.Module):
         linear_neurons = linear_layer.weight.shape[1]
         linear_neurons_per_conv_neuron = linear_neurons // conv_neurons
         return linear_neurons_per_conv_neuron
+    
+    def _same_ancestors(self, node_id: int) -> Set[int]:
+        visited = set()
+        frontier = {node_id}
+        while frontier:
+            next_frontier = set()
+            for nid in frontier:
+                visited.add(nid)
+                same_parents = set(self._dep_manager.get_parent_ids(nid, DepType.SAME))
+                same_parents -= visited
+                next_frontier |= same_parents
+            if not next_frontier:
+                return frontier
+            frontier = next_frontier
+        return {node_id}
+    def _mask_and_zerofy_new_neurons(self, producer_id: int, new_start: int, new_count: int):
+        if new_count <= 0:
+            return
+
+        prod = self._dep_manager.id_2_layer[producer_id]
+        new_ids = set(range(new_start, new_start + new_count))
+
+        self.freeze(producer_id, neuron_ids=new_ids)
+        incoming_children = self._dep_manager.get_dependent_ids(producer_id, DepType.INCOMING)
+        for child_id in incoming_children:
+            child = self._dep_manager.id_2_layer[child_id]
+            out_max = getattr(child, "neuron_count", None)
+            if out_max is None:
+                continue
+            all_out = set(range(int(out_max)))
+            if hasattr(child, "zerofy_connections_from"):
+                try:
+                    child.zerofy_connections_from(from_neuron_ids=new_ids, to_neuron_ids=all_out)
+                except Exception:
+                    pass
+
+        same_children = self._dep_manager.get_dependent_ids(producer_id, DepType.SAME)
+        for same_id in same_children:
+            try:
+                self.freeze(same_id, neuron_ids=new_ids)
+            except Exception:
+                pass
+
 
     def prune(
             self,
@@ -277,7 +327,7 @@ class NetworkWithOps(nn.Module):
 
             if through_flatten:
                 incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.in_features // module.neuron_count
+                    incoming_module.incoming_neuron_count // module.neuron_count
                 incoming_prune_indices = []
                 for index in neuron_indices:
                     incoming_prune_indices.extend(list(range(
@@ -296,10 +346,14 @@ class NetworkWithOps(nn.Module):
                     layer_id: int,
                     neuron_count: int,
                     skip_initialization: bool = False,
-                    through_flatten: bool = False):
+                    through_flatten: bool = False,
+                    _suppress_incoming_ids: Optional[Set[int]] = None):
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.add_neurons] No module with id {layer_id}")
+
+        if _suppress_incoming_ids is None:
+            _suppress_incoming_ids = set()
 
         module = self._dep_manager.id_2_layer[layer_id]
         through_flatten = False
@@ -312,13 +366,20 @@ class NetworkWithOps(nn.Module):
                 layer_id, DepType.SAME):
             self.add_neurons(
                 same_dep_id, neuron_count, skip_initialization,
-                through_flatten=through_flatten)
-
+                through_flatten=through_flatten,
+                _suppress_incoming_ids=_suppress_incoming_ids)
+        
         # If the next layer is of type "INCOMING", say after a conv we have 
         # either a conv or a linear, then we add to incoming neurons.
 
+        updated_incoming_children: List[int] = []
         for incoming_id in self._dep_manager.get_dependent_ids(
                 layer_id, DepType.INCOMING):
+
+            # to avoid double expansion
+            if incoming_id in _suppress_incoming_ids:
+                continue
+
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
 
             incoming_skip_initialization = True
@@ -336,8 +397,34 @@ class NetworkWithOps(nn.Module):
                 incoming_module.add_incoming_neurons(
                     neuron_count, incoming_skip_initialization)
 
+            updated_incoming_children.append(incoming_id)
         module.add_neurons(
                 neuron_count, skip_initialization=skip_initialization)
+
+        current_parent_out = module.neuron_count 
+        for child_id in updated_incoming_children:
+            sibling_incoming_parents = self._dep_manager.get_parent_ids(child_id, DepType.INCOMING)
+            for sib_parent_id in sibling_incoming_parents:
+                if sib_parent_id == layer_id:
+                    continue
+                # to get the producer id
+                producer_ids = self._same_ancestors(sib_parent_id)  # e.g., {conv1} instead of {bn1}
+
+                for producer_id in producer_ids:
+                    sib_prod_module = self._dep_manager.id_2_layer[producer_id]
+                    delta = current_parent_out - sib_prod_module.neuron_count
+                    if delta <= 0:
+                        continue
+
+                    old_nc = int(sib_prod_module.neuron_count)
+                    self.add_neurons(
+                        producer_id,
+                        delta,
+                        skip_initialization=True,
+                        through_flatten=False,
+                        _suppress_incoming_ids={child_id}
+                    )
+                    self._mask_and_zerofy_new_neurons(producer_id, new_start=old_nc, new_count=delta)
 
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
@@ -376,7 +463,7 @@ class NetworkWithOps(nn.Module):
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
             if through_flatten:
                 incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.in_features // module.neuron_count
+                    incoming_module.incoming_neuron_count // module.neuron_count
                 incoming_reorder_indices = []
                 for index in indices:
                     incoming_reorder_indices.extend(
