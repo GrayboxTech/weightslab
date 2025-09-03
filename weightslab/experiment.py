@@ -75,6 +75,17 @@ class Experiment:
         self.is_training = False
         self.training_steps_to_do = training_steps_to_do
 
+        self.lock = Lock()
+        self.architecture_guard = RLock()
+
+        self.eval_full_to_train_steps_ratio = 256
+        self.experiment_dump_to_train_steps_ratio = 1024
+        self.occured_train_steps = 0
+        self.occured_eval__steps = 0
+        self.train_loop_callbacks = []
+        self.train_loop_clbk_freq = 50
+        self.train_loop_clbk_call = True
+
         if not self.root_log_dir.exists():
             self.root_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -104,12 +115,7 @@ class Experiment:
             self.eval_loader, self.eval_tracked_dataset = (
                 self.get_eval_data_loader())
         self.eval_iterator = iter(self.eval_loader)
-
-        self.eval_full_to_train_steps_ratio = 256
-        self.experiment_dump_to_train_steps_ratio = 1024
-        self.occured_train_steps = 0
-        self.occured_eval__steps = 0
-
+        
         self.model.to(self.device)
         self.chkpt_manager = CheckpointManager(root_log_dir)
         self.stats_monitor = NeuronStatsWithDifferencesMonitor()
@@ -118,16 +124,8 @@ class Experiment:
             self.chkpt_manager.load(
                 self.chkpt_manager.get_latest_experiment(), self)
 
-        self.train_loop_callbacks = []
-        self.train_loop_clbk_freq = 50
-        self.train_loop_clbk_call = True
-
         self.model.register_hook_fn_for_architecture_change(
             lambda model: self._update_optimizer(model))
-
-        self.lock = Lock()
-        self.architecture_guard = RLock()
-        self.model.to(self.device)
 
     def __repr__(self):
         with self.lock:
