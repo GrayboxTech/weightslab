@@ -533,4 +533,15 @@ class NetworkWithOps(nn.Module):
     def forward(self,
                 tensor: th.Tensor,
                 intermediary_outputs: List[int] = []):
-        raise NotImplementedError
+        x = tensor
+        intermediaries = {}
+
+        for layer in self.layers:
+            x = layer(x)
+
+            if layer.get_module_id() in intermediary_outputs:
+                intermediaries[layer.get_module_id()] = x.detach().cpu()
+
+        if intermediary_outputs:
+            return x, intermediaries
+        return x
