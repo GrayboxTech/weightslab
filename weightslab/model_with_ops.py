@@ -382,7 +382,7 @@ class NetworkWithOps(nn.Module):
 
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
 
-            incoming_skip_initialization = True
+            incoming_skip_initialization = False
             if incoming_id == self.layers[-1].get_module_id():
                 incoming_skip_initialization = False
 
