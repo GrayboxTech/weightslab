@@ -557,8 +557,13 @@ class LinearWithNeuronOps(nn.Linear, LayerWiseOperations):
         copy_forward_tracked_attrs(activation_map, data)
         if not skip_register:
             self.register(activation_map)
-        if intermediary is not None:
-            intermediary[self.get_module_id()] = activation_map
+        if intermediary is not None and self.get_module_id() in intermediary:
+            try:
+                intermediary[self.get_module_id()] = activation_map
+            except Exception as e:
+                print(
+                    f"Error {e} occurred while updating intermediary outputs",
+                    self.get_module_id(), str(activation_map)[:50])
         return activation_map
 
     def summary_repr(self):
@@ -905,9 +910,13 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
         copy_forward_tracked_attrs(activation_map, data)
         if not skip_register:
             self.register(activation_map)
-        if intermediary is not None:
-            print("forward with intermediary: ", self.get_module_id())
-            intermediary[self.get_module_id()] = activation_map
+        if intermediary is not None \
+                and self.get_module_id() in intermediary:
+            try:
+                intermediary[self.get_module_id()] = activation_map
+            except Exception as e:
+                print(f"Error {e} occurred while updating intermediary outputs",
+                      self.get_module_id(), str(activation_map)[:50])
         return activation_map
 
     def summary_repr(self):
