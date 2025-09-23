@@ -38,8 +38,10 @@ class _StateDictKeys(str, Enum):
         return list(map(lambda c: c.value, cls))
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset):
+    def __init__(self, wrapped_dataset: Dataset, task_type: str = "classification"):
         self.wrapped_dataset = wrapped_dataset
+        self.task_type = task_type
+
         self._denied_samples_ids = set()
         self.denied_sample_cnt = 0
         self.idx_to_idx_remapp = dict()
@@ -155,15 +157,20 @@ class DataSampleTrackingWrapper(Dataset):
             if value is not None:
                 return value
         if stat_name == SampleStatsEx.TARGET:
-            value = self[sample_id][2]
-            if raw:
-                value = self._getitem_raw(sample_id)[2]
+            if hasattr(self.wrapped_dataset, 'targets'):
+                if raw and self.idx_to_idx_remapp:
+                    sample_id  = self.idx_to_idx_remapp[sample_id]
+                value = self.wrapped_dataset.targets[sample_id]
+            else:
+                value = self[sample_id][2]  # 0 -> data; 1 -> index; 2 -> label;
+                if raw and self.idx_to_idx_remapp:
+                    value = self._getitem_raw(sample_id)[2]
             self.sample_statistics[stat_name][sample_id] = value
 
         elif stat_name == SampleStatsEx.SAMPLE_ID:
-            value = self[sample_id][1]  # 0 -> data; 1 -> index; 2 -> label;
+            value = sample_id
             if raw:
-                value = self._getitem_raw(sample_id)[1]
+                value = self.idx_to_idx_remapp[sample_id]
             self.sample_statistics[stat_name][sample_id] = value
         elif stat_name == SampleStatsEx.DENY_LISTED:
             value = False
@@ -450,36 +457,22 @@ class DataSampleTrackingWrapper(Dataset):
             self.dataframe = self._get_stats_dataframe(limit=limit)
         return self.dataframe
 
-    def __getitem__(self, index: int):
-
+    def __getitem__(self, index: int,):
         if self.idx_to_idx_remapp:
             try:
                 # This should keep indexes consistent during the data slicing.
                 index = self.idx_to_idx_remapp[index]
             except KeyError as err:
                 raise IndexError() from err
-            
-        data = self.wrapped_dataset[index]
-        if len(data) == 2:
-            item, target = data
-            return item, index, target
-        elif len(data) == 3:
-            item, target, idx = data
-            return item, idx, target
-        else:
-            raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
+        return self._getitem_raw(index)
 
     def _getitem_raw(self, index: int):
         data = self.wrapped_dataset[index]
         if len(data) == 2:
             item, target = data
             return item, index, target
-        elif len(data) == 3:
-            item, target, idx = data
-            return item, idx, target
         else:
             raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
-
 
     def __len__(self):
         return len(self.wrapped_dataset) - self.denied_sample_cnt
