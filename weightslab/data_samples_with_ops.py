@@ -3,6 +3,7 @@ from typing import Callable, Tuple, Any, Set, Dict
 import numpy as np
 import pandas as pd
 import random as rnd
+import math
 
 from torch.utils.data import Dataset
 
@@ -56,7 +57,7 @@ class DataSampleTrackingWrapper(Dataset):
                 sample_id,
                 {
                     SampleStatsEx.PREDICTION_AGE.value: -1,
-                    SampleStatsEx.PREDICTION_RAW.value: -1,
+                    SampleStatsEx.PREDICTION_RAW.value: -1e9,
                     SampleStatsEx.PREDICTION_LOSS.value: -1,
                     SampleStatsEx.DENY_LISTED.value: False,
                 }

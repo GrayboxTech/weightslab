@@ -268,7 +268,7 @@ class Experiment:
             tensor.to(self.device) for tensor in input_in_id_label]
         data, in_id, label = input_in_id_label
         add_tracked_attrs_to_input_tensor(
-            data, in_id_batch=in_id, label_batch=label)
+            data, in_id_batch=in_id, label_batch=label.float())
         self.last_input = data
         return data, self.model(data)
 
@@ -293,10 +293,14 @@ class Experiment:
             if self.task_type == "segmentation":
                 losses_batch = self.criterion(output, input.label_batch.long())
                 # Output: (N, C, H, W), argmax over channel dim
+
                 pred = output.argmax(dim=1)
             else:
                 losses_batch = self.criterion(output, input.label_batch)
-                pred = output.argmax(dim=1, keepdim=True)
+                if output.ndim == 1:
+                    pred = (output > 0.0).long()
+                else:
+                    pred = output.argmax(dim=1, keepdim=True)
 
             if losses_batch.ndim == 0:
                 losses_batch = losses_batch.unsqueeze(0)
@@ -387,7 +391,11 @@ class Experiment:
             pred = output.argmax(dim=1)
         else:
             losses_batch = self.criterion(output, input.label_batch)
-            pred = output.argmax(dim=1, keepdim=True)
+            if output.ndim == 1:
+                pred = (output > 0.0).long()
+            else:
+                pred = output.argmax(dim=1, keepdim=True)
+
         if losses_batch.ndim == 0:
             losses_batch = losses_batch.unsqueeze(0)
 
