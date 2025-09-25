@@ -1092,6 +1092,15 @@ class BatchNorm2dWithNeuronOps(nn.BatchNorm2d, LayerWiseOperations):
         self.num_features = out_size
         self.neuron_count = out_size
 
+    def forward(self, x, intermediary: dict | None = None):
+        y = super().forward(x)
+        if intermediary is not None and self.get_module_id() in intermediary:
+            try:
+                intermediary[self.get_module_id()] = y
+            except Exception as e:
+                print("BN intermediary set failed:", e)
+        return y
+
 
 def is_module_with_ops(obj):
     has_ops = issubclass(type(obj), LayerWiseOperations) or \
