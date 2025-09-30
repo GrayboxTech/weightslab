@@ -95,7 +95,8 @@ class Experiment:
 
         if self.train_dataset is not None:
             self.train_tracked_dataset = DataSampleTrackingWrapper(
-                self.train_dataset)
+                self.train_dataset,
+                task_type=self.task_type)
             self.train_tracked_dataset._map_updates_hook_fns.append(
                 self.reset_data_iterators)
             self.train_loader = th.utils.data.DataLoader(
@@ -108,7 +109,8 @@ class Experiment:
         self.train_iterator = iter(self.train_loader)
         if self.eval_dataset is not None:
             self.eval_tracked_dataset = DataSampleTrackingWrapper(
-                self.eval_dataset)
+                self.eval_dataset,
+                task_type=self.task_type)
             self.eval_loader = th.utils.data.DataLoader(
                 self.eval_tracked_dataset, batch_size=self.batch_size)
         if self.get_eval_data_loader is not None:
@@ -268,7 +270,7 @@ class Experiment:
             tensor.to(self.device) for tensor in input_in_id_label]
         data, in_id, label = input_in_id_label
         add_tracked_attrs_to_input_tensor(
-            data, in_id_batch=in_id, label_batch=label.float())
+            data, in_id_batch=in_id, label_batch=label)
         self.last_input = data
         return data, self.model(data)
 

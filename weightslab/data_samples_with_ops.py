@@ -133,16 +133,14 @@ class DataSampleTrackingWrapper(Dataset):
             else:
                 self.idx_to_idx_remapp[idx - delta] = idx
 
-    def set(self,
-            sample_id: int,
-            stat_name: str,
-            stat_value: int | float | bool):
+    def set(self, sample_id: int, stat_name: str, stat_value):
         self.dataframe = None
         self._raise_if_invalid_stat_name(stat_name)
         prev_value = self.sample_statistics[stat_name].get(sample_id, None)
-        if type(stat_value) is np.ndarray:
-            stat_value = stat_value[0]
-        # Only update counter if DENY_LISTED and prev_value is not None
+
+        if isinstance(stat_value, np.ndarray) and stat_value.ndim == 0:
+            stat_value = stat_value.item()
+
         if stat_name == SampleStatsEx.DENY_LISTED and prev_value is not None and prev_value != stat_value:
             self._handle_deny_listed_updates(stat_value)
         if stat_name == SampleStatsEx.PREDICTION_LOSS:
