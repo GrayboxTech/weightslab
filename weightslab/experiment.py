@@ -59,7 +59,7 @@ class Experiment:
         self.model = model
         self.device = device
         self.batch_size = batch_size
-        self.criterion = criterion or th.nn.CrossEntropyLoss()
+        self.criterion = criterion or th.nn.CrossEntropyLoss(reduction='none')
         self.metrics = metrics or {}
         self.task_type = task_type
         self.eval_dataset = eval_dataset
@@ -117,7 +117,7 @@ class Experiment:
             self.eval_loader, self.eval_tracked_dataset = (
                 self.get_eval_data_loader())
         self.eval_iterator = iter(self.eval_loader)
-        
+
         self.model.to(self.device)
         self.chkpt_manager = CheckpointManager(root_log_dir)
         self.stats_monitor = NeuronStatsWithDifferencesMonitor()
@@ -128,6 +128,11 @@ class Experiment:
 
         self.model.register_hook_fn_for_architecture_change(
             lambda model: self._update_optimizer(model))
+
+        if self.criterion.reduction != 'none':
+            raise ValueError(
+                f"Criterion reduction must be 'none' in order to access "
+                f"per-sample stats")
 
     def __repr__(self):
         with self.lock:
