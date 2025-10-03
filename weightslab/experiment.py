@@ -3,6 +3,7 @@ It is used to train and evaluate models. """
 
 import torch as th
 import torch.nn.functional as F
+import numpy as np
 
 from tqdm import tqdm
 from pathlib import Path
@@ -331,6 +332,20 @@ class Experiment:
                 losses_batch.detach().cpu().numpy(),
                 pred.detach().cpu().numpy())
 
+            try:
+                ids_np = input.in_id_batch.detach().cpu().numpy()
+                per_sample_loss_np = losses_batch.detach().cpu().numpy()
+                pred_np = pred.detach().cpu().numpy()
+                self.train_loader.dataset.update_sample_stats_ex_batch(
+                    ids_np,
+                    {
+                        "loss/combined": per_sample_loss_np,
+                        "pred": pred_np  # dense (e.g., seg masks) will be handled/downsampled in the dataset
+                    }
+                )
+            except Exception:
+                pass
+
         self.logger.add_scalars(
             'train-loss', {self.name: loss.detach().cpu().numpy()},
             global_step=model_age)
@@ -415,6 +430,20 @@ class Experiment:
             losses_batch.detach().cpu().numpy(),
             pred.detach().cpu().numpy()
         )
+
+        try:
+            ids_np = input.in_id_batch.detach().cpu().numpy()
+            per_sample_loss_np = losses_batch.detach().cpu().numpy()
+            pred_np = pred.detach().cpu().numpy()
+            self.eval_loader.dataset.update_sample_stats_ex_batch(
+                ids_np,
+                {
+                    "loss/combined_eval": per_sample_loss_np,
+                    "pred_eval": pred_np
+                }
+            )
+        except Exception:
+            pass
 
         metric_results = {}
         for name, metric in self.metrics.items():

@@ -12,14 +12,14 @@ from torchvision import datasets as ds
 
 from weightslab.experiment import Experiment
 
-from .test_utils import MNISTModel
+from test_utils import MNISTModel
 
 
 class ExperimentTest(unittest.TestCase):
     def setUp(self) -> None:
         th.manual_seed(1337)
         self.temporary_directory = tempfile.mkdtemp()
-        device = th.device("cuda:0")
+        device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
         transform = T.Compose([T.ToTensor()])
         data_eval = ds.MNIST("../data", train=False, transform=transform)
         data_train = ds.MNIST(

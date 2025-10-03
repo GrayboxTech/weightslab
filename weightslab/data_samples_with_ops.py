@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Callable, Tuple, Any, Set, Dict
+from typing import Callable, Tuple, Any, Set, Dict, Sequence, Optional
 import numpy as np
 import pandas as pd
 import random as rnd
@@ -10,7 +10,57 @@ from torch.utils.data import Dataset
 
 SamplePredicateFn = Callable[[], bool]
 
-#TODO samplestats_extended
+def _is_scalarish(x) -> bool:
+    if isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_)):
+        return True
+    if isinstance(x, str):
+        return len(x) <= 256
+    if isinstance(x, np.ndarray) and x.ndim == 0:
+        return True
+    return False
+
+def _is_dense_array(x) -> bool:
+    return isinstance(x, np.ndarray) and x.ndim >= 2
+
+def _to_numpy_safe(x):
+    if isinstance(x, np.ndarray):
+        return x
+    if isinstance(x, (list, tuple)):
+        try:
+            return np.asarray(x)
+        except Exception:
+            return None
+    try:
+        import torch as th  # optional
+        if isinstance(x, th.Tensor):
+            return x.detach().cpu().numpy()
+    except Exception:
+        pass
+    return None
+
+def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
+    """
+    Downsample 2D/3D arrays using simple striding (nearest-neighbor-like).
+    Keeps channels if present. Avoids heavy deps.
+    """
+    if arr.ndim == 2:
+        H, W = arr.shape
+        scale = max(1, int(np.ceil(max(H, W) / max_hw)))
+        return arr[::scale, ::scale]
+    if arr.ndim == 3:
+        # detect channels-first
+        if arr.shape[0] < arr.shape[1]:
+            C, H, W = arr.shape
+            scale = max(1, int(np.ceil(max(H, W) / max_hw)))
+            return arr[:, ::scale, ::scale]
+        else:
+            H, W, C = arr.shape
+            scale = max(1, int(np.ceil(max(H, W) / max_hw)))
+            return arr[::scale, ::scale, :]
+    return arr
+
+
+# TODO samplestats_extended
 class SampleStatsEx(str, Enum):
     PREDICTION_AGE = "prediction_age"
     PREDICTION_LOSS = "prediction_loss"
@@ -49,6 +99,11 @@ class DataSampleTrackingWrapper(Dataset):
         self.sample_statistics = {
             stat_name: {} for stat_name in SampleStatsEx.ALL()
         }
+        # Extended stats: scalar-ish columns & dense blobs
+        self.sample_statistics_ex: Dict[str, Dict[int, Any]] = {}
+        self.dense_stats_store: Dict[str, Dict[int, np.ndarray]] = {}
+        self._ex_columns_cache: Set[str] = set()
+
         self.dataframe = None
         self._map_updates_hook_fns = []
 
@@ -75,7 +130,14 @@ class DataSampleTrackingWrapper(Dataset):
         return {
             _StateDictKeys.IDX_TO_IDX_MAP.value: self.idx_to_idx_remapp,
             _StateDictKeys.BLOCKD_SAMPLES.value: self.denied_sample_cnt,
-            _StateDictKeys.SAMPLES_STATSS.value: self.sample_statistics,
+            _StateDictKeys.SAMPLES_STATSS.value: {
+                "core": self.sample_statistics,
+                "ex": self.sample_statistics_ex,
+                "dense": {
+                    k: {int(sid): v for sid, v in inner.items()}
+                    for k, inner in self.dense_stats_store.items()
+                }
+            },
         }
 
     def load_state_dict(self, state_dict: Dict):
@@ -86,7 +148,23 @@ class DataSampleTrackingWrapper(Dataset):
 
         self.idx_to_idx_remapp = state_dict[_StateDictKeys.IDX_TO_IDX_MAP]
         self.denied_sample_cnt = state_dict[_StateDictKeys.BLOCKD_SAMPLES]
-        self.sample_statistics = state_dict[_StateDictKeys.SAMPLES_STATSS]
+        samples_stats_payload = state_dict[_StateDictKeys.SAMPLES_STATSS]
+
+        # Backward compatibility: accept either flat or nested dict
+        if isinstance(samples_stats_payload, dict) and "core" in samples_stats_payload:
+            self.sample_statistics = samples_stats_payload.get("core", {})
+            self.sample_statistics_ex = samples_stats_payload.get("ex", {})
+            dense = samples_stats_payload.get("dense", {})
+            self.dense_stats_store = {
+                k: {int(sid): np.asarray(v) for sid, v in inner.items()}
+                for k, inner in dense.items()
+            }
+        else:
+            # legacy checkpoints stored only the core dict
+            self.sample_statistics = samples_stats_payload
+            self.sample_statistics_ex = {}
+            self.dense_stats_store = {}
+        self._ex_columns_cache = set(self.sample_statistics_ex.keys())
 
     def get_stat_value_at_percentile(self, stat_name: str, percentile: float):
         values = sorted(list(self.sample_statistics[stat_name].values()))
@@ -233,6 +311,103 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_RAW.value: sample_pred,
                     SampleStatsEx.PREDICTION_LOSS.value: sample_loss
                 })
+
+    def update_sample_stats_ex(
+        self,
+        sample_id: int,
+        sample_stats_ex: Dict[str, Any]
+    ):
+        """
+        Extended per-sample stats.
+        - Scalar-ish values -> self.sample_statistics_ex[key][sample_id]
+        - Dense arrays (ndim>=2) -> self.dense_stats_store[key][sample_id] (downsampled)
+        """
+        self.dataframe = None
+
+        for key, val in (sample_stats_ex or {}).items():
+            if val is None:
+                continue
+
+            np_val = _to_numpy_safe(val)
+
+            # Dense arrays (e.g., segmentation mask / reconstruction)
+            if _is_dense_array(np_val):
+                if key not in self.dense_stats_store:
+                    self.dense_stats_store[key] = {}
+                self.dense_stats_store[key][sample_id] = _downsample_nn(np_val, max_hw=96)
+                continue
+
+            # Scalar-ish
+            if _is_scalarish(val):
+                if key not in self.sample_statistics_ex:
+                    self.sample_statistics_ex[key] = {}
+                if isinstance(val, np.ndarray) and val.ndim == 0:
+                    val = val.item()
+                self.sample_statistics_ex[key][sample_id] = val
+                self._ex_columns_cache.add(key)
+                continue
+
+            # Small vectors -> list
+            if isinstance(np_val, np.ndarray) and np_val.ndim == 1 and np_val.size <= 64:
+                if key not in self.sample_statistics_ex:
+                    self.sample_statistics_ex[key] = {}
+                self.sample_statistics_ex[key][sample_id] = np_val.tolist()
+                self._ex_columns_cache.add(key)
+                continue
+
+            # Fallback to truncated string
+            stringy = str(val)
+            if len(stringy) > 512:
+                stringy = stringy[:509] + "..."
+            if key not in self.sample_statistics_ex:
+                self.sample_statistics_ex[key] = {}
+            self.sample_statistics_ex[key][sample_id] = stringy
+            self._ex_columns_cache.add(key)
+
+        if sample_id not in self.sample_statistics[SampleStatsEx.SAMPLE_ID]:
+            self.set(sample_id, SampleStatsEx.SAMPLE_ID, sample_id)
+        if sample_id not in self.sample_statistics[SampleStatsEx.DENY_LISTED]:
+            self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
+
+    def update_sample_stats_ex_batch(
+        self,
+        sample_ids: Sequence[int],
+        stats_map: Dict[str, Any]
+    ):
+        """
+        Convenience for batch updates.
+        stats_map values can be:
+            - scalar -> broadcast
+            - np.ndarray / tensor with shape [N, ...] matching len(sample_ids)
+        """
+        self.dataframe = None
+        N = len(sample_ids)
+
+        for key, val in (stats_map or {}).items():
+            arr = _to_numpy_safe(val)
+            if arr is None:
+                # non-array scalar: broadcast
+                for sid in sample_ids:
+                    self.update_sample_stats_ex(sid, {key: val})
+                continue
+
+            if arr.ndim == 0:
+                v = arr.item()
+                for sid in sample_ids:
+                    self.update_sample_stats_ex(sid, {key: v})
+                continue
+
+            if arr.shape[0] != N:
+                raise ValueError(f"[update_sample_stats_ex_batch] '{key}' first dim {arr.shape[0]} != N={N}")
+
+            for i, sid in enumerate(sample_ids):
+                self.update_sample_stats_ex(sid, {key: arr[i]})
+
+    def get_dense_stat(self, sample_id: int, key: str) -> Optional[np.ndarray]:
+        d = self.dense_stats_store.get(key)
+        if d is None:
+            return None
+        return d.get(sample_id, None)
 
     def _actually_deny_samples(self, sample_id):
         if not self.sample_statistics[SampleStatsEx.DENY_LISTED]:
@@ -429,6 +604,14 @@ class DataSampleTrackingWrapper(Dataset):
                 sample_id = int(sample_id)
                 stat_value = self.get(sample_id, stat_name, raw=True)
                 data_frame.loc[sample_id, stat_name] = stat_value
+
+        for ex_key in sorted(self._ex_columns_cache):
+            inner = self.sample_statistics_ex.get(ex_key, {})
+            if not inner:
+                continue
+            s = pd.Series({int(sid): v for sid, v in inner.items()}, name=ex_key)
+            data_frame = data_frame.join(s, how='left')
+
         return data_frame
 
     def as_records(self, limit: int = -1):
@@ -442,6 +625,8 @@ class DataSampleTrackingWrapper(Dataset):
             row = {}
             for stat_name in SampleStatsEx.ALL():
                 row[stat_name] = self.get(sample_id, stat_name)
+            for ex_key in self._ex_columns_cache:
+                row[ex_key] = self.sample_statistics_ex.get(ex_key, {}).get(sample_id)
             rows.append(row)
             denied += int(bool(row.get(SampleStatsEx.DENY_LISTED, False)))
         return rows
