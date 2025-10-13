@@ -54,7 +54,8 @@ class Experiment:
             tqdm_display: bool = True,
             get_train_data_loader: None = None,
             get_eval_data_loader: None = None,
-            skip_loading: bool = False):
+            skip_loading: bool = False,
+            tasks: list | None = None):
 
         self.name = name
         self.model = model
@@ -75,6 +76,7 @@ class Experiment:
         self.last_input = None
         self.is_training = False
         self.training_steps_to_do = training_steps_to_do
+        self.tasks = tasks or [] 
 
         self.lock = Lock()
         self.architecture_guard = RLock()
@@ -197,6 +199,32 @@ class Experiment:
         line prompt. """
         self.stats_monitor.display_stats(self)
 
+    def _pick_legacy_dense_pred(self, preds, x):
+        HxW = None
+        if isinstance(x, th.Tensor) and x.ndim >= 4:
+            HxW = (int(x.shape[-2]), int(x.shape[-1]))
+
+        best, best_score = None, -1.0
+        for p in preds.values():
+            if not isinstance(p, th.Tensor):
+                continue
+            if not (p.ndim >= 3 or (p.ndim == 2 and p.shape[1] >= 64)):
+                continue
+            if p.ndim == 3:  # [N, H, W]
+                H, W = int(p.shape[-2]), int(p.shape[-1])
+            elif p.ndim >= 4:
+                H, W = int(p.shape[-2]), int(p.shape[-1])
+            else:
+                continue
+            score = float(H * W)
+            if HxW and (H, W) == HxW:
+                score += 1e9  
+            if score > best_score:
+                best, best_score = p, score
+
+        # fallback: first pred if nothing dense
+        return best if best is not None else next(iter(preds.values()))
+
     def dump(self):
         """Dump the experiment into a checkpoint. Marks the checkpoint on the
         plots."""
@@ -298,75 +326,156 @@ class Experiment:
                 self.train_iterator = iter(self.train_loader)
                 input, output = self._pass_one_batch(self.train_iterator)
 
-            if self.task_type == "segmentation":
-                losses_batch = self.criterion(output, input.label_batch.long())
-                # Output: (N, C, H, W), argmax over channel dim
+            # if multitask
+            if getattr(self, "tasks", None):
+                head_outputs = {t.name: t.forward(input) for t in self.tasks}
+                per_task_losses = {}
+                per_task_preds = {}
+                combined_losses_batch = None
+                loss = 0.0
 
-                pred = output.argmax(dim=1)
+                for t in self.tasks:
+                    # each task decides where its targets come from
+                    targets = t.get_targets(input) if hasattr(t, "get_targets") else input.label_batch
+                    losses_batch = t.compute_loss(head_outputs[t.name], targets)
+                    if losses_batch.ndim == 0:  # keep old safety
+                        losses_batch = losses_batch.unsqueeze(0)
+                    per_task_losses[t.name] = losses_batch.detach()
+                    per_task_preds[t.name] = t.infer_pred(head_outputs[t.name]).detach()
+                    weighted = losses_batch * float(getattr(t, "loss_weight", 1.0))
+                    combined_losses_batch = weighted if combined_losses_batch is None else (combined_losses_batch + weighted)
+                    loss = loss + weighted.mean()
+
+                try:
+                    loss.backward()
+                except Exception as e:
+                    self.chkpt_manager.dump(self, f"crash_{self.name}_bs{self.batch_size}_step{self.performed_train_steps()}")
+                    print(
+                        'Loss backward error, losses_batch shape:',
+                        list(combined_losses_batch.shape) if combined_losses_batch is not None else None,
+                        'current batch_size:', self.batch_size,
+                        'error:', str(e)
+                    )
+                self.optimizer.step()
+
+                with th.no_grad():
+                    for t in self.tasks:
+                        if not getattr(t, "metrics", None):
+                            continue
+                        targets = t.get_targets(input)
+                        outs = head_outputs[t.name]
+                        for mname, metric in t.metrics.items():
+                            m = metric.to(self.device) if hasattr(metric, "to") else metric
+                            val = m(outs, targets)
+                            if hasattr(m, "compute"):
+                                val = m.compute().item()
+                                if hasattr(m, "reset"):
+                                    m.reset()
+                            elif hasattr(val, "item"):
+                                val = val.item()
+                            self.logger.add_scalars(f"train-{t.name}-{mname}", {self.name: val}, global_step=model_age)
+
+                    for t in self.tasks:
+                        lb = per_task_losses[t.name]
+                        self.logger.add_scalars(f"train-loss/{t.name}", {self.name: lb.mean().item()}, global_step=model_age)
+
             else:
-                losses_batch = self.criterion(output, input.label_batch)
-                if output.ndim == 1:
-                    pred = (output > 0.0).long()
+                if self.task_type == "segmentation":
+                    losses_batch = self.criterion(output, input.label_batch.long())
+                    # Output: (N, C, H, W), argmax over channel dim
+                    pred = output.argmax(dim=1)
                 else:
-                    pred = output.argmax(dim=1, keepdim=True)
+                    losses_batch = self.criterion(output, input.label_batch)
+                    if output.ndim == 1:
+                        pred = (output > 0.0).long()
+                    else:
+                        pred = output.argmax(dim=1, keepdim=True)
 
-            if losses_batch.ndim == 0:
-                losses_batch = losses_batch.unsqueeze(0)
-            loss = th.mean(losses_batch)
-            try:
-                loss.backward()
-            except Exception as e:
-                self.chkpt_manager.dump(self, f"crash_{self.name}_bs{self.batch_size}_step{self.performed_train_steps()}")
-                print(
-                    'Loss backward error, losses_batch shape:',
-                    losses_batch.shape,
-                    'current batch_size:', self.batch_size,
-                    'error:', str(e)
-                )
-            self.optimizer.step()
+                if losses_batch.ndim == 0:
+                    losses_batch = losses_batch.unsqueeze(0)
+                loss = th.mean(losses_batch)
+                try:
+                    loss.backward()
+                except Exception as e:
+                    self.chkpt_manager.dump(self, f"crash_{self.name}_bs{self.batch_size}_step{self.performed_train_steps()}")
+                    print(
+                        'Loss backward error, losses_batch shape:',
+                        losses_batch.shape,
+                        'current batch_size:', self.batch_size,
+                        'error:', str(e)
+                    )
+                self.optimizer.step()
 
         with self.lock:
-            self.train_loader.dataset.update_batch_sample_stats(
-                model_age,
-                input.in_id_batch.detach().cpu().numpy(),
-                losses_batch.detach().cpu().numpy(),
-                pred.detach().cpu().numpy())
-
-            try:
+            if getattr(self, "tasks", None):
+                # combined into the primary per-sample channel (back-compat)
                 ids_np = input.in_id_batch.detach().cpu().numpy()
-                per_sample_loss_np = losses_batch.detach().cpu().numpy()
-                pred_np = pred.detach().cpu().numpy()
-                self.train_loader.dataset.update_sample_stats_ex_batch(
+                comb_np = combined_losses_batch.detach().cpu().numpy()
+
+                # first_pred = next(iter(per_task_preds.values()))
+                first_pred = self._pick_legacy_dense_pred(per_task_preds, input)
+
+                self.train_loader.dataset.update_batch_sample_stats(
+                    model_age,
                     ids_np,
-                    {
-                        "loss/combined": per_sample_loss_np,
-                        "pred": pred_np  # dense (e.g., seg masks) will be handled/downsampled in the dataset
-                    }
+                    comb_np,
+                    first_pred.detach().cpu().numpy()
                 )
-            except Exception:
-                pass
+
+                # extended per-task stats (non-breaking)
+                stats_map = {}
+                for name, lb in per_task_losses.items():
+                    stats_map[f"loss/{name}"] = lb.detach().cpu().numpy()
+                for name, pr in per_task_preds.items():
+                    stats_map[f"pred/{name}"] = pr.detach().cpu().numpy()
+                try:
+                    self.train_loader.dataset.update_sample_stats_ex_batch(ids_np, stats_map)
+                except Exception:
+                    pass
+            else:
+                self.train_loader.dataset.update_batch_sample_stats(
+                    model_age,
+                    input.in_id_batch.detach().cpu().numpy(),
+                    losses_batch.detach().cpu().numpy(),
+                    pred.detach().cpu().numpy())
+
+                try:
+                    ids_np = input.in_id_batch.detach().cpu().numpy()
+                    per_sample_loss_np = losses_batch.detach().cpu().numpy()
+                    pred_np = pred.detach().cpu().numpy()
+                    self.train_loader.dataset.update_sample_stats_ex_batch(
+                        ids_np,
+                        {
+                            "loss/combined": per_sample_loss_np,
+                            "pred": pred_np  # dense (e.g., seg masks) will be handled/downsampled in the dataset
+                        }
+                    )
+                except Exception:
+                    pass
 
         self.logger.add_scalars(
             'train-loss', {self.name: loss.detach().cpu().numpy()},
             global_step=model_age)
 
-        for name, metric in self.metrics.items():
-             # torchmetrics.Metric
-            if hasattr(metric, 'to'): 
-                metric = metric.to(self.device)
-                metric_value = metric(output, input.label_batch)
-                if hasattr(metric, 'compute'):
-                    metric_value = metric.compute().item()
-                    metric.reset()
-            else:
-                # custom metric
-                metric_value = metric(output, input.label_batch)
-                if hasattr(metric_value, 'item'):
-                    metric_value = metric_value.item()
+        # original per-epoch metrics remain for single-task (no change)
+        if not getattr(self, "tasks", None):
+            for name, metric in self.metrics.items():
+                # torchmetrics.Metric
+                if hasattr(metric, 'to'): 
+                    metric = metric.to(self.device)
+                    metric_value = metric(output, input.label_batch)
+                    if hasattr(metric, 'compute'):
+                        metric_value = metric.compute().item()
+                        metric.reset()
+                else:
+                    # custom metric
+                    metric_value = metric(output, input.label_batch)
+                    if hasattr(metric_value, 'item'):
+                        metric_value = metric_value.item()
 
-            self.logger.add_scalars(
-                f'train-{name}', {self.name: metric_value}, global_step=model_age
-            )
+                self.logger.add_scalars(
+                    f'train-{name}', {self.name: metric_value}, global_step=model_age
+                )
 
         with self.lock:
             self.training_steps_to_do -= 1
@@ -406,6 +515,70 @@ class Experiment:
             except StopIteration:
                 self.eval_iterator = iter(self.eval_loader)
                 input, output = self._pass_one_batch(self.eval_iterator)
+
+        if getattr(self, "tasks", None):
+            head_outputs = {t.name: t.forward(input) for t in self.tasks}
+            per_task_losses = {}
+            per_task_preds = {}
+            combined_losses_batch = None
+
+            for t in self.tasks:
+                targets = t.get_targets(input) if hasattr(t, "get_targets") else input.label_batch
+                losses_batch = t.compute_loss(head_outputs[t.name], targets)
+                if losses_batch.ndim == 0:
+                    losses_batch = losses_batch.unsqueeze(0)
+                per_task_losses[t.name] = losses_batch.detach()
+                per_task_preds[t.name] = t.infer_pred(head_outputs[t.name]).detach()
+                weighted = losses_batch * float(getattr(t, "loss_weight", 1.0))
+                combined_losses_batch = weighted if combined_losses_batch is None else (combined_losses_batch + weighted)
+
+            test_loss = combined_losses_batch.mean() if combined_losses_batch.ndim > 0 else combined_losses_batch
+
+            model_age = self.model.get_age()
+            first_pred = self._pick_legacy_dense_pred(per_task_preds, input)
+            self.eval_loader.dataset.update_batch_sample_stats(
+                model_age,
+                input.in_id_batch.detach().cpu().numpy(),
+                combined_losses_batch.detach().cpu().numpy(),
+                first_pred.detach().cpu().numpy()
+            )
+
+
+            try:
+                ids_np = input.in_id_batch.detach().cpu().numpy()
+                stats_map = {}
+                for name, lb in per_task_losses.items():
+                    stats_map[f"loss/{name}_eval"] = lb.detach().cpu().numpy()
+                for name, pr in per_task_preds.items():
+                    stats_map[f"pred/{name}_eval"] = pr.detach().cpu().numpy()
+                self.eval_loader.dataset.update_sample_stats_ex_batch(ids_np, stats_map)
+            except Exception:
+                pass
+
+            # preserve original return contract (loss tensor, metrics dict)
+            metric_results = {}
+            with th.no_grad():
+                for t in self.tasks:
+                    if not getattr(t, "metrics", None):
+                        continue
+                    targets = t.get_targets(input)
+                    outs = head_outputs[t.name]
+                    for mname, metric in t.metrics.items():
+                        m = metric.to(self.device) if hasattr(metric, "to") else metric
+                        val = m(outs, targets)
+                        if hasattr(m, "compute"):
+                            val = m.compute().item()
+                            if hasattr(m, "reset"):
+                                m.reset()
+                        elif hasattr(val, "item"):
+                            val = val.item()
+                        metric_results[f"{t.name}/{mname}"] = val
+
+                # also expose per-task mean loss (unweighted) for eval
+                for t in self.tasks:
+                    lb = per_task_losses[t.name]
+                    self.logger.add_scalars(f"eval-loss/{t.name}", {self.name: lb.mean().item()}, global_step=model_age)
+            return test_loss, metric_results
 
         if self.task_type == "segmentation":
             # For segmentation: output (N, C, H, W), label (N, H, W)
