@@ -1,6 +1,13 @@
 from setuptools import setup
 
 
+# Function to read the dependencies from requirements.txt
+def get_requirements():
+    with open('requirements.txt') as f:
+        # Filter out empty lines and comments
+        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+
 setup(
     name='weightslab',
     version='0.0.0',
@@ -19,4 +26,6 @@ setup(
         'Operating System :: POSIX :: Linux',
         'Programming Language :: Python :: 3.11',
     ],
+    python_requires='>=3.11',
+    install_requires=get_requirements(),
 )
