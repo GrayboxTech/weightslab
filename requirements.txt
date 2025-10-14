@@ -1,12 +1,9 @@
-# Specify the extra index URL for PyTorch CUDA wheels
-# This line applies the custom index URL to all subsequent packages 
-# that can be found there.
---extra-index-url https://download.pytorch.org/whl/cu121
-
 # List the packages and their exact versions
 torch==2.1.2
 torchvision==0.16.2
 torchaudio==2.1.2
+torchinfo==1.8.0
+torchmetrics==1.8.2
 tensorboard==2.20
 filelock==3.15.4
 fsspec==2024.6.0
