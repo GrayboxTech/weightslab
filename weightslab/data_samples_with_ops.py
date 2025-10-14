@@ -626,7 +626,9 @@ class DataSampleTrackingWrapper(Dataset):
             for stat_name in SampleStatsEx.ALL():
                 row[stat_name] = self.get(sample_id, stat_name)
             for ex_key in self._ex_columns_cache:
-                row[ex_key] = self.sample_statistics_ex.get(ex_key, {}).get(sample_id)
+                v = self.sample_statistics_ex.get(ex_key, {}).get(sample_id)
+                if v is not None:
+                    row[ex_key] = v 
             rows.append(row)
             denied += int(bool(row.get(SampleStatsEx.DENY_LISTED, False)))
         return rows
@@ -661,6 +663,10 @@ class DataSampleTrackingWrapper(Dataset):
     def __len__(self):
         return len(self.wrapped_dataset) - self.denied_sample_cnt
     
-    def get_prediction_mask(self, sample_id):
+    def get_prediction_mask(self, sample_id, task_name=None):
+        if task_name:
+            key = f"pred/{task_name}"
+            if key in self.sample_statistics_ex:
+                return self.sample_statistics_ex[key].get(sample_id)
         return self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
 

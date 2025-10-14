@@ -132,7 +132,7 @@ class Experiment:
         self.model.register_hook_fn_for_architecture_change(
             lambda model: self._update_optimizer(model))
 
-        if self.criterion.reduction != 'none':
+        if self.criterion.reduction != 'none' and task_type != 'segmentation':
             raise ValueError(
                 f"Criterion reduction must be 'none' in order to access "
                 f"per-sample stats")
