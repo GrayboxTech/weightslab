@@ -1,3 +1,4 @@
+weightslab.egg-info/*
 build/*
 dist/*
 weightslab/__pycache__/*
