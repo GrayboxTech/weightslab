@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import random as rnd
 import math
+import torch as th  
 
 from torch.utils.data import Dataset
 
@@ -31,7 +32,6 @@ def _to_numpy_safe(x):
         except Exception:
             return None
     try:
-        import torch as th  # optional
         if isinstance(x, th.Tensor):
             return x.detach().cpu().numpy()
     except Exception:
@@ -363,11 +363,6 @@ class DataSampleTrackingWrapper(Dataset):
                 self.sample_statistics_ex[key] = {}
             self.sample_statistics_ex[key][sample_id] = stringy
             self._ex_columns_cache.add(key)
-
-        if sample_id not in self.sample_statistics[SampleStatsEx.SAMPLE_ID]:
-            self.set(sample_id, SampleStatsEx.SAMPLE_ID, sample_id)
-        if sample_id not in self.sample_statistics[SampleStatsEx.DENY_LISTED]:
-            self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
 
     def update_sample_stats_ex_batch(
         self,
