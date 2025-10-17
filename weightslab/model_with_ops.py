@@ -3,7 +3,7 @@ import collections
 import enum
 import functools
 
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set, Optional, Tuple
 from torch import nn
 
 import numpy as np
@@ -19,6 +19,7 @@ class DepType(str, enum.Enum):
     """E.g: layer1.insert triggers layer2.insert."""
     SAME = "SAME"
     NONE = "NONE"
+    MPATHS = "MPATHS"  # When both ways must be explored
 
 
 class _ModulesDependencyManager:
@@ -34,6 +35,8 @@ class _ModulesDependencyManager:
         # what kind of dependency is there
         self.dependency_2_id_2_id = collections.defaultdict(
             lambda: collections.defaultdict(lambda: []))
+        #
+        self.reversed_dep_type = {k: False for k in DepType}
 
     def __str__(self):
         return \
@@ -78,6 +81,18 @@ class _ModulesDependencyManager:
         """
         self._register_dependency(id1, id2, DepType.INCOMING)
 
+    def register_mpaths_dependency(self, id1, id2):
+        """Marks the dependency between two modules with id1 and id2 as
+        INCOMING. Useful for when after a Linear there is a Linear so adding
+        neurons in the first layer triggers adding incoming neurons the second
+        layer.
+
+        Args:
+            id1 (int): The id of the module being depended on.
+            id2 (int): The id of the module dependent on first module.
+        """
+        self._register_dependency(id1, id2, DepType.MPATHS)
+
     def get_dependent_ids(self, idd: int, dep_type: DepType):
         """Get the ids of the modules that are dependent on the module with the
         given id.
@@ -89,7 +104,8 @@ class _ModulesDependencyManager:
         Returns:
             List[int]: The ids of the dependent modules.
         """
-        return list(self.dependency_2_id_2_id[dep_type][idd])
+        return list(self.dependency_2_id_2_id[dep_type][idd]) if idd in \
+            self.dependency_2_id_2_id[dep_type] else []
 
     def get_parent_ids(self, child_id: int, dep_type: DepType) -> List[int]:
         parents = []
@@ -105,6 +121,40 @@ class _ModulesDependencyManager:
             List[int]: The ids of the registered modules.
         """
         return list(self.id_2_layer.keys())
+
+    def reverse_dependencies(self, dep_type, reverse_if_id_in=None):
+        """Reverse the dependencies of a specific type of paths,
+        e.g., (DepType.SAME). This will allow recursive paths to
+        update every dependent layers.
+
+        Args:
+            dep_type (DepType): Type of the path to reverse.
+            reverse_if_id_in (None, int): Id where we want to reverse the path,
+            defaults to None.
+        """
+        # Get dependencies for the path type
+        d = self.dependency_2_id_2_id[dep_type]
+
+        # Sanity check if there is anything to reverse and if id is precised,
+        # reverse only if id exists in deps.
+        if not len(d) and (
+            isinstance(reverse_if_id_in, int) and
+            reverse_if_id_in not in self.dependency_2_id_2_id[dep_type]
+        ):
+            print('No dependencies found to reverse')
+            return
+
+        # Generte the reverse path from {0: [1, 2]} to {1: [0], 2: [0], 0: []}
+        reversed_d = {
+            k: [
+                i for i, v in d.items() if str(k) in [str(x) for x in v]
+            ] for k in set(d.keys()).union(*[v for v in d.values()])
+        }
+        if reverse_if_id_in is None:
+            self.dependency_2_id_2_id[dep_type] = reversed_d
+        elif reverse_if_id_in in reversed_d:
+            self.dependency_2_id_2_id[dep_type] = reversed_d
+        self.reversed_dep_type[dep_type] = True
 
 
 def get_children(module: nn.Module):
@@ -126,7 +176,7 @@ class NetworkWithOps(nn.Module):
         self._dep_manager = _ModulesDependencyManager()
         self.linearized_layers = []
 
-    def register_dependencies(self, dendencies_list: List):
+    def register_dependencies(self, dependencies_list: List):
         """Register the dependencies between children modules.
 
         Args:
@@ -138,12 +188,14 @@ class NetworkWithOps(nn.Module):
             self._dep_manager.register_module(
                 child_module.get_module_id(), child_module)
 
-        for module1, module2, value in dendencies_list:
+        for module1, module2, value in dependencies_list:
             id1, id2 = module1.get_module_id(), module2.get_module_id()
             if value == DepType.INCOMING:
                 self._dep_manager.register_incoming_dependency(id1, id2)
             elif value == DepType.SAME:
                 self._dep_manager.register_same_dependency(id1, id2)
+            elif value == DepType.MPATHS:
+                self._dep_manager.register_mpaths_dependency(id1, id2)
 
     @property
     def layers(self):
@@ -253,7 +305,7 @@ class NetworkWithOps(nn.Module):
         linear_neurons = linear_layer.weight.shape[1]
         linear_neurons_per_conv_neuron = linear_neurons // conv_neurons
         return linear_neurons_per_conv_neuron
-    
+
     def _same_ancestors(self, node_id: int) -> Set[int]:
         visited = set()
         frontier = {node_id}
@@ -268,6 +320,7 @@ class NetworkWithOps(nn.Module):
                 return frontier
             frontier = next_frontier
         return {node_id}
+    
     def _mask_and_zerofy_new_neurons(self, producer_id: int, new_start: int, new_count: int):
         if new_count <= 0:
             return
@@ -296,16 +349,18 @@ class NetworkWithOps(nn.Module):
             except Exception:
                 pass
 
-
     def prune(
             self,
             layer_id: int,
-            neuron_indices: Set[int],
+            neuron_indices: Tuple[int, Set[int]],
             through_flatten: bool = False):
 
+        # Sanity check
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.prune] No module with id {layer_id}")
+        if not isinstance(neuron_indices, (set, list)):
+            neuron_indices = set([neuron_indices])  # set the int
 
         module = self._dep_manager.id_2_layer[layer_id]
         through_flatten = False
@@ -342,23 +397,71 @@ class NetworkWithOps(nn.Module):
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
 
+    def is_flatten_layer(self, module):
+        """
+        Flatten dimensions are based on the shape of the layer. What is a flatten layer ? If every layers concerned have weights, and so tensor with shape, they must match (B, C, H, W), or (B, H, W, C). The B is important and here everytime. So we base our analysis on the tensor shape.
+        """
+        if hasattr(module, 'weight'):
+            shape = module.weight.shape[1:]  # Remove the batch shape
+            return len(shape) == 1
+        return False
+
     def add_neurons(self,
                     layer_id: int,
                     neuron_count: int,
                     skip_initialization: bool = False,
-                    through_flatten: bool = False,
-                    _suppress_incoming_ids: Optional[Set[int]] = None):
+                    _suppress_incoming_ids: Optional[Set[int]] = set(),
+                    _suppress_mpaths_ids: Optional[Set[int]] = None):
+        """
+        Basicly this function will be a recursive function operating on the model graph, regarding each path and its label.
+
+        :param layer_id: [description]
+        :type layer_id: int
+        :param neuron_count: [description]
+        :type neuron_count: int
+        :param skip_initialization: [description], defaults to False
+        :type skip_initialization: bool, optional
+        :param _suppress_incoming_ids: [description], defaults to None
+        :type _suppress_incoming_ids: Optional[Set[int]], optional
+        :param _suppress_mpaths_ids: [description], defaults to None
+        :type _suppress_mpaths_ids: Optional[Set[int]], optional
+        :raises ValueError: [description]
+        """
+
+        # Sanity check to see if layer exists
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.add_neurons] No module with id {layer_id}")
 
-        if _suppress_incoming_ids is None:
-            _suppress_incoming_ids = set()
-
+        # Get the current module
         module = self._dep_manager.id_2_layer[layer_id]
-        through_flatten = False
-        if hasattr(self, "flatten_conv_id"):
-            through_flatten = (self.flatten_conv_id == layer_id)
+
+        # If the dependent layer is of type "MPATHS", ...
+        deps_ = self._dep_manager.get_dependent_ids(layer_id, DepType.MPATHS)
+        for ind in range(len(deps_)):
+            mpaths_dep_id = deps_[ind]
+            if _suppress_mpaths_ids is not None and mpaths_dep_id in _suppress_mpaths_ids:
+                continue
+
+            # Reverse SAME paths related to the id to recursively update
+            # neurons.
+            self._dep_manager.reverse_dependencies(
+                'SAME',
+                reverse_if_id_in=mpaths_dep_id
+            )
+
+            # Add Neurons to the layer
+            self.add_neurons(
+                mpaths_dep_id, neuron_count, skip_initialization,
+                _suppress_incoming_ids=_suppress_incoming_ids,
+                _suppress_mpaths_ids={layer_id}
+            )
+
+            # Reverse SAME paths related to the id to original state
+            self._dep_manager.reverse_dependencies(
+                'SAME',
+                reverse_if_id_in=mpaths_dep_id
+            )
 
         # If the dependent layer is of type "SAME", say after a conv we have
         # batch_norm, then we have to update the layer after the batch_norm too
@@ -366,10 +469,9 @@ class NetworkWithOps(nn.Module):
                 layer_id, DepType.SAME):
             self.add_neurons(
                 same_dep_id, neuron_count, skip_initialization,
-                through_flatten=through_flatten,
                 _suppress_incoming_ids=_suppress_incoming_ids)
-        
-        # If the next layer is of type "INCOMING", say after a conv we have 
+
+        # If the next layer is of type "INCOMING", say after a conv we have
         # either a conv or a linear, then we add to incoming neurons.
 
         updated_incoming_children: List[int] = []
@@ -386,6 +488,7 @@ class NetworkWithOps(nn.Module):
             if incoming_id == self.layers[-1].get_module_id():
                 incoming_skip_initialization = False
 
+            through_flatten = self.is_flatten_layer(incoming_module)
             if through_flatten:
                 incoming_neurons_per_outgoing_neuron = \
                     incoming_module.incoming_neuron_count // module.neuron_count
@@ -401,7 +504,7 @@ class NetworkWithOps(nn.Module):
         module.add_neurons(
                 neuron_count, skip_initialization=skip_initialization)
 
-        current_parent_out = module.neuron_count 
+        current_parent_out = module.neuron_count
         for child_id in updated_incoming_children:
             sibling_incoming_parents = self._dep_manager.get_parent_ids(child_id, DepType.INCOMING)
             for sib_parent_id in sibling_incoming_parents:
@@ -421,7 +524,6 @@ class NetworkWithOps(nn.Module):
                         producer_id,
                         delta,
                         skip_initialization=True,
-                        through_flatten=False,
                         _suppress_incoming_ids={child_id}
                     )
                     self._mask_and_zerofy_new_neurons(producer_id, new_start=old_nc, new_count=delta)

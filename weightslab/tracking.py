@@ -166,15 +166,16 @@ class TriggersTracker(Tracker):
     def _load_from_state_dict(
             self, state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs):
-        self.number_of_neurons = \
-            state_dict[prefix + 'number_of_neurons']
-        self.triggrs_by_neuron = \
-            state_dict[prefix + 'triggrs_by_neuron'].to(self.device)
-        self.updates_by_neuron = \
-            state_dict[prefix + 'updates_by_neuron'].to(self.device)
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs)
+        if state_dict:
+            self.number_of_neurons = \
+                state_dict[prefix + 'number_of_neurons']
+            self.triggrs_by_neuron = \
+                state_dict[prefix + 'triggrs_by_neuron'].to(self.device)
+            self.updates_by_neuron = \
+                state_dict[prefix + 'updates_by_neuron'].to(self.device)
+            super()._load_from_state_dict(
+                state_dict, prefix, local_metadata, strict,
+                missing_keys, unexpected_keys, error_msgs)
 
     def to(
             self,

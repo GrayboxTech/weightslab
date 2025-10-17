@@ -284,7 +284,7 @@ class LinearWithNeuronOps(nn.Linear, LayerWiseOperations):
     def _load_from_state_dict(
             self, state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs):
-        tnsr = self._find_value_for_key_pattern('.weight', state_dict)
+        tnsr = self._find_value_for_key_pattern('.weight', state_dict) or self._find_value_for_key_pattern('weight', state_dict)
         if tnsr is not None:
             in_size, out_size = tnsr.shape[1], tnsr.shape[0]
             with th.no_grad():
@@ -615,7 +615,7 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
     def _load_from_state_dict(
             self, state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs):
-        tnsr = self._find_value_for_key_pattern('.weight', state_dict)
+        tnsr = self._find_value_for_key_pattern('.weight', state_dict) or self._find_value_for_key_pattern('weight', state_dict)
         if tnsr is not None:
             in_size, out_size = tnsr.shape[1], tnsr.shape[0]
             with th.no_grad():
@@ -1070,7 +1070,7 @@ class BatchNorm2dWithNeuronOps(nn.BatchNorm2d, LayerWiseOperations):
     def _load_from_state_dict(
             self, state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs):
-        tnsr = self._find_value_for_key_pattern('.weight', state_dict)
+        tnsr = self._find_value_for_key_pattern('.weight', state_dict) or self._find_value_for_key_pattern('weight', state_dict)
         if tnsr is not None:
             out_size = tnsr.shape[0]
             with th.no_grad():
@@ -1106,3 +1106,16 @@ def is_module_with_ops(obj):
     has_ops = issubclass(type(obj), LayerWiseOperations) or \
         issubclass(type(obj), BatchNorm2dWithNeuronOps)
     return has_ops
+
+
+# Mapping of standard PyTorch layer classes to your custom classes
+LAYER_REPLACEMENTS = {
+    nn.Linear: LinearWithNeuronOps,
+    nn.Conv2d: Conv2dWithNeuronOps,
+    nn.BatchNorm2d: BatchNorm2dWithNeuronOps,
+    # Add other layers here as needed, e.g.:
+    # nn.MaxPool2d: MaxPool2dWithNeuronOps,
+    # Note: For simple non-parametric layers like ReLU, Softmax, MaxPool2d,
+    # if no custom functionality is needed, you might leave them as is or map them
+    # to a custom class that just calls the super's forward method.
+}
