@@ -19,7 +19,6 @@ class DepType(str, enum.Enum):
     """E.g: layer1.insert triggers layer2.insert."""
     SAME = "SAME"
     NONE = "NONE"
-    MPATHS = "MPATHS"  # When both ways must be explored
 
 
 class _ModulesDependencyManager:
@@ -80,18 +79,6 @@ class _ModulesDependencyManager:
             id2 (int): The id of the module dependent on first module.
         """
         self._register_dependency(id1, id2, DepType.INCOMING)
-
-    def register_mpaths_dependency(self, id1, id2):
-        """Marks the dependency between two modules with id1 and id2 as
-        INCOMING. Useful for when after a Linear there is a Linear so adding
-        neurons in the first layer triggers adding incoming neurons the second
-        layer.
-
-        Args:
-            id1 (int): The id of the module being depended on.
-            id2 (int): The id of the module dependent on first module.
-        """
-        self._register_dependency(id1, id2, DepType.MPATHS)
 
     def get_dependent_ids(self, idd: int, dep_type: DepType):
         """Get the ids of the modules that are dependent on the module with the
@@ -194,8 +181,6 @@ class NetworkWithOps(nn.Module):
                 self._dep_manager.register_incoming_dependency(id1, id2)
             elif value == DepType.SAME:
                 self._dep_manager.register_same_dependency(id1, id2)
-            elif value == DepType.MPATHS:
-                self._dep_manager.register_mpaths_dependency(id1, id2)
 
     @property
     def layers(self):
@@ -410,8 +395,8 @@ class NetworkWithOps(nn.Module):
                     layer_id: int,
                     neuron_count: int,
                     skip_initialization: bool = False,
-                    _suppress_incoming_ids: Optional[Set[int]] = set(),
-                    _suppress_mpaths_ids: Optional[Set[int]] = None):
+                    _suppress_incoming_ids: Optional[Set[int]] = [],
+                    _suppress_same_ids: Optional[Set[int]] = []):
         """
         Basicly this function will be a recursive function operating on the model graph, regarding each path and its label.
 
@@ -423,8 +408,8 @@ class NetworkWithOps(nn.Module):
         :type skip_initialization: bool, optional
         :param _suppress_incoming_ids: [description], defaults to None
         :type _suppress_incoming_ids: Optional[Set[int]], optional
-        :param _suppress_mpaths_ids: [description], defaults to None
-        :type _suppress_mpaths_ids: Optional[Set[int]], optional
+        :param _suppress_same_ids: [description], defaults to None
+        :type _suppress_same_ids: Optional[Set[int]], optional
         :raises ValueError: [description]
         """
 
@@ -436,44 +421,35 @@ class NetworkWithOps(nn.Module):
         # Get the current module
         module = self._dep_manager.id_2_layer[layer_id]
 
-        # If the dependent layer is of type "MPATHS", ...
-        deps_ = self._dep_manager.get_dependent_ids(layer_id, DepType.MPATHS)
-        for ind in range(len(deps_)):
-            mpaths_dep_id = deps_[ind]
-            if _suppress_mpaths_ids is not None and mpaths_dep_id in _suppress_mpaths_ids:
-                continue
-
-            # Reverse SAME paths related to the id to recursively update
-            # neurons.
-            self._dep_manager.reverse_dependencies(
-                'SAME',
-                reverse_if_id_in=mpaths_dep_id
-            )
-
-            # Add Neurons to the layer
-            self.add_neurons(
-                mpaths_dep_id, neuron_count, skip_initialization,
-                _suppress_incoming_ids=_suppress_incoming_ids,
-                _suppress_mpaths_ids={layer_id}
-            )
-
-            # Reverse SAME paths related to the id to original state
-            self._dep_manager.reverse_dependencies(
-                'SAME',
-                reverse_if_id_in=mpaths_dep_id
-            )
-
+        # ------------------------------------------------------------------- #
+        # ------------------------ SAME ------------------------------------- #
         # If the dependent layer is of type "SAME", say after a conv we have
         # batch_norm, then we have to update the layer after the batch_norm too
-        for same_dep_id in self._dep_manager.get_dependent_ids(
-                layer_id, DepType.SAME):
+        # Go through parents
+        for same_dep_id in self._dep_manager.get_parent_ids(layer_id, DepType.SAME):
+            if _suppress_same_ids is not None and same_dep_id in _suppress_same_ids:
+                continue
             self.add_neurons(
                 same_dep_id, neuron_count, skip_initialization,
-                _suppress_incoming_ids=_suppress_incoming_ids)
+                _suppress_incoming_ids=_suppress_incoming_ids,
+                _suppress_same_ids={layer_id}
+            )
+        # Go through childs
+        for same_dep_id in self._dep_manager.get_dependent_ids(
+                layer_id, DepType.SAME):
+            if _suppress_same_ids is not None and same_dep_id in _suppress_same_ids:
+                continue
+            self.add_neurons(
+                same_dep_id, neuron_count, skip_initialization,
+                _suppress_incoming_ids=_suppress_incoming_ids,
+                _suppress_same_ids={layer_id}
+            )
 
+        # ---------------------------------------------------------------- #
+        # ------------------------ INCOMING ------------------------------ #
         # If the next layer is of type "INCOMING", say after a conv we have
         # either a conv or a linear, then we add to incoming neurons.
-
+        # Go through childs
         updated_incoming_children: List[int] = []
         for incoming_id in self._dep_manager.get_dependent_ids(
                 layer_id, DepType.INCOMING):
