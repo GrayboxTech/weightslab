@@ -19,6 +19,7 @@ class DepType(str, enum.Enum):
     """E.g: layer1.insert triggers layer2.insert."""
     SAME = "SAME"
     NONE = "NONE"
+    REC = "REC"
 
 
 class _ModulesDependencyManager:
@@ -55,6 +56,18 @@ class _ModulesDependencyManager:
             self, id1: int, id2: int,
             dep_type: DepType = DepType.NONE):
         self.dependency_2_id_2_id[dep_type][id1].append(id2)
+
+    def register_rec_dependency(self, id1, id2):
+        """Marks the dependency between two modules with id1 and id2 as REC,
+        in the sense that id1.operation1 triggers id2.operation1. Useful for
+        when after a Linear there is a BatchNorm so adding neurons in the first
+        layer triggers adding neuron the second layer.
+
+        Args:
+            id1 (int): The id of the module being depended on.
+            id2 (int): The id of the module dependent on first module.
+        """
+        self._register_dependency(id1, id2, DepType.REC)
 
     def register_same_dependency(self, id1, id2):
         """Marks the dependency between two modules with id1 and id2 as SAME,
@@ -162,6 +175,7 @@ class NetworkWithOps(nn.Module):
         self._architecture_change_hook_fns = []
         self._dep_manager = _ModulesDependencyManager()
         self.linearized_layers = []
+        self.suppress_rec_ids = {}
 
     def register_dependencies(self, dependencies_list: List):
         """Register the dependencies between children modules.
@@ -181,6 +195,8 @@ class NetworkWithOps(nn.Module):
                 self._dep_manager.register_incoming_dependency(id1, id2)
             elif value == DepType.SAME:
                 self._dep_manager.register_same_dependency(id1, id2)
+            elif value == DepType.REC:
+                self._dep_manager.register_rec_dependency(id1, id2)
 
     @property
     def layers(self):
@@ -305,7 +321,7 @@ class NetworkWithOps(nn.Module):
                 return frontier
             frontier = next_frontier
         return {node_id}
-    
+
     def _mask_and_zerofy_new_neurons(self, producer_id: int, new_start: int, new_count: int):
         if new_count <= 0:
             return
@@ -393,10 +409,12 @@ class NetworkWithOps(nn.Module):
 
     def add_neurons(self,
                     layer_id: int,
+                    starting_layer_id: int,
                     neuron_count: int,
                     skip_initialization: bool = False,
-                    _suppress_incoming_ids: Optional[Set[int]] = [],
-                    _suppress_same_ids: Optional[Set[int]] = []):
+                    _suppress_incoming_ids: Optional[Set[int]] = set(),
+                    _suppress_rec_ids: Optional[Set[int]] = set(),
+                    _suppress_same_ids: Optional[Set[int]] = set()):
         """
         Basicly this function will be a recursive function operating on the model graph, regarding each path and its label.
 
@@ -412,6 +430,8 @@ class NetworkWithOps(nn.Module):
         :type _suppress_same_ids: Optional[Set[int]], optional
         :raises ValueError: [description]
         """
+        if not hasattr(self, 'visited_nodes'):
+            self.visited_nodes = set()
 
         # Sanity check to see if layer exists
         if layer_id not in self._dep_manager.id_2_layer:
@@ -421,28 +441,77 @@ class NetworkWithOps(nn.Module):
         # Get the current module
         module = self._dep_manager.id_2_layer[layer_id]
 
+        # Sanity check to avoid redundancy
+        bypass = hasattr(module, "bypass")
+        if layer_id in self.visited_nodes and not bypass:  # Be sure that nodes are updated only one time by pass
+            return None
+
         # ------------------------------------------------------------------- #
-        # ------------------------ SAME ------------------------------------- #
-        # If the dependent layer is of type "SAME", say after a conv we have
+        # ------------------------- REC ------------------------------------- #
+        # If the dependent layer is of type "REC", say after a conv we have
         # batch_norm, then we have to update the layer after the batch_norm too
         # Go through parents
-        for same_dep_id in self._dep_manager.get_parent_ids(layer_id, DepType.SAME):
-            if _suppress_same_ids is not None and same_dep_id in _suppress_same_ids:
+        if starting_layer_id not in self.suppress_rec_ids:
+            self.suppress_rec_ids[starting_layer_id] = set()
+        for rec_dep_id in self._dep_manager.get_parent_ids(
+                layer_id, DepType.REC):
+            if not _suppress_rec_ids:
+                _suppress_rec_ids = set()
+            if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id or rec_dep_id in self.suppress_rec_ids[starting_layer_id]:
                 continue
+            _suppress_rec_ids.add(layer_id)
             self.add_neurons(
-                same_dep_id, neuron_count, skip_initialization,
+                rec_dep_id, starting_layer_id, neuron_count, skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
-                _suppress_same_ids={layer_id}
+                _suppress_rec_ids=_suppress_rec_ids,
+                _suppress_same_ids=_suppress_same_ids
             )
+            self.suppress_rec_ids[starting_layer_id].add(rec_dep_id) if rec_dep_id not in self.suppress_rec_ids[starting_layer_id] else None
         # Go through childs
+        for rec_dep_id in self._dep_manager.get_dependent_ids(
+                layer_id, DepType.REC):
+            if not _suppress_rec_ids:
+                _suppress_rec_ids = set()
+            if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id or rec_dep_id in self.suppress_rec_ids[starting_layer_id]:
+                continue
+            _suppress_rec_ids.add(layer_id)
+            self.add_neurons(
+                rec_dep_id, starting_layer_id, neuron_count, skip_initialization,
+                _suppress_incoming_ids=_suppress_incoming_ids,
+                _suppress_same_ids=_suppress_same_ids,
+                _suppress_rec_ids=_suppress_rec_ids
+            )
+            self.suppress_rec_ids[starting_layer_id].add(rec_dep_id) if rec_dep_id not in self.suppress_rec_ids[starting_layer_id] else None
+
+        # ------------------------------------------------------------------- #
+        # ------------------------ SAME ------------------------------------- #
+        # If the dependent layer is of type "REC", say after a conv we have
+        # batch_norm, then we have to update the layer after the batch_norm too
+        for same_dep_id in self._dep_manager.get_parent_ids(
+                layer_id, DepType.SAME):
+            if not _suppress_same_ids:
+                _suppress_same_ids = set()
+            if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
+                continue
+            _suppress_same_ids.add(layer_id)
+            self.add_neurons(
+                same_dep_id, starting_layer_id, neuron_count, skip_initialization,
+                _suppress_incoming_ids=_suppress_incoming_ids,
+                _suppress_rec_ids=_suppress_rec_ids,
+                _suppress_same_ids=_suppress_same_ids
+            )
         for same_dep_id in self._dep_manager.get_dependent_ids(
                 layer_id, DepType.SAME):
-            if _suppress_same_ids is not None and same_dep_id in _suppress_same_ids:
+            if not _suppress_same_ids:
+                _suppress_same_ids = set()
+            if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
                 continue
+            _suppress_same_ids.add(layer_id)
             self.add_neurons(
-                same_dep_id, neuron_count, skip_initialization,
+                same_dep_id, starting_layer_id, neuron_count, skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
-                _suppress_same_ids={layer_id}
+                _suppress_rec_ids=_suppress_rec_ids,
+                _suppress_same_ids=_suppress_same_ids
             )
 
         # ---------------------------------------------------------------- #
@@ -453,12 +522,13 @@ class NetworkWithOps(nn.Module):
         updated_incoming_children: List[int] = []
         for incoming_id in self._dep_manager.get_dependent_ids(
                 layer_id, DepType.INCOMING):
-
-            # to avoid double expansion
-            if incoming_id in _suppress_incoming_ids:
-                continue
-
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
+            bypass = hasattr(incoming_module, "bypass")
+            # to avoid double expansion
+            if incoming_id in self.visited_nodes and not bypass:
+                continue
+            if _suppress_incoming_ids and incoming_id in _suppress_incoming_ids:
+                continue
 
             incoming_skip_initialization = False
             if incoming_id == self.layers[-1].get_module_id():
@@ -475,10 +545,12 @@ class NetworkWithOps(nn.Module):
             else:
                 incoming_module.add_incoming_neurons(
                     neuron_count, incoming_skip_initialization)
+            self.visited_nodes.add(incoming_id)
 
             updated_incoming_children.append(incoming_id)
         module.add_neurons(
-                neuron_count, skip_initialization=skip_initialization)
+                neuron_count, skip_initialization=skip_initialization) if layer_id not in self.visited_nodes else None
+        self.visited_nodes.add(layer_id)
 
         current_parent_out = module.neuron_count
         for child_id in updated_incoming_children:
@@ -498,12 +570,15 @@ class NetworkWithOps(nn.Module):
                     old_nc = int(sib_prod_module.neuron_count)
                     self.add_neurons(
                         producer_id,
-                        delta,
+                        starting_layer_id=starting_layer_id,
+                        neuron_count=delta,
                         skip_initialization=True,
                         _suppress_incoming_ids={child_id}
                     )
-                    self._mask_and_zerofy_new_neurons(producer_id, new_start=old_nc, new_count=delta)
-
+                    try:
+                        self._mask_and_zerofy_new_neurons(producer_id, new_start=old_nc, new_count=delta)
+                    except:
+                        pass
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
 

@@ -257,6 +257,7 @@ class LinearWithNeuronOps(nn.Linear, LayerWiseOperations):
             device=device,
             dtype=dtype)
         LayerWiseOperations.__init__(self, out_features, in_features, device)
+        
         self.register_module('train_dataset_tracker', TriggersTracker(
             self.neuron_count, device=self.device))
         self.register_module('eval_dataset_tracker', TriggersTracker(
