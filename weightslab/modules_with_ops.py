@@ -29,8 +29,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             incoming_neuron_count: int,
             device,
             module_name: str = "module") -> None:
-        super().__init__()
-        super().assign_id()
+        super().assign_id()  # assign ids
         self.id = LayerWiseOperations.object_counter
         LayerWiseOperations.object_counter += 1
         self.neuron_count = neuron_count
@@ -849,8 +848,8 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
             if self.bias is not None:
                 self.bias.data = nn.Parameter(th.cat((self.bias.data, biases)))
 
-        self.out_channels += neuron_count
-        self.neuron_count = self.out_channels
+        self.out_channels += neuron_count  # class conv2d this one
+        self.neuron_count = self.out_channels  # class layerwise
 
         for tracker in self.trackers():
             tracker.add_neurons(neuron_count)
@@ -888,7 +887,6 @@ class Conv2dWithNeuronOps(nn.Conv2d, LayerWiseOperations):
             w = self.weight
             for o in to_idx:
                 w[o, from_idx, :, :] = 0.0
-
 
     def register(self, activation_map: th.Tensor):
         tracker = self.get_tracker()
@@ -1104,9 +1102,7 @@ class BatchNorm2dWithNeuronOps(nn.BatchNorm2d, LayerWiseOperations):
 
 
 def is_module_with_ops(obj):
-    has_ops = issubclass(type(obj), LayerWiseOperations) or \
-        issubclass(type(obj), BatchNorm2dWithNeuronOps)
-    return has_ops
+    return "WithNeuronOps" in obj._get_name()
 
 
 # Mapping of standard PyTorch layer classes to your custom classes
@@ -1117,6 +1113,6 @@ LAYER_REPLACEMENTS = {
     # Add other layers here as needed, e.g.:
     # nn.MaxPool2d: MaxPool2dWithNeuronOps,
     # Note: For simple non-parametric layers like ReLU, Softmax, MaxPool2d,
-    # if no custom functionality is needed, you might leave them as is or map them
-    # to a custom class that just calls the super's forward method.
+    # if no custom functionality is needed, you might leave them as is or map
+    # them to a custom class that just calls the super's forward method.
 }

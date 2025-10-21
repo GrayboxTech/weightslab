@@ -40,7 +40,7 @@ class _ModulesDependencyManager:
 
     def __str__(self):
         return \
-            f"ModulesDependencyManager: " + \
+            "ModulesDependencyManager: " + \
             f"{self.id_2_layer} {self.dependency_2_id_2_id}"
 
     def register_module(self, id: int, module: nn.Module):
@@ -262,7 +262,7 @@ class NetworkWithOps(nn.Module):
 
         module = self._dep_manager.id_2_layer[layer_id]
         if neuron_ids is None:
-            neuron_ids = set(range(module.neuron_count))
+            neuron_ids = set(range(module.out_neurons))
 
         for neuron_id in neuron_ids:
             neuron_lr = module.get_per_neuron_learning_rate(neuron_id)
@@ -375,7 +375,7 @@ class NetworkWithOps(nn.Module):
             self.prune(
                 same_dep_id, neuron_indices, through_flatten=through_flatten)
 
-        # If the next layer is of type "INCOMING", say after a conv we have 
+        # If the next layer is of type "INCOMING", say after a conv we have
         # either a conv or a linear, then we add to incoming neurons.
         for incoming_id in self._dep_manager.get_dependent_ids(
                 layer_id, DepType.INCOMING):
@@ -383,7 +383,7 @@ class NetworkWithOps(nn.Module):
 
             if through_flatten:
                 incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.incoming_neuron_count // module.neuron_count
+                    incoming_module.in_neurons // module.out_neurons
                 incoming_prune_indices = []
                 for index in neuron_indices:
                     incoming_prune_indices.extend(list(range(
@@ -537,11 +537,11 @@ class NetworkWithOps(nn.Module):
             through_flatten = self.is_flatten_layer(incoming_module)
             if through_flatten:
                 incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.incoming_neuron_count // module.neuron_count
-                incoming_neuron_count = \
+                    incoming_module.in_neurons // module.out_neurons
+                in_neurons = \
                     neuron_count * incoming_neurons_per_outgoing_neuron
                 incoming_module.add_incoming_neurons(
-                    incoming_neuron_count, incoming_skip_initialization)
+                    in_neurons, incoming_skip_initialization)
             else:
                 incoming_module.add_incoming_neurons(
                     neuron_count, incoming_skip_initialization)
@@ -552,7 +552,7 @@ class NetworkWithOps(nn.Module):
                 neuron_count, skip_initialization=skip_initialization) if layer_id not in self.visited_nodes else None
         self.visited_nodes.add(layer_id)
 
-        current_parent_out = module.neuron_count
+        current_parent_out = module.out_neurons
         for child_id in updated_incoming_children:
             sibling_incoming_parents = self._dep_manager.get_parent_ids(child_id, DepType.INCOMING)
             for sib_parent_id in sibling_incoming_parents:
@@ -563,11 +563,14 @@ class NetworkWithOps(nn.Module):
 
                 for producer_id in producer_ids:
                     sib_prod_module = self._dep_manager.id_2_layer[producer_id]
-                    delta = current_parent_out - sib_prod_module.neuron_count
-                    if delta <= 0:
+                    delta = current_parent_out - sib_prod_module.out_neurons
+
+                    # use bypass to not increase the delta if it is generated from a recursive layers,
+                    # i.e., delta came from cat function.
+                    if bypass or delta <= 0:
                         continue
 
-                    old_nc = int(sib_prod_module.neuron_count)
+                    old_nc = int(sib_prod_module.out_neurons)
                     self.add_neurons(
                         producer_id,
                         starting_layer_id=starting_layer_id,
@@ -616,7 +619,7 @@ class NetworkWithOps(nn.Module):
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
             if through_flatten:
                 incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.incoming_neuron_count // module.neuron_count
+                    incoming_module.in_neurons // module.out_neurons
                 incoming_reorder_indices = []
                 for index in indices:
                     incoming_reorder_indices.extend(
