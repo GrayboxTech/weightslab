@@ -148,7 +148,7 @@ def is_module_learnable(module: Optional[Any]) -> bool:
     """
     Check if the module has learnable parameters.
     """
-    return hasattr(module, 'weight')
+    return hasattr(module, 'weight') and module.weight is not None
 
 
 def is_feature_producer(module: Optional[Any]) -> bool:
@@ -233,7 +233,7 @@ def generate_graph_dependencies(
             # Get current module from node
             current_module = get_module_by_name(model, node.target)
             if node.name in bypass:
-                current_module.bypass = True
+                current_module.bypass = True  # bypass strategy for recursive update dependencies, like bypass = true for __add__ but false for cat
 
             # Find the input source node that came from a tracked module
             source_node = next(

@@ -290,7 +290,7 @@ class SingleBlockResNetTruncated(nn.Module):
     methods.
     """
 
-    def __init__(self, in_channels=3):
+    def __init__(self, in_channels=1):
         super(SingleBlockResNetTruncated, self).__init__()
 
         # Set input shape
@@ -442,7 +442,7 @@ class TinyUNet_Straightforward(nn.Module):
     Architecture:
     Input (H, W) -> Enc1 -> Bottleneck -> Up1 -> Output (H, W)
     """
-    def __init__(self, in_channels=3, out_classes=1):
+    def __init__(self, in_channels=1, out_classes=1):
         super().__init__()
         print('Initializing model named: ', self._get_name())
 
@@ -651,6 +651,137 @@ class FCNResNet50(nn.Module):
         return self.model(input)
 
 
+class FlexibleCNNBlock(nn.Module):
+    """
+    A PyTorch module designed to handle 1D, 2D, or 3D convolutions,
+    normalizations, and pooling layers based on the 'dim' parameter.
+
+    This is useful for creating flexible architectures that work across
+    time series (1D), images (2D), or volumes (3D).
+    """
+
+    # --- Static Mappings for Layer Classes ---
+
+    # Map dimension (int) to the corresponding Convolution class
+    CONV_MAP = {
+        1: nn.Conv1d,
+        2: nn.Conv2d,
+        3: nn.Conv3d
+    }
+
+    # Map dimension (int) to the corresponding Transposed Convolution class
+    CONV_TRANSPOSED_MAP = {
+        1: nn.ConvTranspose1d,
+        2: nn.ConvTranspose2d,
+        3: nn.ConvTranspose3d
+    }
+
+    # Map dimension (int) to the corresponding Batch Normalization class
+    BATCH_NORM_MAP = {
+        1: nn.BatchNorm1d,
+        2: nn.BatchNorm2d,
+        3: nn.BatchNorm3d
+    }
+
+    # Map dimension (int) to the corresponding Instance Normalization class
+    INSTANCE_NORM_MAP = {
+        1: nn.InstanceNorm1d,
+        2: nn.InstanceNorm2d,
+        3: nn.InstanceNorm3d
+    }
+
+    # Map dimension (int) to the corresponding MaxPool class
+    MAX_POOL_MAP = {
+        1: nn.MaxPool1d,
+        2: nn.MaxPool2d,
+        3: nn.MaxPool3d
+    }
+
+    # Map dimension (int) to the corresponding Lazy Convolution class
+    LAZY_CONV_MAP = {
+        1: nn.LazyConv1d,
+        2: nn.LazyConv2d,
+        3: nn.LazyConv3d
+    }
+
+    def __init__(self,
+                 dim: int = 3,
+                 in_channels: int | None = 1,
+                 out_channels: int = 8,
+                 kernel_size: int = 3,
+                 stride: int = 1,
+                 padding: int = 1,
+                 norm_type: str = 'BatchNorm',
+                 is_transposed: bool = False,
+                 use_lazy: bool = False):
+
+        super().__init__()
+        self.input_shape = (1, 1, 16, 16, 16)
+
+        if dim not in [1, 2, 3]:
+            raise ValueError("Dimension (dim) must be 1, 2, or 3.")
+
+        self.dim = dim
+        self.out_channels = out_channels
+        self.norm_type = norm_type
+
+        # --- Helper for dynamic class selection ---
+        def _get_conv_layer(is_transposed, use_lazy, in_channels):
+            """Selects the correct Conv layer class based on parameters."""
+            if use_lazy:
+                # Lazy layers do not require in_channels
+                return self.LAZY_CONV_MAP[self.dim]
+
+            if is_transposed:
+                return self.CONV_TRANSPOSED_MAP[self.dim]
+            else:
+                return self.CONV_MAP[self.dim]
+
+        def _get_norm_layer(norm_type):
+            """Selects the correct Normalization layer class."""
+            norm_type = norm_type.lower()
+            if 'batch' in norm_type:
+                return self.BATCH_NORM_MAP[self.dim]
+            elif 'instance' in norm_type:
+                return self.INSTANCE_NORM_MAP[self.dim]
+            else:
+                raise ValueError(f"Unknown norm_type: {norm_type}")
+
+        # --- Instantiate Layers Dynamically ---
+
+        # 1. Convolution Layer
+        ConvClass = _get_conv_layer(is_transposed, use_lazy, in_channels)
+
+        # If using LazyConv, we only pass out_channels
+        if use_lazy:
+            self.conv = ConvClass(out_channels=out_channels, 
+                                  kernel_size=kernel_size, stride=stride, padding=padding)
+        else:
+            # For standard Conv, we must specify in_channels
+            if in_channels is None:
+                raise ValueError("in_channels must be specified when use_lazy is False.")
+
+            self.conv = ConvClass(in_channels=in_channels, out_channels=out_channels,
+                                  kernel_size=kernel_size, stride=stride, padding=padding)
+
+        # 2. Normalization Layer
+        NormClass = _get_norm_layer(norm_type)
+        self.norm = NormClass(out_channels, affine=True)  # Normalization layers take num_features (which is our out_channels)
+
+        # 3. Activation and Max Pooling
+        self.relu = nn.ReLU(inplace=True)
+        self.pool = self.MAX_POOL_MAP[self.dim](kernel_size=2) # Using a fixed MaxPool of size 2
+
+    def forward(self, x):
+        # Sequential execution
+        x = self.conv(x)
+        x = self.norm(x)
+        x = self.relu(x)
+        x = self.pool(x)
+
+        return x
+
+
 if __name__ == "__main__":
     from weightslab.backend.watcher_editor import WatcherEditor
 
@@ -658,12 +789,12 @@ if __name__ == "__main__":
     setup_logging('INFO')
 
     # Gen. the model
-    dummy_input = th.randn(1, 3, 256, 256)
     model = TinyUNet_Straightforward()
+    dummy_input = th.randn(model.input_shape)
     model(dummy_input)
 
     # Watcher implementation
-    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=True)
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
     print(f'Inference results {model(dummy_input)}')  # infer
     print(model)
 
@@ -686,10 +817,100 @@ if __name__ == "__main__":
                     if n != n_layers + x:  # - -x != + -x
                         continue
             print(f'Add neuron at layer {n}', level='DEBUG')
-            model.add_neurons(n, neuron_count=1)
-            model.visited_nodes = set()  # reinitialisation
+            with model:
+                model.add_neurons(n, neuron_count=1)
         model(dummy_input)
         print('Inference done!\n', level='DEBUG')
 
     model_add_neurons(model, x=2, dummy_input=dummy_input)
     print('#'+'-'*50)
+
+    # -------------------------
+    # Test Flexible CNN Models
+
+    # 1. 2D Example (e.g., Image)
+    print("\n--- Testing 2D Block ---")
+    model = FlexibleCNNBlock(
+        dim=2,  # 2D
+        in_channels=1,
+        out_channels=16,
+        norm_type='BatchNorm',
+        kernel_size=3
+    )
+    dummy_input = th.randn(1, 1, 64, 64)
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    print(f'Inference results {model(dummy_input)}')  # infer
+    model_add_neurons(model, dummy_input=dummy_input)
+    print("\n--- Testing 2D Block with InstanceNorm---")
+    model = FlexibleCNNBlock(
+        dim=2,
+        in_channels=1,
+        out_channels=16,
+        norm_type='InstanceNorm',
+        kernel_size=3
+    )
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    print(f'Inference results {model(dummy_input)}')  # infer
+    model_add_neurons(model, dummy_input=dummy_input)
+
+    # 2. 3D Example (e.g., Volume)
+    print("\n--- Testing 3D Block ---")
+    model = FlexibleCNNBlock(
+        dim=3,
+        in_channels=1,
+        out_channels=8,
+        norm_type='BatchNorm',
+        is_transposed=False  # Using standard Conv3d
+    )
+    dummy_input = th.randn(1, 1, 16, 16, 16)
+    output_3d = model(dummy_input)
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    print(f'Inference results {model(dummy_input)}')  # infer
+    model_add_neurons(model, dummy_input=dummy_input)
+    print("\n--- Testing 3D Block with TransposedConv ---")
+    model = FlexibleCNNBlock(
+        dim=3,
+        in_channels=1,
+        out_channels=8,
+        norm_type='BatchNorm',
+        is_transposed=True  # Using standard Conv3d
+    )
+    dummy_input = th.randn(1, 1, 16, 16, 16)
+    output_3d = model(dummy_input)
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    print(f'Inference results {model(dummy_input)}')  # infer
+    model_add_neurons(model, dummy_input=dummy_input)
+
+    # 3. 1D Example (e.g., Time Series)
+    print("\n--- Testing 1D Block with LazyConv ---")
+    # Using LazyConv, so in_channels is set to None
+    model = FlexibleCNNBlock(
+        dim=1,
+        in_channels=None,
+        out_channels=32,
+        norm_type='BatchNorm',
+        use_lazy=True
+    )
+    # Dummy input: (Batch=4, Channels=12, Length=100)
+    dummy_input = th.randn(4, 12, 100)
+    # The first forward pass automatically infers the in_channels for LazyConv
+    output_1d = model(dummy_input)
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    print(f'Inference results {model(dummy_input)}')  # infer
+    model_add_neurons(model, dummy_input=dummy_input)
+    print("\n--- Testing 1D Block without LazyConv ---")
+    # Using LazyConv, so in_channels is set to None
+    model = FlexibleCNNBlock(
+        dim=1,
+        in_channels=1,
+        out_channels=32,
+        norm_type='BatchNorm',
+        use_lazy=False
+    )
+    # Dummy input: (Batch=4, Channels=12, Length=100)
+    dummy_input = th.randn(4, 1, 100)
+    # The first forward pass automatically infers the in_channels for LazyConv
+    output_1d = model(dummy_input)
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    print(f'Inference results {model(dummy_input)}')  # infer
+    model_add_neurons(model, dummy_input=dummy_input)
