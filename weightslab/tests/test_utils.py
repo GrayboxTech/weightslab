@@ -447,7 +447,7 @@ class TinyUNet_Straightforward(nn.Module):
         print('Initializing model named: ', self._get_name())
 
         # Set input shape
-        self.input_shape = (1, 3, 256, 256)
+        self.input_shape = (1, 1, 256, 256)
 
         # Hyperparamètres (Canaux à chaque étape)
         # c[1]=8 (Encodage/Décodage), c[2]=16 (Bottleneck)
@@ -782,6 +782,98 @@ class FlexibleCNNBlock(nn.Module):
         return x
 
 
+class DCGAN(nn.Module):
+    """
+    A single class encapsulating both the Generator (G) and Discriminator (D)
+    of a Deep Convolutional Generative Adversarial Network (DCGAN).
+
+    The standard forward method is dedicated to the Generator, while the
+    Discriminator's logic is exposed via the 'discriminate' method.
+    """
+    def __init__(self, z_dim=100, img_channels=3,
+                 features_g=64, features_d=64):
+        super(DCGAN, self).__init__()
+
+        self.input_shape = (16, z_dim, 1, 1)
+        self.z_dim = z_dim
+
+        # Initialize Generator and Discriminator as nn.Sequential blocks
+        self.generator = self._init_generator_sequential(z_dim, img_channels, features_g)
+        self.discriminator = self._init_discriminator_sequential(img_channels, features_d)
+
+    def _init_generator_sequential(self, z_dim, img_channels, features_g):
+        """Defines the Generator network using nn.Sequential."""
+        print("Initializing Generator Sequential Block...")
+        return nn.Sequential(
+            # Block 1: Input: N x Z_DIM x 1 x 1 -> N x 512 x 4 x 4
+            nn.ConvTranspose2d(z_dim, features_g * 8, kernel_size=4, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(features_g * 8),
+            nn.ReLU(inplace=True),
+
+            # Block 2: N x 512 x 4 x 4 -> N x 256 x 8 x 8
+            nn.ConvTranspose2d(features_g * 8, features_g * 4, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(features_g * 4),
+            nn.ReLU(inplace=True),
+
+            # Block 3: N x 256 x 8 x 8 -> N x 128 x 16 x 16
+            nn.ConvTranspose2d(features_g * 4, features_g * 2, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(features_g * 2),
+            nn.ReLU(inplace=True),
+
+            # Block 4: N x 128 x 16 x 16 -> N x 64 x 32 x 32
+            nn.ConvTranspose2d(features_g * 2, features_g, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(features_g),
+            nn.ReLU(inplace=True),
+
+            # Final Conv: N x 64 x 32 x 32 -> N x 3 x 64 x 64
+            nn.ConvTranspose2d(features_g, img_channels, kernel_size=4, stride=2, padding=1),
+            nn.Tanh()  # Output range [-1, 1]
+        )
+
+    def _init_discriminator_sequential(self, img_channels, features_d):
+        """Defines the Discriminator network using nn.Sequential."""
+        print("Initializing Discriminator Sequential Block...")
+        return nn.Sequential(
+            # Input: N x C x 64 x 64
+            nn.Conv2d(img_channels, features_d, kernel_size=4, stride=2, padding=1),  # Output: N x 64 x 32 x 32
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Block 2: N x 64 x 32 x 32 -> N x 128 x 16 x 16
+            nn.Conv2d(features_d, features_d * 2, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(features_d * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Block 3: N x 128 x 16 x 16 -> N x 256 x 8 x 8
+            nn.Conv2d(features_d * 2, features_d * 4, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(features_d * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Block 4: N x 256 x 8 x 8 -> N x 512 x 4 x 4
+            nn.Conv2d(features_d * 4, features_d * 8, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(features_d * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # Final Conv: N x 512 x 4 x 4 -> N x 1 x 1 x 1
+            nn.Conv2d(features_d * 8, 1, kernel_size=4, stride=1, padding=0),
+        )
+
+    def forward(self, noise):
+        """
+        Standard forward pass, dedicated to the Generator.
+        Takes noise and returns a fake image.
+        """
+        return self.generator(noise)
+
+    def discriminate(self, image):
+        """
+        Dedicated method to run the Discriminator.
+        Takes an image and returns a single logit (N x 1).
+        """
+        output = self.discriminator(image)
+        # Squeeze the output (N x 1 x 1 x 1) to (N x 1)
+        return output.view(image.size(0), -1)
+
+
 if __name__ == "__main__":
     from weightslab.backend.watcher_editor import WatcherEditor
 
@@ -826,8 +918,25 @@ if __name__ == "__main__":
     print('#'+'-'*50)
 
     # -------------------------
-    # Test Flexible CNN Models
+    # Test GAN Models
+    model = DCGAN()
+    dummy_input = th.randn(model.input_shape)
+    model(dummy_input)
 
+    # Watching
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    fake_images = model(dummy_input)
+    disc_output = model.model.discriminate(fake_images)
+    print(f"2. Discriminator (discriminate) Output Shape: {disc_output.shape}")
+    print(f"   Sample Logits: {disc_output.squeeze()[:4].tolist()}")
+
+    print("\n--- Test Successful: Single-Class Structure Verified ---")
+    model_add_neurons(model, dummy_input=dummy_input)
+
+    # -------------------------
+    # Test Flexible CNN Models
+    # TODO (GP): Add test function to each class; maybe following testunits
+    # TODO (GP): systems.
     # 1. 2D Example (e.g., Image)
     print("\n--- Testing 2D Block ---")
     model = FlexibleCNNBlock(

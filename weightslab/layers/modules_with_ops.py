@@ -300,9 +300,14 @@ class LayerWiseOperations(NeuronWiseOperations):
         # Weights
         # # Handle n-dims kernels like with conv{n}d
         if hasattr(self, "kernel_size") and self.kernel_size:
-            added_weights = th.zeros(
-                (out_neurons, self.in_neurons, *self.kernel_size)
-            ).to(device)
+            if 'transpose' in self.get_name().lower():  # TODO (GP): fix hardcoding
+                added_weights = th.zeros(
+                    (self.in_neurons, out_neurons, *self.kernel_size)
+                ).to(device)
+            else:
+                added_weights = th.zeros(
+                    (out_neurons, self.in_neurons, *self.kernel_size)
+                ).to(device)
 
         # # Handle 1-dims cases like batchnorm without in out mapping
         elif len(self.weight.data.shape) == 1:
@@ -324,14 +329,15 @@ class LayerWiseOperations(NeuronWiseOperations):
 
             # Update
             with th.no_grad():
-                try:
+                if 'transpose' in self.get_name().lower():  # TODO (GP): fix hardcoding
+                    self.weight.data = nn.Parameter(
+                        th.cat((self.weight.data, added_weights), dim=1)
+                    ).to(
+                        device
+                    )
+                else:
                     self.weight.data = nn.Parameter(
                         th.cat((self.weight.data, added_weights))).to(device)
-                except RuntimeError:
-                    # Transposed Convolution
-                    # TODO (GP): Look why tensor dims are reverted ?
-                    self.weight.data = nn.Parameter(
-                        th.cat((self.weight.data, added_weights), dim=1)).to(device)
                 if self.bias is not None:
                     self.bias.data = nn.Parameter(
                         th.cat((self.bias.data, added_bias))).to(device)
@@ -377,9 +383,14 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # Weights
         if hasattr(self, "kernel_size") and self.kernel_size:
-            added_weights = th.zeros(
-                (self.out_neurons, out_neurons, *self.kernel_size)
-            ).to(device)
+            if 'transpose' in self.get_name().lower():  # TODO (GP): fix hardcoding
+                added_weights = th.zeros(
+                    (out_neurons, self.out_neurons, *self.kernel_size)
+                ).to(device)
+            else:
+                added_weights = th.zeros(
+                    (self.out_neurons, out_neurons, *self.kernel_size)
+                ).to(device)
         else:
             added_weights = th.zeros(
                 (self.out_neurons, out_neurons)
@@ -392,9 +403,14 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # Update
         with th.no_grad():
-            self.weight.data = nn.Parameter(
-                th.cat((self.weight.data, added_weights), dim=1)
-            ).to(device)
+            if 'transpose' in self.get_name().lower():  # TODO (GP): fix hardcoding
+                self.weight.data = nn.Parameter(
+                    th.cat((self.weight.data, added_weights), dim=0)
+                ).to(device)
+            else:
+                self.weight.data = nn.Parameter(
+                    th.cat((self.weight.data, added_weights), dim=1)
+                ).to(device)
 
         self.update_attr(self.super_in_name, out_neurons)
         self.in_neurons = getattr(self, self.super_in_name)
