@@ -390,7 +390,8 @@ class NetworkWithOps(nn.Module):
 
             updated_incoming_children.append(incoming_id)
         module.add_neurons(
-                neuron_count, skip_initialization=skip_initialization) if layer_id not in self.visited_nodes else None
+                neuron_count, skip_initialization=skip_initialization) \
+            if layer_id not in self.visited_nodes else None
         self.visited_nodes.add(layer_id)
 
         current_parent_out = module.out_neurons
