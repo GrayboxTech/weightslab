@@ -13,8 +13,8 @@ from os import path
 from weightslab.tracking import TrackingMode
 
 from .test_utils import MNISTModel
-from weightslab.model_with_ops import NetworkWithOps, DepType
-from weightslab.modules_with_ops import (
+from weightslab.models.model_with_ops import NetworkWithOps, DepType
+from weightslab.layers.modules_with_ops import (
     Conv2dWithNeuronOps,
     BatchNorm2dWithNeuronOps,
     LinearWithNeuronOps,

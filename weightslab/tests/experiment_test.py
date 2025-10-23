@@ -10,7 +10,7 @@ from torch import optim
 from torchvision import transforms as T
 from torchvision import datasets as ds
 
-from weightslab.experiment import Experiment
+from weightslab.experiment.experiment import Experiment
 
 from test_utils import MNISTModel
 

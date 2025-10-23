@@ -1,8 +1,9 @@
 # tasks.py
-from typing import Dict, Any, Optional, Callable
 import torch as th
+from typing import Dict, Any, Optional, Callable
 
 TargetFn = Callable[[th.Tensor], th.Tensor]  # input -> targets
+
 
 class Task:
     """

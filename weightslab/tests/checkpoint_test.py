@@ -7,12 +7,12 @@ from torchvision import transforms as T
 from torchvision import datasets as ds
 
 from unittest import mock
-from unittest.mock import ANY
 
 from graybox.checkpoint import CheckpointManager
 from graybox.experiment import Experiment
 
 from .test_utils import MNISTModel
+
 
 class CheckpointManagerTest(unittest.TestCase):
     def setUp(self) -> None:

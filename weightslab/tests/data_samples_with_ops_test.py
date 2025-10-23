@@ -4,8 +4,8 @@ import numpy as np
 from torchvision import datasets as ds
 from torchvision import transforms as T
 
-from weightslab.data_samples_with_ops import DataSampleTrackingWrapper
-from weightslab.data_samples_with_ops import SampleStatsEx
+from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
+from weightslab.data.data_samples_with_ops import SampleStatsEx
 
 
 class DummyDataset:

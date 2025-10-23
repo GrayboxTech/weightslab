@@ -1,8 +1,8 @@
 import torch as th
+import torch.nn.functional as F
+
 from torch import nn
 from copy import deepcopy
-
-import torch.nn.functional as F
 
 
 class Monitor:

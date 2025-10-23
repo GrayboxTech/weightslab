@@ -2,23 +2,22 @@
 It is used to train and evaluate models. """
 
 import torch as th
-import torch.nn.functional as F
-import numpy as np
 
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from pathlib import Path
-import os
-import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
-from weightslab.checkpoint import CheckpointManager
-from weightslab.data_samples_with_ops import DataSampleTrackingWrapper
-from weightslab.tracking import TrackingMode
-from weightslab.tracking import add_tracked_attrs_to_input_tensor
-from weightslab.monitoring import NeuronStatsWithDifferencesMonitor
-
-
 from threading import Lock, RLock
 from enum import Enum, auto
+
+from weightslab.components.checkpoint import CheckpointManager
+from weightslab.data.data_samples_with_ops import \
+    DataSampleTrackingWrapper
+from weightslab.components.tracking import TrackingMode
+from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
+from weightslab.components.monitoring import \
+    NeuronStatsWithDifferencesMonitor
+from weightslab.backend.watcher_editor import WatcherEditor
+
 
 class ArchitectureOpType(Enum):
     ADD_NEURONS = auto()
@@ -37,6 +36,7 @@ class Experiment:
     def __init__(
             self,
             model,
+            input_shape,
             optimizer_class,
             train_dataset,
             eval_dataset,
@@ -45,7 +45,7 @@ class Experiment:
             batch_size: int,
             criterion=None,
             metrics=None,
-            task_type = "classification",
+            task_type="classification",
             training_steps_to_do: int = 256,
             name: str = "baseline",
             root_log_dir: str = "root_experiment",
@@ -59,6 +59,7 @@ class Experiment:
 
         self.name = name
         self.model = model
+        self.input_shape = input_shape
         self.device = device
         self.batch_size = batch_size
         self.criterion = criterion or th.nn.CrossEntropyLoss(reduction='none')
@@ -76,8 +77,7 @@ class Experiment:
         self.last_input = None
         self.is_training = False
         self.training_steps_to_do = training_steps_to_do
-        self.tasks = tasks or [] 
-
+        self.tasks = tasks or []
         self.lock = Lock()
         self.architecture_guard = RLock()
 
@@ -121,7 +121,14 @@ class Experiment:
                 self.get_eval_data_loader())
         self.eval_iterator = iter(self.eval_loader)
 
+        # Model WatcherEditor
+        self.model = WatcherEditor(
+            self.model,
+            dummy_input=th.randn(self.input_shape),
+            device=device
+        )
         self.model.to(self.device)
+
         self.chkpt_manager = CheckpointManager(root_log_dir)
         self.stats_monitor = NeuronStatsWithDifferencesMonitor()
 
@@ -134,8 +141,8 @@ class Experiment:
 
         if self.criterion.reduction != 'none':
             raise ValueError(
-                f"Criterion reduction must be 'none' in order to access "
-                f"per-sample stats")
+                "Criterion reduction must be 'none' in order to access "
+                "per-sample stats")
 
     def __repr__(self):
         with self.lock:
@@ -147,7 +154,7 @@ class Experiment:
             model.parameters(), lr=self.learning_rate)
 
     def register_train_loop_callback(self, callback):
-        """Add callback that will be called every train_loop_clbk_freq steps 
+        """Add callback that will be called every train_loop_clbk_freq steps
         during the training loop
 
         Args:
@@ -381,11 +388,17 @@ class Experiment:
 
             else:
                 if self.task_type == "segmentation":
-                    losses_batch = self.criterion(output, input.label_batch.long())
+                    losses_batch = self.criterion(
+                        output,
+                        input.label_batch.long()
+                    )
                     # Output: (N, C, H, W), argmax over channel dim
                     pred = output.argmax(dim=1)
                 else:
-                    losses_batch = self.criterion(output, input.label_batch)
+                    losses_batch = self.criterion(
+                        output.flatten(),
+                        input.label_batch.flatten().float()
+                    )
                     if output.ndim == 1:
                         pred = (output > 0.0).long()
                     else:
@@ -461,9 +474,12 @@ class Experiment:
         if not getattr(self, "tasks", None):
             for name, metric in self.metrics.items():
                 # torchmetrics.Metric
-                if hasattr(metric, 'to'): 
+                if hasattr(metric, 'to'):
                     metric = metric.to(self.device)
-                    metric_value = metric(output, input.label_batch)
+                    metric_value = metric(
+                        output.flatten(),
+                        input.label_batch.flatten()
+                    )
                     if hasattr(metric, 'compute'):
                         metric_value = metric.compute().item()
                         metric.reset()
@@ -474,7 +490,9 @@ class Experiment:
                         metric_value = metric_value.item()
 
                 self.logger.add_scalars(
-                    f'train-{name}', {self.name: metric_value}, global_step=model_age
+                    f'train-{name}',
+                    {self.name: metric_value},
+                    global_step=model_age
                 )
 
         with self.lock:
@@ -487,7 +505,7 @@ class Experiment:
         Args:
             n (int): The number of steps to be performed.
         """
-        train_range = range(n)
+        train_range = trange(n, desc='Training..', total=len(n))
         try:
             for _ in train_range:
                 self.train_one_step()
@@ -753,11 +771,14 @@ class Experiment:
 
     def apply_architecture_op(self, op_type, **kwargs):
         if op_type == ArchitectureOpType.ADD_NEURONS:
-            with self.architecture_guard:
-                self.model.add_neurons(
+            with self.architecture_guard, self.model as model:
+                model.add_neurons(
                     layer_id=kwargs['layer_id'],
                     neuron_count=kwargs['neuron_count'],
-                    skip_initialization=kwargs.get('skip_initialization', False)
+                    skip_initialization=kwargs.get(
+                        'skip_initialization',
+                        False
+                    )
                 )
         elif op_type == ArchitectureOpType.PRUNE:
             with self.architecture_guard:

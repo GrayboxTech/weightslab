@@ -5,10 +5,11 @@ from collections import defaultdict
 from typing import Set, List
 import torch as th
 
-from .neuron_ops import NeuronWiseOperations
+from weightslab.layers.neuron_ops import NeuronWiseOperations
 
 
 _TRACKING_TENSOR_DISPLAY_LIMIT = 8
+
 
 class TrackingMode(str, enum.Enum):
     """ Tracking mode w.r.t the dataset. """
@@ -214,6 +215,8 @@ class TriggersTracker(Tracker):
             #     f"activation map has shape: {str(tensor.shape)}")
             tensor = tensor.view(-1, self.number_of_neurons)
         try:
+            if tensor.shape == th.Size([]):
+                tensor = tensor[None, None]  # Add one dim
             bs = tensor.shape[0]
             self.triggrs_by_neuron += th.sum(
                 tensor, dim=(0, )).view(-1).long().to(self.device)

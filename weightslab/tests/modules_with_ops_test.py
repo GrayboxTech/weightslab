@@ -8,7 +8,7 @@ from os import path
 from torch.nn import functional as F
 
 from weightslab.tracking import TrackingMode
-from weightslab.modules_with_ops import (
+from weightslab.layers.modules_with_ops import (
     LinearWithNeuronOps,
     Conv2dWithNeuronOps,
     BatchNorm2dWithNeuronOps

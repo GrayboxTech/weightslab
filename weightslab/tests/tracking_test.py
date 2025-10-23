@@ -8,7 +8,7 @@ from os import path
 import torch as th
 
 
-from weightslab.tracking import (
+from weightslab.components.tracking import (
     add_tracked_attrs_to_input_tensor,
     TriggersTracker,
     TriggersTrackerClazzAndSampleID

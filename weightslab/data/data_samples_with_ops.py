@@ -1,10 +1,9 @@
-from enum import Enum
-from typing import Callable, Tuple, Any, Set, Dict, Sequence, Optional
 import numpy as np
 import pandas as pd
 import random as rnd
-import math
 
+from enum import Enum
+from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset
 
 
