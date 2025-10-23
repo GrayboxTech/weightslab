@@ -295,27 +295,28 @@ class LayerWiseOperations(NeuronWiseOperations):
             level='DEBUG'
         )
         device = self.weight.device  # get current device on which operate
-        batchnorm = False
+        norm = False
 
         # Weights
         # # Handle n-dims kernels like with conv{n}d
         if hasattr(self, "kernel_size") and self.kernel_size:
             added_weights = th.zeros(
                 (out_neurons, self.in_neurons, *self.kernel_size)
-            ).to(self.device)
+            ).to(device)
+
         # # Handle 1-dims cases like batchnorm without in out mapping
         elif len(self.weight.data.shape) == 1:
-            batchnorm = True
+            norm = True
             added_weights = th.ones(out_neurons, ).to(device)
 
         # # Handle 1-dims cases like linear, where we have a in out mapping
         # # (similar to conv1d wo. kernel)
         else:
             added_weights = th.zeros(out_neurons, self.in_neurons).to(
-                self.device)
+                device)
         added_bias = th.zeros(out_neurons).to(device)
 
-        if not batchnorm:
+        if not norm:
             # Initialization
             if not skip_initialization:
                 nn.init.xavier_uniform_(added_weights,
@@ -323,8 +324,14 @@ class LayerWiseOperations(NeuronWiseOperations):
 
             # Update
             with th.no_grad():
-                self.weight.data = nn.Parameter(
-                    th.cat((self.weight.data, added_weights))).to(device)
+                try:
+                    self.weight.data = nn.Parameter(
+                        th.cat((self.weight.data, added_weights))).to(device)
+                except RuntimeError:
+                    # Transposed Convolution
+                    # TODO (GP): Look why tensor dims are reverted ?
+                    self.weight.data = nn.Parameter(
+                        th.cat((self.weight.data, added_weights), dim=1)).to(device)
                 if self.bias is not None:
                     self.bias.data = nn.Parameter(
                         th.cat((self.bias.data, added_bias))).to(device)
@@ -339,13 +346,17 @@ class LayerWiseOperations(NeuronWiseOperations):
                         th.cat((self.bias.data, added_bias))
                     )
 
-                self.running_mean = th.cat((
-                    self.running_mean,
-                    th.zeros(out_neurons).to(self.running_mean.device)))
-                self.running_var = th.cat((
-                    self.running_var,
-                    th.ones(out_neurons).to(self.running_var.device))
-                )
+                if hasattr(self, 'running_mean') and \
+                        self.running_mean is not None:
+                    self.running_mean = th.cat((
+                        self.running_mean,
+                        th.zeros(out_neurons).to(device)))
+                if hasattr(self, 'running_var') and \
+                        self.running_var is not None:
+                    self.running_var = th.cat((
+                        self.running_var,
+                        th.ones(out_neurons).to(device))
+                    )
 
         # Update
         self.update_attr(self.super_out_name, out_neurons)
