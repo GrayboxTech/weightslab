@@ -334,7 +334,7 @@ class DataSampleTrackingWrapper(Dataset):
             if _is_dense_array(np_val):
                 if key not in self.dense_stats_store:
                     self.dense_stats_store[key] = {}
-                self.dense_stats_store[key][sample_id] = _downsample_nn(np_val, max_hw=96)
+                self.dense_stats_store[key][sample_id] = _downsample_nn(np_val, max_hw=128)
                 continue
 
             # Scalar-ish
@@ -661,7 +661,7 @@ class DataSampleTrackingWrapper(Dataset):
     def get_prediction_mask(self, sample_id, task_name=None):
         if task_name:
             key = f"pred/{task_name}"
-            if key in self.sample_statistics_ex:
-                return self.sample_statistics_ex[key].get(sample_id)
+            if key in self.dense_stats_store:
+                return self.dense_stats_store[key].get(sample_id)
         return self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
 
