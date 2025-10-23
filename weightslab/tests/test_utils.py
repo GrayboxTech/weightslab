@@ -86,7 +86,8 @@ class FashionCNNSequential(nn.Module):
                 add_tracked_attrs_to_input_tensor(
                     one_hot, in_id_batch=input.in_id_batch,
                     label_batch=input.label_batch)
-            self.classifier[-1].register(one_hot) if hasattr(self.classifier[-1], 'register') else None
+            self.classifier[-1].register(one_hot) \
+                if hasattr(self.classifier[-1], 'register') else None
 
         out = self.out_softmax(x)
 
@@ -754,23 +755,36 @@ class FlexibleCNNBlock(nn.Module):
 
         # If using LazyConv, we only pass out_channels
         if use_lazy:
-            self.conv = ConvClass(out_channels=out_channels, 
-                                  kernel_size=kernel_size, stride=stride, padding=padding)
+            self.conv = ConvClass(
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding
+            )
         else:
             # For standard Conv, we must specify in_channels
             if in_channels is None:
-                raise ValueError("in_channels must be specified when use_lazy is False.")
+                raise ValueError(
+                    "in_channels must be specified when use_lazy is False."
+                )
 
-            self.conv = ConvClass(in_channels=in_channels, out_channels=out_channels,
-                                  kernel_size=kernel_size, stride=stride, padding=padding)
+            self.conv = ConvClass(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding
+            )
 
         # 2. Normalization Layer
         NormClass = _get_norm_layer(norm_type)
-        self.norm = NormClass(out_channels, affine=True)  # Normalization layers take num_features (which is our out_channels)
+        # Normalization layers take num_features (which is our out_channels)
+        self.norm = NormClass(out_channels, affine=True)
 
         # 3. Activation and Max Pooling
         self.relu = nn.ReLU(inplace=True)
-        self.pool = self.MAX_POOL_MAP[self.dim](kernel_size=2) # Using a fixed MaxPool of size 2
+        # Using a fixed MaxPool of size 2
+        self.pool = self.MAX_POOL_MAP[self.dim](kernel_size=2)
 
     def forward(self, x):
         # Sequential execution
@@ -798,35 +812,47 @@ class DCGAN(nn.Module):
         self.z_dim = z_dim
 
         # Initialize Generator and Discriminator as nn.Sequential blocks
-        self.generator = self._init_generator_sequential(z_dim, img_channels, features_g)
-        self.discriminator = self._init_discriminator_sequential(img_channels, features_d)
+        self.generator = self._init_generator_sequential(
+            z_dim,
+            img_channels,
+            features_g
+        )
+        self.discriminator = self._init_discriminator_sequential(
+            img_channels,
+            features_d
+        )
 
     def _init_generator_sequential(self, z_dim, img_channels, features_g):
         """Defines the Generator network using nn.Sequential."""
         print("Initializing Generator Sequential Block...")
         return nn.Sequential(
             # Block 1: Input: N x Z_DIM x 1 x 1 -> N x 512 x 4 x 4
-            nn.ConvTranspose2d(z_dim, features_g * 8, kernel_size=4, stride=1, padding=0, bias=False),
+            nn.ConvTranspose2d(z_dim, features_g * 8, kernel_size=4, stride=1,
+                               padding=0, bias=False),
             nn.BatchNorm2d(features_g * 8),
             nn.ReLU(inplace=True),
 
             # Block 2: N x 512 x 4 x 4 -> N x 256 x 8 x 8
-            nn.ConvTranspose2d(features_g * 8, features_g * 4, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.ConvTranspose2d(features_g * 8, features_g * 4, kernel_size=4,
+                               stride=2, padding=1, bias=False),
             nn.BatchNorm2d(features_g * 4),
             nn.ReLU(inplace=True),
 
             # Block 3: N x 256 x 8 x 8 -> N x 128 x 16 x 16
-            nn.ConvTranspose2d(features_g * 4, features_g * 2, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.ConvTranspose2d(features_g * 4, features_g * 2, kernel_size=4,
+                               stride=2, padding=1, bias=False),
             nn.BatchNorm2d(features_g * 2),
             nn.ReLU(inplace=True),
 
             # Block 4: N x 128 x 16 x 16 -> N x 64 x 32 x 32
-            nn.ConvTranspose2d(features_g * 2, features_g, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.ConvTranspose2d(features_g * 2, features_g, kernel_size=4,
+                               stride=2, padding=1, bias=False),
             nn.BatchNorm2d(features_g),
             nn.ReLU(inplace=True),
 
             # Final Conv: N x 64 x 32 x 32 -> N x 3 x 64 x 64
-            nn.ConvTranspose2d(features_g, img_channels, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(features_g, img_channels, kernel_size=4,
+                               stride=2, padding=1),
             nn.Tanh()  # Output range [-1, 1]
         )
 
@@ -835,21 +861,25 @@ class DCGAN(nn.Module):
         print("Initializing Discriminator Sequential Block...")
         return nn.Sequential(
             # Input: N x C x 64 x 64
-            nn.Conv2d(img_channels, features_d, kernel_size=4, stride=2, padding=1),  # Output: N x 64 x 32 x 32
+            nn.Conv2d(img_channels, features_d, kernel_size=4, stride=2,
+                      padding=1),  # Output: N x 64 x 32 x 32
             nn.LeakyReLU(0.2, inplace=True),
 
             # Block 2: N x 64 x 32 x 32 -> N x 128 x 16 x 16
-            nn.Conv2d(features_d, features_d * 2, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.Conv2d(features_d, features_d * 2, kernel_size=4, stride=2,
+                      padding=1, bias=False),
             nn.BatchNorm2d(features_d * 2),
             nn.LeakyReLU(0.2, inplace=True),
 
             # Block 3: N x 128 x 16 x 16 -> N x 256 x 8 x 8
-            nn.Conv2d(features_d * 2, features_d * 4, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.Conv2d(features_d * 2, features_d * 4, kernel_size=4, stride=2,
+                      padding=1, bias=False),
             nn.BatchNorm2d(features_d * 4),
             nn.LeakyReLU(0.2, inplace=True),
 
             # Block 4: N x 256 x 8 x 8 -> N x 512 x 4 x 4
-            nn.Conv2d(features_d * 4, features_d * 8, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.Conv2d(features_d * 4, features_d * 8, kernel_size=4, stride=2,
+                      padding=1, bias=False),
             nn.BatchNorm2d(features_d * 8),
             nn.LeakyReLU(0.2, inplace=True),
 
@@ -872,6 +902,77 @@ class DCGAN(nn.Module):
         output = self.discriminator(image)
         # Squeeze the output (N x 1 x 1 x 1) to (N x 1)
         return output.view(image.size(0), -1)
+
+
+class SimpleVAE(nn.Module):
+    """
+    A minimal Variational Autoencoder (VAE) using fully-connected layers.
+    Designed for 28x28 grayscale images (784 features).
+    """
+    def __init__(self, image_size=784, h_dim=200, z_dim=20):
+        super(SimpleVAE, self).__init__()
+        self.image_size = image_size
+        self.h_dim = h_dim
+        self.z_dim = z_dim
+        self.input_shape = (8, 1, 28, 28)
+
+        # --- 1. Encoder ---
+        # The Encoder maps the input image to the parameters of the latent
+        # distribution.
+        self.encoder = nn.Sequential(
+            nn.Linear(image_size, h_dim),
+            nn.ReLU(),
+        )
+        # Separate layers to output the mean (mu) and log variance (log_var)
+        self.fc_mu = nn.Linear(h_dim, z_dim)
+        self.fc_log_var = nn.Linear(h_dim, z_dim)
+
+        # --- 2. Decoder ---
+        # The Decoder maps the sampled latent vector (z) back to the image
+        # space.
+        self.decoder = nn.Sequential(
+            nn.Linear(z_dim, h_dim),
+            nn.ReLU(),
+            nn.Linear(h_dim, image_size),
+            nn.Sigmoid()  # Sigmoid to output pixel values in the range [0, 1]
+        )
+
+    def reparameterize(self, mu, log_var):
+        """
+        The Reparameterization Trick: samples z = mu + sigma * epsilon.
+        This allows gradients to flow back through the sampling process.
+        """
+        # Calculate standard deviation (sigma) from log variance
+        std = th.exp(0.5 * log_var)
+
+        # Sample epsilon from standard normal distribution
+        eps = th.randn_like(std)
+
+        # Return the sampled latent vector z
+        return mu + std * eps
+
+    def forward(self, x):
+        """
+        The forward pass performs the encoding, sampling, and decoding steps.
+        """
+        # 1. Flatten the input image (e.g., N x 1 x 28 x 28 -> N x 784)
+        # We use x.view(-1, IMAGE_SIZE) or x.flatten(1) if dimensions are known
+        x = x.view(x.size(0), -1)
+
+        # 2. Encode
+        encoded = self.encoder(x)
+        mu = self.fc_mu(encoded)
+        log_var = self.fc_log_var(encoded)
+
+        # 3. Reparameterize and Sample Latent Vector (z)
+        z = self.reparameterize(mu, log_var)
+
+        # 4. Decode
+        reconstruction = self.decoder(z)
+
+        # Return the reconstruction along with mu and log_var
+        # (needed for the VAE loss)
+        return reconstruction, mu, log_var
 
 
 if __name__ == "__main__":
@@ -914,11 +1015,58 @@ if __name__ == "__main__":
         model(dummy_input)
         print('Inference done!\n', level='DEBUG')
 
-    model_add_neurons(model, x=2, dummy_input=dummy_input)
+    model_add_neurons(model, dummy_input=dummy_input)
     print('#'+'-'*50)
 
     # -------------------------
-    # Test GAN Models
+    # Test VAE Model
+    # Instantiate the VAE model
+    model = SimpleVAE()
+
+    # Create a dummy batch of grayscale images (Batch=16, 1 channel, 28x28)
+    dummy_input = th.randn(model.input_shape)
+
+    print("--- Simple VAE Model Test ---")
+    print(f"Input Image Shape: {dummy_input.shape}")
+    print(f"Latent Space Dimension (Z_DIM): {model.z_dim}")
+
+    # Run the forward pass
+    reconstruction, mu, log_var = model(dummy_input)
+
+    # Display results
+    print(f"\n1. Latent Mean (mu) Shape: {mu.shape}")
+    print(f"2. Latent Log-Variance (log_var) Shape: {log_var.shape}")
+    print(f"3. Reconstruction Output Shape: {reconstruction.shape}")
+    print(f"   Pixel range: \
+          [{reconstruction.min():.2f}, {reconstruction.max():.2f}] \
+            (Expected [0, 1])")
+
+    # Verification of shapes
+    assert reconstruction.shape == (model.input_shape[0], model.image_size), \
+        "Reconstruction shape check failed."
+    assert mu.shape == (model.input_shape[0], model.z_dim), "Latent mean \
+        shape check failed."
+
+    # --- Example of Generating New Data (Inference/Sampling) ---
+    print("\n--- Testing Generation (Sampling) ---")
+
+    # Create random noise in the latent space (B x Z_DIM)
+    num_samples = 5
+    sampled_z = th.randn(num_samples, model.z_dim)
+
+    # Pass sampled Z directly to the decoder portion
+    with th.no_grad():
+        generated_images = model.decoder(sampled_z)
+
+    print(f"Generated Image Shape: {generated_images.shape}")
+
+    print("\n--- Test Successful: VAE Structure Verified ---")
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    model_add_neurons(model, dummy_input=dummy_input)
+    print('#'+'-'*50)
+
+    # -------------------------
+    # Test GAN Model
     model = DCGAN()
     dummy_input = th.randn(model.input_shape)
     model(dummy_input)
