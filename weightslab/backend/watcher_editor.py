@@ -1,6 +1,7 @@
 import torch as th
 
 from torch.fx.passes.shape_prop import ShapeProp
+# from weightslab.utils.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
 
 from weightslab.components.tracking import TrackingMode
@@ -11,7 +12,7 @@ from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.utils.logs import print, setup_logging
 from weightslab.models.monkey_patcher import monkey_patch
 from weightslab.utils.tools import generate_graph_dependencies, \
-    model_add_neurons
+    model_op_neurons
 
 
 class WatcherEditor(NetworkWithOps):
@@ -156,6 +157,24 @@ class WatcherEditor(NetworkWithOps):
                 except Exception:
                     # Fallback if get_module_id fails
                     pass
+            elif isinstance(module, th.nn.modules.container.Sequential):
+                seq_string = "\n"
+                for seq_name, seq_module in module.named_children():
+                    seq_module_repr = repr(seq_module)
+                    if hasattr(seq_module, 'get_module_id'):
+                        try:
+                            seq_module_id = seq_module.get_module_id()
+                            # Inject the ID into the module's representation string
+                            seq_module_repr = f"ID={seq_module_id} | {seq_module_repr}"
+                        except Exception:
+                            # Fallback if get_module_id fails
+                            pass
+                    seq_lines = seq_module_repr.split('\n')
+                    # The first line is formatted with the name, the rest are indented
+                    seq_string += f"  ({seq_name}): {seq_lines[0]}\n"
+                    for seq_line in seq_lines[1:]:
+                        seq_string += f"  {seq_line}\n"
+                module_repr = f"{seq_string}"
             else:
                 module_repr = f"ID=None | {module_repr}"
 
@@ -183,6 +202,7 @@ if __name__ == "__main__":
 
     # 0. Get the model
     model = FashionCNNSequential()
+    print(model)
 
     # 2. Create a dummy input and transform it
     dummy_input = th.randn(model.input_shape)

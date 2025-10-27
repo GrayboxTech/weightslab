@@ -9,7 +9,8 @@ from tqdm import tqdm
 from typing import Type
 
 from weightslab.backend.watcher_editor import WatcherEditor
-from weightslab.utils.tools import model_add_neurons
+from weightslab.utils.tools import model_op_neurons, \
+    get_nb_parameters
 from weightslab.utils.logs import print, setup_logging
 
 
@@ -87,14 +88,17 @@ def test_model_loading_and_inference(ModelClass):
             dummy_input=dummy_input,
             print_graph=False
         )
+        get_nb_parameters(model)
 
         # Run the forward pass
         with torch.no_grad():
             model(dummy_input)
 
-        model_add_neurons(model)
+        print('Performing model parameters operations..', level='DEBUG')
+        model_op_neurons(model, dummy_input=None)
         with torch.no_grad():
             out = model(dummy_input)
+        get_nb_parameters(model)
 
         print('#'+'-'*50+'\n')
         return out
@@ -112,11 +116,12 @@ def test_model_loading_and_inference(ModelClass):
 
 if __name__ == "__main__":
     # Init logs
-    setup_logging('INFO')
+    setup_logging('DEBUG')
 
     err = list()
+    # ALL_MODEL_CLASSES = ALL_MODEL_CLASSES[5:9]
     for model_cl in tqdm(ALL_MODEL_CLASSES, desc="Testing.."):
-        print(f'{model_cl}')
+        print(f'{model_cl}', level='DEBUG')
         out = test_model_loading_and_inference(model_cl)
         if out is None:
             err.append(model_cl)

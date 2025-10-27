@@ -1,7 +1,9 @@
 import types
 import inspect
+import collections
 import torch as th
 import torch.nn as nn
+
 from torch.fx import GraphModule, Node
 from typing import Tuple, Optional, List, Any, Type
 
@@ -208,6 +210,115 @@ def make_safelist(x):
     return [x] if not isinstance(x, list) else x
 
 
+def generate_mappings(src_channels: int, dest_channels: int) -> Tuple[list]:
+    """
+    TODO (GP): Improve this function
+    Generates index mappings between a source and destination layer.
+
+    The mapping format is a list of [from_index, [to_indices_list]].
+    This structure can represent one-to-one, one-to-many, and many-to-one
+    relationships.
+
+    Args:
+        src_channels (int): The number of neurons/channels in the source layer.
+        dest_channels (int): The number of neurons/channels in the destination
+        layer.
+
+    Returns:
+        tuple: A tuple containing (src_to_dst_mapping, dst_to_src_mapping).
+
+    Raises:
+        ValueError: If one channel count is larger than the other but not
+                    perfectly divisible by the smaller one.
+    """
+    src_to_dst_mapping = []
+    dst_to_src_mapping = []
+    src_channels = list(src_channels)
+    dest_channels = list(dest_channels)
+
+    if len(src_channels) == len(dest_channels):
+        # Case 1: 1-to-1 mapping
+        # Each source channel maps to the corresponding destination channel.
+        src_to_dst_mapping = {i: [j] for i, j in zip(src_channels, dest_channels)}
+        dst_to_src_mapping = {i: [j] for i, j in zip(dest_channels, src_channels)}
+
+    elif len(src_channels) > len(dest_channels):
+        # Case 2: Many-to-one (src > dst)
+        # A "batch" of source neurons maps to a single destination neuron.
+        if len(src_channels) % len(dest_channels) != 0:
+            raise ValueError(
+                f"Source channels ({src_channels}) must be perfectly \
+                 divisible by destination channels ({dest_channels}) \
+                 for many-to-one mapping."
+            )
+
+        # 1. Calculate the block size.
+        # This determines how many linear layer neurons map to one convolution channel.
+        # We use integer division to ensure a clean split.
+        # Example: 8192 keys // 32 values = 256 keys per value
+        group_size = len(src_channels) // len(dest_channels)
+
+        # src_to_dst: Many-to-one
+        # [src_idx, [dst_idx]]
+        # e.g., src 0, 1, 2 map to dst 0 (group_size=3)
+        dependency_map = dict([[src_idx, src_idx // group_size]
+                              for src_idx in src_channels])
+        groups = collections.defaultdict(list)
+        for key, value in dependency_map.items():
+            groups[value].append(key)
+        src_to_dst_mapping = {key: groups[dependency_map[key]]
+                              for key in dependency_map}
+
+        # dst_to_src: One-to-many
+        # [dst_idx, [src_idx_list]]
+        # e.g., dst 0 maps to src 0, 1, 2
+        dst_to_src_mapping_ = []
+        for dst_idx in dest_channels:
+            start_src_idx = dst_idx * group_size
+            end_src_idx = (dst_idx + 1) * group_size
+            src_indices = list(range(start_src_idx, end_src_idx))
+            dst_to_src_mapping_.append([dst_idx, src_indices])
+        dst_to_src_mapping = {}
+        # We iterate over the key (index) and value (the range of codes)
+        for index, code_range in dict(dst_to_src_mapping_).items():
+            # Then, we iterate over every single code within that range
+            for code in code_range:
+                # We map the individual code back to the original index
+                dst_to_src_mapping[code] = index
+
+    else:  # src_channels < dest_channels
+        # 1. Calculate the block size.
+        # This determines how many linear layer neurons map to one convolution channel.
+        # We use integer division to ensure a clean split.
+        # Example: 8192 keys // 32 values = 256 keys per value
+        block_size = len(dest_channels) // len(src_channels)
+
+        # 2. Generate the first mapping dictionary (a)
+        # The key is the linear neuron index (0 to 8191)
+        # The value is the convolution channel index (0 to 31)
+        neuron_to_channel_map = {
+            i: i // block_size
+            for i in dest_channels
+        }
+        # 3. Generate the second mapping dictionary (b)
+        # Since you requested it to be equal, we just copy the first one.
+        # Using .copy() creates a new object in memory, which is usually safer
+        # than just assigning a reference (map_conv_to_linear_copy = map_conv_to_linear),
+        # unless you explicitly need them to share the *same* memory ID,
+        # which is rare for simple immutable mappings.
+        channel_to_neuron_map = collections.defaultdict(list)
+
+        for neuron_id, channel_id in neuron_to_channel_map.items():
+            channel_to_neuron_map[channel_id].append(neuron_id)
+
+        dst_to_src_mapping = dict(channel_to_neuron_map)
+        src_to_dst_mapping = {i: [i] for i in range(len(dst_to_src_mapping))}
+        dst_to_src_mapping = {k: u if isinstance(u, list) else [u]
+                              for k, u in dst_to_src_mapping.items()}
+
+    return src_to_dst_mapping, dst_to_src_mapping
+
+
 def generate_graph_dependencies(
         model: nn.Module,
         traced_graph: GraphModule) -> \
@@ -227,13 +338,13 @@ def generate_graph_dependencies(
 
     # Iterate over the nodes in the graph to find sources
     for node in traced_graph.graph.nodes:
-
+        bypassed = False
         current_module = None
         if node.op == 'call_module':
             # Get current module from node
             current_module = get_module_by_name(model, node.target)
             if node.name in bypass:
-                current_module.bypass = True  # bypass strategy for recursive update dependencies, like bypass = true for __add__ but false for cat
+                current_module.bypass = 0  # bypass strategy for recursive update dependencies, like bypass = true for __add__ but false for cat; and cnt for neurons mapping src / dst
 
             # Find the input source node that came from a tracked module
             source_node = next(
@@ -277,7 +388,7 @@ def generate_graph_dependencies(
                                 source_out_channels == dest_out_channels:
                             dep_type = DepType.SAME
 
-                        # 1.2. Append the dependency
+                        # 1.3. Append the dependency
                         # (Structural Source -> Structural Destination)
                         dependencies.append(
                             (
@@ -286,6 +397,25 @@ def generate_graph_dependencies(
                                 dep_type
                             )
                         )
+
+                        # # 1.4. Generate mappings tnsr for src and dst layers
+                        # src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = \
+                        #     generate_mappings(
+                        #         source_out_channels,
+                        #         dest_out_channels
+                        #     )
+                        # source_module.src_to_dst_mapping_tnsrs.update(
+                        #     {
+                        #         current_module.get_name():
+                        #             src_to_dst_mapping_tnsr
+                        #     }
+                        # )
+                        # current_module.dst_to_src_mapping_tnsrs.update(
+                        #     {
+                        #         source_module.get_name():
+                        #             dst_to_src_mapping_tnsr
+                        #     }
+                        # )
 
             # --- 2. Update Tracking Map (Only track Structural Modules
             # or pass through) ---
@@ -310,7 +440,9 @@ def generate_graph_dependencies(
         elif node.op == 'call_function' or node.op == "call_method":
             # add next steps bypass if op. change next input dimension
             # (e.g., cat)
-            bypass.append(str(node.next)) if node.name == 'cat' else None
+            if node.name == 'cat':
+                bypass.append(str(node.next))
+                bypassed = True
 
             # 1. Identify all source modules that feed into this function node
             source_modules_ = []  # Collect modules to check for single input
@@ -341,7 +473,8 @@ def generate_graph_dependencies(
                     for j in range(i + 1, len(distinct_source_modules)):
                         mod_a = distinct_source_modules[i]
                         mod_b = distinct_source_modules[j]
-                        dependencies.append((mod_a, mod_b, DepType.REC))
+                        if not bypassed:
+                            dependencies.append((mod_a, mod_b, DepType.REC))
 
             # 3. Update the module map for the function node's output
             # (i.e., intelligent pass-through)
@@ -356,13 +489,51 @@ def generate_graph_dependencies(
             else:
                 node_to_module[node] = None  # Placeholder or constant input
 
-    # Final cleanup of dependencies to remove duplicates and None entries
-    dependencies = list(
-        set(
-            [d for d in dependencies if d[0] is not None and
-                d[1] is not None]
+    # Generate mapping tensor btw deps
+    for dep in dependencies:
+        src_mod, dst_mod, dep_type = dep[0], dep[1], dep[2]
+        recursive_dep = dep_type == DepType.REC
+        source_out_channels = range(src_mod.out_neurons)
+        dst_in_channels = range(dst_mod.in_neurons if not recursive_dep else dst_mod.out_neurons)
+        if hasattr(dst_mod, 'bypass'):
+            dst_in_channels = range(dst_mod.bypass, len(source_out_channels) + dst_mod.bypass)
+            dst_mod.bypass = len(source_out_channels)
+
+        # 1.4. Generate mappings tnsr for src and dst layers
+        src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = \
+            generate_mappings(
+                source_out_channels,
+                dst_in_channels
+            )
+        if not recursive_dep:
+            dst_mod.dst_to_src_mapping_tnsrs.update(  # should be reverse mapping
+                {
+                    src_mod.get_name_wi_id():
+                        dst_to_src_mapping_tnsr
+                }
+            )
+        else:
+            dst_mod.src_to_dst_mapping_tnsrs.update(
+                {
+                    src_mod.get_name_wi_id():
+                        dst_to_src_mapping_tnsr
+                }
+
+            )
+        src_mod.src_to_dst_mapping_tnsrs.update(
+            {
+                dst_mod.get_name_wi_id():
+                    src_to_dst_mapping_tnsr
+            }
         )
-    )
+        # Add to dst node, the parent indexs maps also
+        dst_mod.parents_src_to_dst_mapping_tnsrs.update(
+            {
+                dst_mod.get_name_wi_id():
+                    src_to_dst_mapping_tnsr
+            }
+        )
+
     return dependencies
 
 
@@ -380,7 +551,7 @@ def get_original_torch_class(
     return replacement_map.get(custom_class)
 
 
-def model_add_neurons(model, x=None):
+def model_op_neurons(model, x=None, dummy_input=None):
     """
         Test function to iteratively update neurons for each layer,
         then test inference. Everything match ?
@@ -394,6 +565,66 @@ def model_add_neurons(model, x=None):
             else:
                 if n != n_layers + x:  # - -x != + -x
                     continue
-        print(f'Adding neuron at layer {n}', level='DEBUG')
-        with model:
-            model.add_neurons(n, neuron_count=1)
+        print(f'Operate on neurons at layer {n}', level='DEBUG')
+        with model as m:
+            print('Adding operation', level='DEBUG')
+            m.operate(n, {-1}, neurons_operation=1)
+            m(dummy_input) if dummy_input is not None else None
+            print('Pruning', level='DEBUG')
+            m.operate(n, {-2}, neurons_operation=2)
+            m(dummy_input) if dummy_input is not None else None
+            print('Freezing operation', level='DEBUG')
+            m.operate(n, {-2}, neurons_operation=3)
+            m(dummy_input) if dummy_input is not None else None
+            print('Reseting operation', level='DEBUG')
+            m.operate(n, {-2}, neurons_operation=4)
+            m(dummy_input) if dummy_input is not None else None
+
+
+def reindex_and_compress_blocks(data_dict, block_size):
+    """
+    Re-indexes the dictionary keys and shifts the neuron value ranges to ensure 
+    they remain contiguous starting from 0, after removing an intermediate block.
+
+    Args:
+        data_dict (dict): The dictionary with non-contiguous keys and value ranges.
+        block_size (int): The fixed size of each neuron block (e.g., 256).
+
+    Returns:
+        dict: The re-indexed dictionary with contiguous keys and compressed values.
+    """
+    # 1. Sort the remaining blocks by their original keys to maintain order
+    # The dictionary keys must be sorted to ensure the blocks are processed sequentially.
+    sorted_blocks = collections.OrderedDict(sorted(data_dict.items()))
+
+    reindexed_dict = {}
+
+    # 2. Iterate through the remaining blocks, assigning a new contiguous index
+    for new_index, (old_key, old_range) in enumerate(sorted_blocks.items()):
+
+        # Calculate the new starting point for the range.
+        # This point ensures the range is contiguous (0 * size, 1 * size, 2 * size, ...)
+        new_start = new_index * block_size
+        new_end = new_start + block_size
+
+        # Create the new contiguous range
+        new_range = range(new_start, new_end)
+
+        # Assign the new key and the compressed value range
+        reindexed_dict[new_index] = new_range
+
+    return reindexed_dict
+
+
+def get_nb_parameters(model: th.nn.Module):
+    # Count only parameters where requires_grad is True
+    params = sum(
+        p.numel() for p in model.parameters()
+    )
+    trainable_params = sum(
+        p.numel() for p in model.parameters() if p.requires_grad
+    )
+
+    # Since all parameters in your model currently have requires_grad=True:
+    # trainable_params will also equal 8,367,235
+    print(f"{params} paraeters with {trainable_params} trainable parameters.", level='DEBUG')

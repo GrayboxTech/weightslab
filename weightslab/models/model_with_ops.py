@@ -1,9 +1,9 @@
-""" Classes related to network architecture operations and internals. """
-from typing import List, Set, Optional, Tuple
-from torch import nn
-
 import numpy as np
 import torch as th
+
+from torch import nn
+from enum import Enum, auto
+from typing import List, Set, Optional
 
 from weightslab.components.tracking import TrackingMode
 from weightslab.utils.tools import get_children
@@ -11,16 +11,27 @@ from weightslab.utils.modules_dependencies import _ModulesDependencyManager, \
     DepType
 
 
+class ArchitectureNeuronsOpType(Enum):
+    """
+        Different types of operation.
+    """
+    ADD = auto()
+    PRUNE = auto()
+    FREEZE = auto()
+    RESET = auto()
+
+
 class NetworkWithOps(nn.Module):
     def __init__(self):
         super(NetworkWithOps, self).__init__()
+
         self.seen_samples = 0
         self.tracking_mode = TrackingMode.DISABLED
         self._architecture_change_hook_fns = []
         self._dep_manager = _ModulesDependencyManager()
         self.linearized_layers = []
         self.suppress_rec_ids = {}
-        self.visited_nodes = set()  # Keep in memory in the backward / forward graph path exploration nodes visited
+        self.visited_nodes = set()  # Memory trace of explored nodes
 
     def register_dependencies(self, dependencies_list: List):
         """Register the dependencies between children modules.
@@ -100,50 +111,36 @@ class NetworkWithOps(nn.Module):
     def get_age(self):
         return self.seen_samples
 
-    def freeze(self, layer_id: int, neuron_ids: Set[int] | None = None):
-        if layer_id not in self._dep_manager.id_2_layer:
-            raise ValueError(
-                f"[NetworkWithOps.freeze] No module with id {layer_id}")
+    # def reinit_neurons(
+    #         self,
+    #         layer_id: int,
+    #         neuron_indices: Set[int],
+    #         perturbation_ratio: float | None = None):
+    #     if layer_id not in self._dep_manager.id_2_layer:
+    #         raise ValueError(
+    #             f"[NetworkWithOps.prune] No module with id {layer_id}")
 
-        module = self._dep_manager.id_2_layer[layer_id]
-        if neuron_ids is None:
-            neuron_ids = set(range(module.out_neurons))
+    #     module = self._dep_manager.id_2_layer[layer_id]
+    #     module.reset(neuron_indices, perturbation_ratio=perturbation_ratio)
 
-        for neuron_id in neuron_ids:
-            neuron_lr = module.get_per_neuron_learning_rate(neuron_id)
-            module.set_per_neuron_learning_rate(
-                neuron_ids={neuron_id}, lr=1.0 - neuron_lr)
+    #     # If the dependent layer is of type "SAME", say after a conv we have
+    #     # batch_norm, then we have to update the layer after the batch_norm too
+    #     for same_dep_id in self._dep_manager.get_dependent_ids(
+    #             layer_id, DepType.SAME):
+    #         self.reinit_neurons(
+    #             same_dep_id, neuron_indices, perturbation_ratio)
 
-    def reinit_neurons(
-            self,
-            layer_id: int,
-            neuron_indices: Set[int],
-            perturbation_ratio: float | None = None):
-        if layer_id not in self._dep_manager.id_2_layer:
-            raise ValueError(
-                f"[NetworkWithOps.prune] No module with id {layer_id}")
+    #     # If the next layer is of type "INCOMING", say after a conv we have
+    #     # either a conv or a linear, then we add to incoming neurons.
+    #     for incoming_id in self._dep_manager.get_dependent_ids(
+    #             layer_id, DepType.INCOMING):
+    #         incoming_module = self._dep_manager.id_2_layer[incoming_id]
+    #         incoming_module.reset_incoming_neurons(
+    #             neuron_indices,
+    #             skip_initialization=True,
+    #             perturbation_ratio=perturbation_ratio)
 
-        module = self._dep_manager.id_2_layer[layer_id]
-        module.reset(neuron_indices, perturbation_ratio=perturbation_ratio)
-
-        # If the dependent layer is of type "SAME", say after a conv we have
-        # batch_norm, then we have to update the layer after the batch_norm too
-        for same_dep_id in self._dep_manager.get_dependent_ids(
-                layer_id, DepType.SAME):
-            self.reinit_neurons(
-                same_dep_id, neuron_indices, perturbation_ratio)
-
-        # If the next layer is of type "INCOMING", say after a conv we have 
-        # either a conv or a linear, then we add to incoming neurons.
-        for incoming_id in self._dep_manager.get_dependent_ids(
-                layer_id, DepType.INCOMING):
-            incoming_module = self._dep_manager.id_2_layer[incoming_id]
-            incoming_module.reset_incoming_neurons(
-                neuron_indices,
-                skip_initialization=True,
-                perturbation_ratio=perturbation_ratio)
-
-        # TODO(rotaru): Deal with through_flatten case.
+    #     # TODO(rotaru): Deal with through_flatten case.
 
     def _conv_neuron_to_linear_neurons_through_flatten(
             self, conv_layer, linear_layer):
@@ -159,7 +156,12 @@ class NetworkWithOps(nn.Module):
             next_frontier = set()
             for nid in frontier:
                 visited.add(nid)
-                same_parents = set(self._dep_manager.get_parent_ids(nid, DepType.SAME))
+                same_parents = set(
+                    self._dep_manager.get_parent_ids(
+                        nid,
+                        DepType.SAME
+                    )
+                )
                 same_parents -= visited
                 next_frontier |= same_parents
             if not next_frontier:
@@ -167,14 +169,22 @@ class NetworkWithOps(nn.Module):
             frontier = next_frontier
         return {node_id}
 
-    def _mask_and_zerofy_new_neurons(self, producer_id: int, new_start: int, new_count: int):
+    def _mask_and_zerofy_new_neurons(
+            self,
+            producer_id: int,
+            new_start: int,
+            new_count: int
+    ):
         if new_count <= 0:
             return
 
         new_ids = set(range(new_start, new_start + new_count))
 
         self.freeze(producer_id, neuron_ids=new_ids)
-        incoming_children = self._dep_manager.get_dependent_ids(producer_id, DepType.INCOMING)
+        incoming_children = self._dep_manager.get_dependent_ids(
+            producer_id,
+            DepType.INCOMING
+        )
         for child_id in incoming_children:
             child = self._dep_manager.id_2_layer[child_id]
             out_max = getattr(child, "neuron_count", None)
@@ -183,88 +193,45 @@ class NetworkWithOps(nn.Module):
             all_out = set(range(int(out_max)))
             if hasattr(child, "zerofy_connections_from"):
                 try:
-                    child.zerofy_connections_from(from_neuron_ids=new_ids, to_neuron_ids=all_out)
+                    child.zerofy_connections_from(
+                        from_neuron_ids=new_ids,
+                        to_neuron_ids=all_out
+                    )
                 except Exception:
                     pass
 
-        same_children = self._dep_manager.get_dependent_ids(producer_id, DepType.SAME)
+        same_children = self._dep_manager.get_dependent_ids(
+            producer_id,
+            DepType.SAME
+        )
         for same_id in same_children:
             try:
                 self.freeze(same_id, neuron_ids=new_ids)
             except Exception:
                 pass
 
-    def prune(
-            self,
-            layer_id: int,
-            neuron_indices: Tuple[int, Set[int]],
-            through_flatten: bool = False):
-
-        # Sanity check
-        if layer_id not in self._dep_manager.id_2_layer:
-            raise ValueError(
-                f"[NetworkWithOps.prune] No module with id {layer_id}")
-        if not isinstance(neuron_indices, (set, list)):
-            neuron_indices = set([neuron_indices])  # set the int
-
-        module = self._dep_manager.id_2_layer[layer_id]
-        through_flatten = False
-        if hasattr(self, "flatten_conv_id"):
-            through_flatten = (self.flatten_conv_id == layer_id)
-
-        # If the dependent layer is of type "SAME", say after a conv we have
-        # batch_norm, then we have to update the layer after the batch_norm too
-        for same_dep_id in self._dep_manager.get_dependent_ids(
-                layer_id, DepType.SAME):
-            self.prune(
-                same_dep_id, neuron_indices, through_flatten=through_flatten)
-
-        # If the next layer is of type "INCOMING", say after a conv we have
-        # either a conv or a linear, then we add to incoming neurons.
-        for incoming_id in self._dep_manager.get_dependent_ids(
-                layer_id, DepType.INCOMING):
-            incoming_module = self._dep_manager.id_2_layer[incoming_id]
-
-            if through_flatten:
-                incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.in_neurons // module.out_neurons
-                incoming_prune_indices = []
-                for index in neuron_indices:
-                    incoming_prune_indices.extend(list(range(
-                        incoming_neurons_per_outgoing_neuron * index,
-                        incoming_neurons_per_outgoing_neuron * (index + 1))))
-                incoming_module.prune_incoming_neurons(incoming_prune_indices)
-            else:
-                incoming_module.prune_incoming_neurons(neuron_indices)
-
-        module.prune(neuron_indices)
-
-        for hook_fn in self._architecture_change_hook_fns:
-            hook_fn(self)
-
-    def is_flatten_layer(self, module):
+    def operate(
+        self,
+        layer_id: int,
+        index_neurons: Set[int] | int = {},
+        skip_initialization: bool = False,
+        neurons_operation: Enum = ArchitectureNeuronsOpType.ADD,
+        current_child_name: str = None,
+        current_parent_name: str = None,
+        _suppress_incoming_ids: Optional[Set[int]] = set(),
+        _suppress_rec_ids: Optional[Set[int]] = set(),
+        _suppress_same_ids: Optional[Set[int]] = set(),
+        **kwargs
+    ):
         """
-        Flatten dimensions are based on the shape of the layer. What is a flatten layer ? If every layers concerned have weights, and so tensor with shape, they must match (B, C, H, W), or (B, H, W, C). The B is important and here everytime. So we base our analysis on the tensor shape.
-        """
-        if hasattr(module, 'weight'):
-            shape = module.weight.shape[1:]  # Remove the batch shape
-            return len(shape) == 1
-        return False
-
-    def add_neurons(self,
-                    layer_id: int,
-                    neuron_count: int,
-                    skip_initialization: bool = False,
-                    _suppress_incoming_ids: Optional[Set[int]] = set(),
-                    _suppress_rec_ids: Optional[Set[int]] = set(),
-                    _suppress_same_ids: Optional[Set[int]] = set()):
-        """
-        Basicly this function will be a recursive function operating on the model graph, regarding each path and its label.
+        Basicly this function will be a recursive function operating on the
+        model graph, regarding each path and its label.
 
         :param layer_id: [description]
         :type layer_id: int
-        :param neuron_count: [description]
-        :type neuron_count: int
+        :param index_neurons: [description]
+        :type index_neurons: int
+        :type neuron_operation: Operation TAG
         :param skip_initialization: [description], defaults to False
         :type skip_initialization: bool, optional
         :param _suppress_incoming_ids: [description], defaults to None
@@ -278,13 +245,18 @@ class NetworkWithOps(nn.Module):
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.add_neurons] No module with id {layer_id}")
+        if not isinstance(index_neurons, (set, dict)):
+            index_neurons = {index_neurons}
 
         # Get the current module
         module = self._dep_manager.id_2_layer[layer_id]
+        current_parent_out = module.out_neurons
+        current_parent_name = module.get_name_wi_id()
 
         # Sanity check to avoid redundancy
+        # To be sure that nodes are updated only one time by pass
         bypass = hasattr(module, "bypass")
-        if layer_id in self.visited_nodes and not bypass:  # Be sure that nodes are updated only one time by pass
+        if layer_id in self.visited_nodes and not bypass:
             return None
 
         # ------------------------------------------------------------------- #
@@ -299,12 +271,16 @@ class NetworkWithOps(nn.Module):
             if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
-            self.add_neurons(
+            self.operate(
                 rec_dep_id,
-                neuron_count, skip_initialization,
+                index_neurons,
+                skip_initialization,
+                current_child_name=current_parent_name,
+                neurons_operation=neurons_operation,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
-                _suppress_same_ids=_suppress_same_ids
+                _suppress_same_ids=_suppress_same_ids,
+                **kwargs
             )
         # Go through childs
         for rec_dep_id in self._dep_manager.get_dependent_ids(
@@ -314,12 +290,16 @@ class NetworkWithOps(nn.Module):
             if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
-            self.add_neurons(
+            self.operate(
                 rec_dep_id,
-                neuron_count, skip_initialization,
+                index_neurons,
+                skip_initialization,
+                current_child_name=current_parent_name,
+                neurons_operation=neurons_operation,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_same_ids=_suppress_same_ids,
-                _suppress_rec_ids=_suppress_rec_ids
+                _suppress_rec_ids=_suppress_rec_ids,
+                **kwargs
             )
 
         # ------------------------------------------------------------------- #
@@ -333,12 +313,16 @@ class NetworkWithOps(nn.Module):
             if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
-            self.add_neurons(
+            self.operate(
                 same_dep_id,
-                neuron_count, skip_initialization,
+                index_neurons,
+                skip_initialization,
+                current_child_name=current_parent_name,
+                neurons_operation=neurons_operation,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
-                _suppress_same_ids=_suppress_same_ids
+                _suppress_same_ids=_suppress_same_ids,
+                **kwargs
             )
         for same_dep_id in self._dep_manager.get_dependent_ids(
                 layer_id, DepType.SAME):
@@ -347,12 +331,16 @@ class NetworkWithOps(nn.Module):
             if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
-            self.add_neurons(
+            self.operate(
                 same_dep_id,
-                neuron_count, skip_initialization,
+                index_neurons,
+                skip_initialization,
+                current_child_name=current_parent_name,
+                neurons_operation=neurons_operation,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
-                _suppress_same_ids=_suppress_same_ids
+                _suppress_same_ids=_suppress_same_ids,
+                **kwargs
             )
 
         # ---------------------------------------------------------------- #
@@ -360,143 +348,94 @@ class NetworkWithOps(nn.Module):
         # If the next layer is of type "INCOMING", say after a conv we have
         # either a conv or a linear, then we add to incoming neurons.
         # Go through childs
+        incoming_module = None
         updated_incoming_children: List[int] = []
         for incoming_id in self._dep_manager.get_dependent_ids(
                 layer_id, DepType.INCOMING):
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
             bypass = hasattr(incoming_module, "bypass")
+
             # to avoid double expansion
             if incoming_id in self.visited_nodes and not bypass:
                 continue
-            if _suppress_incoming_ids and incoming_id in _suppress_incoming_ids:
+            if _suppress_incoming_ids and incoming_id \
+                    in _suppress_incoming_ids:
                 continue
 
             incoming_skip_initialization = False
             if incoming_id == self.layers[-1].get_module_id():
                 incoming_skip_initialization = False
 
-            through_flatten = self.is_flatten_layer(incoming_module)
-            if through_flatten:
-                incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.in_neurons // module.out_neurons
-                in_neurons = \
-                    neuron_count * incoming_neurons_per_outgoing_neuron
-                incoming_module.add_incoming_neurons(
-                    in_neurons, incoming_skip_initialization)
-            else:
-                incoming_module.add_incoming_neurons(
-                    neuron_count, incoming_skip_initialization)
-            self.visited_nodes.add(incoming_id)
+            # # Operate on module incoming neurons
+            incoming_module.operate(
+                index_neurons=index_neurons,
+                incoming_neurons=True,
+                neurons_operation=neurons_operation,
+                skip_initialization=incoming_skip_initialization,
+                current_parent_name=module.get_name_wi_id(),
+                **kwargs
+            )
+            self.visited_nodes.add(incoming_id) if not bypass else None  # Keep visited node in mem.
 
+            # Save incoming children from layer_id
             updated_incoming_children.append(incoming_id)
-        module.add_neurons(
-                neuron_count, skip_initialization=skip_initialization) \
-            if layer_id not in self.visited_nodes else None
-        self.visited_nodes.add(layer_id)
 
-        current_parent_out = module.out_neurons
+        # Operate in module out neurons
+        module.operate(
+                index_neurons,
+                neurons_operation=neurons_operation,
+                skip_initialization=skip_initialization,
+                current_child_name=incoming_module.get_name_wi_id()
+                if incoming_module is not None else None,
+                **kwargs
+        ) if layer_id not in self.visited_nodes else None
+        self.visited_nodes.add(layer_id)  # Update visited node
+
+        # Iterate over incoming childs
         for child_id in updated_incoming_children:
-            sibling_incoming_parents = self._dep_manager.get_parent_ids(child_id, DepType.INCOMING)
-            for sib_parent_id in sibling_incoming_parents:
+            # Iterate over my siblings, generated from my parents
+            for sib_parent_id in self._dep_manager.get_parent_ids(
+                child_id,
+                DepType.INCOMING
+            ):
                 if sib_parent_id == layer_id:
                     continue
-                # to get the producer id
-                producer_ids = self._same_ancestors(sib_parent_id)  # e.g., {conv1} instead of {bn1}
 
-                for producer_id in producer_ids:
+                # Get the producer id - e.g., conv1 from batchnorm1
+                for producer_id in self._same_ancestors(sib_parent_id):
                     sib_prod_module = self._dep_manager.id_2_layer[producer_id]
                     delta = current_parent_out - sib_prod_module.out_neurons
 
-                    # use bypass to not increase the delta if it is generated from a recursive layers,
+                    # use bypass to not increase the delta if it is generated
+                    # from a recursive layers,
                     # i.e., delta came from cat function.
+                    # Not bypass for e.g. __add__ operation
                     if bypass or delta <= 0:
                         continue
 
                     old_nc = int(sib_prod_module.out_neurons)
-                    self.add_neurons(
+                    self.operate(
                         producer_id,
-                        neuron_count=delta,
+                        index_neurons=delta,
                         skip_initialization=True,
-                        _suppress_incoming_ids={child_id}
+                        current_child_name=sib_prod_module.get_name_wi_id(),
+                        neurons_operation=neurons_operation,
+                        _suppress_incoming_ids={child_id},
+                        **kwargs
                     )
                     try:
-                        self._mask_and_zerofy_new_neurons(producer_id, new_start=old_nc, new_count=delta)
-                    except:
+                        self._mask_and_zerofy_new_neurons(
+                            producer_id,
+                            new_start=old_nc,
+                            new_count=delta
+                        )
+                    except Exception:
+                        # TODO (GP): Check why sometime it raises errors
                         pass
+
+        # Hooking
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
-
-    def reorder(self,
-                layer_id: int,
-                indices: List[int],
-                through_flatten: bool = False):
-
-        if layer_id not in self._dep_manager.id_2_layer:
-            id_and_type = []
-            for id in self._dep_manager.id_2_layer:
-                id_and_type.append(
-                    (id, type(self._dep_manager.id_2_layer[id])))
-            raise ValueError(
-                f"[NetworkWithOps.reorder] No module with id {layer_id}"
-                f" in {str(id_and_type)}")
-
-        module = self._dep_manager.id_2_layer[layer_id]
-        module.reorder(indices)
-
-        through_flatten = False
-        if hasattr(self, "flatten_conv_id"):
-            through_flatten = (self.flatten_conv_id == layer_id)
-
-        # If the dependent layer is of type "SAME", say after a conv we have
-        # batch_norm, then we have to update the layer after the batch_norm too
-        for same_dep_id in self._dep_manager.get_dependent_ids(
-                layer_id, DepType.SAME):
-            self.reorder(same_dep_id, indices, through_flatten=through_flatten)
-
-        # If the next layer is of type "INCOMING", say after a conv we have 
-        # either a conv or a linear, then we add to incoming neurons.
-        for incoming_id in self._dep_manager.get_dependent_ids(
-                layer_id, DepType.INCOMING):
-            incoming_module = self._dep_manager.id_2_layer[incoming_id]
-            if through_flatten:
-                incoming_neurons_per_outgoing_neuron = \
-                    incoming_module.in_neurons // module.out_neurons
-                incoming_reorder_indices = []
-                for index in indices:
-                    incoming_reorder_indices.extend(
-                        list(range(incoming_neurons_per_outgoing_neuron * index,
-                                   incoming_neurons_per_outgoing_neuron * (index + 1))))
-                incoming_module.reorder_incoming_neurons(incoming_reorder_indices)
-            else:
-                incoming_module.reorder_incoming_neurons(indices)
-
-        # TODO(rotaru): Deal with through_flatten case.
-
-    def reorder_neurons_by_trigger_rate(self, layer_id: int):
-        if layer_id not in self._dep_manager.id_2_layer:
-            id_and_type = []
-            for id in self._dep_manager.id_2_layer:
-                id_and_type.append(
-                    (id, type(self._dep_manager.id_2_layer[id])))
-            raise ValueError(
-                f"[NetworkWithOps.reorder_by] No module with id {layer_id}"
-                f" in {str(id_and_type)}")
-
-        module = self._dep_manager.id_2_layer[layer_id]
-        if not hasattr(module, 'train_dataset_tracker'):
-            raise ValueError(
-                f"[NetworkWithOps.reorder_by] Module with id {layer_id} "
-                f"has not trackers")
-        tracker = module.train_dataset_tracker
-
-        ids_and_rates = []
-        for neuron_id in range(tracker.number_of_neurons):
-            frq_curr = tracker.get_neuron_stats(neuron_id)
-            ids_and_rates.append((neuron_id, frq_curr))
-        ids_and_rates.sort(key=lambda x: x[1], reverse=True)
-        indices = [idx_and_frq[0] for idx_and_frq in ids_and_rates]
-
-        self.reorder(layer_id=layer_id, indices=indices)
 
     def model_summary_str(self):
         repr = "Model|"

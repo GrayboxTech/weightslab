@@ -16,6 +16,10 @@ class NeuronWiseOperations:
         self.module_id = NeuronWiseOperations.MODULE_ID
         NeuronWiseOperations.MODULE_ID += 1
 
+    def get_name_wi_id(self):
+        """Return the unique module name"""
+        return self.get_name() + "_" + str(self.get_module_id())
+
     def get_module_id(self):
         """Return the id of the instance."""
         return self.module_id

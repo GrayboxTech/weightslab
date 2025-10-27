@@ -7,7 +7,7 @@ from weightslab.layers.modules_with_ops import \
 from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import \
     check_learnable_module, extract_in_out_params, \
-    get_module_device, rename_with_ops, model_add_neurons
+    get_module_device, rename_with_ops, model_op_neurons
 
 
 def monkey_patch(module: nn.Module):
@@ -80,9 +80,9 @@ if __name__ == "__main__":
 
     # 1. Instantiate the standard model
     model = FashionCNNSequential()
-    model.apply(monkey_patch)  # Apply recursively fn to all nn.modules
-    model(dummy_input)  # working
+    model(dummy_input)  # test inference
     model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    model(dummy_input)  # test inference
     print("--- Model Instantiated (Pre-Patching) ---")
 
     print("\n--- Running Patched Forward Pass ---")

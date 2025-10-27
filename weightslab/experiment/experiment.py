@@ -7,7 +7,6 @@ from tqdm import tqdm, trange
 from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 from threading import Lock, RLock
-from enum import Enum, auto
 
 from weightslab.components.checkpoint import CheckpointManager
 from weightslab.data.data_samples_with_ops import \
@@ -17,13 +16,7 @@ from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
 from weightslab.components.monitoring import \
     NeuronStatsWithDifferencesMonitor
 from weightslab.backend.watcher_editor import WatcherEditor
-
-
-class ArchitectureOpType(Enum):
-    ADD_NEURONS = auto()
-    PRUNE = auto()
-    REINITIALIZE = auto()
-    FREEZE = auto()
+from weightslab.models.model_with_ops import ArchitectureNeuronsOpType
 
 
 class Experiment:
@@ -770,7 +763,7 @@ class Experiment:
             self.name = name
 
     def apply_architecture_op(self, op_type, **kwargs):
-        if op_type == ArchitectureOpType.ADD_NEURONS:
+        if op_type == ArchitectureNeuronsOpType.ADD:
             with self.architecture_guard, self.model as model:
                 model.add_neurons(
                     layer_id=kwargs['layer_id'],
@@ -780,19 +773,19 @@ class Experiment:
                         False
                     )
                 )
-        elif op_type == ArchitectureOpType.PRUNE:
+        elif op_type == ArchitectureNeuronsOpType.PRUNE:
             with self.architecture_guard:
                 self.model.prune(
                     layer_id=kwargs['layer_id'],
                     neuron_indices=kwargs['neuron_indices']
                 )
-        elif op_type == ArchitectureOpType.REINITIALIZE:
+        elif op_type == ArchitectureNeuronsOpType.RESET:
             with self.architecture_guard:
                 self.model.reinit_neurons(
                     layer_id=kwargs['layer_id'],
                     neuron_indices=kwargs['neuron_indices']
                 )
-        elif op_type == ArchitectureOpType.FREEZE:
+        elif op_type == ArchitectureNeuronsOpType.FREEZE:
             with self.architecture_guard:
                 self.model.freeze(
                     layer_id=kwargs['layer_id'],
