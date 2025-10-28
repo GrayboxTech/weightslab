@@ -10,7 +10,6 @@ from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
 class FashionCNN(nn.Module):
     def __init__(self):
         super().__init__()
-        print(f'Initializing model named: ', self._get_name())
 
         # Set input shape
         self.input_shape = (1, 1, 28, 28)
@@ -445,7 +444,6 @@ class TinyUNet_Straightforward(nn.Module):
     """
     def __init__(self, in_channels=1, out_classes=1):
         super().__init__()
-        print('Initializing model named: ', self._get_name())
 
         # Set input shape
         self.input_shape = (1, 1, 256, 256)
@@ -837,7 +835,6 @@ class DCGAN(nn.Module):
 
     def _init_generator_sequential(self, z_dim, img_channels, features_g):
         """Defines the Generator network using nn.Sequential."""
-        print("Initializing Generator Sequential Block...")
         return nn.Sequential(
             # Block 1: Input: N x Z_DIM x 1 x 1 -> N x 512 x 4 x 4
             nn.ConvTranspose2d(z_dim, features_g * 8, kernel_size=4, stride=1,
@@ -871,7 +868,6 @@ class DCGAN(nn.Module):
 
     def _init_discriminator_sequential(self, img_channels, features_d):
         """Defines the Discriminator network using nn.Sequential."""
-        print("Initializing Discriminator Sequential Block...")
         return nn.Sequential(
             # Input: N x C x 64 x 64
             nn.Conv2d(img_channels, features_d, kernel_size=4, stride=2,
@@ -986,205 +982,3 @@ class SimpleVAE(nn.Module):
         # Return the reconstruction along with mu and log_var
         # (needed for the VAE loss)
         return reconstruction, mu, log_var
-
-
-if __name__ == "__main__":
-    from weightslab.backend.watcher_editor import WatcherEditor
-
-    # Init logs
-    setup_logging('DEBUG')
-
-    # # Gen. the model
-    # model = TinyUNet_Straightforward()
-    # dummy_input = th.randn(model.input_shape)
-    # model(dummy_input)
-
-    # # Watcher implementation
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # print(f'Inference results {model(dummy_input)}')  # infer
-    # print(model)
-
-    # # Model Operations
-    # # # Test: add neurons
-    # print("--- Test: Add Neurons ---")
-
-    def model_operate_neurons(model, x=None, dummy_input=None, op=0):
-        """
-            Test function to iteratively update neurons for each layer,
-            then test inference.
-        """
-        n_layers = len(model.layers)
-        for n in range(n_layers-1, -1, -1):
-            if x is not None:
-                if x >= 0:
-                    if n != x:
-                        continue
-                else:
-                    if n != n_layers + x:  # - -x != + -x
-                        continue
-            print(f'Add neuron at layer {n}', level='DEBUG')
-            with model:
-                model.operate(n, neuron_count=1, neurons_operation=op)
-        model(dummy_input)
-        print('Inference done!\n', level='DEBUG')
-
-    # model_operate_neurons(model, dummy_input=dummy_input)
-    # print('#'+'-'*50)
-
-    # # -------------------------
-    # # Test VAE Model
-    # # Instantiate the VAE model
-    # model = SimpleVAE()
-
-    # # Create a dummy batch of grayscale images (Batch=16, 1 channel, 28x28)
-    # dummy_input = th.randn(model.input_shape)
-
-    # print("--- Simple VAE Model Test ---")
-    # print(f"Input Image Shape: {dummy_input.shape}")
-    # print(f"Latent Space Dimension (Z_DIM): {model.z_dim}")
-
-    # # Run the forward pass
-    # reconstruction, mu, log_var = model(dummy_input)
-
-    # # Display results
-    # print(f"\n1. Latent Mean (mu) Shape: {mu.shape}")
-    # print(f"2. Latent Log-Variance (log_var) Shape: {log_var.shape}")
-    # print(f"3. Reconstruction Output Shape: {reconstruction.shape}")
-    # print(f"   Pixel range: \
-    #       [{reconstruction.min():.2f}, {reconstruction.max():.2f}] \
-    #         (Expected [0, 1])")
-
-    # # Verification of shapes
-    # assert reconstruction.shape == (model.input_shape[0], model.image_size), \
-    #     "Reconstruction shape check failed."
-    # assert mu.shape == (model.input_shape[0], model.z_dim), "Latent mean \
-    #     shape check failed."
-
-    # # --- Example of Generating New Data (Inference/Sampling) ---
-    # print("\n--- Testing Generation (Sampling) ---")
-
-    # # Create random noise in the latent space (B x Z_DIM)
-    # num_samples = 5
-    # sampled_z = th.randn(num_samples, model.z_dim)
-
-    # # Pass sampled Z directly to the decoder portion
-    # with th.no_grad():
-    #     generated_images = model.decoder(sampled_z)
-
-    # print(f"Generated Image Shape: {generated_images.shape}")
-
-    # print("\n--- Test Successful: VAE Structure Verified ---")
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # model_operate_neurons(model, dummy_input=dummy_input)
-    # print('#'+'-'*50)
-
-    # # -------------------------
-    # # Test GAN Model
-    # model = DCGAN()
-    # dummy_input = th.randn(model.input_shape)
-    # model(dummy_input)
-
-    # # Watching
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # fake_images = model(dummy_input)
-    # disc_output = model.model.discriminate(fake_images)
-    # print(f"2. Discriminator (discriminate) Output Shape: {disc_output.shape}")
-    # print(f"   Sample Logits: {disc_output.squeeze()[:4].tolist()}")
-
-    # print("\n--- Test Successful: Single-Class Structure Verified ---")
-    # model_operate_neurons(model, dummy_input=dummy_input)
-
-    # # -------------------------
-    # # Test Flexible CNN Models
-    # # TODO (GP): Add test function to each class; maybe following testunits
-    # # TODO (GP): systems.
-    # # 1. 2D Example (e.g., Image)
-    # print("\n--- Testing 2D Block ---")
-    # model = FlexibleCNNBlock(
-    #     dim=2,  # 2D
-    #     in_channels=1,
-    #     out_channels=16,
-    #     norm_type='BatchNorm',
-    #     kernel_size=3
-    # )
-    # dummy_input = th.randn(1, 1, 64, 64)
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # print(f'Inference results {model(dummy_input)}')  # infer
-    # model_operate_neurons(model, dummy_input=dummy_input)
-    # print("\n--- Testing 2D Block with InstanceNorm---")
-    # model = FlexibleCNNBlock(
-    #     dim=2,
-    #     in_channels=1,
-    #     out_channels=16,
-    #     norm_type='InstanceNorm',
-    #     kernel_size=3
-    # )
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # print(f'Inference results {model(dummy_input)}')  # infer
-    # model_operate_neurons(model, dummy_input=dummy_input)
-
-    # # 2. 3D Example (e.g., Volume)
-    # print("\n--- Testing 3D Block ---")
-    # model = FlexibleCNNBlock(
-    #     dim=3,
-    #     in_channels=1,
-    #     out_channels=8,
-    #     norm_type='BatchNorm',
-    #     is_transposed=False  # Using standard Conv3d
-    # )
-    # dummy_input = th.randn(1, 1, 16, 16, 16)
-    # output_3d = model(dummy_input)
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # print(f'Inference results {model(dummy_input)}')  # infer
-    # model_operate_neurons(model, dummy_input=dummy_input)
-    print("\n--- Testing 3D Block with TransposedConv ---")
-    # model = FlexibleCNNBlock(
-    #     dim=1,
-    #     in_channels=1,
-    #     out_channels=8,
-    #     norm_type='BatchNorm',
-    #     is_transposed=True  # Using standard Conv3d
-    # )
-    # model = FashionCNNSequential()
-    # dummy_input = th.randn(model.input_shape)
-    # model(dummy_input)
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # print(f'Inference results {model(dummy_input)}')  # infer
-    # model_operate_neurons(model, x=0, dummy_input=dummy_input, op=2)
-    # model_operate_neurons(model, x=1, dummy_input=dummy_input, op=2)
-    # model_operate_neurons(model, x=2, dummy_input=dummy_input, op=2)
-    # model_operate_neurons(model, dummy_input=dummy_input)
-
-    # # 3. 1D Example (e.g., Time Series)
-    # print("\n--- Testing 1D Block with LazyConv ---")
-    # # Using LazyConv, so in_channels is set to None
-    # model = FlexibleCNNBlock(
-    #     dim=1,
-    #     in_channels=None,
-    #     out_channels=32,
-    #     norm_type='BatchNorm',
-    #     use_lazy=True
-    # )
-    # # Dummy input: (Batch=4, Channels=12, Length=100)
-    # dummy_input = th.randn(4, 12, 100)
-    # # The first forward pass automatically infers the in_channels for LazyConv
-    # output_1d = model(dummy_input)
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # print(f'Inference results {model(dummy_input)}')  # infer
-    # model_operate_neurons(model, dummy_input=dummy_input)
-    # print("\n--- Testing 1D Block without LazyConv ---")
-    # # Using LazyConv, so in_channels is set to None
-    # model = FlexibleCNNBlock(
-    #     dim=1,
-    #     in_channels=1,
-    #     out_channels=32,
-    #     norm_type='BatchNorm',
-    #     use_lazy=False
-    # )
-    # # Dummy input: (Batch=4, Channels=12, Length=100)
-    # dummy_input = th.randn(4, 1, 100)
-    # # The first forward pass automatically infers the in_channels for LazyConv
-    # output_1d = model(dummy_input)
-    # model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
-    # print(f'Inference results {model(dummy_input)}')  # infer
-    # model_operate_neurons(model, dummy_input=dummy_input)

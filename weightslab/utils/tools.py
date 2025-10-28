@@ -551,39 +551,47 @@ def get_original_torch_class(
     return replacement_map.get(custom_class)
 
 
-def model_op_neurons(model, x=None, dummy_input=None):
+def model_op_neurons(model, layer_id=None, dummy_input=None, op=None):
     """
         Test function to iteratively update neurons for each layer,
         then test inference. Everything match ?
     """
     n_layers = len(model.layers)
     for n in range(n_layers-1, -1, -1):
-        if x is not None:
-            if x >= 0:
-                if n != x:
+        if layer_id is not None:
+            if layer_id >= 0:
+                if n != layer_id:
                     continue
             else:
-                if n != n_layers + x:  # - -x != + -x
+                if n != n_layers + layer_id:  # - -layer_id != + -layer_id
                     continue
         print(f'Operate on neurons at layer {n}', level='DEBUG')
         with model as m:
-            print('Adding operation', level='DEBUG')
-            m.operate(n, {-1}, neurons_operation=1)
-            m(dummy_input) if dummy_input is not None else None
-            print('Pruning', level='DEBUG')
-            m.operate(n, {-2}, neurons_operation=2)
-            m(dummy_input) if dummy_input is not None else None
-            print('Freezing operation', level='DEBUG')
-            m.operate(n, {-2}, neurons_operation=3)
-            m(dummy_input) if dummy_input is not None else None
-            print('Reseting operation', level='DEBUG')
-            m.operate(n, {-2}, neurons_operation=4)
-            m(dummy_input) if dummy_input is not None else None
+            if op is None:
+                print('Adding operation - 2 neurons added.', level='DEBUG')
+                m.operate(n, {0, 0, 0, 0, 0}, neuron_operation=1)
+                m(dummy_input) if dummy_input is not None else None
+                print('Pruning operation - first neuron removed.', level='DEBUG')
+                m.operate(n, {0, 1}, neuron_operation=2)
+                m(dummy_input) if dummy_input is not None else NotImplemented
+                print('Reseting operation - every neurons reset.', level='DEBUG')
+                m.operate(n, {}, neuron_operation=4)
+                m(dummy_input) if dummy_input is not None else None
+                print('Freezing operation - last neuron froze.', level='DEBUG')
+                m.operate(n, {-3}, neuron_operation=3)
+                m(dummy_input) if dummy_input is not None else None
+            else:
+                m.operate(
+                    n,
+                    {-2},
+                    neuron_operation=op
+                )
+                m(dummy_input) if dummy_input is not None else None
 
 
 def reindex_and_compress_blocks(data_dict, block_size):
     """
-    Re-indexes the dictionary keys and shifts the neuron value ranges to ensure 
+    Re-indexes the dictionary keys and shifts the neuron value ranges to ensure
     they remain contiguous starting from 0, after removing an intermediate block.
 
     Args:
@@ -627,4 +635,9 @@ def get_nb_parameters(model: th.nn.Module):
 
     # Since all parameters in your model currently have requires_grad=True:
     # trainable_params will also equal 8,367,235
-    print(f"{params} paraeters with {trainable_params} trainable parameters.", level='DEBUG')
+    print(
+        f"{params} paraeters with {trainable_params} trainable parameters.",
+        level='DEBUG'
+    )
+
+    return trainable_params

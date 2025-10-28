@@ -32,6 +32,7 @@ class NetworkWithOps(nn.Module):
         self.linearized_layers = []
         self.suppress_rec_ids = {}
         self.visited_nodes = set()  # Memory trace of explored nodes
+        self.name = self._get_name()
 
     def register_dependencies(self, dependencies_list: List):
         """Register the dependencies between children modules.
@@ -111,36 +112,8 @@ class NetworkWithOps(nn.Module):
     def get_age(self):
         return self.seen_samples
 
-    # def reinit_neurons(
-    #         self,
-    #         layer_id: int,
-    #         neuron_indices: Set[int],
-    #         perturbation_ratio: float | None = None):
-    #     if layer_id not in self._dep_manager.id_2_layer:
-    #         raise ValueError(
-    #             f"[NetworkWithOps.prune] No module with id {layer_id}")
-
-    #     module = self._dep_manager.id_2_layer[layer_id]
-    #     module.reset(neuron_indices, perturbation_ratio=perturbation_ratio)
-
-    #     # If the dependent layer is of type "SAME", say after a conv we have
-    #     # batch_norm, then we have to update the layer after the batch_norm too
-    #     for same_dep_id in self._dep_manager.get_dependent_ids(
-    #             layer_id, DepType.SAME):
-    #         self.reinit_neurons(
-    #             same_dep_id, neuron_indices, perturbation_ratio)
-
-    #     # If the next layer is of type "INCOMING", say after a conv we have
-    #     # either a conv or a linear, then we add to incoming neurons.
-    #     for incoming_id in self._dep_manager.get_dependent_ids(
-    #             layer_id, DepType.INCOMING):
-    #         incoming_module = self._dep_manager.id_2_layer[incoming_id]
-    #         incoming_module.reset_incoming_neurons(
-    #             neuron_indices,
-    #             skip_initialization=True,
-    #             perturbation_ratio=perturbation_ratio)
-
-    #     # TODO(rotaru): Deal with through_flatten case.
+    def get_name(self):
+        return self.name
 
     def _conv_neuron_to_linear_neurons_through_flatten(
             self, conv_layer, linear_layer):
@@ -213,11 +186,9 @@ class NetworkWithOps(nn.Module):
     def operate(
         self,
         layer_id: int,
-        index_neurons: Set[int] | int = {},
+        neuron_indices: Set[int] | int = {},
+        neuron_operation: Enum = ArchitectureNeuronsOpType.ADD,
         skip_initialization: bool = False,
-        neurons_operation: Enum = ArchitectureNeuronsOpType.ADD,
-        current_child_name: str = None,
-        current_parent_name: str = None,
         _suppress_incoming_ids: Optional[Set[int]] = set(),
         _suppress_rec_ids: Optional[Set[int]] = set(),
         _suppress_same_ids: Optional[Set[int]] = set(),
@@ -229,8 +200,8 @@ class NetworkWithOps(nn.Module):
 
         :param layer_id: [description]
         :type layer_id: int
-        :param index_neurons: [description]
-        :type index_neurons: int
+        :param neuron_indices: [description]
+        :type neuron_indices: int
         :type neuron_operation: Operation TAG
         :param skip_initialization: [description], defaults to False
         :type skip_initialization: bool, optional
@@ -242,16 +213,16 @@ class NetworkWithOps(nn.Module):
         """
 
         # Sanity check to see if layer exists
+        if not isinstance(layer_id, int):
+            raise ValueError(
+                f"[NetworkWithOps.operate] Layer_id ({layer_id}) is not int.")
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
-                f"[NetworkWithOps.add_neurons] No module with id {layer_id}")
-        if not isinstance(index_neurons, (set, dict)):
-            index_neurons = {index_neurons}
+                f"[NetworkWithOps.operate] No module with id {layer_id}")
 
         # Get the current module
         module = self._dep_manager.id_2_layer[layer_id]
         current_parent_out = module.out_neurons
-        current_parent_name = module.get_name_wi_id()
 
         # Sanity check to avoid redundancy
         # To be sure that nodes are updated only one time by pass
@@ -273,10 +244,9 @@ class NetworkWithOps(nn.Module):
             _suppress_rec_ids.add(layer_id)
             self.operate(
                 rec_dep_id,
-                index_neurons,
-                skip_initialization,
-                current_child_name=current_parent_name,
-                neurons_operation=neurons_operation,
+                neuron_indices,
+                neuron_operation=neuron_operation,
+                skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
                 _suppress_same_ids=_suppress_same_ids,
@@ -292,10 +262,9 @@ class NetworkWithOps(nn.Module):
             _suppress_rec_ids.add(layer_id)
             self.operate(
                 rec_dep_id,
-                index_neurons,
-                skip_initialization,
-                current_child_name=current_parent_name,
-                neurons_operation=neurons_operation,
+                neuron_indices,
+                neuron_operation=neuron_operation,
+                skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_same_ids=_suppress_same_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
@@ -315,10 +284,9 @@ class NetworkWithOps(nn.Module):
             _suppress_same_ids.add(layer_id)
             self.operate(
                 same_dep_id,
-                index_neurons,
-                skip_initialization,
-                current_child_name=current_parent_name,
-                neurons_operation=neurons_operation,
+                neuron_indices,
+                neuron_operation=neuron_operation,
+                skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
                 _suppress_same_ids=_suppress_same_ids,
@@ -333,10 +301,9 @@ class NetworkWithOps(nn.Module):
             _suppress_same_ids.add(layer_id)
             self.operate(
                 same_dep_id,
-                index_neurons,
-                skip_initialization,
-                current_child_name=current_parent_name,
-                neurons_operation=neurons_operation,
+                neuron_indices,
+                neuron_operation=neuron_operation,
+                skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
                 _suppress_same_ids=_suppress_same_ids,
@@ -368,9 +335,9 @@ class NetworkWithOps(nn.Module):
 
             # # Operate on module incoming neurons
             incoming_module.operate(
-                index_neurons=index_neurons,
-                incoming_neurons=True,
-                neurons_operation=neurons_operation,
+                neuron_indices=neuron_indices,
+                is_incoming=True,
+                neuron_operation=neuron_operation,
                 skip_initialization=incoming_skip_initialization,
                 current_parent_name=module.get_name_wi_id(),
                 **kwargs
@@ -382,8 +349,8 @@ class NetworkWithOps(nn.Module):
 
         # Operate in module out neurons
         module.operate(
-                index_neurons,
-                neurons_operation=neurons_operation,
+                neuron_indices,
+                neuron_operation=neuron_operation,
                 skip_initialization=skip_initialization,
                 current_child_name=incoming_module.get_name_wi_id()
                 if incoming_module is not None else None,
@@ -416,10 +383,9 @@ class NetworkWithOps(nn.Module):
                     old_nc = int(sib_prod_module.out_neurons)
                     self.operate(
                         producer_id,
-                        index_neurons=delta,
+                        neuron_indices=delta,
                         skip_initialization=True,
-                        current_child_name=sib_prod_module.get_name_wi_id(),
-                        neurons_operation=neurons_operation,
+                        neuron_operation=neuron_operation,
                         _suppress_incoming_ids={child_id},
                         **kwargs
                     )

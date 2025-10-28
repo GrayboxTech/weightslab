@@ -240,7 +240,7 @@ class LinearWithNeuronsOpsTest(unittest.TestCase):
     def test_add_neurons_cuda(self):
         self.add_neurons(th.device('cuda'))
 
-    def incoming_neurons(self, device):
+    def is_incoming(self, device):
         self.module.to(device)
         module_test_input = th.Tensor([1.0000, 1.0000, 1.0000, 1.0000]).to(
             device)
@@ -262,10 +262,10 @@ class LinearWithNeuronsOpsTest(unittest.TestCase):
                 th.Tensor([0.3750, 1.6250, 2.8750, 4.1250]).to(device)))
 
     def test_incoming_neurons_cpu(self):
-        self.incoming_neurons(th.device('cpu'))
+        self.is_incoming(th.device('cpu'))
 
     def test_incoming_neurons_cuda(self):
-        self.incoming_neurons(th.device('cuda'))
+        self.is_incoming(th.device('cuda'))
 
     def test_all_ops(self):
         # Basic
