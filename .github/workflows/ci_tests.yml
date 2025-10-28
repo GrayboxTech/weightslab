@@ -1,0 +1,42 @@
+name: Python CI / Unit Tests
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  build_and_test:
+    # Use a matrix strategy to test against multiple Python versions
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+        os: [ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: 1. Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 2. Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: 4. Install Dependencies (and package itself)
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e .
+        
+    - name: 5. Run Unit Tests
+      # Assuming you have a standard 'tests/' directory and use pytest
+      run: |
+        python ./weightslab/weightslab/tests/test_watcher_editor.py
+        
+    - name: 6. Show Test Success or Failure
+      if: always()
+      run: echo "Tests finished for Python ${{ matrix.python-version }}"

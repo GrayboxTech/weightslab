@@ -329,20 +329,18 @@ class NetworkWithOps(nn.Module):
                     in _suppress_incoming_ids:
                 continue
 
-            incoming_skip_initialization = False
-            if incoming_id == self.layers[-1].get_module_id():
-                incoming_skip_initialization = False
-
             # # Operate on module incoming neurons
             incoming_module.operate(
                 neuron_indices=neuron_indices,
                 is_incoming=True,
                 neuron_operation=neuron_operation,
-                skip_initialization=incoming_skip_initialization,
+                skip_initialization=False,
                 current_parent_name=module.get_name_wi_id(),
                 **kwargs
             )
-            self.visited_nodes.add(incoming_id) if not bypass else None  # Keep visited node in mem.
+            # Keep visited node in mem. if bypass flag,
+            # i.e., it's the output of a cat layer.
+            self.visited_nodes.add(incoming_id) if not bypass else None
 
             # Save incoming children from layer_id
             updated_incoming_children.append(incoming_id)

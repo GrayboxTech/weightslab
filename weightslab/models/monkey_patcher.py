@@ -69,7 +69,7 @@ def monkey_patch(module: nn.Module):
 if __name__ == "__main__":
     from torch import nn
     from weightslab.backend.watcher_editor import WatcherEditor
-    from weightslab.tests.test_utils import FashionCNNSequential
+    from weightslab.weightslab.tests.torch_models import FashionCNNSequential
 
     # Setup prints
     setup_logging('DEBUG')

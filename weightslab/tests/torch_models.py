@@ -1,9 +1,15 @@
+"""
+    Batch of Torch models that use several types of architectures and can be
+    used for different tasks.
+    These architectures include several types of convolutional layers,
+    batch normalization, and max pooling that are useful to stress test
+    our neuron operations.
+"""
 import torch as th
 import torch.nn as nn
 import torchvision.models as models
 from torch.nn import functional as F
 
-from weightslab.utils.logs import print, setup_logging
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
 
 

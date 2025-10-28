@@ -11,7 +11,7 @@ from unittest import mock
 from graybox.checkpoint import CheckpointManager
 from graybox.experiment import Experiment
 
-from .test_utils import MNISTModel
+from .torch_models import MNISTModel
 
 
 class CheckpointManagerTest(unittest.TestCase):

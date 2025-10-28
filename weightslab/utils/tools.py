@@ -571,15 +571,15 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None):
                 print('Adding operation - 2 neurons added.', level='DEBUG')
                 m.operate(n, {0, 0, 0, 0, 0}, neuron_operation=1)
                 m(dummy_input) if dummy_input is not None else None
-                print('Pruning operation - first neuron removed.', level='DEBUG')
-                m.operate(n, {0, 1}, neuron_operation=2)
-                m(dummy_input) if dummy_input is not None else NotImplemented
                 print('Reseting operation - every neurons reset.', level='DEBUG')
                 m.operate(n, {}, neuron_operation=4)
                 m(dummy_input) if dummy_input is not None else None
                 print('Freezing operation - last neuron froze.', level='DEBUG')
                 m.operate(n, {-3}, neuron_operation=3)
                 m(dummy_input) if dummy_input is not None else None
+                print('Pruning operation - first neuron removed.', level='DEBUG')
+                m.operate(n, {0, 1}, neuron_operation=2)
+                m(dummy_input) if dummy_input is not None else NotImplemented
             else:
                 m.operate(
                     n,
@@ -624,14 +624,20 @@ def reindex_and_compress_blocks(data_dict, block_size):
     return reindexed_dict
 
 
-def get_nb_parameters(model: th.nn.Module):
-    # Count only parameters where requires_grad is True
+def get_nb_parameters_neuronwise(model: th.nn.Module):
+    # Count only neurons with associated lr != 0
+    # Basically parameters not masked
     params = sum(
         p.numel() for p in model.parameters()
     )
-    trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad
-    )
+    trainable_params = 0
+    for layer in model.layers:
+        for learnable_tensors in layer.learnable_tensors_name:
+            # TODO (GP) Upgrade freezing to consider every learnable tensors
+            if 'weight' == learnable_tensors:
+                trainable_params += getattr(layer, learnable_tensors).numel()
+        trainable_params -= len(layer.neuron_2_learning_rate)
+        trainable_params -= len(layer.incoming_neuron_2_lr)
 
     # Since all parameters in your model currently have requires_grad=True:
     # trainable_params will also equal 8,367,235

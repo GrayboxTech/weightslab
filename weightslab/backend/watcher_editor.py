@@ -87,7 +87,7 @@ class WatcherEditor(NetworkWithOps):
         """
         return self
 
-    def __exit__(self, exc_type, **_):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Executed when exiting the 'with' block (whether by success or error).
 
@@ -110,7 +110,7 @@ class WatcherEditor(NetworkWithOps):
         if exc_type is not None:
             print(
                 f"[{self.__class__.__name__}]: An exception occurred: \
-                    {exc_type.__name__}")
+                    {exc_type.__name__} with {exc_val} and {exc_tb}.")
             return False
         return False
 
@@ -270,58 +270,9 @@ class WatcherEditor(NetworkWithOps):
 
         return out
 
-    def __repr__(self):
-        """
-        Generates a string representation of the WatcherEditor instance.
-
-        This method overrides the default `__repr__` behavior to provide a
-        human-readable string that mimics the standard PyTorch `nn.Module`
-        representation. It enhances this representation by injecting a custom
-        module ID (if available via `get_module_id`) for each submodule,
-        including those within `Sequential` containers. This implementation
-        handles nested containers recursively.
-        """
-        def _get_module_repr(module, prefix=""):
-            """Recursively builds the string representation for a module."""
-            # Base case: not a container, or an empty container
-            if not list(module.children()):
-                module_repr = repr(module)
-                if hasattr(module, 'get_module_id'):
-                    try:
-                        module_id = module.get_module_id()
-                        return f"ID={module_id} | {module_repr}"
-                    except Exception:
-                        return f"ID=err | {module_repr}"
-                else:
-                    # For standard layers without get_module_id
-                    return f"ID=None | {module_repr}"
-
-            # Recursive step for containers
-            child_lines = []
-            for name, child_module in module.named_children():
-                child_repr = _get_module_repr(child_module, prefix + "  ")
-                child_lines.append(f"{prefix}  ({name}): {child_repr}")
-
-            # Get the class name of the container
-            container_name = module.__class__.__name__
-            # Join the child representations
-            children_str = '\n'.join(child_lines)
-            return f"{container_name}(\n{children_str}\n{prefix})"
-
-        # Start with the model's class name
-        string = f"{self.model.__class__.__name__}(\n"
-
-        # Iterate over all top-level child modules
-        for name, module in self.model.named_children():
-            module_repr = _get_module_repr(module, "  ")
-            string += f"  ({name}): {module_repr}\n"
-
-        string += ")"
-        return string
-
 
 if __name__ == "__main__":
-    from weightslab.tests.test_utils import FCNResNet50 as Model
+    from weightslab.weightslab.tests.torch_models import FashionCNN as Model
 
     # Setup prints
     setup_logging('DEBUG')
@@ -345,6 +296,6 @@ if __name__ == "__main__":
     # Model Operations
     # # Test: add neurons
     print("--- Test: Add Neurons ---")
-    model_op_neurons(model)
+    model_op_neurons(model, layer_id=3, op=1)
     model(dummy_input)  # Inference test
     print(f'Inference test of the modified model is:\n{model(dummy_input)}')

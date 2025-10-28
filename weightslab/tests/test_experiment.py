@@ -12,7 +12,7 @@ from torchvision import datasets as ds
 
 from weightslab.experiment.experiment import Experiment
 
-from test_utils import MNISTModel
+from weightslab.weightslab.tests.torch_models import MNISTModel
 
 
 class ExperimentTest(unittest.TestCase):

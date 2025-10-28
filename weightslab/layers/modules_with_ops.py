@@ -145,9 +145,8 @@ class LayerWiseOperations(NeuronWiseOperations):
         Returns:
             float: The learning rate for the specific neuron.
         """
-        if isinstance(neurons_id, (list, set)) and \
-                isinstance(neurons_id[0], (list, set)):
-            neurons_id = [i for i in neurons_id]
+        if isinstance(neurons_id, set):
+            neurons_id = [i for i in list(neurons_id)]
 
         if not self.neuron_2_learning_rate:
             return [1.0]*len(neurons_id)
@@ -180,7 +179,8 @@ class LayerWiseOperations(NeuronWiseOperations):
         # Manage incoming module
         in_out_neurons = self.out_neurons if not is_incoming else \
             self.in_neurons
-        neurons_2_lr = self.neuron_2_learning_rate if not is_incoming else self.incoming_neuron_2_lr
+        neurons_2_lr = self.neuron_2_learning_rate if not is_incoming else \
+            self.incoming_neuron_2_lr
 
         # Sanity Check
         invalid_ids = (set(neurons_id) - set(range(in_out_neurons)))
@@ -195,8 +195,13 @@ class LayerWiseOperations(NeuronWiseOperations):
         for neuron_id in neurons_id:
             lr = neurons_lr[neuron_id]
             if lr < 0 or lr > 1.0:
-                raise ValueError('Cannot set learning rate outside [0, 1] range')
-            neurons_2_lr[neuron_id] = lr
+                raise ValueError(
+                    'Cannot set learning rate outside [0, 1] range'
+                )
+            if neuron_id in neurons_2_lr and lr == 1:
+                del neurons_2_lr[neuron_id]
+            else:
+                neurons_2_lr[neuron_id] = lr
 
     def register_grad_hook(self):
         # This is meant to be called in the children classes.
@@ -231,7 +236,8 @@ class LayerWiseOperations(NeuronWiseOperations):
                     self.weight is not None:
                 self.weight.register_hook(weight_grad_hook)
             else:
-                if hasattr(self, 'tensor_name') and getattr(self, tensor_name) is not None:
+                if hasattr(self, 'tensor_name') and getattr(self, tensor_name)\
+                        is not None:
                     getattr(self, tensor_name).register_hook(oneD_grad_hook)
 
     def _find_value_for_key_pattern(self, key_pattern, state_dict):
@@ -351,6 +357,8 @@ class LayerWiseOperations(NeuronWiseOperations):
         2. N-to-1 Mappings (Conv(N) -> Flatten -> Linear(N*H*W))
         3. 1-to-N Mappings (Linear(N*H*W) -> Unflatten -> Conv(N))
         """
+        if not len(neuron_indices) or neuron_indices is None:
+            neuron_indices = {-1}
 
         def reversing_indices(n_neurons, indices_set):
             """Your provided function to normalize indices."""
@@ -386,7 +394,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         )
         flat_indexs = list(
             mapped_indexs[len(mapped_indexs)+i][::-1] for i in reversed_indexs
-        ) if hasattr(self, 'bypass') and is_incoming else list(
+        ) if hasattr(self, 'bypass') or is_incoming else list(
             len(mapped_indexs)+i for i in reversed_indexs
         )
 
@@ -431,18 +439,12 @@ class LayerWiseOperations(NeuronWiseOperations):
         # neurons.
         # Both neuron indices and original exists because sometime with bypass
         # flag, both can be different.
-        if neuron_operation != ArchitectureNeuronsOpType.ADD:
-            neuron_indices, original_neuron_indices = \
-                self._process_neurons_indices(
-                    neuron_indices,
-                    is_incoming=is_incoming,
-                    **kwargs
-                )
-        else:
-            neuron_indices = [1,] * (neuron_indices if
-                                     isinstance(neuron_indices, int) else
-                                     len(neuron_indices))
-            original_neuron_indices = neuron_indices
+        neuron_indices, original_neuron_indices = \
+            self._process_neurons_indices(
+                neuron_indices,
+                is_incoming=is_incoming,
+                **kwargs
+            )
 
         # Sanity check if neuron_indices is correctly defined
         if not len(neuron_indices) and \
@@ -456,13 +458,13 @@ class LayerWiseOperations(NeuronWiseOperations):
             neuron_indices, original_neuron_indices = [None], [None]
 
         # Operate on neurons
-        for neuron_indice, original_neuron_indice in zip(
+        for neuron_indices_, original_neuron_indices_ in zip(
             neuron_indices,
             original_neuron_indices
         ):
             op(
-                original_neuron_indices=original_neuron_indice,
-                neuron_indices=neuron_indice,
+                original_neuron_indices=original_neuron_indices_,
+                neuron_indices=neuron_indices_,
                 is_incoming=is_incoming,
                 skip_initialization=skip_initialization,
                 **kwargs
@@ -711,18 +713,15 @@ class LayerWiseOperations(NeuronWiseOperations):
         **_
     ):
         if isinstance(neuron_indices, int):
-            neuron_indices = set([neuron_indices])
-        if isinstance(neuron_indices, (list, set)):
-            if isinstance(neuron_indices, set):
-                neuron_indices = list(neuron_indices)
-                if isinstance(neuron_indices[0], int):
-                    neuron_indices = [i for i in neuron_indices]
-                else:
-                    neuron_indices = set(neuron_indices)
+            neuron_indices = [neuron_indices]
+        if isinstance(neuron_indices, set):
+            neuron_indices = list(neuron_indices)
+            if isinstance(neuron_indices[0], list):
+                neuron_indices = [i for j in neuron_indices for i in j]
 
         # Neurons not specified - freeze everything
         if neuron_indices is None or not len(neuron_indices):
-            neuron_indices = set(range(self.out_neurons))
+            neuron_indices = list(range(self.out_neurons))
 
         neurons_lr = {
             neuron_indices[neuron_indice]:
@@ -738,7 +737,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     def _add_neurons(
         self,
-        neuron_indices: Set[int] = -1,
+        neuron_indices: Set[int] | int = -1,
         is_incoming: bool = False,
         skip_initialization: bool = False,
         **kwargs
@@ -747,12 +746,14 @@ class LayerWiseOperations(NeuronWiseOperations):
             if isinstance(neuron_indices, list):
                 neuron_indices = set(neuron_indices)
             else:
-                neuron_indices = set([neuron_indices])
+                neuron_indices = set(neuron_indices) if not \
+                    isinstance(neuron_indices, int) else set([neuron_indices])
         print(
             f"{self.get_name()}[{self.get_module_id()}].add {neuron_indices}",
             level='DEBUG'
         )
-        nb_neurons = self.get_canal_length(is_incoming) if len(neuron_indices) == 1 else len(neuron_indices)
+        nb_neurons = self.get_canal_length(is_incoming) if \
+            len(neuron_indices) == 1 else len(neuron_indices)
         # Incoming operation or out operation; chose the right neurons
         norm = False
         # # TODO (GP): fix hardcoding transpose
@@ -798,7 +799,11 @@ class LayerWiseOperations(NeuronWiseOperations):
                 self.weight.data = nn.Parameter(
                     th.cat(
                         (self.weight.data, added_weights),
-                        dim=(transposed ^ is_incoming) & int(len(self.weight.data.flatten()) > 1)
+                        dim=(transposed ^ is_incoming) & int(
+                            len(
+                                self.weight.data.flatten()
+                            ) > 1
+                        )
                     )
                 ).to(self.device)
 
@@ -877,7 +882,13 @@ class LayerWiseOperations(NeuronWiseOperations):
                         self.dst_to_src_mapping_tnsrs[parent_name][k+min_p] = v
                 if hasattr(self, 'bypass') and parent_name in \
                         current_parent_name:
-                    key_index = max(list(self.dst_to_src_mapping_tnsrs[parent_name].keys()))
+                    key_index = max(
+                        list(
+                            self.dst_to_src_mapping_tnsrs[
+                                parent_name
+                            ].keys()
+                        )
+                    )
                     self.dst_to_src_mapping_tnsrs[
                         parent_name
                     ][key_index + 1] = [
@@ -894,8 +905,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
 if __name__ == "__main__":
     from weightslab.backend.watcher_editor import WatcherEditor
-    from weightslab.tests.test_utils import FashionCNN as Model
-    from weightslab.tests.test_utils import TinyUNet_Straightforward as Model
+    from weightslab.weightslab.tests.torch_models import FashionCNN as Model
 
     # Define the model & the input
     model = Model()
@@ -909,11 +919,17 @@ if __name__ == "__main__":
     model(dummy_input)
     print(model)
     nn_l = len(model.layers)-1
+
     # Neurons Operation
-    #
-    # ADD 4 neurons
+    # - To test on The TinyUnet3p example
+    # ADD
+    # - layer_id = Base layer (Conv_out); same layer (eg batchnorm); multi-inputs layers (eg. tinyUnet3p); recursive layers (eg. tinyUnet3p))
+    # - neuron_indices = {-1, -2, -7, -19, -12} on a layer with 4 neurons - eq. 
     with model as m:
-        m.operate(1, 4, neuron_operation=ArchitectureNeuronsOpType.FREEZE)
+        m.operate(layer_id=3, neuron_operation=ArchitectureNeuronsOpType.FREEZE)
+        m(dummy_input)
+    with model as m:
+        m.operate(3, 4, neuron_operation=ArchitectureNeuronsOpType.FREEZE)
         m(dummy_input)
     # ADD 2 neurons
     with model as m:
@@ -927,110 +943,3 @@ if __name__ == "__main__":
     with model as m:
         m.operate(3, {-1, -2, 1}, neuron_operation=2)
         m(dummy_input)
-
-    #
-    # # Adding
-    # # # # Case A.1: C0out to Bin -> Channel adding
-    # # # # Case A.2: Bout to Cin -> Channel adding
-    # with model as m:
-    #     m.operate(1, {-3, -1}, neuron_operation=1)
-    #     m(dummy_input)
-    # # # Case B: C1out to Lin -> Channel adding & corr. Lin. neurons
-    # with model as m:
-    #     m.operate(2, {-2, -1}, neuron_operation=1)
-    #     m(dummy_input)
-    # # # # Case C: Lout to Lin -> Corresp. Neurons to add both side
-    # with model as m:
-    #     m.operate(3, {-145, -1}, neuron_operation=1)
-    #     m(dummy_input)
-    # # # # Pruning
-    # # # Case A.1: C0out to Bin -> Channel pruning
-    with model as m:
-        m.operate(0, {-100}, neuron_operation=2)
-        m(dummy_input)
-    # # # # Case A.2: Bout to Cin -> Channel pruning
-    # with model as m:
-    #     m.operate(1, {-3, -1}, neuron_operation=2)
-    #     m(dummy_input)
-    # # # Case B: C1out to Lin -> Channel pruning & corr. Lin. neurons
-    # with model as m:
-    #     m.operate(2, {-2, -1}, neuron_operation=2)
-    #     m(dummy_input)
-    # # # # Case C: Lout to Lin -> Corresp. Neurons to prune
-    # with model as m:
-    #     m.operate(3, {-145, -1}, neuron_operation=2)
-    #     m(dummy_input)
-    # # # # # Freezing
-    # # # # Case A.1: C0out to Bin -> Channel freezing
-    # with model as m:
-    #     m.operate(0, {-3, -1}, neuron_operation=3)
-    #     m(dummy_input)
-    # # # # Case A.2: Bout to Cin -> Channel freezing
-    # with model as m:
-    #     m.operate(1, {-3, -1}, neuron_operation=3)
-    #     m(dummy_input)
-    # # # Case B: C1out to Lin -> Channel freezing & corr. Lin. neurons
-    # with model as m:
-    #     m.operate(2, {-2, -1}, neuron_operation=3)
-    #     m(dummy_input)
-    # # # # Case C: Lout to Lin -> Corresp. Neurons to freeze
-    # with model as m:
-    #     m.operate(3, {-145, -1}, neuron_operation=3)
-    #     m(dummy_input)
-    # # # Reset ids
-    # # # Case A.1: C0out to Bin to Cin -> Channel reseting
-    with model as m:
-        m.operate(0, {-3, -1, -2, -4}, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    # # # Case A.2: Bout to Cin -> Channel reseting
-    with model as m:
-        m.operate(1, {-3, -1}, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    # # Case B: C1out to Lin -> Channel reseting & corr. Lin. neurons
-    with model as m:
-        m.operate(2, {-2, -1}, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    # # # Case C: Lout to Lin -> Corresp. Neurons to reset
-    with model as m:
-        m.operate(3, {-145, -1}, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    # # # Reset every neurons
-    # # # Case A.1: C0out to Bin to Cin -> Channel reseting
-    with model as m:
-        m.operate(0, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    # # # Case A.2: Bout to Cin -> Channel reseting
-    with model as m:
-        m.operate(1, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    # # Case B: C1out to Lin -> Channel reseting & corr. Lin. neurons
-    with model as m:
-        m.operate(2, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    # # # Case C: Lout to Lin -> Corresp. Neurons to reset
-    with model as m:
-        m.operate(3, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-
-    # Transposed part
-    # # # # Case A.1: C0out to Bin -> Channel adding
-    with model as m:
-        m.operate(5, {-1}, neuron_operation=1)
-        m(dummy_input)
-    # # # Case A.1: C0out to Bin -> Channel pruning
-    with model as m:
-        m.operate(5, {-3, -1}, neuron_operation=2)
-        m(dummy_input)
-    # # # Case A.1: C0out to Bin -> Channel freezing
-    with model as m:
-        m.operate(5, {-3, -1}, neuron_operation=3)
-        m.operate(5, neuron_operation=3)
-        m(dummy_input)
-    # # # Case A.1: C0out to Bin to Cin -> Channel reseting
-    with model as m:
-        m.operate(5, neuron_operation=4)
-        m.operate(5, perturbation_ratio=0.5, neuron_operation=4)
-        m.operate(5, {-2}, neuron_operation=4)
-        m.operate(5, {-2}, perturbation_ratio=0.5, neuron_operation=4)
-        m(dummy_input)
-    print('Bye World')
