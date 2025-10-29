@@ -624,7 +624,31 @@ def reindex_and_compress_blocks(data_dict, block_size):
     return reindexed_dict
 
 
-def get_nb_parameters_neuronwise(model: th.nn.Module):
+def get_layer_trainable_parameters_neuronwise(layer: th.nn.Module):
+    """
+        Count the number of neurons with associated lr != 0.
+    """
+    trainable_params = 0
+    for learnable_tensor_name in layer.learnable_tensors_name:
+        trainable_params += getattr(layer, learnable_tensor_name).numel()
+        trainable_params -= len(
+            layer.neuron_2_lr[
+                learnable_tensor_name
+            ]
+        )
+        if learnable_tensor_name in layer.incoming_neuron_2_lr:
+            trainable_params -= len(
+                layer.incoming_neuron_2_lr[
+                    learnable_tensor_name
+                ]
+            )
+    return trainable_params
+
+
+def get_model_parameters_neuronwise(model: th.nn.Module):
+    """
+        Get the number of neurons with associated lr!= 0 in the model.
+    """
     # Count only neurons with associated lr != 0
     # Basically parameters not masked
     params = sum(
@@ -632,12 +656,7 @@ def get_nb_parameters_neuronwise(model: th.nn.Module):
     )
     trainable_params = 0
     for layer in model.layers:
-        for learnable_tensors in layer.learnable_tensors_name:
-            # TODO (GP) Upgrade freezing to consider every learnable tensors
-            if 'weight' == learnable_tensors:
-                trainable_params += getattr(layer, learnable_tensors).numel()
-        trainable_params -= len(layer.neuron_2_learning_rate)
-        trainable_params -= len(layer.incoming_neuron_2_lr)
+        trainable_params += get_layer_trainable_parameters_neuronwise(layer)
 
     # Since all parameters in your model currently have requires_grad=True:
     # trainable_params will also equal 8,367,235
@@ -646,4 +665,4 @@ def get_nb_parameters_neuronwise(model: th.nn.Module):
         level='DEBUG'
     )
 
-    return trainable_params
+    return params, trainable_params

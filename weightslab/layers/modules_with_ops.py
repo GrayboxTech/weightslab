@@ -28,7 +28,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             self,
             in_neurons: int,
             out_neurons: int,
-            device,
+            device: str = 'cpu',
             module_name: str = "module",
             super_in_name: str = "in_features",
             super_out_name: str = "out_features"
@@ -44,18 +44,24 @@ class LayerWiseOperations(NeuronWiseOperations):
         self.in_neurons = in_neurons
         self.device = device
         self.tracking_mode = TrackingMode.DISABLED
-        self.neuron_2_learning_rate = collections.defaultdict(lambda: 1.0)
-        self.incoming_neuron_2_lr = collections.defaultdict(lambda: 1.0)
         self.module_name = module_name
         self.super_in_name = super_in_name
         self.super_out_name = super_out_name
         self.src_to_dst_mapping_tnsrs = {}
         self.dst_to_src_mapping_tnsrs = {}
         self.parents_src_to_dst_mapping_tnsrs = {}
-        self.learnable_tensors_name = [
-            name for name, param in self.named_parameters()
-            if param.requires_grad
-        ]  # Get every learnable tensors name
+        if hasattr(self, 'named_parameters'):
+            self.learnable_tensors_name = [
+                name for name, param in self.named_parameters()
+                if param.requires_grad
+            ]  # Get every learnable tensors name
+            self.neuron_2_lr = {
+                tensor_name:
+                    collections.defaultdict(lambda: 1.0) for tensor_name in
+                    self.learnable_tensors_name}
+            self.incoming_neuron_2_lr = {
+                'weight': collections.defaultdict(lambda: 1.0)
+            }
 
         # Tracking
         self.regiser_trackers()
@@ -135,7 +141,12 @@ class LayerWiseOperations(NeuronWiseOperations):
                 op_type == ArchitectureNeuronsOpType.RESET.value:
             return self._reset_neurons
 
-    def get_per_neuron_learning_rate(self, neurons_id: int) -> float:
+    def get_per_neuron_learning_rate(
+            self,
+            neurons_id: int,
+            is_incoming: bool,
+            tensor_name: str
+    ) -> float:
         """
         Get the learning rate for a specific neuron.
 
@@ -148,10 +159,14 @@ class LayerWiseOperations(NeuronWiseOperations):
         if isinstance(neurons_id, set):
             neurons_id = [i for i in list(neurons_id)]
 
-        if not self.neuron_2_learning_rate:
+        neuron_2_lr = self.neuron_2_lr if not is_incoming else \
+            self.incoming_neuron_2_lr
+        
+        if not neuron_2_lr or \
+                tensor_name not in neuron_2_lr:
             return [1.0]*len(neurons_id)
         return [
-            self.neuron_2_learning_rate[neuron_id] for neuron_id in
+            neuron_2_lr[tensor_name][neuron_id] for neuron_id in
             neurons_id
         ]
 
@@ -159,7 +174,8 @@ class LayerWiseOperations(NeuronWiseOperations):
             self,
             neurons_id: Set[int],
             neurons_lr: Set[float],
-            is_incoming: bool = False
+            tensor_name: str,
+            is_incoming: bool = False,
     ):
         """
         Set per neuron learning rates.
@@ -179,7 +195,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         # Manage incoming module
         in_out_neurons = self.out_neurons if not is_incoming else \
             self.in_neurons
-        neurons_2_lr = self.neuron_2_learning_rate if not is_incoming else \
+        neuron_2_lr = self.neuron_2_lr if not is_incoming else \
             self.incoming_neuron_2_lr
 
         # Sanity Check
@@ -198,47 +214,55 @@ class LayerWiseOperations(NeuronWiseOperations):
                 raise ValueError(
                     'Cannot set learning rate outside [0, 1] range'
                 )
-            if neuron_id in neurons_2_lr and lr == 1:
-                del neurons_2_lr[neuron_id]
+            if neuron_id in neuron_2_lr[tensor_name] and lr == 1:
+                del neuron_2_lr[tensor_name][neuron_id]
             else:
-                neurons_2_lr[neuron_id] = lr
+                neuron_2_lr[tensor_name][neuron_id] = lr
 
     def register_grad_hook(self):
         # This is meant to be called in the children classes.
-        def weight_grad_hook(weight_grad):
-            for neuron_id, neuron_lr in self.neuron_2_learning_rate.items():
-                if neuron_id >= weight_grad.shape[0]:
-                    continue
-                neuron_grad = weight_grad[neuron_id]
-                neuron_grad *= neuron_lr
-                weight_grad[neuron_id] = neuron_grad
+        def create_tensor_grad_hook(tensor_name: str, oneD: bool):
 
-            for in_neuron_id, neuron_lr in self.incoming_neuron_2_lr.items():
-                if in_neuron_id >= weight_grad.shape[1]:
-                    continue
-                in_neuron_grad = weight_grad[:, in_neuron_id]
-                in_neuron_grad *= neuron_lr
-                weight_grad[:, in_neuron_id] = in_neuron_grad
-            return weight_grad
+            def weight_grad_hook(weight_grad):
+                for neuron_id, neuron_lr in \
+                        self.neuron_2_lr[tensor_name].items():
+                    if neuron_id >= weight_grad.shape[0]:
+                        continue
+                    neuron_grad = weight_grad[neuron_id]
+                    neuron_grad *= neuron_lr
+                    weight_grad[neuron_id] = neuron_grad
 
-        def oneD_grad_hook(bias_grad):
-            for neuron_id, neuron_lr in self.neuron_2_learning_rate.items():
-                if neuron_id >= bias_grad.shape[0]:
-                    continue
-                neuron_grad = bias_grad[neuron_id]
-                neuron_grad *= neuron_lr
-                bias_grad[neuron_id] = neuron_grad
-            return bias_grad
+                for in_neuron_id, neuron_lr in \
+                        self.incoming_neuron_2_lr[tensor_name].items():
+                    if in_neuron_id >= weight_grad.shape[1]:
+                        continue
+                    in_neuron_grad = weight_grad[:, in_neuron_id]
+                    in_neuron_grad *= neuron_lr
+                    weight_grad[:, in_neuron_id] = in_neuron_grad
+                return weight_grad
 
+            def oneD_grad_hook(bias_grad):
+                for neuron_id, neuron_lr in \
+                        self.neuron_2_lr[tensor_name].items():
+                    if neuron_id >= bias_grad.shape[0]:
+                        continue
+                    neuron_grad = bias_grad[neuron_id]
+                    neuron_grad *= neuron_lr
+                    bias_grad[neuron_id] = neuron_grad
+                return bias_grad
+
+            return weight_grad_hook if oneD else oneD_grad_hook
+
+        # Attribute hooks to corresponding learnable tensors
         for tensor_name in self.learnable_tensors_name:
-            if tensor_name == 'weight' and \
-                    hasattr(self, 'weight') and \
-                    self.weight is not None:
-                self.weight.register_hook(weight_grad_hook)
-            else:
-                if hasattr(self, 'tensor_name') and getattr(self, tensor_name)\
-                        is not None:
-                    getattr(self, tensor_name).register_hook(oneD_grad_hook)
+            if hasattr(self, 'tensor_name'):
+                tensor = getattr(self, tensor_name)
+                if tensor is not None:
+                    hook_fct = create_tensor_grad_hook(
+                        tensor_name,
+                        oneD=len(tensor) == 1
+                    )
+                    self.weight.register_hook(hook_fct)
 
     def _find_value_for_key_pattern(self, key_pattern, state_dict):
         for key, value in state_dict.items():
@@ -723,17 +747,26 @@ class LayerWiseOperations(NeuronWiseOperations):
         if neuron_indices is None or not len(neuron_indices):
             neuron_indices = list(range(self.out_neurons))
 
-        neurons_lr = {
-            neuron_indices[neuron_indice]:
-                1.0 - neuron_lr for neuron_indice, neuron_lr in enumerate(
-                    self.get_per_neuron_learning_rate(neuron_indices)
-                )
-        }
-        self.set_per_neuron_learning_rate(
-            neurons_id=set(neuron_indices),
-            neurons_lr=neurons_lr,
-            is_incoming=is_incoming
-        )
+        # Work on the output
+        tensors_name = self.learnable_tensors_name if not is_incoming \
+            else ['weight']  # Weight is the only learnable tensor input
+        for tensor_name in tensors_name:
+            neurons_lr = {
+                neuron_indices[neuron_indice]:
+                    1.0 - neuron_lr for neuron_indice, neuron_lr in enumerate(
+                        self.get_per_neuron_learning_rate(
+                            neuron_indices,
+                            is_incoming=is_incoming,
+                            tensor_name=tensor_name
+                        )
+                    )
+            }
+            self.set_per_neuron_learning_rate(
+                neurons_id=set(neuron_indices),
+                neurons_lr=neurons_lr,
+                is_incoming=is_incoming,
+                tensor_name=tensor_name
+            )
 
     def _add_neurons(
         self,
@@ -755,8 +788,8 @@ class LayerWiseOperations(NeuronWiseOperations):
         nb_neurons = self.get_canal_length(is_incoming) if \
             len(neuron_indices) == 1 else len(neuron_indices)
         # Incoming operation or out operation; chose the right neurons
+        # # TODO (GP): fix hardcoding transpose and norm
         norm = False
-        # # TODO (GP): fix hardcoding transpose
         transposed = int('transpose' in self.get_name().lower())
         in_out_neurons = self.out_neurons if is_incoming else \
             self.in_neurons  # tuple (in_r, out_r)
@@ -921,6 +954,13 @@ if __name__ == "__main__":
     nn_l = len(model.layers)-1
 
     # Neurons Operation
+    # FREEZE
+    with model as m:
+        m.operate(0, 2, neuron_operation=ArchitectureNeuronsOpType.FREEZE)
+        m(dummy_input)
+    with model as m:
+        m.operate(layer_id=3, neuron_operation=ArchitectureNeuronsOpType.FREEZE)
+        m(dummy_input)
     # - To test on The TinyUnet3p example
     # ADD
     # - layer_id = Base layer (Conv_out); same layer (eg batchnorm); multi-inputs layers (eg. tinyUnet3p); recursive layers (eg. tinyUnet3p))
