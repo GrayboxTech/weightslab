@@ -16,35 +16,41 @@ class LayerWiseOperationsTest(unittest.TestCase):
         self.all_layers = {}
 
     # --- SETUP METHODS (To initialize layer instances) ---
-    def _create_layers(self):
+    def _create_layers(self, device: str = 'cpu') -> None:
         # Use an input size that works across 1D/2D/3D (C_in=10, C_out=5)
-        self.all_layers['Linear'] = th.nn.Linear(10, 5)
+        self.all_layers['Linear'] = th.nn.Linear(10, 5).to(device)
 
-        self.all_layers['Conv1d'] = th.nn.Conv1d(10, 5, kernel_size=3)
-        self.all_layers['Conv2d'] = th.nn.Conv2d(10, 5, kernel_size=3)
-        self.all_layers['Conv3d'] = th.nn.Conv3d(10, 5, kernel_size=3)
+        self.all_layers['Conv1d'] = th.nn.Conv1d(10, 5, kernel_size=3).to(
+            device
+        )
+        self.all_layers['Conv2d'] = th.nn.Conv2d(10, 5, kernel_size=3).to(
+            device
+        )
+        self.all_layers['Conv3d'] = th.nn.Conv3d(10, 5, kernel_size=3).to(
+            device
+        )
 
         self.all_layers['ConvTranspose1d'] = th.nn.ConvTranspose1d(
             10,
             5,
             kernel_size=3
-        )
+        ).to(device)
         self.all_layers['ConvTranspose2d'] = th.nn.ConvTranspose2d(
             10,
             5,
             kernel_size=3
-        )
+        ).to(device)
         self.all_layers['ConvTranspose3d'] = th.nn.ConvTranspose3d(
             10,
             5,
             kernel_size=3
-        )
+        ).to(device)
 
         # BatchNorm layers have 'num_features' which corresponds to the
         # channel count
-        self.all_layers['BatchNorm1d'] = th.nn.BatchNorm1d(5)
-        self.all_layers['BatchNorm2d'] = th.nn.BatchNorm2d(5)
-        self.all_layers['BatchNorm3d'] = th.nn.BatchNorm3d(5)
+        self.all_layers['BatchNorm1d'] = th.nn.BatchNorm1d(5).to(device)
+        self.all_layers['BatchNorm2d'] = th.nn.BatchNorm2d(5).to(device)
+        self.all_layers['BatchNorm3d'] = th.nn.BatchNorm3d(5).to(device)
 
         # Apply the required patch
         for layer in self.all_layers.values():
@@ -58,14 +64,12 @@ class LayerWiseOperationsTest(unittest.TestCase):
             device: th.device
     ):
 
-        self._create_layers()
+        self._create_layers(device=device)
         layer_instance = self.all_layers.get(layer_key)
+        layer_instance.to(device)  # Update tracker device 
 
         if layer_instance is None:
             self.fail(f"Layer key '{layer_key}' not found in setup.")
-
-        # Set Device
-        layer_instance.to(device)
 
         # Check if layer has module id
         # Will raise error if module_id is not set or function not found
@@ -439,6 +443,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
             # --- Incoming ---
             if len(layer_instance.weight.shape) > 1:
                 # RESET must preserve the number of parameters
+                initial_weights_sum = layer_instance.weight.sum()
                 layer_instance.operate(
                     neuron_indices={},
                     is_incoming=False,
@@ -455,6 +460,13 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"be preserved). Init:{initial_nb_trainable_parameters}," +
                     f"Final:{final_nb_trainable_parameters}"
                 )
+                self.assertNotEqual(
+                    initial_weights_sum,
+                    layer_instance.weight.sum(),
+                    f"[{layer_key}/{op_name}] changed weights (should be " +
+                    f"preserved). Init:{initial_weights_sum}," +
+                    f"Final:{layer_instance.weight.sum()}"
+                )
 
 
 # --- DYNAMIC TEST GENERATION ---
@@ -465,9 +477,9 @@ LAYER_KEYS = [
 ]
 
 OPERATIONS = [
-    # ArchitectureNeuronsOpType.ADD,
-    # ArchitectureNeuronsOpType.PRUNE,
-    # ArchitectureNeuronsOpType.RESET,
+    ArchitectureNeuronsOpType.ADD,
+    ArchitectureNeuronsOpType.PRUNE,
+    ArchitectureNeuronsOpType.RESET,
     ArchitectureNeuronsOpType.FREEZE
 ]
 
@@ -503,20 +515,21 @@ for layer_key in LAYER_KEYS:
         setattr(
             LayerWiseOperationsTest,
             test_method_cpu.__name__,
-            test_method_cpu
+            test_method_cpu 
         )
 
         # 2. CUDA Test
-        test_method_cuda = _create_test_method(
-            op,
-            layer_key,
-            th.device('cuda')
-        )
-        setattr(
-            LayerWiseOperationsTest,
-            test_method_cuda.__name__,
-            test_method_cuda
-        )
+        if th.cuda.is_available():
+            test_method_cuda = _create_test_method(
+                op,
+                layer_key,
+                th.device('cuda')
+            )
+            setattr(
+                LayerWiseOperationsTest,
+                test_method_cuda.__name__,
+                test_method_cuda
+            )
 
 
 if __name__ == '__main__':
