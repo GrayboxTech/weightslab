@@ -463,12 +463,16 @@ class LayerWiseOperations(NeuronWiseOperations):
         # neurons.
         # Both neuron indices and original exists because sometime with bypass
         # flag, both can be different.
-        neuron_indices, original_neuron_indices = \
-            self._process_neurons_indices(
-                neuron_indices,
-                is_incoming=is_incoming,
-                **kwargs
-            )
+        if isinstance(neuron_indices, int) or isinstance(neuron_indices, set) and \
+                len(neuron_indices) > 0:
+            neuron_indices, original_neuron_indices = \
+                self._process_neurons_indices(
+                    neuron_indices,
+                    is_incoming=is_incoming,
+                    **kwargs
+                )
+        else:
+            original_neuron_indices = neuron_indices
 
         # Sanity check if neuron_indices is correctly defined
         if not len(neuron_indices) and \

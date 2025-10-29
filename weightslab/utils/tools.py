@@ -628,6 +628,9 @@ def get_layer_trainable_parameters_neuronwise(layer: th.nn.Module):
     """
         Count the number of neurons with associated lr != 0.
     """
+    # TODO (GP) Review function; seems like not working as expected with conv.
+    # TODO (GP) when having kernel size (counts now only in out params. wo.
+    # TODO (GP) corr. to kernel weights).
     trainable_params = 0
     for learnable_tensor_name in layer.learnable_tensors_name:
         trainable_params += getattr(layer, learnable_tensor_name).numel()
