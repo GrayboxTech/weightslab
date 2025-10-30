@@ -224,27 +224,6 @@ class TriggersTracker(Tracker):
                 self.number_of_neurons).long().to(self.device) * bs
         except RuntimeError as err:
             raise err
-            # raise ValueError(
-            #     f"Number of neurons in the input {tensor.shape[1]} differs "
-            #     f"from tracked neurons {self.number_of_neurons}.") from err
-
-    def reorder(self, indices: List[int]):
-        neurons = set(range(self.number_of_neurons))
-
-        if not set(indices) & neurons:
-            raise ValueError(
-                f"TriggersTracker.reorder indices and neurons set do not "
-                f"overlap: {indices} & {neurons} => {indices & neurons}")
-
-        triggrs_by_neuron = th.zeros_like(self.triggrs_by_neuron)
-        updates_by_neuron = th.zeros_like(self.updates_by_neuron)
-        for index_dest, index_from in enumerate(indices):
-            triggrs_by_neuron[index_dest] = self.triggrs_by_neuron[index_from]
-            updates_by_neuron[index_dest] = self.updates_by_neuron[index_from]
-        self.triggrs_by_neuron = triggrs_by_neuron
-        self.updates_by_neuron = updates_by_neuron
-
-        self.to(self.device)
 
     def prune(self, indices: Set[int], update_neuron_count: bool = True):
         neurons = set(range(self.number_of_neurons))

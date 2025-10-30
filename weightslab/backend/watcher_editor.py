@@ -55,7 +55,10 @@ class WatcherEditor(NetworkWithOps):
         self.tracking_mode = TrackingMode.DISABLED
         self.name = "Test Architecture Model"
         self.model = model.to(device)
-        self.dummy_input = dummy_input.to(device)
+        if dummy_input is not None:
+            self.dummy_input = dummy_input.to(device)
+        else:
+            self.dummy_input = th.randn(model.input_shape).to(device)
         self.print_graph = print_graph
         self.print_graph_filename = print_graph_filename
         self.traced_model = symbolic_trace(model)
@@ -72,6 +75,9 @@ class WatcherEditor(NetworkWithOps):
 
         # Generate the graph dependencies
         self.define_deps()
+
+        # Clean
+        del self.traced_model
 
     def __enter__(self):
         """
@@ -164,35 +170,6 @@ class WatcherEditor(NetworkWithOps):
         # Return every model layers with ops
         childs = list(self.model.children())
         return childs
-    
-    def generate_graph_vizu(self):
-        """Generates a visualization of the model's computational graph.
-
-        This method creates a visual representation of the `self.traced_model`'s
-        computational graph, including details about dependencies between layers.
-        The visualization is generated only if `self.print_graph` is True.
-        It uses `generate_graph_dependencies` to determine the connections
-        and `plot_fx_graph_with_details` to render the graph to a file.
-
-        Args:
-            self: The instance of the WatcherEditor class.
-
-        Returns:
-            None: This method does not return any value; it generates a file
-            as a side effect if `self.print_graph` is True.
-        """
-        if self.print_graph:
-            print("--- Generated Graph Dependencies (FX Tracing) ---")
-            or_dependencies = generate_graph_dependencies(
-                self.model,
-                self.traced_model
-            )
-            plot_fx_graph_with_details(
-                self.traced_model,
-                custom_dependencies=or_dependencies,
-
-                filename=self.print_graph_filename
-            )
 
     def generate_graph_vizu(self):
         """Generates a visualization of the model's computational graph.
@@ -270,9 +247,47 @@ class WatcherEditor(NetworkWithOps):
 
         return out
 
+    def state_dict(self):
+        """
+        Returns the state dictionary of the wrapped model.
+
+        This method provides a way to access the `state_dict` of the underlying
+        `self.model`, which is essential for saving and loading model parameters
+        (weights, biases, etc.). It acts as a proxy to the original PyTorch
+        model's `state_dict` method.
+
+        Returns:
+            dict: A dictionary containing a whole state of the module.
+        """
+        return super().state_dict()
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """
+        Loads the model's parameters and buffers from a state dictionary.
+
+        This method is a wrapper around the underlying PyTorch model's
+        `load_state_dict` method. It allows for loading a pre-trained model's
+        state, including weights and biases, into the current model instance.
+
+        Args:
+            state_dict (dict): A dictionary containing parameters and
+                persistent buffers.
+            strict (bool, optional): Whether to strictly enforce that the keys
+                in `state_dict` match the keys returned by this module's
+                `state_dict()` method. Defaults to True.
+            assign (bool, optional): Whether to copy the data from `state_dict`
+                into the module's parameters and buffers. Defaults to False.
+
+        Returns:
+            NamedTuple: A named tuple with `missing_keys` and `unexpected_keys` fields,
+            detailing any discrepancies between the provided `state_dict` and the
+            model's own state dictionary.
+        """
+        return super().load_state_dict(state_dict, strict, assign)
+
 
 if __name__ == "__main__":
-    from weightslab.weightslab.tests.torch_models import FashionCNN as Model
+    from weightslab.tests.torch_models import FashionCNN as Model
 
     # Setup prints
     setup_logging('DEBUG')

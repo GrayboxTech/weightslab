@@ -216,6 +216,8 @@ class NetworkWithOps(nn.Module):
         if not isinstance(layer_id, int):
             raise ValueError(
                 f"[NetworkWithOps.operate] Layer_id ({layer_id}) is not int.")
+        # Convert to index from back
+        layer_id = (len(self.layers) + layer_id) if layer_id < 0 else layer_id
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.operate] No module with id {layer_id}")
@@ -418,7 +420,7 @@ class NetworkWithOps(nn.Module):
         state[prefix + 'tracking_mode'] = self.tracking_mode
         return state
 
-    def _load_from_state_dict(
+    def load_from_state_dict(
             self, state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs):
         self.seen_samples = state_dict[prefix + 'seen_samples']
@@ -426,6 +428,13 @@ class NetworkWithOps(nn.Module):
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs)
+
+    def load_state_dict(
+            self, state_dict, strict, assign, **kwargs):
+        self.seen_samples = state_dict['seen_samples']
+        self.tracking_mode = state_dict['tracking_mode']
+        super().load_state_dict(
+            state_dict, strict=strict, assign=assign, **kwargs)
 
     def __repr__(self):
         return super().__repr__() + f" age=({self.seen_samples})"

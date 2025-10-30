@@ -7,7 +7,7 @@ from weightslab.layers.modules_with_ops import \
 from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import \
     check_learnable_module, extract_in_out_params, \
-    get_module_device, rename_with_ops, model_op_neurons
+    get_module_device, rename_with_ops
 
 
 def monkey_patch(module: nn.Module):
@@ -69,7 +69,7 @@ def monkey_patch(module: nn.Module):
 if __name__ == "__main__":
     from torch import nn
     from weightslab.backend.watcher_editor import WatcherEditor
-    from weightslab.weightslab.tests.torch_models import FashionCNNSequential
+    from weightslab.tests.torch_models import FashionCNNSequential
 
     # Setup prints
     setup_logging('DEBUG')

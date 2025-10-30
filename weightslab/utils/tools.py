@@ -648,7 +648,7 @@ def get_layer_trainable_parameters_neuronwise(layer: th.nn.Module):
     return trainable_params
 
 
-def get_model_parameters_neuronwise(model: th.nn.Module):
+def get_model_parameters_neuronwise(model: th.nn.Module, trainable_only=True):
     """
         Get the number of neurons with associated lr!= 0 in the model.
     """
@@ -668,4 +668,5 @@ def get_model_parameters_neuronwise(model: th.nn.Module):
         level='DEBUG'
     )
 
-    return params, trainable_params
+    return (params, trainable_params) if not trainable_only else \
+        trainable_params

@@ -1,4 +1,4 @@
-import os
+import os, time
 import inspect
 import unittest
 import warnings
@@ -72,9 +72,16 @@ class TestAllModelInference(unittest.TestCase):
         structure/shapes.
     """
     def setUp(self):
-        print('Hi, I\'m setting up...')
-    pass
+        print(f"\n--- Start {self._testMethodName} ---\n")
 
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
 def create_inference_test(ModelClass):
     """

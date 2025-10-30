@@ -1,5 +1,5 @@
 """ Tests for model logic."""
-import os
+import os, time
 import warnings
 import unittest
 import tempfile
@@ -25,6 +25,8 @@ TMP_DIR = tempfile.mkdtemp()
 
 class NetworkWithOpsTest(unittest.TestCase):
     def setUp(self) -> None:
+        print(f"\n--- Start {self._testMethodName} ---\n")
+        self.stamp = time.time()
         transform = T.Compose([T.ToTensor()])
         self.test_dir = TMP_DIR
         os.makedirs(self.test_dir, exist_ok=True)
@@ -59,6 +61,15 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         self.optimizer = opt.SGD(
             self.dummy_network.parameters(), lr=1e-3)
+
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
     def _replicated_model(self):
         return WatcherEditor(
@@ -310,17 +321,6 @@ class NetworkWithOpsTest(unittest.TestCase):
             weights_sum_value.item(),
             after_reset_weights_sum_value.item()
         )
-
-    def tearDown(self):
-        """
-        Runs AFTER every single test method (test_...).
-        This is where you should place your final print('\n').
-        """
-        test_name = self._testMethodName
-
-        # 1. Print a final message with the function name
-        print(f"\n--- FINISHED: {test_name} ---\n")
-
 
 
 if __name__ == '__main__':

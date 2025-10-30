@@ -1,4 +1,5 @@
 """ Tests for modules with operations. """
+import time
 import warnings
 import tempfile
 import unittest
@@ -18,8 +19,18 @@ warnings.filterwarnings("ignore")
 
 class LayerWiseOperationsTest(unittest.TestCase):
     def setUp(self) -> None:
+        print(f"\n--- Start {self._testMethodName} ---\n")
         self.test_dir = tempfile.mkdtemp()
         self.all_layers = {}
+
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
     # --- SETUP METHODS (To initialize layer instances) ---
     def _create_layers(self, device: str = 'cpu') -> None:
@@ -472,16 +483,6 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"preserved). Init:{initial_weights_sum}," +
                     f"Final:{layer_instance.weight.sum()}"
                 )
-
-    def tearDown(self):
-        """
-        Runs AFTER every single test method (test_...).
-        This is where you should place your final print('\n').
-        """
-        test_name = self._testMethodName
-
-        # 1. Print a final message with the function name
-        print(f"\n--- FINISHED: {test_name} ---\n")
 
 
 # --- DYNAMIC TEST GENERATION ---
