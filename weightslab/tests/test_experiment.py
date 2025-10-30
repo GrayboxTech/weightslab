@@ -1,4 +1,5 @@
 """Test for the core and main object of the graybox package."""
+import os
 import unittest
 import tempfile
 
@@ -12,25 +13,36 @@ from torchvision import datasets as ds
 
 from weightslab.experiment.experiment import Experiment
 
-from weightslab.weightslab.tests.torch_models import MNISTModel
+from weightslab.tests.torch_models import FashionCNN
 
 
 class ExperimentTest(unittest.TestCase):
     def setUp(self) -> None:
         th.manual_seed(1337)
-        self.temporary_directory = tempfile.mkdtemp()
+        self.temporary_directory = r'C:/Users/GuillaumePelluet/Desktop/trash/'  # tempfile.mkdtemp()
         device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
+        model = FashionCNN()
         transform = T.Compose([T.ToTensor()])
-        data_eval = ds.MNIST("../data", train=False, transform=transform)
+        data_eval = ds.MNIST(
+            os.path.join(self.temporary_directory, "data"),
+            download=True,
+            train=False,
+            transform=transform
+        )
         data_train = ds.MNIST(
-            "../data", train=True, transform=transform, download=True)
+            os.path.join(self.temporary_directory, "data"),
+            train=True,
+            transform=transform,
+            download=True
+        )
 
         self.summary_writer_mock = mock.Mock()
         self.summary_writer_mock.add_scalars = mock.MagicMock()
         self.experiment = Experiment(
-            model=MNISTModel(),
+            model=model,
             optimizer_class=optim.Adam,
             train_dataset=data_train,
+            input_shape=model.input_shape,
             eval_dataset=data_eval,
             device=device,
             learning_rate=1e-3,
@@ -38,7 +50,7 @@ class ExperimentTest(unittest.TestCase):
             name="x0",
             root_log_dir=self.temporary_directory,
             logger=self.summary_writer_mock,
-            train_shuffle=False)        
+            train_shuffle=False)
 
     def test_set_learning_rate(self):
         self.assertEqual(self.experiment.learning_rate, 1e-3)

@@ -1,4 +1,5 @@
 """ Tests for modules with operations. """
+import warnings
 import tempfile
 import unittest
 import torch as th
@@ -6,8 +7,13 @@ import torch as th
 from weightslab.models.monkey_patcher import monkey_patch
 from weightslab.layers.modules_with_ops import \
     ArchitectureNeuronsOpType
-from weightslab.weightslab.utils.tools import \
+from weightslab.utils.tools import \
     get_layer_trainable_parameters_neuronwise
+
+
+# Set Global Default Settings
+th.manual_seed(42)  # Set SEED
+warnings.filterwarnings("ignore")
 
 
 class LayerWiseOperationsTest(unittest.TestCase):
@@ -93,7 +99,6 @@ class LayerWiseOperationsTest(unittest.TestCase):
 
         # --- ASSERTIONS ---
         op_name = op.name
-
         if op == ArchitectureNeuronsOpType.ADD:
             # --- Not Incoming ---
             # 1. Perform the Operation
@@ -468,6 +473,16 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     f"Final:{layer_instance.weight.sum()}"
                 )
 
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        test_name = self._testMethodName
+
+        # 1. Print a final message with the function name
+        print(f"\n--- FINISHED: {test_name} ---\n")
+
 
 # --- DYNAMIC TEST GENERATION ---
 LAYER_KEYS = [
@@ -515,7 +530,7 @@ for layer_key in LAYER_KEYS:
         setattr(
             LayerWiseOperationsTest,
             test_method_cpu.__name__,
-            test_method_cpu 
+            test_method_cpu
         )
 
         # 2. CUDA Test
