@@ -36,7 +36,7 @@ jobs:
     - name: 5. Run Unit Tests
       # Assuming you have a standard 'tests/' directory and use pytest
       run: |
-        python ./weightslab/weightslab/tests/test_watcher_editor.py
+        python ./weightslab/tests/test_watcher_editor.py
         
     - name: 6. Show Test Success or Failure
       if: always()
