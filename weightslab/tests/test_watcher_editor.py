@@ -9,6 +9,7 @@ import importlib.util
 import torch.nn as nn
 
 from typing import Type
+
 from weightslab.models.model_with_ops import ArchitectureNeuronsOpType
 from weightslab.backend.watcher_editor import WatcherEditor
 from weightslab.utils.tools import model_op_neurons, \

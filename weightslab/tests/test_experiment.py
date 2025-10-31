@@ -22,7 +22,6 @@ from weightslab.tests.torch_models import FashionCNN
 
 # Set Global Default Settings
 th.manual_seed(42)  # Set SEED
-warnings.filterwarnings("ignore")
 TMP_DIR = tempfile.mkdtemp()
 DEVICE = th.device("cuda" if th.cuda.is_available() else "cpu")
 

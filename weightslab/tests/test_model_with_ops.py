@@ -7,11 +7,13 @@ import tempfile
 import torch as th
 import torch.optim as opt
 
+from os import path
+from tqdm import trange
 from torch.nn import functional as F
+
 from torchvision import datasets as ds
 from torchvision import transforms as T
-from tqdm import trange
-from os import path
+
 from weightslab.components.tracking import TrackingMode
 from weightslab.backend.watcher_editor import WatcherEditor
 from weightslab.tests.torch_models import FashionCNN as Model

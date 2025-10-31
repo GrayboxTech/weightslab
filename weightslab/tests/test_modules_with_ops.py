@@ -1,6 +1,6 @@
 """ Tests for modules with operations. """
 import time
-import warnings
+import warnings; warnings.filterwarnings("ignore")
 import tempfile
 import unittest
 import torch as th
@@ -14,7 +14,6 @@ from weightslab.utils.tools import \
 
 # Set Global Default Settings
 th.manual_seed(42)  # Set SEED
-warnings.filterwarnings("ignore")
 
 
 class LayerWiseOperationsTest(unittest.TestCase):

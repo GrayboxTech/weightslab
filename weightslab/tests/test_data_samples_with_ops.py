@@ -1,6 +1,7 @@
 import time
 import unittest
 import numpy as np
+import warnings; warnings.filterwarnings("ignore")
 
 from torchvision import datasets as ds
 from torchvision import transforms as T
