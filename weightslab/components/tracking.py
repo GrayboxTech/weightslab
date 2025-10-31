@@ -117,8 +117,8 @@ class TriggersTracker(Tracker):
         super().__init__()
         self.device = device
         self.number_of_neurons = number_of_neurons
-        self.triggrs_by_neuron = th.zeros(number_of_neurons).long()
-        self.updates_by_neuron = th.zeros(number_of_neurons).long()
+        self.triggrs_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
+        self.updates_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
 
     def reset_stats(self):
         """
@@ -135,9 +135,10 @@ class TriggersTracker(Tracker):
         triggers_tuple = tuple(self.triggrs_by_neuron.tolist())
         updates_tuple = tuple(self.updates_by_neuron.tolist())
 
+        # Convert device to string or another immutable representation
         return hash(
             (
-                str(self.device),  # Convert device to string or another immutable representation
+                str(self.device),
                 self.number_of_neurons,
                 triggers_tuple,
                 updates_tuple

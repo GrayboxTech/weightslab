@@ -3,17 +3,21 @@ import time
 import shutil
 import unittest
 import tempfile
-
-from os import path
-
+import warnings; warnings.filterwarnings("ignore")
 import torch as th
 
+from os import path
 
 from weightslab.components.tracking import (
     add_tracked_attrs_to_input_tensor,
     TriggersTracker,
     TriggersTrackerClazzAndSampleID
 )
+
+
+# Set Global Default Settings
+DEVICE = 'cpu' if not th.cuda.is_available() else 'cuda'
+th.manual_seed(42)  # Set SEED
 
 
 class TriggersTrackerTest(unittest.TestCase):
@@ -24,7 +28,7 @@ class TriggersTrackerTest(unittest.TestCase):
     def setUp(self):
         print(f"\n--- Start {self._testMethodName} ---\n")
         self.batch_size = 2
-        self.device = th.device("cpu")
+        self.device = DEVICE
         self.triggers_tracker = TriggersTracker(2, self.device)
         self.test_dir = tempfile.mkdtemp()
         self.stamp = time.time()

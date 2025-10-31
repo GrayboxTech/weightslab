@@ -20,6 +20,9 @@ warnings.filterwarnings("ignore")
 class LayerWiseOperationsTest(unittest.TestCase):
     def setUp(self) -> None:
         print(f"\n--- Start {self._testMethodName} ---\n")
+
+        # Init Variables
+        self.stamp = time.time()
         self.test_dir = tempfile.mkdtemp()
         self.all_layers = {}
 

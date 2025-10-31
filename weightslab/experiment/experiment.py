@@ -16,7 +16,6 @@ from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
 from weightslab.components.monitoring import \
     NeuronStatsWithDifferencesMonitor
 from weightslab.backend.watcher_editor import WatcherEditor
-from weightslab.models.model_with_ops import ArchitectureNeuronsOpType
 
 
 class Experiment:
@@ -48,7 +47,8 @@ class Experiment:
             get_train_data_loader: None = None,
             get_eval_data_loader: None = None,
             skip_loading: bool = False,
-            tasks: list | None = None):
+            tasks: list | None = None
+    ):
 
         self.name = name
         self.model = model
@@ -114,23 +114,17 @@ class Experiment:
                 self.get_eval_data_loader())
         self.eval_iterator = iter(self.eval_loader)
 
-        # Model WatcherEditor
-        self.model = WatcherEditor(
-            self.model,
-            dummy_input=th.randn(self.input_shape),
-            device=device
-        )
-        self.model.to(self.device)
+        # Model WatcherEditor & Registration
+        self.model = self.interface_model()
+        self.model.register_hook_fn_for_architecture_change(
+            lambda model: self._update_optimizer(model))
 
-        self.chkpt_manager = CheckpointManager(root_log_dir)
+        # Initialize CheckpointManager and NeuronStatsWithDifferencesMonitor
         self.stats_monitor = NeuronStatsWithDifferencesMonitor()
-
+        self.chkpt_manager = CheckpointManager(root_log_dir)
         if not skip_loading:
             self.chkpt_manager.load(
                 self.chkpt_manager.get_latest_experiment(), self)
-
-        self.model.register_hook_fn_for_architecture_change(
-            lambda model: self._update_optimizer(model))
 
         if self.criterion.reduction != 'none':
             raise ValueError(
@@ -139,12 +133,20 @@ class Experiment:
 
     def __repr__(self):
         with self.lock:
-            return f"Experiment[{id(self)}, {self.name}] is_train: {self.is_training} " + \
+            return f"Experiment[{id(self)}, {self.name}] " + \
+                f"is_train: {self.is_training} " + \
                 f"steps: {self.training_steps_to_do}"
 
     def _update_optimizer(self, model):
         self.optimizer = self.optimizer_class(
             model.parameters(), lr=self.learning_rate)
+
+    def interface_model(self):
+        return WatcherEditor(
+            self.model,
+            dummy_input=th.randn(self.input_shape),
+            device=self.device
+        )
 
     def register_train_loop_callback(self, callback):
         """Add callback that will be called every train_loop_clbk_freq steps
@@ -218,7 +220,7 @@ class Experiment:
                 continue
             score = float(H * W)
             if HxW and (H, W) == HxW:
-                score += 1e9  
+                score += 1e9
             if score > best_score:
                 best, best_score = p, score
 
@@ -295,8 +297,11 @@ class Experiment:
         try:
             input_in_id_label = next(loader_iterator)
         except Exception as e:
-            # print("Exception in _pass_one_batch: ", e, self.occured_train_steps)
-            # import pdb; pdb.set_trace()
+            print(
+                "Exception in _pass_one_batch: ",
+                e,
+                self.occured_train_steps
+            )
 
             raise StopIteration
 
@@ -336,23 +341,38 @@ class Experiment:
 
                 for t in self.tasks:
                     # each task decides where its targets come from
-                    targets = t.get_targets(input) if hasattr(t, "get_targets") else input.label_batch
-                    losses_batch = t.compute_loss(head_outputs[t.name], targets)
+                    targets = t.get_targets(input) if hasattr(
+                        t,
+                        "get_targets"
+                    ) else input.label_batch
+                    losses_batch = t.compute_loss(
+                        head_outputs[t.name],
+                        targets
+                    )
                     if losses_batch.ndim == 0:  # keep old safety
                         losses_batch = losses_batch.unsqueeze(0)
                     per_task_losses[t.name] = losses_batch.detach()
-                    per_task_preds[t.name] = t.infer_pred(head_outputs[t.name]).detach()
-                    weighted = losses_batch * float(getattr(t, "loss_weight", 1.0))
-                    combined_losses_batch = weighted if combined_losses_batch is None else (combined_losses_batch + weighted)
+                    per_task_preds[t.name] = t.infer_pred(
+                        head_outputs[t.name]
+                    ).detach()
+                    weighted = losses_batch * float(
+                        getattr(t, "loss_weight", 1.0)
+                    )
+                    combined_losses_batch = weighted if combined_losses_batch \
+                        is None else (combined_losses_batch + weighted)
                     loss = loss + weighted.mean()
 
                 try:
                     loss.backward()
                 except Exception as e:
-                    self.chkpt_manager.dump(self, f"crash_{self.name}_bs{self.batch_size}_step{self.performed_train_steps()}")
+                    self.chkpt_manager.dump(
+                        self,
+                        f"crash_{self.name}_bs{self.batch_size}_step" +
+                        f"{self.performed_train_steps()}")
                     print(
                         'Loss backward error, losses_batch shape:',
-                        list(combined_losses_batch.shape) if combined_losses_batch is not None else None,
+                        list(combined_losses_batch.shape)
+                        if combined_losses_batch is not None else None,
                         'current batch_size:', self.batch_size,
                         'error:', str(e)
                     )
@@ -365,7 +385,8 @@ class Experiment:
                         targets = t.get_targets(input)
                         outs = head_outputs[t.name]
                         for mname, metric in t.metrics.items():
-                            m = metric.to(self.device) if hasattr(metric, "to") else metric
+                            m = metric.to(self.device) \
+                                if hasattr(metric, "to") else metric
                             val = m(outs, targets)
                             if hasattr(m, "compute"):
                                 val = m.compute().item()
@@ -373,11 +394,19 @@ class Experiment:
                                     m.reset()
                             elif hasattr(val, "item"):
                                 val = val.item()
-                            self.logger.add_scalars(f"train-{t.name}-{mname}", {self.name: val}, global_step=model_age)
+                            self.logger.add_scalars(
+                                f"train-{t.name}-{mname}",
+                                {self.name: val},
+                                global_step=model_age
+                            )
 
                     for t in self.tasks:
                         lb = per_task_losses[t.name]
-                        self.logger.add_scalars(f"train-loss/{t.name}", {self.name: lb.mean().item()}, global_step=model_age)
+                        self.logger.add_scalars(
+                            f"train-loss/{t.name}",
+                            {self.name: lb.mean().item()},
+                            global_step=model_age
+                        )
 
             else:
                 if self.task_type == "segmentation":
@@ -388,8 +417,9 @@ class Experiment:
                     # Output: (N, C, H, W), argmax over channel dim
                     pred = output.argmax(dim=1)
                 else:
+                    output = output.max(dim=1)[0]
                     losses_batch = self.criterion(
-                        output.flatten(),
+                        output,
                         input.label_batch.flatten().float()
                     )
                     if output.ndim == 1:
@@ -403,7 +433,10 @@ class Experiment:
                 try:
                     loss.backward()
                 except Exception as e:
-                    self.chkpt_manager.dump(self, f"crash_{self.name}_bs{self.batch_size}_step{self.performed_train_steps()}")
+                    self.chkpt_manager.dump(
+                        self,
+                        f"crash_{self.name}_bs{self.batch_size}" +
+                        f"_step{self.performed_train_steps()}")
                     print(
                         'Loss backward error, losses_batch shape:',
                         losses_batch.shape,
@@ -419,7 +452,10 @@ class Experiment:
                 comb_np = combined_losses_batch.detach().cpu().numpy()
 
                 # first_pred = next(iter(per_task_preds.values()))
-                first_pred = self._pick_legacy_dense_pred(per_task_preds, input)
+                first_pred = self._pick_legacy_dense_pred(
+                    per_task_preds,
+                    input
+                )
 
                 self.train_loader.dataset.update_batch_sample_stats(
                     model_age,
@@ -435,7 +471,10 @@ class Experiment:
                 for name, pr in per_task_preds.items():
                     stats_map[f"pred/{name}"] = pr.detach().cpu().numpy()
                 try:
-                    self.train_loader.dataset.update_sample_stats_ex_batch(ids_np, stats_map)
+                    self.train_loader.dataset.update_sample_stats_ex_batch(
+                        ids_np,
+                        stats_map
+                    )
                 except Exception:
                     pass
             else:
@@ -453,7 +492,8 @@ class Experiment:
                         ids_np,
                         {
                             "loss/combined": per_sample_loss_np,
-                            "pred": pred_np  # dense (e.g., seg masks) will be handled/downsampled in the dataset
+                            "pred": pred_np  # dense (e.g., seg masks) will be
+                            # handled/downsampled in the dataset
                         }
                     )
                 except Exception:
@@ -498,7 +538,7 @@ class Experiment:
         Args:
             n (int): The number of steps to be performed.
         """
-        train_range = trange(n, desc='Training..', total=len(n))
+        train_range = trange(n, desc='Training..', total=n)
         try:
             for _ in train_range:
                 self.train_one_step()
@@ -534,16 +574,23 @@ class Experiment:
             combined_losses_batch = None
 
             for t in self.tasks:
-                targets = t.get_targets(input) if hasattr(t, "get_targets") else input.label_batch
+                targets = t.get_targets(input) \
+                    if hasattr(t, "get_targets") else input.label_batch
                 losses_batch = t.compute_loss(head_outputs[t.name], targets)
                 if losses_batch.ndim == 0:
                     losses_batch = losses_batch.unsqueeze(0)
                 per_task_losses[t.name] = losses_batch.detach()
-                per_task_preds[t.name] = t.infer_pred(head_outputs[t.name]).detach()
+                per_task_preds[t.name] = t.infer_pred(
+                    head_outputs[t.name]
+                ).detach()
                 weighted = losses_batch * float(getattr(t, "loss_weight", 1.0))
-                combined_losses_batch = weighted if combined_losses_batch is None else (combined_losses_batch + weighted)
+                combined_losses_batch = weighted \
+                    if combined_losses_batch is None else (
+                        combined_losses_batch + weighted
+                    )
 
-            test_loss = combined_losses_batch.mean() if combined_losses_batch.ndim > 0 else combined_losses_batch
+            test_loss = combined_losses_batch.mean() \
+                if combined_losses_batch.ndim > 0 else combined_losses_batch
 
             model_age = self.model.get_age()
             first_pred = self._pick_legacy_dense_pred(per_task_preds, input)
@@ -554,7 +601,6 @@ class Experiment:
                 first_pred.detach().cpu().numpy()
             )
 
-
             try:
                 ids_np = input.in_id_batch.detach().cpu().numpy()
                 stats_map = {}
@@ -562,7 +608,10 @@ class Experiment:
                     stats_map[f"loss/{name}_eval"] = lb.detach().cpu().numpy()
                 for name, pr in per_task_preds.items():
                     stats_map[f"pred/{name}_eval"] = pr.detach().cpu().numpy()
-                self.eval_loader.dataset.update_sample_stats_ex_batch(ids_np, stats_map)
+                self.eval_loader.dataset.update_sample_stats_ex_batch(
+                    ids_np,
+                    stats_map
+                )
             except Exception:
                 pass
 
@@ -575,7 +624,8 @@ class Experiment:
                     targets = t.get_targets(input)
                     outs = head_outputs[t.name]
                     for mname, metric in t.metrics.items():
-                        m = metric.to(self.device) if hasattr(metric, "to") else metric
+                        m = metric.to(self.device) if hasattr(metric, "to") \
+                            else metric
                         val = m(outs, targets)
                         if hasattr(m, "compute"):
                             val = m.compute().item()
@@ -588,7 +638,11 @@ class Experiment:
                 # also expose per-task mean loss (unweighted) for eval
                 for t in self.tasks:
                     lb = per_task_losses[t.name]
-                    self.logger.add_scalars(f"eval-loss/{t.name}", {self.name: lb.mean().item()}, global_step=model_age)
+                    self.logger.add_scalars(
+                        f"eval-loss/{t.name}",
+                        {self.name: lb.mean().item()},
+                        global_step=model_age
+                    )
             return test_loss, metric_results
 
         if self.task_type == "segmentation":
@@ -605,7 +659,8 @@ class Experiment:
         if losses_batch.ndim == 0:
             losses_batch = losses_batch.unsqueeze(0)
 
-        test_loss = th.sum(losses_batch) if losses_batch.ndim > 0 else losses_batch
+        test_loss = th.sum(losses_batch) if losses_batch.ndim > 0 \
+            else losses_batch
 
         model_age = self.model.get_age()
         self.eval_loader.dataset.update_batch_sample_stats(
@@ -666,7 +721,8 @@ class Experiment:
             mean_metrics = {name: 0.0 for name in self.metrics}
         else:
             mean_loss = losses / count
-            mean_metrics = {name: metric_totals[name] / count for name in self.metrics}
+            mean_metrics = {name: metric_totals[name] / count for name in
+                            self.metrics}
         return mean_loss.cpu(), mean_metrics
 
     @th.no_grad()
@@ -676,7 +732,6 @@ class Experiment:
         mean_loss, mean_metrics = self.eval_n_steps(len(self.eval_loader))
 
         print("eval full: ", mean_loss, mean_metrics)
-
         if not skip_tensorboard:
             self.logger.add_scalars(
                 'eval-loss', {self.name: mean_loss},
@@ -763,33 +818,10 @@ class Experiment:
             self.name = name
 
     def apply_architecture_op(self, op_type, **kwargs):
-        if op_type == ArchitectureNeuronsOpType.ADD:
-            with self.architecture_guard, self.model as model:
-                model.add_neurons(
-                    layer_id=kwargs['layer_id'],
-                    neuron_count=kwargs['neuron_count'],
-                    skip_initialization=kwargs.get(
-                        'skip_initialization',
-                        False
-                    )
-                )
-        elif op_type == ArchitectureNeuronsOpType.PRUNE:
-            with self.architecture_guard:
-                self.model.prune(
-                    layer_id=kwargs['layer_id'],
-                    neuron_indices=kwargs['neuron_indices']
-                )
-        elif op_type == ArchitectureNeuronsOpType.RESET:
-            with self.architecture_guard:
-                self.model.reinit_neurons(
-                    layer_id=kwargs['layer_id'],
-                    neuron_indices=kwargs['neuron_indices']
-                )
-        elif op_type == ArchitectureNeuronsOpType.FREEZE:
-            with self.architecture_guard:
-                self.model.freeze(
-                    layer_id=kwargs['layer_id'],
-                    neuron_ids=kwargs['neuron_ids']
-                )
-        else:
-            raise ValueError(f"Unsupported op_type: {op_type}")
+        # Operate
+        with self.architecture_guard, self.model as model:
+            model.operate(
+                layer_id=kwargs['layer_id'],
+                neuron_indices=kwargs['neuron_ids'],
+                neuron_operation=op_type
+            )

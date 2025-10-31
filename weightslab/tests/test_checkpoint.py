@@ -1,43 +1,83 @@
-import torch as th
+import os
+import time
+import warnings; warnings.filterwarnings("ignore")
 import unittest
 import tempfile
-
-from torch import optim
-from torchvision import transforms as T
-from torchvision import datasets as ds
+import torch as th
 
 from unittest import mock
 
-from graybox.checkpoint import CheckpointManager
-from graybox.experiment import Experiment
 
-from .torch_models import MNISTModel
+from torchvision import transforms as T
+from torchvision import datasets as ds
+
+from weightslab.tests.torch_models import FashionCNN
+from weightslab.experiment.experiment import Experiment
+from weightslab.components.checkpoint import CheckpointManager
+
+
+# Set Global Default Settings
+th.manual_seed(42)  # Set SEED
+TMP_DIR = tempfile.mkdtemp()
+DEVICE = th.device("cuda" if th.cuda.is_available() else "cpu")
 
 
 class CheckpointManagerTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary_directory = tempfile.mkdtemp()
+        print(f"\n--- Start {self._testMethodName} ---\n")
+
+        # Init Variables
+        self.stamp = time.time()
+        self.temporary_directory = TMP_DIR
+
+        # Initialize the checkpoint manager
         self.checkpoint_manager = CheckpointManager(self.temporary_directory)
 
-        th.manual_seed(1337)
-        device = th.device("cuda:0")
-        transform = T.Compose([T.ToTensor()])
+        # Instanciate the model
+        model = FashionCNN()
 
+        # Dataset initialization
+        data_eval = ds.MNIST(
+            os.path.join(self.temporary_directory, "data"),
+            download=True,
+            train=False,
+            transform=T.Compose([T.ToTensor()])
+        )
+        data_train = ds.MNIST(
+            os.path.join(self.temporary_directory, "data"),
+            train=True,
+            transform=T.Compose([T.ToTensor()]),
+            download=True
+        )
+
+        # Mock the summary writer
         self.summary_writer_mock = mock.Mock()
         self.summary_writer_mock.add_scalars = mock.MagicMock()
+
+        # Initialize the experiment
         self.experiment = Experiment(
-            model=MNISTModel(),
-            optimizer_class=optim.Adam,
-            train_dataset=ds.MNIST(
-                "../data", train=True, transform=transform, download=True),
-            eval_dataset=ds.MNIST("../data", train=False, transform=transform),
-            device=device,
+            model=model,
+            optimizer_class=th.optim.Adam,
+            input_shape=model.input_shape,
+            train_dataset=data_train,
+            eval_dataset=data_eval,
+            device=DEVICE,
             learning_rate=1e-3,
             batch_size=32,
             name="x0",
             root_log_dir=self.temporary_directory,
             logger=self.summary_writer_mock,
-            train_shuffle=False) 
+            train_shuffle=False
+        )
+
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
     def test_three_dumps_one_load(self):
         # Dump a untrained model into checkpoint.

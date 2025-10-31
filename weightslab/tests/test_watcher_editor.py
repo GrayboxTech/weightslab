@@ -1,7 +1,8 @@
-import os, time
+import os
+import time
 import inspect
 import unittest
-import warnings
+import warnings; warnings.filterwarnings("ignore")
 import traceback
 import torch as th
 import importlib.util
@@ -18,7 +19,6 @@ from weightslab.utils.logs import print
 # Set Global Default Settings
 DEVICE = 'cpu' if not th.cuda.is_available() else 'cuda'
 th.manual_seed(42)  # Set SEED
-warnings.filterwarnings("ignore")
 
 
 # 1. Utility function to dynamically find model classes (from previous answer)
@@ -73,6 +73,7 @@ class TestAllModelInference(unittest.TestCase):
     """
     def setUp(self):
         print(f"\n--- Start {self._testMethodName} ---\n")
+        self.stamp = time.time()
 
     def tearDown(self):
         """
@@ -82,6 +83,7 @@ class TestAllModelInference(unittest.TestCase):
         print(
             f"\n--- FINISHED: {self._testMethodName} in " +
             f"{time.time()-self.stamp}s ---\n")
+
 
 def create_inference_test(ModelClass):
     """
