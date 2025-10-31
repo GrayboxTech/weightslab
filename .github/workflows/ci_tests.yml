@@ -57,8 +57,8 @@ jobs:
         # python ./tests/test_checkpoint.py
         # python ./tests/test_data_samples_with_ops.py
         # python ./tests/test_experiment.py
-        python ./tests/test_model_with_ops.py
-        #python ./tests/test_modules_with_ops.py
+        # python ./tests/test_model_with_ops.py
+        python ./tests/test_modules_with_ops.py
         #python ./tests/test_tracking.py
         #python ./tests/test_watcher_editor.py
 
