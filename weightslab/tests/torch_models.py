@@ -5,9 +5,11 @@
     batch normalization, and max pooling that are useful to stress test
     our neuron operations.
 """
+import warnings; warnings.filterwarnings("ignore")
 import torch as th
 import torch.nn as nn
 import torchvision.models as models
+
 from torch.nn import functional as F
 
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
@@ -36,13 +38,14 @@ class FashionCNN(nn.Module):
         # Classifier Block (Includes Flatten)
         # Automatically flattens the BxCxHxW tensor to Bx(C*H*W)
         self.f3 = nn.Flatten()
-        self.fc3 = nn.Linear(in_features=4 * 6 * 6, out_features=10)
-        self.s3 = nn.Softmax(dim=1)
+        self.fc3 = nn.Linear(in_features=4 * 6 * 6, out_features=64)
+        self.fc4 = nn.Linear(in_features=64, out_features=10)
+        self.s4 = nn.Softmax(dim=1)
 
     def forward(self, x):
         x = self.m1(self.r1(self.b1(self.c1(x))))
         x = self.m2(self.r2(self.b2(self.c2(x))))
-        x = self.s3(self.fc3(self.f3(x)))
+        x = self.s4(self.fc4(self.fc3(self.f3(x))))
         return x
 
 
@@ -491,7 +494,7 @@ class TinyUNet_Straightforward(nn.Module):
         )
         # Dual conv after cat (In: 16 (bottleneck) + 8 (skip) = 24 -> Out: 8)
         self.up_conv1 = nn.Sequential(
-            nn.Conv2d(c[2] + c[1], c[1], kernel_size=3, padding=1),
+            nn.Conv2d(c[2] + c[1] + c[1], c[1], kernel_size=3, padding=1),
             nn.BatchNorm2d(c[1]),
             nn.ReLU(inplace=True),
             nn.Conv2d(c[1], c[1], kernel_size=3, padding=1),
@@ -513,7 +516,7 @@ class TinyUNet_Straightforward(nn.Module):
 
         # 3. DECODER 1: Interp + Concat (x1) + Conv
         up_b = self.up_interp1(bottleneck)
-        merged1 = th.cat([x1, up_b], dim=1)
+        merged1 = th.cat([x1, self.up_interp1(p1), up_b], dim=1)
         d1 = self.up_conv1(merged1)
 
         # 4. OUTPUT
@@ -1041,3 +1044,477 @@ class TwoLayerUnflattenNet(th.nn.Module):
         y_pred = self.conv3(x_reshaped)
 
         return y_pred
+
+
+class ToyAvgPoolNet(nn.Module):
+    """
+    A simple Convolutional Neural Network (CNN) demonstrating the use of
+    nn.AvgPool2d to downsample feature maps.
+    """
+    def __init__(self, in_channels=3, num_classes=10):
+        super().__init__()
+        self.input_shape = (1, 3, 32, 32)
+
+        # 1. Feature Extraction Layers
+        self.features = nn.Sequential(
+            # Input: B x 3 x 32 x 32
+            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            # Output: B x 16 x 32 x 32
+
+            # Max Pooling (Standard method for downsampling)
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Output: B x 16 x 16 x 16 (Spatial dimensions halved)
+
+            # Groups = 1
+            nn.Conv2d(16, 32, kernel_size=3, padding=1, groups=1),
+            nn.ReLU(),
+            # Output: B x 32 x 16 x 16
+
+            # 1 < Groups > In_channels
+            nn.Conv2d(32, 32, kernel_size=3, padding=1, groups=4),
+            nn.ReLU(),
+            # Output: B x 32 x 16 x 16
+
+            # # Groups = In_channels
+            # nn.Conv2d(32, 32, kernel_size=3, padding=1, groups=32),
+            # nn.ReLU(),
+            # # Output: B x 32 x 16 x 16
+
+            # Average Pooling (The requested layer)
+            nn.AvgPool2d(kernel_size=2, stride=2)
+            # Output: B x 32 x 8 x 8 (Spatial dimensions halved again)
+        )
+
+        # Calculate the size of the flattened tensor for the Linear layer
+        # 32 channels * 8 H * 8 W = 2048 features
+        self.flatten_size = 32 * 8 * 8
+
+        # 2. Classifier Head
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.flatten_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        # Pass through convolutional features
+        x = self.features(x)
+
+        # Pass through classifier head
+        x = self.classifier(x)
+        return x
+
+
+class UNet(nn.Module):
+    """
+    A full U-Net implementation contained within a single class,
+    using nn.Sequential for all core DoubleConv blocks.
+
+    This architecture is designed for semantic segmentation tasks.
+    """
+    def __init__(self, n_channels=3, n_classes=1):
+        super(UNet, self).__init__()
+        self.input_shape = (1, n_channels, 256, 256)
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+
+        # Helper function to define the DoubleConv block as an nn.Sequential
+        def double_conv(in_c, out_c):
+            return nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True)
+            )
+
+        # ------------------ ENCODER (Downsampling Path) ------------------
+        # 0. Initial Layer
+        self.inc = double_conv(n_channels, 64)
+
+        # 1. Down 1 (Max pool + Conv)
+        self.down1_pool = nn.MaxPool2d(2)
+        self.down1_conv = double_conv(64, 128)
+
+        # 2. Down 2
+        self.down2_pool = nn.MaxPool2d(2)
+        self.down2_conv = double_conv(128, 256)
+
+        # 3. Down 3
+        self.down3_pool = nn.MaxPool2d(2)
+        self.down3_conv = double_conv(256, 512)
+
+        # 4. Down 4 (Bottleneck)
+        self.down4_pool = nn.MaxPool2d(2)
+        self.down4_conv = double_conv(512, 1024)
+
+        # ------------------ DECODER (Upsampling Path) ------------------
+        # 1. Up 1 (Upsample + Conv + Skip Connection)
+        self.up1_up = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.up1_conv = double_conv(1024, 512)  # Input channels: 512 (from up) + 512 (from skip) = 1024
+
+        # 2. Up 2
+        self.up2_up = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.up2_conv = double_conv(512, 256)  # Input channels: 256 + 256 = 512
+
+        # 3. Up 3
+        self.up3_up = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.up3_conv = double_conv(256, 128)  # Input channels: 128 + 128 = 256
+
+        # 4. Up 4
+        self.up4_up = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.up4_conv = double_conv(128, 64)  # Input channels: 64 + 64 = 128
+
+        # ------------------ OUTPUT Layer ------------------
+        # 1x1 convolution to map the final feature channels (64) to the number of classes
+        self.outc = nn.Conv2d(64, n_classes, kernel_size=1)
+
+    def forward(self, x):
+        # ------------------ ENCODER (Store for skip connections) ------------------
+        x1 = self.inc(x)
+
+        x2 = self.down1_pool(x1)
+        x2 = self.down1_conv(x2)
+
+        x3 = self.down2_pool(x2)
+        x3 = self.down2_conv(x3)
+
+        x4 = self.down3_pool(x3)
+        x4 = self.down3_conv(x4)
+
+        x5 = self.down4_pool(x4)
+        x5 = self.down4_conv(x5)  # This is the bottleneck feature map (lowest resolution)
+
+        # ------------------ DECODER (Concatenate and Convolve) ------------------
+        # Up 1
+        x = self.up1_up(x5)  # Upsample x5
+        x = self._align_and_concat(x, x4)
+        x = self.up1_conv(x)
+
+        # Up 2
+        x = self.up2_up(x)
+        x = self._align_and_concat(x, x3)
+        x = self.up2_conv(x)
+
+        # Up 3
+        x = self.up3_up(x)
+        x = self._align_and_concat(x, x2)
+        x = self.up3_conv(x)
+
+        # Up 4
+        x = self.up4_up(x)
+        x = self._align_and_concat(x, x1)
+        x = self.up4_conv(x)
+
+        # ------------------ OUTPUT ------------------
+        logits = self.outc(x)
+
+        return logits
+
+    def _align_and_concat(self, upsampled, skip):
+        """
+        Helper method to align upsampled tensor size to match the skip connection.
+        Uses F.interpolate, which is tracer-friendly.
+
+        Args:
+            upsampled (Tensor): The upsampled tensor from the decoder path.
+            skip (Tensor): The higher-resolution tensor from the encoder (skip connection).
+
+        Returns:
+            Tensor: The concatenated tensor.
+        """
+        # Explicitly resize the upsampled tensor to match the spatial dimensions of the skip connection
+        # skip.shape[-2:] extracts (H, W)
+        upsampled = F.interpolate(
+            upsampled,
+            size=skip.shape[-2:],
+            mode='bilinear',
+            align_corners=False  # Set to False for compatibility and best practice
+        )
+
+        # Concatenate along the channel dimension (dim=1)
+        return th.cat([skip, upsampled], dim=1)
+
+
+# TODO (GP): Not working now: indexing dict not updated from src edges for dst or inverse
+# class UNet3p(nn.Module):
+#     """
+#     UNet 3+ Architecture for Semantic Segmentation.
+    
+#     This single-class implementation uses full-scale skip connections to 
+#     combine multi-scale features for high-resolution output.
+    
+#     Note: Deep Supervision is often used but is omitted here for simplicity 
+#     and focusing on the core feature fusion logic.
+#     """
+#     def __init__(self, n_channels=3, n_classes=1, filter_list=[64, 128, 256, 512, 1024]):
+#         super(UNet3p, self).__init__()
+#         self.input_shape = (1, n_channels, 256, 256)
+#         self.n_channels = n_channels
+#         self.n_classes = n_classes
+#         self.filters = filter_list # [F1, F2, F3, F4, F5]
+#         self.F_cat = self.filters[0] * 5 # Total channels in feature concatenation (e.g., 64 * 5 = 320)
+
+#         # ------------------- Internal Building Blocks -------------------
+        
+#         # Helper for a simple 3x3 Conv -> BN -> ReLU block
+#         def conv_block(in_c, out_c):
+#             return nn.Sequential(
+#                 nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+#                 nn.BatchNorm2d(out_c),
+#                 nn.ReLU(inplace=True)
+#             )
+#         self.ConvBlock = conv_block
+
+#         # Helper for a Double Conv block (used for standard encoder layers)
+#         def double_conv(in_c, out_c):
+#             return nn.Sequential(
+#                 nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+#                 nn.BatchNorm2d(out_c),
+#                 nn.ReLU(inplace=True),
+#                 nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
+#                 nn.BatchNorm2d(out_c),
+#                 nn.ReLU(inplace=True)
+#             )
+        
+#         # ------------------- ENCODER (Downsampling Path) -------------------
+        
+#         # E1, E2, E3, E4 are standard double convolutions
+#         self.conv1 = double_conv(n_channels, self.filters[0])
+#         self.pool1 = nn.MaxPool2d(kernel_size=2)
+        
+#         self.conv2 = double_conv(self.filters[0], self.filters[1])
+#         self.pool2 = nn.MaxPool2d(kernel_size=2)
+        
+#         self.conv3 = double_conv(self.filters[1], self.filters[2])
+#         self.pool3 = nn.MaxPool2d(kernel_size=2)
+        
+#         self.conv4 = double_conv(self.filters[2], self.filters[3])
+#         self.pool4 = nn.MaxPool2d(kernel_size=2)
+
+#         # E5 is the Bottleneck
+#         self.conv5 = double_conv(self.filters[3], self.filters[4])
+
+
+#         # ------------------- DECODER (Upsampling Path with Full-Scale Fusion) -------------------
+#         # Decoder D4 (Input: E1, E2, E3 (Downsampled); E5 (Upsampled); D5 (Upsampled, from D5 in paper) - simplified here)
+#         # To match E1, E2, E3: need to downsample E1, E2, E3
+#         self.h1_L4 = conv_block(self.filters[0], self.F_cat) # E1 -> D4 (down by 8x)
+#         self.h2_L4 = conv_block(self.filters[1], self.F_cat) # E2 -> D4 (down by 4x)
+#         self.h3_L4 = conv_block(self.filters[2], self.F_cat) # E3 -> D4 (down by 2x)
+#         self.h4_L4 = conv_block(self.filters[3], self.F_cat) # E4 -> D4 (same scale)
+#         self.h5_L4 = conv_block(self.filters[4], self.F_cat) # E5 -> D4 (up by 2x)
+#         self.up_conv4 = double_conv(5 * self.F_cat, self.filters[3]) # Final D4 convolution
+
+#         # Decoder D3 (Input: E1, E2 (Downsampled); E4, E5 (Upsampled); D4 (Upsampled))
+#         self.h1_L3 = conv_block(self.filters[0], self.F_cat) # E1 -> D3 (down by 4x)
+#         self.h2_L3 = conv_block(self.filters[1], self.F_cat) # E2 -> D3 (down by 2x)
+#         self.h3_L3 = conv_block(self.filters[2], self.F_cat) # E3 -> D3 (same scale)
+#         self.h4_L3 = conv_block(self.filters[3], self.F_cat) # D4 -> D3 (up by 2x)
+#         self.h5_L3 = conv_block(self.filters[4], self.F_cat) # E5 -> D3 (up by 4x)
+#         self.up_conv3 = double_conv(5 * self.F_cat, self.filters[2]) # Final D3 convolution
+
+#         # Decoder D2 (Input: E1 (Downsampled); E3, E4, E5 (Upsampled); D3 (Upsampled))
+#         self.h1_L2 = conv_block(self.filters[0], self.F_cat) # E1 -> D2 (down by 2x)
+#         self.h2_L2 = conv_block(self.filters[1], self.F_cat) # E2 -> D2 (same scale)
+#         self.h3_L2 = conv_block(self.filters[2], self.F_cat) # D3 -> D2 (up by 2x)
+#         self.h4_L2 = conv_block(self.filters[3], self.F_cat) # D4 -> D2 (up by 4x)
+#         self.h5_L2 = conv_block(self.filters[4], self.F_cat) # E5 -> D2 (up by 8x)
+#         self.up_conv2 = double_conv(5 * self.F_cat, self.filters[1]) # Final D2 convolution
+
+#         # Decoder D1 (Input: E2, E3, E4, E5 (Upsampled); D2 (Upsampled))
+#         self.h1_L1 = conv_block(self.filters[0], self.F_cat) # E1 -> D1 (same scale)
+#         self.h2_L1 = conv_block(self.filters[1], self.F_cat) # D2 -> D1 (up by 2x)
+#         self.h3_L1 = conv_block(self.filters[2], self.F_cat) # D3 -> D1 (up by 4x)
+#         self.h4_L1 = conv_block(self.filters[3], self.F_cat) # D4 -> D1 (up by 8x)
+#         self.h5_L1 = conv_block(self.filters[4], self.F_cat) # E5 -> D1 (up by 16x)
+#         self.up_conv1 = double_conv(5 * self.F_cat, self.filters[0]) # Final D1 convolution
+        
+#         # ------------------- FINAL Output Layer -------------------
+#         self.outc = nn.Conv2d(self.filters[0], n_classes, kernel_size=1)
+
+
+#     # Helper function for resizing tensors
+#     def _interpolate_to_size(self, x, size):
+#         return F.interpolate(x, size=size, mode='bilinear', align_corners=True)
+
+#     def forward(self, x):
+#         H, W = x.shape[-2:] # Store original size for final output
+
+#         # ------------------- ENCODER -------------------
+#         # E1 (64 channels) - Size H/1
+#         e1 = self.conv1(x)
+#         p1 = self.pool1(e1) # Size H/2
+
+#         # E2 (128 channels)
+#         e2 = self.conv2(p1) 
+#         p2 = self.pool2(e2) # Size H/4
+
+#         # E3 (256 channels)
+#         e3 = self.conv3(p2) 
+#         p3 = self.pool3(e3) # Size H/8
+
+#         # E4 (512 channels)
+#         e4 = self.conv4(p3) 
+#         p4 = self.pool4(e4) # Size H/16
+
+#         # E5 (1024 channels) - Bottleneck
+#         e5 = self.conv5(p4) # Size H/16
+
+#         # ------------------- DECODER D4 (Size H/8) -------------------
+#         # All inputs are brought to the spatial size of E3 (H/8)
+
+#         # 1. Input from E1 (Down 8x)
+#         h1_d4 = self.h1_L4(self._interpolate_to_size(e1, e3.shape[-2:]))
+
+#         # 2. Input from E2 (Down 4x)
+#         h2_d4 = self.h2_L4(self._interpolate_to_size(e2, e3.shape[-2:]))
+
+#         # 3. Input from E3 (Down 2x)
+#         h3_d4 = self.h3_L4(self._interpolate_to_size(e3, e3.shape[-2:]))
+
+#         # 4. Input from E4 (Same Scale)
+#         h4_d4 = self.h4_L4(self._interpolate_to_size(e4, e3.shape[-2:]))
+
+#         # 5. Input from E5 (Up 2x)
+#         h5_d4 = self.h5_L4(self._interpolate_to_size(e5, e3.shape[-2:]))
+
+#         # Concatenate and convolve
+#         d4 = th.cat((h1_d4, h2_d4, h3_d4, h4_d4, h5_d4), dim=1)
+#         d4 = self.up_conv4(d4) # Output D4 (512 channels, Size H/8)
+
+#         # ------------------- DECODER D3 (Size H/4) -------------------
+#         # All inputs are brought to the spatial size of E2 (H/4)
+
+#         # 1. Input from E1 (Down 4x)
+#         h1_d3 = self.h1_L3(self._interpolate_to_size(e1, e2.shape[-2:]))
+
+#         # 2. Input from E2 (Down 2x)
+#         h2_d3 = self.h2_L3(self._interpolate_to_size(e2, e2.shape[-2:]))
+
+#         # 3. Input from E3 (Same Scale)
+#         h3_d3 = self.h3_L3(self._interpolate_to_size(e3, e2.shape[-2:]))
+
+#         # 4. Input from D4 (Up 2x)
+#         h4_d3 = self.h4_L3(self._interpolate_to_size(d4, e2.shape[-2:]))
+
+#         # 5. Input from E5 (Up 4x)
+#         h5_d3 = self.h5_L3(self._interpolate_to_size(e5, e2.shape[-2:]))
+
+#         # Concatenate and convolve
+#         d3 = th.cat((h1_d3, h2_d3, h3_d3, h4_d3, h5_d3), dim=1)
+#         d3 = self.up_conv3(d3) # Output D3 (256 channels, Size H/4)
+
+#         # ------------------- DECODER D2 (Size H/2) -------------------
+#         # All inputs are brought to the spatial size of E1 (H/2)
+
+#         # 1. Input from E1 (Down 2x)
+#         h1_d2 = self.h1_L2(self._interpolate_to_size(e1, e1.shape[-2:]))
+
+#         # 2. Input from E2 (Same Scale)
+#         h2_d2 = self.h2_L2(self._interpolate_to_size(e2, e1.shape[-2:]))
+
+#         # 3. Input from D3 (Up 2x)
+#         h3_d2 = self.h3_L2(self._interpolate_to_size(d3, e1.shape[-2:]))
+
+#         # 4. Input from D4 (Up 4x)
+#         h4_d2 = self.h4_L2(self._interpolate_to_size(d4, e1.shape[-2:]))
+
+#         # 5. Input from E5 (Up 8x)
+#         h5_d2 = self.h5_L2(self._interpolate_to_size(e5, e1.shape[-2:]))
+
+#         # Concatenate and convolve
+#         d2 = th.cat((h1_d2, h2_d2, h3_d2, h4_d2, h5_d2), dim=1)
+#         d2 = self.up_conv2(d2) # Output D2 (128 channels, Size H/2)
+
+#         # ------------------- DECODER D1 (Size H/1) -------------------
+#         # All inputs are brought to the spatial size of the original input x (H/1)
+
+#         # 1. Input from E1 (Same Scale)
+#         h1_d1 = self.h1_L1(e1)
+
+#         # 2. Input from D2 (Up 2x)
+#         h2_d1 = self.h2_L1(self._interpolate_to_size(d2, x.shape[-2:]))
+
+#         # 3. Input from D3 (Up 4x)
+#         h3_d1 = self.h3_L1(self._interpolate_to_size(d3, x.shape[-2:]))
+
+#         # 4. Input from D4 (Up 8x)
+#         h4_d1 = self.h4_L1(self._interpolate_to_size(d4, x.shape[-2:]))
+
+#         # 5. Input from E5 (Up 16x)
+#         h5_d1 = self.h5_L1(self._interpolate_to_size(e5, x.shape[-2:]))
+
+#         # Concatenate and convolve
+#         d1 = th.cat((h1_d1, h2_d1, h3_d1, h4_d1, h5_d1), dim=1)
+#         d1 = self.up_conv1(d1)  # Output D1 (64 channels, Size H/1)
+
+#         # ------------------- OUTPUT -------------------
+#         logits = self.outc(d1)
+#         return logits
+
+
+# TODO (GP): MobileNet not working; Inverted Residual Connexion I think
+# class MobileNet_v3(nn.Module):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+
+#         # Set input shape
+#         self.input_shape = (1, 3, 224, 224)
+
+#         # Get the pre-trained VGG-13
+#         self.model = models.mobilenet_v3_large(
+#             weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
+#         )
+
+#     def forward(self, input):
+#         return self.model(input)
+
+
+if __name__ == "__main__":
+    from weightslab.backend.watcher_editor import WatcherEditor
+    from weightslab.utils.logs import print, setup_logging
+
+    # Setup prints
+    setup_logging('DEBUG')
+    print('Hello World')
+
+    # 0. Get the model
+    model = ToyAvgPoolNet()
+    print(model)
+
+    # 2. Create a dummy input and transform it
+    dummy_input = th.randn(model.input_shape)
+
+    # 3. Test the model inference
+    model(dummy_input)
+
+    # --- Example ---
+    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    print(f'Inference results {model(dummy_input)}')  # infer
+    print(model)
+
+    # Model Operations
+    # # # Test: add neurons
+    # print("--- Test: Add Neurons ---")
+    # model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
+    # model_op_neurons(model, op=)
+    with model as m:
+        m.operate(1, {-1}, neuron_operation=1)
+    model(dummy_input)  # Inference test
+    with model as m:
+        m.operate(1, {-14, -2}, neuron_operation=2)
+    model(dummy_input)  # Inference test
+    with model as m:
+        m.operate(1, {-14, -2}, neuron_operation=3)
+    model(dummy_input)  # Inference test
+    with model as m:
+        m.operate(1, {-14, -2}, neuron_operation=4)
+    model(dummy_input)  # Inference test
+    # with model as m:
+    #     m.operate(3, {-1}, neuron_operation=1)
+    # model(dummy_input)  # Inference test
+    print(f'Inference test of the modified model is:\n{model(dummy_input)}')

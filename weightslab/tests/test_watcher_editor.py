@@ -1,8 +1,8 @@
 import os
 import time
 import inspect
-import unittest
 import warnings; warnings.filterwarnings("ignore")
+import unittest
 import traceback
 import torch as th
 import importlib.util
@@ -110,11 +110,12 @@ def create_inference_test(ModelClass):
             ) if self is not None else None
 
     def model_test(self):
-        # 1. Setup
+        # --- Setup ---
+        # # Initialize model
         model = ModelClass()
-        # # # Create dummy input tensor
+        # # Create dummy input tensor
         dummy_input = th.randn(model.input_shape).to(DEVICE)
-        # # Interface the th model
+        # # Interface the model
         model = WatcherEditor(
             model,
             dummy_input=dummy_input,
@@ -125,12 +126,14 @@ def create_inference_test(ModelClass):
         model_name = ModelClass.__name__
         print(f"\n--- Running Inference Test: {model_name} ---")
 
-        # 2. Forward Pass Testing
+        # --- Forward Pass Testing ---
         test_inference(self, model, dummy_input)
 
-        # 3. Model Edition Testing
-        # # Check ADD operation
-        op = ArchitectureNeuronsOpType.ADD  # Get initial nb parameters
+        # --- Model Edition Testing ---
+        # #############################
+        # ########### ADD #############
+        # #############################
+        op = ArchitectureNeuronsOpType.ADD
         layer_id = len(model.layers) // 2
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
@@ -145,9 +148,11 @@ def create_inference_test(ModelClass):
             f"Neurons operation {op} didn\'t \
                 generate new trainable parameters."
         ) if self is not None else None
-        #
-        # # Check PRUNING operation
-        op = ArchitectureNeuronsOpType.PRUNE  # Get initial nb parameters
+
+        # #############################
+        # ######### PRUNE #############
+        # #############################
+        op = ArchitectureNeuronsOpType.PRUNE
         layer_id = len(model.layers) // 2
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
@@ -162,9 +167,11 @@ def create_inference_test(ModelClass):
             f"Neurons operation {op} didn\'t \
                 remove trainable parameters."
         ) if self is not None else None
-        #
-        # # Check RESET operation
-        op = ArchitectureNeuronsOpType.RESET  # Get initial nb parameters
+
+        # #############################
+        # ######### RESET #############
+        # #############################
+        op = ArchitectureNeuronsOpType.RESET
         layer_id = len(model.layers) // 2
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
@@ -179,9 +186,11 @@ def create_inference_test(ModelClass):
             f"Neurons operation {op} change \
                 the number of trainable parameters."
         ) if self is not None else None
-        #
-        # # Check FREEZE operation
-        op = ArchitectureNeuronsOpType.FREEZE  # Get initial nb parameters
+
+        # #############################
+        # ######### FROZEN ############
+        # #############################
+        op = ArchitectureNeuronsOpType.FREEZE
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
@@ -191,7 +200,6 @@ def create_inference_test(ModelClass):
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
         self.assertIn(
             nb_trainable_parameters,
-            # TODO (GP): Estimate how many frozen neurons from res. connexion
             range(
                 initial_nb_trainable_parameters,
                 initial_nb_trainable_parameters-20,
@@ -201,7 +209,10 @@ def create_inference_test(ModelClass):
             f"initially {initial_nb_trainable_parameters} trainable" +
             f" parameters, and now {nb_trainable_parameters}."
         )
-        # # Unmasked the parameters
+
+        # #############################
+        # ####### UNFROZEN ############
+        # #############################
         model_op_neurons(model, layer_id=-1, op=op)
         test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
@@ -211,8 +222,10 @@ def create_inference_test(ModelClass):
             nb_trainable_parameters,
             "Unmasking parameters didn't restore the correct parameters."
         )
-        #
-        # # Check ALL operations on every layers
+
+        # #############################
+        # ######## OP. mix ############
+        # #############################
         print('Performing model parameters operations..', level='DEBUG')
         model_op_neurons(model)
         test_inference(self, model, dummy_input)

@@ -273,7 +273,6 @@ class LayerWiseOperations(NeuronWiseOperations):
     def register_grad_hook(self):
         # This is meant to be called in the children classes.
         def create_tensor_grad_hook(tensor_name: str, oneD: bool):
-
             def weight_grad_hook(weight_grad):
                 if tensor_name in self.neuron_2_lr:
                     for neuron_id, neuron_lr in \
@@ -559,6 +558,8 @@ class LayerWiseOperations(NeuronWiseOperations):
             neuron_indices,
             original_neuron_indices
         ):
+            # Process the neuron_indices to match the layer's constraints
+            # e.g., Conv's groups parameter
             op(
                 original_neuron_indices=original_neuron_indices_,
                 neuron_indices=neuron_indices_,
@@ -569,311 +570,6 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     # ---------------
     # Neurons Operations
-    def _prune_neurons(
-        self,
-        original_neuron_indices: Set[int],
-        neuron_indices: List | Set[int],
-        is_incoming: bool = False,
-        **kwargs
-    ):
-        if not isinstance(neuron_indices, set):
-            if isinstance(neuron_indices, list):
-                neuron_indices = set(neuron_indices)
-            else:
-                neuron_indices = set([neuron_indices])
-        # Check if it's a transposed layer
-        transposed = int('transpose' in self.get_name().lower())
-
-        # Get the number of corresponding layer weights
-        in_out_neurons = self.get_neurons(attr_name='out_neurons') if not is_incoming else \
-            self.get_neurons(attr_name='in_neurons')
-
-        # Get current weights indexs
-        neurons = set(range(in_out_neurons))
-
-        # Sanity check
-        # # Overlapping neurons index and neurons available
-        if not set(neuron_indices) & neurons:
-            print(
-                f"{self.get_name()}.prune indices and neurons set do not "
-                f"overlapp: {neuron_indices} & {neurons} => \
-                    {neuron_indices & neurons}",
-                level='WARNING'
-            )
-            return  # Do not change
-
-        # # Enough neurons to operate
-        if len(neurons) <= 1:
-            print(f'Not enough neurons to operate (currently {neurons})')
-            return
-
-        # Generate idx to keep
-        idx_tnsr = th.tensor(
-            list(neurons - neuron_indices)
-        ).to(self.device)
-
-        if hasattr(self, 'weight') and self.weight is not None:
-            # Tensors modification
-            with th.no_grad():
-                self.weight.data = nn.Parameter(
-                    th.index_select(
-                        self.weight.data,
-                        dim=(transposed ^ is_incoming),
-                        index=idx_tnsr
-                    )).to(self.device)
-
-                if hasattr(self, 'bias') and self.bias is not None:
-                    self.bias.data = nn.Parameter(
-                        th.index_select(
-                            self.bias.data,
-                            dim=0,
-                            index=idx_tnsr
-                        )).to(self.device) if not is_incoming else \
-                            self.bias.data
-                if hasattr(self, 'running_mean'):
-                    self.running_mean = th.index_select(
-                        self.running_mean, dim=0, index=idx_tnsr).to(self.device)
-                if hasattr(self, 'running_var'):
-                    self.running_var = th.index_select(
-                        self.running_var, dim=0, index=idx_tnsr).to(self.device)
-
-        # Update neurons count and indexing
-        if not is_incoming:
-            # Update module attribute
-            new_value = self.set_neurons(
-                self.super_out_name,
-                len(idx_tnsr)
-            )
-            self.set_neurons(
-                attr_name='out_neurons',
-                new_value=new_value
-            )
-            # Remove indexs from indexs map
-            for child_name in self.src_to_dst_mapping_tnsrs:
-                channel_size = 1  # Identical throught tensor
-                for index in list(neuron_indices)[::-1]:
-                    channel_size = len(self.src_to_dst_mapping_tnsrs[
-                        child_name
-                    ].pop(index))  # Remove indexs from all childs as its a src
-                # Re-index every neurons
-                self.src_to_dst_mapping_tnsrs[child_name] = \
-                    reindex_and_compress_blocks(
-                        self.src_to_dst_mapping_tnsrs[
-                            child_name
-                        ],
-                        channel_size
-                    )
-            # Tracker
-            for tracker in self.get_trackers():
-                tracker.prune(neuron_indices)
-            print(f'New layer is {self}', level='DEBUG')
-        else:
-            # Update module attribute
-            new_value = self.set_neurons(
-                self.super_in_name,
-                len(idx_tnsr)
-            )
-            self.set_neurons(
-                attr_name='in_neurons',
-                new_value=new_value
-            )
-            # Remove indexs from indexs map
-            min_p = 0
-            current_parent_name = kwargs.get('current_parent_name', [])
-            for parent_name in self.dst_to_src_mapping_tnsrs:
-                # if dict has several items that are bypass of the module,
-                # we split the new neurons between the two inputs channels
-                # from the two input tensors, and so re index every neurons
-                if min_p > 0:
-                    tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[parent_name])
-                    self.dst_to_src_mapping_tnsrs[parent_name].clear()
-                    for k, v in tmp_.items():
-                        self.dst_to_src_mapping_tnsrs[parent_name][k-min_p] = v
-
-                if not hasattr(self, 'bypass') or (hasattr(self, 'bypass')
-                                                   and parent_name in
-                                                   current_parent_name):
-                    channel_size = 1  # Identical throught tensor
-                    for index in [original_neuron_indices]:
-                        offset_index = min(self.dst_to_src_mapping_tnsrs[
-                                parent_name
-                            ].keys()
-                        )
-                        channel_size = len(self.dst_to_src_mapping_tnsrs[
-                            parent_name
-                        ].pop(offset_index + index))
-                    # Re-index every neurons - no use to keep active pointer
-                    # here as it's dst2src
-                    self.dst_to_src_mapping_tnsrs[parent_name] = \
-                        reindex_and_compress_blocks(
-                            self.dst_to_src_mapping_tnsrs[parent_name],
-                            channel_size,
-                            offset_index=offset_index
-                        )
-                    if hasattr(self, 'bypass'):
-                        min_p = channel_size
-            print(f'New INCOMING layer is {self}', level='DEBUG')
-
-    def _reset_neurons(
-        self,
-        neuron_indices: int | Set[int],
-        is_incoming: bool = False,
-        skip_initialization: bool = False,
-        perturbation_ratio: float | None = None,
-        **_
-    ):
-        if isinstance(neuron_indices, int):
-            neuron_indices = set([neuron_indices])
-        if isinstance(neuron_indices, (list, set)):
-            if isinstance(neuron_indices, set):
-                neuron_indices = list(neuron_indices)
-                if isinstance(neuron_indices[0], int):
-                    neuron_indices = [i for i in neuron_indices]
-                else:
-                    neuron_indices = set(neuron_indices)
-
-        # Manage specific usecases
-        # # Incoming Layer
-        in_out_neurons = self.get_neurons(attr_name='out_neurons') if not is_incoming else \
-            self.get_neurons(attr_name='in_neurons')
-        out_in_neurons = self.get_neurons(attr_name='out_neurons') if is_incoming else \
-            self.get_neurons(attr_name='in_neurons')
-        # # Transposed Layer
-        transposed = int('transpose' in self.get_name().lower())
-        # # Reset everything
-        if neuron_indices is None or not len(neuron_indices):
-            neuron_indices = set(range(in_out_neurons))
-
-        # If layer is not learnable - no need to reset anything
-        if not hasattr(self, 'weight') or self.weight is None:
-            return
-
-        # Skip initialization is only to be able to test the function.
-        neurons = set(range(in_out_neurons))
-        if not set(neuron_indices) & neurons:
-            raise ValueError(
-                f"{self.get_name()}.reset neuron_indices and neurons set dont"
-                f"overlapp: {neuron_indices} & {neurons} => "
-                f"{set(neuron_indices) & neurons}")
-        if perturbation_ratio is not None and (
-                0.0 >= perturbation_ratio or perturbation_ratio >= 1.0):
-            raise ValueError(
-                f"{self.get_name()}.reset perturbation "
-                f"{perturbation_ratio} outside of [0.0, 1.0]")
-
-        norm = False
-        with th.no_grad():
-            for neuron_indice in neuron_indices:
-                # Weights
-                # # Handle n-dims kernels like with conv{n}d
-                if hasattr(self, "kernel_size") and self.kernel_size:
-                    tensors = (out_in_neurons if not transposed else
-                               in_out_neurons,)
-                    neuron_weights = th.zeros(
-                        tensors + (*self.kernel_size,)
-                    ).to(self.device)
-
-                # # Handle 1-dims cases like batchnorm without in out mapping
-                elif len(self.weight.data.shape) == 1:
-                    if hasattr(self, 'running_var') and \
-                            hasattr(self, 'running_mean'):
-                        norm = True
-                    tensors = (out_in_neurons if not transposed else
-                               in_out_neurons,)
-                    neuron_weights = th.ones(tensors).to(self.device) if not \
-                        norm else 0.
-
-                # # Handle 1-dims cases like linear, where we have a in out
-                # # mapping (similar to conv1d wo. kernel)
-                else:
-                    tensors = (out_in_neurons if not transposed else
-                               in_out_neurons,)
-                    neuron_weights = th.zeros(
-                        tensors
-                    ).to(self.device)
-
-                neuron_bias = 0.0
-                if not norm and not skip_initialization:
-                    nn.init.xavier_uniform_(
-                        neuron_weights.unsqueeze(0),
-                        gain=nn.init.calculate_gain('relu')
-                    )
-                    if perturbation_ratio is not None:
-                        # weights
-                        neuron_weights = self.weight[neuron_indice] if not \
-                            is_incoming else self.weight[:, neuron_indice]
-                        weights_perturbation = \
-                            perturbation_ratio * neuron_weights * \
-                            th.randint_like(neuron_weights, -1, 2).float()
-                        neuron_weights += weights_perturbation
-
-                        # bias
-                        if not is_incoming and hasattr(self, 'bias') and \
-                                self.bias is not None:
-                            neuron_bias = self.bias[neuron_indice]
-                            bias_perturbation = \
-                                perturbation_ratio * neuron_bias * \
-                                th.randint(-1, 2, (1, )).float().item()
-                            neuron_bias += bias_perturbation
-                if not norm:
-                    if not is_incoming:
-                        self.weight[neuron_indice] = neuron_weights
-                        if hasattr(self, 'bias') and self.bias is not None:
-                            self.bias[neuron_indice] = neuron_bias
-                    else:
-                        self.weight[:, neuron_indice] = neuron_weights
-                else:
-                    self.running_mean[neuron_indice] = neuron_weights
-                    self.running_var[neuron_indice] = 1 - neuron_weights
-                    self.weight[neuron_indice] = neuron_weights
-                    if hasattr(self, 'bias') and self.bias is not None:
-                        self.bias[neuron_indice] = neuron_weights
-        if not is_incoming:
-            for tracker in self.get_trackers():
-                tracker.reset(neuron_indices)
-
-    def _freeze_neurons(
-        self,
-        neuron_indices: int | Set[int],
-        is_incoming: bool = False,
-        **_
-    ):
-        if isinstance(neuron_indices, int):
-            neuron_indices = [neuron_indices]
-        if isinstance(neuron_indices, set):
-            neuron_indices = list(neuron_indices)
-            if isinstance(neuron_indices[0], list):
-                neuron_indices = [i for j in neuron_indices for i in j]
-
-        # If layer is not learnable - no need to freeze
-        if not hasattr(self, 'weight') or self.weight is None:
-            return
-
-        # Neurons not specified - freeze everything
-        if neuron_indices is None or not len(neuron_indices):
-            neuron_indices = list(range(self.get_neurons(attr_name='out_neurons')))
-
-        # Work on the output
-        tensors_name = self.learnable_tensors_name if not is_incoming \
-            else ['weight']  # Weight is the only learnable tensor input
-        for tensor_name in tensors_name:
-            neurons_lr = {
-                neuron_indices[neuron_indice]:
-                    1.0 - neuron_lr for neuron_indice, neuron_lr in enumerate(
-                        self.get_per_neuron_learning_rate(
-                            neuron_indices,
-                            is_incoming=is_incoming,
-                            tensor_name=tensor_name
-                        )
-                    )
-            }
-            self.set_per_neuron_learning_rate(
-                neurons_id=set(neuron_indices),
-                neurons_lr=neurons_lr,
-                is_incoming=is_incoming,
-                tensor_name=tensor_name
-            )
-
     def _add_neurons(
         self,
         neuron_indices: Set[int] | int = -1,
@@ -891,17 +587,26 @@ class LayerWiseOperations(NeuronWiseOperations):
             f"{self.get_name()}[{self.get_module_id()}].add {neuron_indices}",
             level='DEBUG'
         )
-        nb_neurons = self.get_canal_length(is_incoming) if \
-            len(neuron_indices) == 1 else len(neuron_indices)
         # Incoming operation or out operation; chose the right neurons
         # # TODO (GP): fix hardcoding transpose and norm
+        # # TODO (GP): maybe with a one way upgrade from learnable tensors,
+        # # TODO (GP): depending on the weight shape (1d, 2d, 3d, ..etc).
         norm = False
         transposed = int('transpose' in self.get_name().lower())
-        in_out_neurons = self.get_neurons(attr_name='out_neurons') if is_incoming else \
-            self.get_neurons(attr_name='in_neurons')  # tuple (in_r, out_r)
-        tensors = (nb_neurons, in_out_neurons) if \
-            not is_incoming ^ transposed else \
-            (in_out_neurons, nb_neurons)
+        in_out_neurons = self.get_neurons(attr_name='out_neurons') \
+            if is_incoming else self.get_neurons(attr_name='in_neurons')
+        # We consider in the weight operation on incoming neurons only,
+        # the cluster_size (e.g., groups parameter for convolutions).
+        # Here, for a group of 4, we add 1 neuron to the weight matrix and
+        # we increase also the number of incoming neurons in the layer.
+        group_size = self.groups if hasattr(self, 'groups') \
+            else 1
+        nb_neurons = self.get_canal_length(is_incoming) if \
+            len(neuron_indices) == 1 else len(neuron_indices)
+        if is_incoming == transposed:
+            tensors = (nb_neurons, in_out_neurons // group_size)
+        else:
+            tensors = (in_out_neurons, nb_neurons // group_size)
 
         # Weights
         if hasattr(self, "weight") and self.weight is not None:
@@ -914,7 +619,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             # # Handle 1-dims cases like batchnorm without in out mapping
             elif len(self.weight.data.shape) == 1:
                 norm = True
-                added_weights = th.ones(nb_neurons, ).to(self.device)
+                added_weights = th.ones(tensors[0], ).to(self.device)
 
             # # Handle 1-dims cases like linear, where we have a in out mapping
             # # (similar to conv1d wo. kernel)
@@ -979,6 +684,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                         )
 
         # Update neurons count & indexing
+        # nb_neurons = nb_neurons * group_size
         if not is_incoming:
             # Update
             new_value = self.set_neurons(
@@ -989,7 +695,6 @@ class LayerWiseOperations(NeuronWiseOperations):
                 attr_name='out_neurons',
                 new_value=new_value
             )
-            print(f'New layer is {self}', level='DEBUG')
             # Add indexs from indexs map
             for parent_name in self.src_to_dst_mapping_tnsrs:
                 key_index = int(
@@ -1009,6 +714,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             # Tracking
             for tracker in self.get_trackers():
                 tracker.add_neurons(nb_neurons)
+            print(f'New layer is {self}', level='DEBUG')
         else:
             # Update
             new_value = self.set_neurons(
@@ -1052,6 +758,335 @@ class LayerWiseOperations(NeuronWiseOperations):
                     if hasattr(self, 'bypass'):
                         min_p = nb_neurons
             print(f'New INCOMING layer is {self}', level='DEBUG')
+
+    def _prune_neurons(
+        self,
+        original_neuron_indices: Set[int],
+        neuron_indices: List | Set[int],
+        is_incoming: bool = False,
+        **kwargs
+    ):
+        if not isinstance(neuron_indices, set):
+            if isinstance(neuron_indices, list):
+                neuron_indices = set(neuron_indices)
+            else:
+                neuron_indices = set([neuron_indices])
+        # Check if it's a transposed layer
+        transposed = int('transpose' in self.get_name().lower())
+
+        # Get the number of corresponding layer weights
+        in_out_neurons = self.get_neurons(attr_name='out_neurons') if not is_incoming else \
+            self.get_neurons(attr_name='in_neurons')
+
+        # Get current weights indexs & group size
+        neurons = set(range(in_out_neurons))
+        group_size = self.groups if hasattr(self, 'groups') and is_incoming \
+            else 1
+
+        # Sanity check
+        # # Overlapping neurons index and neurons available
+        if not set(neuron_indices) & neurons:
+            print(
+                f"{self.get_name()}.prune indices and neurons set do not "
+                f"overlapp: {neuron_indices} & {neurons} => \
+                    {neuron_indices & neurons}",
+                level='WARNING'
+            )
+            return  # Do not change
+
+        # # Enough neurons to operate
+        if len(neurons) <= 1:
+            print(f'Not enough neurons to operate (currently {neurons})')
+            return
+
+        # Generate idx to keep
+        idx_tokeep = neurons - neuron_indices
+        idx_tnsr = th.unique(
+            th.Tensor(list(idx_tokeep)).long() // group_size
+        ).to(self.device)
+
+        # Operate on learnable tensor
+        if hasattr(self, 'weight') and self.weight is not None:
+            # Tensors modification
+            with th.no_grad():
+                self.weight.data = nn.Parameter(
+                    th.index_select(
+                        self.weight.data,
+                        dim=(transposed ^ is_incoming),
+                        index=idx_tnsr
+                    )).to(self.device)
+
+                if hasattr(self, 'bias') and self.bias is not None:
+                    self.bias.data = nn.Parameter(
+                        th.index_select(
+                            self.bias.data,
+                            dim=0,
+                            index=idx_tnsr
+                        )).to(self.device) if not is_incoming else \
+                            self.bias.data
+                if hasattr(self, 'running_mean'):
+                    self.running_mean = th.index_select(
+                        self.running_mean, dim=0, index=idx_tnsr).to(self.device)
+                if hasattr(self, 'running_var'):
+                    self.running_var = th.index_select(
+                        self.running_var, dim=0, index=idx_tnsr).to(self.device)
+
+        # Update neurons count and indexing
+        if not is_incoming:
+            # Update module attribute
+            new_value = self.set_neurons(
+                self.super_out_name,
+                len(idx_tokeep)
+            )
+            self.set_neurons(
+                attr_name='out_neurons',
+                new_value=new_value
+            )
+            # Remove indexs from indexs map
+            for child_name in self.src_to_dst_mapping_tnsrs:
+                channel_size = 1  # Identical throught tensor
+                for index in list(neuron_indices)[::-1]:
+                    channel_size = len(self.src_to_dst_mapping_tnsrs[
+                        child_name
+                    ].pop(index))  # Remove indexs from all childs as its a src
+                # Re-index every neurons
+                self.src_to_dst_mapping_tnsrs[child_name] = \
+                    reindex_and_compress_blocks(
+                        self.src_to_dst_mapping_tnsrs[
+                            child_name
+                        ],
+                        channel_size
+                    )
+            # Tracker
+            for tracker in self.get_trackers():
+                tracker.prune(neuron_indices)
+            print(f'New layer is {self}', level='DEBUG')
+        else:
+            # Update module attribute
+            new_value = self.set_neurons(
+                self.super_in_name,
+                len(idx_tokeep)
+            )
+            self.set_neurons(
+                attr_name='in_neurons',
+                new_value=new_value
+            )
+            # Remove indexs from indexs map
+            min_p = 0
+            current_parent_name = kwargs.get('current_parent_name', [])
+            for parent_name in self.dst_to_src_mapping_tnsrs:
+                # if dict has several items that are bypass of the module,
+                # we split the new neurons between the two inputs channels
+                # from the two input tensors, and so re index every neurons
+                if min_p > 0:
+                    tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[parent_name])
+                    self.dst_to_src_mapping_tnsrs[parent_name].clear()
+                    for k, v in tmp_.items():
+                        self.dst_to_src_mapping_tnsrs[parent_name][k-min_p] = v
+
+                if not hasattr(self, 'bypass') or (hasattr(self, 'bypass')
+                                                   and parent_name in
+                                                   current_parent_name):
+                    channel_size = 1  # Identical throught tensor
+                    for index in neuron_indices:  # [original_neuron_indices]:
+                        channel_size = len(self.dst_to_src_mapping_tnsrs[
+                            parent_name
+                        ].pop(index))
+                    # Re-index every neurons - no use to keep active pointer
+                    # here as it's dst2src
+                    indexs = self.dst_to_src_mapping_tnsrs[
+                        parent_name
+                    ]
+                    offset_index = min(
+                        indexs.keys()
+                    ) if len(indexs) else 0
+                    self.dst_to_src_mapping_tnsrs[parent_name] = \
+                        reindex_and_compress_blocks(
+                            self.dst_to_src_mapping_tnsrs[parent_name],
+                            channel_size,
+                            offset_index=offset_index
+                        )
+                    if hasattr(self, 'bypass'):
+                        min_p = channel_size
+            print(f'New INCOMING layer is {self}', level='DEBUG')
+
+    def _freeze_neurons(
+        self,
+        neuron_indices: int | Set[int],
+        is_incoming: bool = False,
+        **_
+    ):
+        if isinstance(neuron_indices, int):
+            neuron_indices = [neuron_indices]
+        if isinstance(neuron_indices, set):
+            neuron_indices = list(neuron_indices)
+            if isinstance(neuron_indices[0], list):
+                neuron_indices = [i for j in neuron_indices for i in j]
+
+        # If layer is not learnable - no need to freeze
+        if not hasattr(self, 'weight') or self.weight is None:
+            return
+
+        # Neurons not specified - freeze everything
+        if neuron_indices is None or not len(neuron_indices):
+            neuron_indices = list(range(self.get_neurons(attr_name='out_neurons')))
+
+        # Get group size & reformat neuron indices
+        group_size = self.groups if hasattr(self, 'groups') and is_incoming \
+            else 1
+        neuron_indices = [i//group_size for i in neuron_indices]
+
+        # Work on the output
+        tensors_name = self.learnable_tensors_name if not is_incoming \
+            else ['weight']  # Weight is the only learnable tensor input
+        for tensor_name in tensors_name:
+            neurons_lr = {
+                neuron_indices[neuron_indice]:
+                    1.0 - neuron_lr for neuron_indice, neuron_lr in enumerate(
+                        self.get_per_neuron_learning_rate(
+                            neuron_indices,
+                            is_incoming=is_incoming,
+                            tensor_name=tensor_name
+                        )
+                    )
+            }
+            self.set_per_neuron_learning_rate(
+                neurons_id=set(neuron_indices),
+                neurons_lr=neurons_lr,
+                is_incoming=is_incoming,
+                tensor_name=tensor_name
+            )
+
+    def _reset_neurons(
+        self,
+        neuron_indices: int | Set[int],
+        is_incoming: bool = False,
+        skip_initialization: bool = False,
+        perturbation_ratio: float | None = None,
+        **_
+    ):
+        if isinstance(neuron_indices, int):
+            neuron_indices = set([neuron_indices])
+        if isinstance(neuron_indices, (list, set)):
+            if isinstance(neuron_indices, set):
+                neuron_indices = list(neuron_indices)
+                if isinstance(neuron_indices[0], int):
+                    neuron_indices = [i for i in neuron_indices]
+                else:
+                    neuron_indices = set(neuron_indices)
+
+        # Manage specific usecases
+        # # Get group size
+        group_size = self.groups if hasattr(self, 'groups') else 1
+        # # Incoming Layer
+        in_out_neurons = self.get_neurons(attr_name='out_neurons') if not is_incoming else \
+            self.get_neurons(attr_name='in_neurons') // group_size
+        out_in_neurons = self.get_neurons(attr_name='out_neurons') if is_incoming else \
+            self.get_neurons(attr_name='in_neurons') // group_size
+        # # Transposed Layer
+        transposed = int('transpose' in self.get_name().lower())
+        # # Reset everything
+        if neuron_indices is None or not len(neuron_indices):
+            neuron_indices = set(range(in_out_neurons))
+
+        # If layer is not learnable - no need to reset anything
+        if not hasattr(self, 'weight') or self.weight is None:
+            return
+
+        # Skip initialization is only to be able to test the function.
+        neurons = set(range(self.get_neurons(attr_name='out_neurons') if not is_incoming else \
+            self.get_neurons(attr_name='in_neurons')))
+        if not set(neuron_indices) & neurons:
+            raise ValueError(
+                f"{self.get_name()}.reset neuron_indices and neurons set dont"
+                f"overlapp: {neuron_indices} & {neurons} => "
+                f"{set(neuron_indices) & neurons}")
+        if perturbation_ratio is not None and (
+                0.0 >= perturbation_ratio or perturbation_ratio >= 1.0):
+            raise ValueError(
+                f"{self.get_name()}.reset perturbation "
+                f"{perturbation_ratio} outside of [0.0, 1.0]")
+
+        norm = False
+        with th.no_grad():
+            for neuron_indice in neuron_indices:
+                # Process neuron indice
+                neuron_indice = neuron_indice // group_size
+                # Weights
+                # # Handle n-dims kernels like with conv{n}d
+                if hasattr(self, "kernel_size") and self.kernel_size:
+                    tensors = (out_in_neurons,)  # if (not is_incoming and transposed) or (is_incoming and not transposed) or (not is_incoming and not transposed) else
+                            #    in_out_neurons,)
+                    neuron_weights = th.zeros(
+                        tensors + (*self.kernel_size,)
+                    ).to(self.device)
+
+                # # Handle 1-dims cases like batchnorm without in out mapping
+                elif len(self.weight.data.shape) == 1:
+                    if hasattr(self, 'running_var') and \
+                            hasattr(self, 'running_mean'):
+                        norm = True
+                    tensors = (out_in_neurons,)  # if (not is_incoming and transposed) or (is_incoming and not transposed) or (not is_incoming and not transposed) else
+                            #    in_out_neurons,)
+                    neuron_weights = th.ones(tensors).to(self.device) if not \
+                        norm else 0.
+
+                # # Handle 1-dims cases like linear, where we have a in out
+                # # mapping (similar to conv1d wo. kernel)
+                else:
+                    tensors = (out_in_neurons,)  # if (not is_incoming and transposed) or (is_incoming and not transposed)  or (not is_incoming and not transposed) else
+                            #    in_out_neurons,)
+                    neuron_weights = th.zeros(
+                        tensors
+                    ).to(self.device)
+
+                neuron_bias = 0.0
+                if not norm and not skip_initialization:
+                    nn.init.xavier_uniform_(
+                        neuron_weights.unsqueeze(0),
+                        gain=nn.init.calculate_gain('relu')
+                    )
+                    if perturbation_ratio is not None:
+                        # weights
+                        neuron_weights = self.weight[neuron_indice] if not \
+                            is_incoming else self.weight[:, neuron_indice]
+                        weights_perturbation = \
+                            perturbation_ratio * neuron_weights * \
+                            th.randint_like(neuron_weights, -1, 2).float()
+                        neuron_weights += weights_perturbation
+
+                        # bias
+                        if not is_incoming and hasattr(self, 'bias') and \
+                                self.bias is not None:
+                            neuron_bias = self.bias[neuron_indice]
+                            bias_perturbation = \
+                                perturbation_ratio * neuron_bias * \
+                                th.randint(-1, 2, (1, )).float().item()
+                            neuron_bias += bias_perturbation
+                if not norm:
+                    if not transposed and not is_incoming:
+                        self.weight[neuron_indice] = neuron_weights
+                        if hasattr(self, 'bias') and self.bias is not None and not is_incoming:
+                            self.bias[neuron_indice] = neuron_bias
+                    elif transposed and not is_incoming:
+                        self.weight[:, neuron_indice] = neuron_weights
+                        if hasattr(self, 'bias') and self.bias is not None and not is_incoming:
+                            self.bias[neuron_indice] = neuron_bias
+                    elif not transposed and is_incoming:
+                        self.weight[:, neuron_indice] = neuron_weights
+                    else:
+                        self.weight[neuron_indice] = neuron_weights
+                        if hasattr(self, 'bias') and self.bias is not None and not is_incoming:
+                            self.bias[neuron_indice] = neuron_bias
+                else:
+                    self.running_mean[neuron_indice] = neuron_weights
+                    self.running_var[neuron_indice] = 1 - neuron_weights
+                    self.weight[neuron_indice] = neuron_weights
+                    if hasattr(self, 'bias') and self.bias is not None:
+                        self.bias[neuron_indice] = neuron_weights
+        if not is_incoming:
+            for tracker in self.get_trackers():
+                tracker.reset(neuron_indices)
 
 
 if __name__ == "__main__":

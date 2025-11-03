@@ -17,7 +17,7 @@ def setup_logging(level):
     logging.getLogger().handlers = []
 
     # Basic logger configuration
-    logging.basicConfig(level=level, format=FORMAT)
+    logging.basicConfig(level=level.upper(), format=FORMAT)
 
 
 def print(first_element, *other_elements, sep=' ', **kwargs):

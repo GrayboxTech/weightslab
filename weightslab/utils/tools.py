@@ -268,9 +268,13 @@ def make_safelist(x):
     return [x] if not isinstance(x, list) else x
 
 
-def generate_mappings(src_channels: int, dst_channels: int) -> Tuple[list]:
+def generate_mappings(
+    src_channels: int,
+    dst_channels: int,
+    dst_groups: int = 1,
+    src_groups: int = 1
+) -> Tuple[list]:
     """
-    TODO (GP): Improve this function
     Generates index mappings between a source and destination layer.
 
     The mapping format is a list of [from_index, [to_indices_list]].
@@ -281,6 +285,7 @@ def generate_mappings(src_channels: int, dst_channels: int) -> Tuple[list]:
         src_channels (int): The number of neurons/channels in the source layer.
         dst_channels (int): The number of neurons/channels in the destination
         layer.
+        groups (int): The number of groups to divide the channels into.
 
     Returns:
         tuple: A tuple containing (src_to_dst_mapping, dst_to_src_mapping).
@@ -289,16 +294,59 @@ def generate_mappings(src_channels: int, dst_channels: int) -> Tuple[list]:
         ValueError: If one channel count is larger than the other but not
                     perfectly divisible by the smaller one.
     """
+    src_group_size = 1
+    dst_group_size = 1
     src_to_dst_mapping = []
     dst_to_src_mapping = []
     src_channels = list(src_channels)
     dst_channels = list(dst_channels)
 
+    # 1. Calculate the size of the block (group) for both input and output
+    if src_groups is not None:
+        src_group_size = len(src_channels) // max(src_groups, 1)
+    if dst_groups is not None:
+        dst_group_size = len(dst_channels) // max(1, dst_groups)
+
     if len(src_channels) == len(dst_channels):
         # Case 1: 1-to-1 mapping
         # Each source channel maps to the corresponding dstination channel.
-        src_to_dst_mapping = {i: [j] for i, j in zip(src_channels, dst_channels)}
-        dst_to_src_mapping = {i: [j] for i, j in zip(dst_channels, src_channels)}
+        # src_to_dst_mapping = {i: [j] for i, j in zip(src_channels, dst_channels)}
+        src_to_dst_mapping = {}
+        # 2. Iterate through every source neuron
+        for src_idx in src_channels:
+
+            # Determine which group the current source neuron belongs to
+            group_idx = src_idx // src_group_size
+
+            # Calculate the starting index for the connected destination neurons
+            dst_start_idx = group_idx * dst_group_size
+
+            # Calculate the ending index (exclusive) for the connected destination neurons
+            dst_end_idx = dst_start_idx + dst_group_size
+
+            # Create the list of connected destination neuron indices for this group
+            connected_dst_neurons = list(range(dst_start_idx, dst_end_idx))
+
+            # Add the mapping to the dictionary
+            src_to_dst_mapping[src_idx] = connected_dst_neurons
+        # dst_to_src_mapping = {i: [j] for i, j in zip(dst_channels, src_channels)}
+        dst_to_src_mapping = {}
+        # 2. Iterate through every source neuron
+        for dst_idx in dst_channels:
+            # Determine which group the current source neuron belongs to
+            group_idx = dst_idx // dst_group_size
+
+            # Calculate the starting index for the connected destination neurons
+            src_start_idx = group_idx * src_group_size
+
+            # Calculate the ending index (exclusive) for the connected destination neurons
+            src_end_idx = src_start_idx + src_group_size
+
+            # Create the list of connected destination neuron indices for this group
+            connected_src_neurons = list(range(src_start_idx, src_end_idx))
+
+            # Add the mapping to the dictionary
+            dst_to_src_mapping[dst_idx] = connected_src_neurons
 
     elif len(src_channels) > len(dst_channels):
         # Case 2: Many-to-one (src > dst)
@@ -349,13 +397,13 @@ def generate_mappings(src_channels: int, dst_channels: int) -> Tuple[list]:
         # This determines how many linear layer neurons map to one convolution channel.
         # We use integer division to ensure a clean split.
         # Example: 8192 keys // 32 values = 256 keys per value
-        block_size = len(dst_channels) // len(src_channels)
+        group_size = len(dst_channels) // len(src_channels) * src_group_size
 
         # 2. Generate the first mapping dictionary (a)
         # The key is the linear neuron index (0 to 8191)
         # The value is the convolution channel index (0 to 31)
         neuron_to_channel_map = {
-            i: i // block_size
+            i: i // group_size
             for i in dst_channels
         }
         # 3. Generate the second mapping dictionary (b)
@@ -369,11 +417,33 @@ def generate_mappings(src_channels: int, dst_channels: int) -> Tuple[list]:
         for neuron_id, channel_id in neuron_to_channel_map.items():
             channel_to_neuron_map[channel_id].append(neuron_id)
 
-        dst_to_src_mapping = dict(channel_to_neuron_map)
-        src_to_dst_mapping = {i: [i] for i in range(len(dst_to_src_mapping))}
-        dst_to_src_mapping = {k: u if isinstance(u, list) else [u]
-                              for k, u in dst_to_src_mapping.items()}
+        dst_to_src_mapping_ = dict(channel_to_neuron_map)
+        # src_to_dst_mapping = {i: [i] for i in range(len(dst_to_src_mapping_))}
+        dst_to_src_mapping_ = {k: u if isinstance(u, list) else [u]
+                               for k, u in dst_to_src_mapping_.items()}
+        dst_to_src_mapping = {
+            input_neuron_index: input_range
+            for input_range in dst_to_src_mapping_.values()
+            for input_neuron_index in input_range
+        }
+        src_to_dst_mapping = {}
+        # 2. Iterate through every source neuron
+        for src_idx in src_channels:
 
+            # Determine which group the current source neuron belongs to
+            group_idx = src_idx // src_group_size
+
+            # Calculate the starting index for the connected destination neurons
+            dst_start_idx = group_idx * dst_group_size
+
+            # Calculate the ending index (exclusive) for the connected destination neurons
+            dst_end_idx = dst_start_idx + dst_group_size
+
+            # Create the list of connected destination neuron indices for this group
+            connected_dst_neurons = list(range(dst_start_idx, dst_end_idx))
+
+            # Add the mapping to the dictionary
+            src_to_dst_mapping[src_idx] = connected_dst_neurons
     return src_to_dst_mapping, dst_to_src_mapping
 
 
@@ -428,7 +498,7 @@ def generate_graph_dependencies(
             if source_modules:
                 for source_module in source_modules:
                     if source_module is not None and \
-                        (has_layer_type or is_dst_structural or is_learnable):
+                            (has_layer_type or is_dst_structural or is_learnable):
                         # 1.1. Determine Dependency Type based on Shape
                         # (for Pruning)
                         dep_type = DepType.INCOMING
@@ -486,11 +556,15 @@ def generate_graph_dependencies(
         elif node.op == 'call_function' or node.op == "call_method":
             # add next steps bypass if op. change next input dimension
             # (e.g., cat)
-            if node.name == 'cat':
+            if 'cat' in node.name or 'cat_' in node.name:
                 bypass.append(str(node.next))
                 bypassed = True
 
             # 1. Identify all source modules that feed into this function node
+            # TODO (GP): Find recursive approach to do that, if there are
+            # TODO (GP): cat of cat of cat, should be nested list also ?
+            # TODO (GP): e.g., cat([conv1, conv2, cat([conv3, cat([conv4,
+            # TODO (GP): conv5])])])])
             source_modules_ = []  # Collect modules to check for single input
             source_nodes = []  # Collect nodes to check for single input
             for arg in node.args:
@@ -503,6 +577,14 @@ def generate_graph_dependencies(
                         if source_modules is not None:
                             for ind in range(len(source_modules)):
                                 source_modules_.append(source_modules[ind])
+                    elif isinstance(_arg, (tuple, set, list)):
+                        for __arg in _arg:
+                            if isinstance(__arg, th.fx.Node):
+                                source_nodes.append(__arg)
+                                source_modules = node_to_module.get(__arg)
+                                if source_modules is not None:
+                                    for ind in range(len(source_modules)):
+                                        source_modules_.append(source_modules[ind])
 
             # Remove duplicates while preserving the order/identity
             distinct_source_modules = source_modules_
@@ -551,13 +633,16 @@ def generate_graph_dependencies(
                 dst_mod.bypass,
                 len(source_out_channels) + dst_mod.bypass
             )
-            dst_mod.bypass = len(source_out_channels)
+            dst_mod.bypass += len(source_out_channels)
 
         # 1.4. Generate mappings tnsr for src and dst layers
+        groups = dst_mod.groups if hasattr(dst_mod, 'groups') else (src_mod.groups) if hasattr(src_mod, 'groups') else None
         src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = \
             generate_mappings(
                 source_out_channels,
-                dst_in_channels
+                dst_in_channels,
+                dst_groups=(len(dst_in_channels) // groups) if groups is not None else None,
+                src_groups=len(source_out_channels) // groups if groups is not None else None
             )
         if not recursive_dep:
             # should be reverse mapping

@@ -285,10 +285,68 @@ class WatcherEditor(NetworkWithOps):
         """
         return super().load_state_dict(state_dict, strict, assign)
 
+    def __repr__(self):
+        """
+        Overrides the behavior of print(model).
+        It mimics the standard PyTorch format but includes a custom module ID.
+        """
+        string = f"{self.__class__.__name__}(\n"
+
+        # Iterate over all named child modules
+        for name, module in self.model.named_children():
+            # Standard PyTorch module representation
+            module_repr = repr(module)
+
+            # --- Custom Logic to Inject ID ---
+            # Check if the module has the get_module_id method
+            # (i.e., if it's one of your custom layers)
+            if hasattr(module, 'get_module_id'):
+                try:
+                    module_id = module.get_module_id()
+                    # Inject the ID into the module's representation string
+                    module_repr = f"ID={module_id} | {module_repr}"
+                except Exception:
+                    # Fallback if get_module_id fails
+                    pass
+            elif isinstance(module, th.nn.modules.container.Sequential):
+                seq_string = "\n"
+                for seq_name, seq_module in module.named_children():
+                    seq_module_repr = repr(seq_module)
+                    if hasattr(seq_module, 'get_module_id'):
+                        try:
+                            seq_module_id = seq_module.get_module_id()
+                            # Inject the ID into the module's representation string
+                            seq_module_repr = f"ID={seq_module_id} | {seq_module_repr}"
+                        except Exception:
+                            # Fallback if get_module_id fails
+                            pass
+                    seq_lines = seq_module_repr.split('\n')
+                    # The first line is formatted with the name, the rest are indented
+                    seq_string += f"  ({seq_name}): {seq_lines[0]}\n"
+                    for seq_line in seq_lines[1:]:
+                        seq_string += f"  {seq_line}\n"
+                module_repr = f"{seq_string}"
+            else:
+                module_repr = f"ID=None | {module_repr}"
+
+            # -----------------------------------
+            # Indent and append the module's details
+            # We use string manipulation to correctly format and indent nested
+            # modules
+            lines = module_repr.split('\n')
+
+            # The first line is formatted with the name, the rest are indented
+            string += f"  ({name}): {lines[0]}\n"
+            for line in lines[1:]:
+                string += f"  {line}\n"
+
+        string += ")"
+        return string
+
 
 if __name__ == "__main__":
     from weightslab.tests.torch_models import \
-        TwoLayerUnflattenNet as Model
+        UNet3p as Model
 
     # Setup prints
     setup_logging('DEBUG')
@@ -311,13 +369,23 @@ if __name__ == "__main__":
 
     # Model Operations
     # # Test: add neurons
-    print("--- Test: Add Neurons ---")
-    model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
-    # model_op_neurons(model, op=)
+    print("--- Test: Op Neurons ---")
+    # model_op_neurons(model, op=1, dummy_input=dummy_input)
     with model as m:
-        m.operate(3, {-1}, neuron_operation=4)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(3, {-1}, neuron_operation=1)
+        m.operate(71, {-1}, neuron_operation=2)
+    model_op_neurons(model, op=1)
+    model_op_neurons(model, op=2)
+    model_op_neurons(model, op=3)
+    model_op_neurons(model, op=4)
+    # # Left grouped operator
+    # with model as m:
+    #     m.operate(1, {2}, neuron_operation=1)
+    # model(dummy_input)  # Inference test
+    # # Right grouped operator
+    # with model as m:
+    #     m.operate(2, {2}, neuron_operation=1)
+    # model(dummy_input)  # Inference test
+    # with model as m:
+    #     m.operate(3, {-1}, neuron_operation=1)
     model(dummy_input)  # Inference test
     print(f'Inference test of the modified model is:\n{model(dummy_input)}')
