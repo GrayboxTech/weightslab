@@ -224,52 +224,13 @@ class ShapeProp(torch.fx.Interpreter):
 
 
 if __name__ == "__main__":
-    class TwoLayerNet(torch.nn.Module):
-        def __init__(self, D_in, H, D_out):
-            super().__init__()
-            # --- Layer 1: Conv2d (3 -> 16 channels) ---
-            # Output spatial size is maintained (32x32 -> 32x32)
-            self.conv1 = torch.nn.Conv2d(in_channels=D_in, out_channels=16,
-                                         kernel_size=3, padding=1)
-
-            # --- Layer 2: Conv2d (16 -> 32 channels) ---
-            # Spatial size is halved (32x32 -> 16x16)
-            self.conv2 = torch.nn.Conv2d(in_channels=16, out_channels=32,
-                                         kernel_size=3, stride=2, padding=1)
-
-            self.f = torch.nn.Flatten()
-            self.linear1 = torch.nn.Linear(512, 128)
-            self.linear2 = torch.nn.Linear(128, 8192)
-
-            # --- Unflattening (Required before final Conv2d) ---
-            # Reshapes the 8192 tensor back to (32, 16, 16)
-            # dim=1 means we are reshaping starting from the channel dimension
-            self.unflatten = torch.nn.Unflatten(
-                dim=1,
-                unflattened_size=(32, 16, 16)
-            )
-
-            # --- Layer 5: Conv2d (32 -> 10 channels) ---
-            # Final convolution layer for 10 classes
-            self.conv3 = torch.nn.Conv2d(
-                in_channels=32,
-                out_channels=10,
-                kernel_size=1
-            )
-
-        def forward(self, x):
-            x = self.f(self.conv2(self.conv1(x)))
-            h_relu = self.linear1(x).clamp(min=0)
-            x = self.linear2(h_relu)
-            y_pred = self.conv3(self.unflatten(x))
-
-            return y_pred
+    from weightslab.tests.torch_models import TwoLayerUnflattenNet
 
     N, D_in, H, D_out = 64, 1000, 100, 10
     x = torch.randn(N, D_in)
     y = torch.randn(N, D_out)
     dummy_input = torch.randn(1, D_in, 8, 8)
-    model = TwoLayerNet(D_in, H, D_out)
+    model = TwoLayerUnflattenNet(D_in, D_out)
     model(dummy_input)
     gm = torch.fx.symbolic_trace(model)
     ShapeProp(gm).propagate(dummy_input)

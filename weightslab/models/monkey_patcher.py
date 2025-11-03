@@ -6,8 +6,10 @@ from weightslab.layers.modules_with_ops import \
     NeuronWiseOperations, LayerWiseOperations
 from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import \
-    check_learnable_module, extract_in_out_params, \
-    get_module_device, rename_with_ops
+    get_shape_attribute_from_module, \
+    what_layer_type, extract_in_out_params, \
+    get_module_device, rename_with_ops, \
+    is_learnable_module
 
 
 def monkey_patch(module: nn.Module):
@@ -15,25 +17,33 @@ def monkey_patch(module: nn.Module):
     Dynamically injects LayerWiseOperations methods, wraps forward, and renames
     the module's displayed class name.
     """
+    module_type = what_layer_type(module)
     # Check if module is model type, sequential, list, and iterate until
     # module is type nn.module and no children.
     if len(list(module.children())) > 0 or \
             isinstance(module, nn.modules.container.Sequential) or \
-            not isinstance(module, nn.Module) \
-            or not check_learnable_module(module):
+            not isinstance(module, nn.Module):  # or not is_learnable_module(module):
+        return module
+
+    # --- Step 0: Extract Input and Output Parameters from layers ---
+    in_dim, out_dim, in_name, out_name = extract_in_out_params(module)
+    if in_dim is None and out_dim is None and in_name is None and out_name is None:
         return module
 
     # --- Step 1: Inject Mixin Methods (As before) ---
+    # First, set layer type attribute
+    setattr(module, 'layer_type', module_type)
     # ... (Injection of NeuronWiseOperations and LayerWiseOperations methods)
+    # NeuronWiseOperations
     for name, method in vars(NeuronWiseOperations).items():
         if isinstance(method, types.FunctionType):
             setattr(module, name, types.MethodType(method, module))
+    # LayerWiseOperations
     for name, method in vars(LayerWiseOperations).items():
         if isinstance(method, types.FunctionType):
             setattr(module, name, types.MethodType(method, module))
 
     # --- Step 2: Custom Initialization Setup ---
-    in_dim, out_dim, in_name, out_name = extract_in_out_params(module)
     try:
         module.__init__(
             in_neurons=in_dim,
@@ -69,17 +79,16 @@ def monkey_patch(module: nn.Module):
 if __name__ == "__main__":
     from torch import nn
     from weightslab.backend.watcher_editor import WatcherEditor
-    from weightslab.tests.torch_models import FashionCNNSequential
+    from weightslab.tests.torch_models import \
+        TwoLayerUnflattenNet as Model
 
     # Setup prints
     setup_logging('DEBUG')
     print('Hello World')
 
-    # 0. Test the forward pass to see the custom logic execute
-    dummy_input = th.randn(1, 1, 28, 28)
-
     # 1. Instantiate the standard model
-    model = FashionCNNSequential()
+    model = Model()
+    dummy_input = th.randn(model.input_shape)
     model(dummy_input)  # test inference
     model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
     model(dummy_input)  # test inference
@@ -92,9 +101,3 @@ if __name__ == "__main__":
 
     print("\n--- Final Output Shape ---")
     print(output.shape)
-
-    print("\n--- Test Layer add_neurons")
-    model_add_neurons(model)
-    print(f'Inference test of the modified model is:\n{model(dummy_input)}')
-
-    print('Bye World')

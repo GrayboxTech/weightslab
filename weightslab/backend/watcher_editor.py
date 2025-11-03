@@ -287,7 +287,8 @@ class WatcherEditor(NetworkWithOps):
 
 
 if __name__ == "__main__":
-    from weightslab.tests.torch_models import FashionCNN as Model
+    from weightslab.tests.torch_models import \
+        TwoLayerUnflattenNet as Model
 
     # Setup prints
     setup_logging('DEBUG')
@@ -311,6 +312,12 @@ if __name__ == "__main__":
     # Model Operations
     # # Test: add neurons
     print("--- Test: Add Neurons ---")
-    model_op_neurons(model, layer_id=3, op=1)
+    model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
+    # model_op_neurons(model, op=)
+    with model as m:
+        m.operate(3, {-1}, neuron_operation=4)
+    model(dummy_input)  # Inference test
+    with model as m:
+        m.operate(3, {-1}, neuron_operation=1)
     model(dummy_input)  # Inference test
     print(f'Inference test of the modified model is:\n{model(dummy_input)}')

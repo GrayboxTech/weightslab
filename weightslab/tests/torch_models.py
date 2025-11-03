@@ -988,3 +988,56 @@ class SimpleVAE(nn.Module):
         # Return the reconstruction along with mu and log_var
         # (needed for the VAE loss)
         return reconstruction, mu, log_var
+
+
+class TwoLayerUnflattenNet(th.nn.Module):
+    def __init__(self, D_in=1000, D_out=10):
+        super().__init__()
+        self.input_shape = (64, D_in, 8, 8)
+
+        # --- Layer 1: Conv2d (3 -> 16 channels) ---
+        # Output spatial size is maintained (32x32 -> 32x32)
+        self.conv1 = th.nn.Conv2d(in_channels=D_in, out_channels=16,
+                                  kernel_size=3, padding=1)
+
+        # --- Layer 2: Conv2d (16 -> 32 channels) ---
+        # Spatial size is halved (32x32 -> 16x16)
+        self.conv2 = th.nn.Conv2d(in_channels=16, out_channels=32,
+                                  kernel_size=3, stride=2, padding=1)
+
+        self.linear1 = th.nn.Linear(512, 128)
+        self.linear2 = th.nn.Linear(128, 8192)
+
+        # --- Unflattening (Required before final Conv2d) ---
+        # Reshapes the 8192 tensor back to (32, 16, 16)
+        # dim=1 means we are reshaping starting from the channel dimension
+        self.unflatten = th.nn.Unflatten(
+            dim=1,
+            unflattened_size=(32, 16, 16)
+        )
+
+        # --- Layer 5: Conv2d (32 -> 10 channels) ---
+        # Final convolution layer for 10 classes
+        self.conv3 = th.nn.Conv2d(
+            in_channels=32,
+            out_channels=D_out,
+            kernel_size=1
+        )
+
+    def forward(self, x):
+        # Convolution layers
+        x = self.conv1(x)
+        x = self.conv2(x)
+
+        # Flatten layer
+        x = x.view(x.shape[0], -1)  # Flatten the tensor
+
+        # Linear layers and ReLU activation function
+        h_relu = self.linear1(x).clamp(min=0)
+        x = self.linear2(h_relu)
+
+        # Reshape for a final convolution
+        x_reshaped = self.unflatten(x)
+        y_pred = self.conv3(x_reshaped)
+
+        return y_pred

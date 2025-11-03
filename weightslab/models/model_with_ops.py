@@ -188,6 +188,7 @@ class NetworkWithOps(nn.Module):
         layer_id: int,
         neuron_indices: Set[int] | int = {},
         neuron_operation: Enum = ArchitectureNeuronsOpType.ADD,
+        current_child_name: Optional[str] = None,
         skip_initialization: bool = False,
         _suppress_incoming_ids: Optional[Set[int]] = set(),
         _suppress_rec_ids: Optional[Set[int]] = set(),
@@ -224,7 +225,7 @@ class NetworkWithOps(nn.Module):
 
         # Get the current module
         module = self._dep_manager.id_2_layer[layer_id]
-        current_parent_out = module.out_neurons
+        current_parent_out = module.get_neurons(attr_name='out_neurons')
 
         # Sanity check to avoid redundancy
         # To be sure that nodes are updated only one time by pass
@@ -353,7 +354,7 @@ class NetworkWithOps(nn.Module):
                 neuron_operation=neuron_operation,
                 skip_initialization=skip_initialization,
                 current_child_name=incoming_module.get_name_wi_id()
-                if incoming_module is not None else None,
+                if incoming_module is not None else current_child_name,
                 **kwargs
         ) if layer_id not in self.visited_nodes else None
         self.visited_nodes.add(layer_id)  # Update visited node
@@ -371,7 +372,7 @@ class NetworkWithOps(nn.Module):
                 # Get the producer id - e.g., conv1 from batchnorm1
                 for producer_id in self._same_ancestors(sib_parent_id):
                     sib_prod_module = self._dep_manager.id_2_layer[producer_id]
-                    delta = current_parent_out - sib_prod_module.out_neurons
+                    delta = current_parent_out - sib_prod_module.get_neurons(attr_name='out_neurons')
 
                     # use bypass to not increase the delta if it is generated
                     # from a recursive layers,
@@ -380,7 +381,7 @@ class NetworkWithOps(nn.Module):
                     if bypass or delta <= 0:
                         continue
 
-                    old_nc = int(sib_prod_module.out_neurons)
+                    old_nc = int(sib_prod_module.get_neurons(attr_name='out_neurons'))
                     self.operate(
                         producer_id,
                         neuron_indices=delta,

@@ -14,7 +14,7 @@ from weightslab.utils.logs import print
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
-def check_learnable_module(module: nn.Module) -> bool:
+def is_learnable_module(module: nn.Module) -> bool:
     """
     Checks if a module is a learnable nn.Module with parameters that have grad.
     """
@@ -62,9 +62,32 @@ def extract_in_out_params(module: nn.Module) -> List[int | str]:
         in_name = "num_features"
         out_dim = module.num_features
         out_name = "num_features"
+        module.same_flag = True
         return in_dim, out_dim, in_name, out_name
 
-    # 4. Catch all or return None for non-parameterized layers
+    # 4. Layers using in or out shape/size attributes
+    shape_attrs = [
+        i for i in list(module.__dict__.keys())
+        if '_size' in i or '_shape' in i
+    ]
+    if len(shape_attrs) and 'flatten' in module._get_name():
+        in_shape_attrs = [attr for attr in shape_attrs if 'in_' in attr]
+        out_shape_attrs = [attr for attr in shape_attrs if 'in_' in attr]
+        # OneWay layers, e.g., UnFlatten or BatchNorm layers
+        if not len(in_shape_attrs) or not len(out_shape_attrs):
+            in_dim = getattr(module, shape_attrs[0])
+            in_name = shape_attrs[0]
+            out_dim = getattr(module, shape_attrs[0])
+            out_name = shape_attrs[0]
+        elif len(in_shape_attrs) == len(out_shape_attrs):
+            in_dim = getattr(module, in_shape_attrs[0])
+            in_name = in_shape_attrs[0]
+            out_dim = getattr(module, out_shape_attrs[0])
+            out_name = out_shape_attrs[0]
+        module.same_flag = True
+        return in_dim, out_dim, in_name, out_name
+
+    # 5. Catch all or return None for non-parameterized layers
     return None, None, None, None
 
 
@@ -192,25 +215,60 @@ def get_feature_channel_size(node: Node) -> Optional[int]:
     return None
 
 
-def has_multi_in_out(module):
-    in_out_c = (
-        hasattr(module, 'in_channels') or
-        hasattr(module, 'in_features')
-    ) and (
-        hasattr(module, 'out_channels') or
-        hasattr(module, 'out_features')
-    )
-    if not in_out_c:
-        if hasattr(module, 'weight') or hasattr(module, 'weights'):
-            return True
-    return False
+def get_shape_attribute_from_module(
+        module: nn.Module,
+        _in=False,
+        _out=False,
+        with_name=False
+):
+    attrs = [
+        i for i in list(module.__dict__.keys())
+        if '_size' in i or '_shape' in i
+    ]
+    res = [None] if not with_name else (None, None)
+    if not len(attrs):
+        return [None] if not with_name else (None, None)
+    if _in:
+        _in_attrs = [i for i in attrs if '_in' in i or 'in_' in i]
+        if len(_in_attrs):
+            res = getattr(module, _in_attrs[0])
+            res = [res] if not with_name else (res, _in_attrs[0])
+    if _out:
+        _out_attrs = [i for i in attrs if '_out' in i or 'out_' in i]
+        if len(_out_attrs):
+            res = getattr(module, _out_attrs[0])
+            res = [res] if not with_name else (res, _out_attrs[0])
+
+    if _in == _out is False:
+        res = getattr(module, attrs[0])
+        res = [res] if not with_name else (res, attrs[0])
+
+    return res
+
+
+def what_layer_type(module: nn.Module):
+    in_attrs = [i for i in list(module.__dict__.keys()) if 'in_' in i]
+    out_attrs = [i for i in list(module.__dict__.keys()) if 'out_' in i]
+    shape_attrs = [
+        i for i in list(module.__dict__.keys())
+        if 'size_' in i or '_size' in i or
+        'shape_' in i or '_shape' in i
+    ]
+
+    # Find and return layer type based on the attributes found
+    if len(in_attrs) and len(out_attrs):
+        return 1
+    elif len(shape_attrs):
+        return 2
+    else:
+        return 0
 
 
 def make_safelist(x):
     return [x] if not isinstance(x, list) else x
 
 
-def generate_mappings(src_channels: int, dest_channels: int) -> Tuple[list]:
+def generate_mappings(src_channels: int, dst_channels: int) -> Tuple[list]:
     """
     TODO (GP): Improve this function
     Generates index mappings between a source and destination layer.
@@ -221,7 +279,7 @@ def generate_mappings(src_channels: int, dest_channels: int) -> Tuple[list]:
 
     Args:
         src_channels (int): The number of neurons/channels in the source layer.
-        dest_channels (int): The number of neurons/channels in the destination
+        dst_channels (int): The number of neurons/channels in the destination
         layer.
 
     Returns:
@@ -234,21 +292,21 @@ def generate_mappings(src_channels: int, dest_channels: int) -> Tuple[list]:
     src_to_dst_mapping = []
     dst_to_src_mapping = []
     src_channels = list(src_channels)
-    dest_channels = list(dest_channels)
+    dst_channels = list(dst_channels)
 
-    if len(src_channels) == len(dest_channels):
+    if len(src_channels) == len(dst_channels):
         # Case 1: 1-to-1 mapping
-        # Each source channel maps to the corresponding destination channel.
-        src_to_dst_mapping = {i: [j] for i, j in zip(src_channels, dest_channels)}
-        dst_to_src_mapping = {i: [j] for i, j in zip(dest_channels, src_channels)}
+        # Each source channel maps to the corresponding dstination channel.
+        src_to_dst_mapping = {i: [j] for i, j in zip(src_channels, dst_channels)}
+        dst_to_src_mapping = {i: [j] for i, j in zip(dst_channels, src_channels)}
 
-    elif len(src_channels) > len(dest_channels):
+    elif len(src_channels) > len(dst_channels):
         # Case 2: Many-to-one (src > dst)
-        # A "batch" of source neurons maps to a single destination neuron.
-        if len(src_channels) % len(dest_channels) != 0:
+        # A "batch" of source neurons maps to a single dstination neuron.
+        if len(src_channels) % len(dst_channels) != 0:
             raise ValueError(
                 f"Source channels ({src_channels}) must be perfectly \
-                 divisible by destination channels ({dest_channels}) \
+                 divisible by dstination channels ({dst_channels}) \
                  for many-to-one mapping."
             )
 
@@ -256,7 +314,7 @@ def generate_mappings(src_channels: int, dest_channels: int) -> Tuple[list]:
         # This determines how many linear layer neurons map to one convolution channel.
         # We use integer division to ensure a clean split.
         # Example: 8192 keys // 32 values = 256 keys per value
-        group_size = len(src_channels) // len(dest_channels)
+        group_size = len(src_channels) // len(dst_channels)
 
         # src_to_dst: Many-to-one
         # [src_idx, [dst_idx]]
@@ -273,7 +331,7 @@ def generate_mappings(src_channels: int, dest_channels: int) -> Tuple[list]:
         # [dst_idx, [src_idx_list]]
         # e.g., dst 0 maps to src 0, 1, 2
         dst_to_src_mapping_ = []
-        for dst_idx in dest_channels:
+        for dst_idx in dst_channels:
             start_src_idx = dst_idx * group_size
             end_src_idx = (dst_idx + 1) * group_size
             src_indices = list(range(start_src_idx, end_src_idx))
@@ -284,21 +342,21 @@ def generate_mappings(src_channels: int, dest_channels: int) -> Tuple[list]:
             # Then, we iterate over every single code within that range
             for code in code_range:
                 # We map the individual code back to the original index
-                dst_to_src_mapping[code] = index
+                dst_to_src_mapping[code] = [index]
 
-    else:  # src_channels < dest_channels
+    else:  # src_channels < dst_channels
         # 1. Calculate the block size.
         # This determines how many linear layer neurons map to one convolution channel.
         # We use integer division to ensure a clean split.
         # Example: 8192 keys // 32 values = 256 keys per value
-        block_size = len(dest_channels) // len(src_channels)
+        block_size = len(dst_channels) // len(src_channels)
 
         # 2. Generate the first mapping dictionary (a)
         # The key is the linear neuron index (0 to 8191)
         # The value is the convolution channel index (0 to 31)
         neuron_to_channel_map = {
             i: i // block_size
-            for i in dest_channels
+            for i in dst_channels
         }
         # 3. Generate the second mapping dictionary (b)
         # Since you requested it to be equal, we just copy the first one.
@@ -343,8 +401,14 @@ def generate_graph_dependencies(
         if node.op == 'call_module':
             # Get current module from node
             current_module = get_module_by_name(model, node.target)
+            current_layer_type = current_module.layer_type if hasattr(current_module, 'layer_type') else -1
+
+            # If the current module is a multi-input layer, flag as bypass
             if node.name in bypass:
-                current_module.bypass = 0  # bypass strategy for recursive update dependencies, like bypass = true for __add__ but false for cat; and cnt for neurons mapping src / dst
+                # bypass strategy for recursive update dependencies,
+                # like bypass = true for __add__ but false for cat;
+                # and cnt for neurons mapping src / dst
+                current_module.bypass = 0
 
             # Find the input source node that came from a tracked module
             source_node = next(
@@ -358,38 +422,37 @@ def generate_graph_dependencies(
             # current Structural Module) ---
             # A dependency edge (A -> B) is only created if B (current_module)
             # is a structural layer.
-            is_dest_structural = is_feature_producer(current_module)
+            is_dst_structural = is_feature_producer(current_module)
             is_learnable = is_module_learnable(current_module)
+            has_layer_type = hasattr(current_module, 'layer_type')
             if source_modules:
                 for source_module in source_modules:
                     if source_module is not None and \
-                            (is_dest_structural or is_learnable):
+                        (has_layer_type or is_dst_structural or is_learnable):
                         # 1.1. Determine Dependency Type based on Shape
                         # (for Pruning)
                         dep_type = DepType.INCOMING
                         source_out_channels = get_feature_channel_size(
                             source_node
                         )
-                        dest_out_channels = get_feature_channel_size(node)
+                        dst_out_channels = get_feature_channel_size(node)
+
                         # 1.2. Check if current module should be target SAME
                         # path. It's a specific case where current module has
                         # in==out shapes
-                        same_dep = has_multi_in_out(current_module)
-
                         # Check for SAME constraint (requires source to be a
                         # producer)
-                        if is_feature_producer(source_module) and \
-                                source_out_channels is not None and \
-                                dest_out_channels is not None:
-                            if same_dep and \
-                                    source_out_channels == dest_out_channels:
+                        if current_layer_type == 1 and \
+                            source_out_channels is not None and \
+                                dst_out_channels is not None:
+                            if hasattr(current_module, 'same_flag'):
                                 dep_type = DepType.SAME
-                        elif same_dep and \
-                                source_out_channels == dest_out_channels:
+                        else:
                             dep_type = DepType.SAME
+                            # current_module.bypass = 1
 
                         # 1.3. Append the dependency
-                        # (Structural Source -> Structural Destination)
+                        # (Structural Source -> Structural dstination)
                         dependencies.append(
                             (
                                 source_module,
@@ -397,31 +460,14 @@ def generate_graph_dependencies(
                                 dep_type
                             )
                         )
-
-                        # # 1.4. Generate mappings tnsr for src and dst layers
-                        # src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = \
-                        #     generate_mappings(
-                        #         source_out_channels,
-                        #         dest_out_channels
-                        #     )
-                        # source_module.src_to_dst_mapping_tnsrs.update(
-                        #     {
-                        #         current_module.get_name():
-                        #             src_to_dst_mapping_tnsr
-                        #     }
-                        # )
-                        # current_module.dst_to_src_mapping_tnsrs.update(
-                        #     {
-                        #         source_module.get_name():
-                        #             dst_to_src_mapping_tnsr
-                        #     }
-                        # )
+                        if hasattr(current_module, 'bypass'):
+                            source_module.src_bypass = 1
 
             # --- 2. Update Tracking Map (Only track Structural Modules
             # or pass through) ---
             # Structural Modules are producers (Conv, Linear) or
             # size-constrainers (BN)
-            if is_dest_structural or is_learnable:
+            if current_layer_type >= 1 or is_learnable:
                 node_to_module[node] = make_safelist(current_module)
             elif source_node and source_node in node_to_module:
                 # Pass through: For stateless layers (ReLU, MaxPool), point
@@ -491,12 +537,20 @@ def generate_graph_dependencies(
 
     # Generate mapping tensor btw deps
     for dep in dependencies:
+        # Get src and dst modules and type
         src_mod, dst_mod, dep_type = dep[0], dep[1], dep[2]
+
+        # Is it a recursive dependency ?
         recursive_dep = dep_type == DepType.REC
-        source_out_channels = range(src_mod.out_neurons)
-        dst_in_channels = range(dst_mod.in_neurons if not recursive_dep else dst_mod.out_neurons)
-        if hasattr(dst_mod, 'bypass'):
-            dst_in_channels = range(dst_mod.bypass, len(source_out_channels) + dst_mod.bypass)
+
+        source_out_channels = range(src_mod.get_neurons(attr_name='out_neurons'))
+        dst_in_channels = range(dst_mod.get_neurons(attr_name='in_neurons') if not recursive_dep else
+                                dst_mod.get_neurons(attr_name='out_neurons'))
+        if hasattr(dst_mod, 'bypass') or hasattr(dst_mod, 'bypassed'):
+            dst_in_channels = range(
+                dst_mod.bypass,
+                len(source_out_channels) + dst_mod.bypass
+            )
             dst_mod.bypass = len(source_out_channels)
 
         # 1.4. Generate mappings tnsr for src and dst layers
@@ -506,7 +560,8 @@ def generate_graph_dependencies(
                 dst_in_channels
             )
         if not recursive_dep:
-            dst_mod.dst_to_src_mapping_tnsrs.update(  # should be reverse mapping
+            # should be reverse mapping
+            dst_mod.dst_to_src_mapping_tnsrs.update(
                 {
                     src_mod.get_name_wi_id():
                         dst_to_src_mapping_tnsr
@@ -568,58 +623,66 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None):
         print(f'Operate on neurons at layer {n}', level='DEBUG')
         with model as m:
             if op is None:
-                print('Adding operation - 2 neurons added.', level='DEBUG')
+                print('Adding operation - 2 neurons added.',
+                      level='DEBUG')
                 m.operate(n, {0, 0, 0, 0, 0}, neuron_operation=1)
                 m(dummy_input) if dummy_input is not None else None
-                print('Reseting operation - every neurons reset.', level='DEBUG')
+                print('Reseting operation - every neurons reset.',
+                      level='DEBUG')
                 m.operate(n, {}, neuron_operation=4)
                 m(dummy_input) if dummy_input is not None else None
-                print('Freezing operation - last neuron froze.', level='DEBUG')
+                print('Freezing operation - last neuron froze.',
+                      level='DEBUG')
                 m.operate(n, {-3}, neuron_operation=3)
                 m(dummy_input) if dummy_input is not None else None
-                print('Pruning operation - first neuron removed.', level='DEBUG')
+                print('Pruning operation - first neuron removed.',
+                      level='DEBUG')
                 m.operate(n, {0, 1}, neuron_operation=2)
                 m(dummy_input) if dummy_input is not None else NotImplemented
             else:
                 m.operate(
                     n,
-                    {-2},
+                    {-1},
                     neuron_operation=op
                 )
                 m(dummy_input) if dummy_input is not None else None
 
 
-def reindex_and_compress_blocks(data_dict, block_size):
+def reindex_and_compress_blocks(data_dict, block_size, offset_index=0):
     """
     Re-indexes the dictionary keys and shifts the neuron value ranges to ensure
-    they remain contiguous starting from 0, after removing an intermediate block.
+    they remain contiguous starting from 0, after removing an intermediate
+    block.
 
     Args:
-        data_dict (dict): The dictionary with non-contiguous keys and value ranges.
+        data_dict (dict): The dictionary with non-contiguous keys and value
+        ranges.
         block_size (int): The fixed size of each neuron block (e.g., 256).
 
     Returns:
-        dict: The re-indexed dictionary with contiguous keys and compressed values.
+        dict: The re-indexed dictionary with contiguous keys and compressed
+        values.
     """
     # 1. Sort the remaining blocks by their original keys to maintain order
-    # The dictionary keys must be sorted to ensure the blocks are processed sequentially.
+    # The dictionary keys must be sorted to ensure the blocks are processed
+    # sequentially.
     sorted_blocks = collections.OrderedDict(sorted(data_dict.items()))
 
     reindexed_dict = {}
 
     # 2. Iterate through the remaining blocks, assigning a new contiguous index
-    for new_index, (old_key, old_range) in enumerate(sorted_blocks.items()):
-
+    for new_index in range(len(list(sorted_blocks.items()))):
+        index_batch = new_index // block_size
         # Calculate the new starting point for the range.
-        # This point ensures the range is contiguous (0 * size, 1 * size, 2 * size, ...)
-        new_start = new_index * block_size
+        # This point ensures the range is contiguous (0 * size, n * size, ...)
+        new_start = block_size*index_batch
         new_end = new_start + block_size
 
         # Create the new contiguous range
-        new_range = range(new_start, new_end)
+        new_range = list(range(new_start, new_end))
 
         # Assign the new key and the compressed value range
-        reindexed_dict[new_index] = new_range
+        reindexed_dict[new_index+offset_index] = new_range
 
     return reindexed_dict
 

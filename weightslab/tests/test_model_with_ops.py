@@ -80,12 +80,38 @@ class NetworkWithOpsTest(unittest.TestCase):
             print_graph=False
         )
 
+    def _train_one_epoch(self, cutoff: int | None = None):
+        corrects = 0
+        for idx, (image, label) in enumerate(self.train_loader):
+            if cutoff and cutoff <= idx:
+                break
+            self.dummy_network.train()
+            self.optimizer.zero_grad()
+            output = self.dummy_network(image)
+            prediction = output.argmax(dim=1, keepdim=True)
+            losses_batch = F.cross_entropy(output, label, reduction='none')
+            loss = th.mean(losses_batch)
+            loss.backward()
+            self.optimizer.step()
+            corrects += prediction.eq(label.view_as(prediction)).sum().item()
+        return corrects
+
+    def _eval_one_epoch(self, cutoff: int | None = None):
+        corrects = 0
+        for idx, (image, label) in enumerate(self.eval_loader):
+            if cutoff and cutoff <= idx:
+                break
+            self.dummy_network.eval()
+            output = self.dummy_network(image)
+            prediction = output.argmax(dim=1, keepdim=True)
+            corrects += prediction.eq(label.view_as(prediction)).sum().item()
+        return corrects
+
     def test_update_age_and_tracking_mode(self):
         self.dummy_network.maybe_update_age(self.tracked_input)
         self.assertEqual(self.dummy_network.get_age(), 0)
         self.dummy_network.set_tracking_mode(TrackingMode.TRAIN)
         self.dummy_network.maybe_update_age(self.tracked_input)
-
 
     def test_store_and_load(self):
         # Forward
@@ -133,40 +159,13 @@ class NetworkWithOpsTest(unittest.TestCase):
         replicated_model.load_state_dict(state_dict, strict=False)
         self.assertEqual(self.dummy_network, replicated_model)
 
-    def train_one_epoch(self, cutoff: int | None = None):
-        corrects = 0
-        for idx, (image, label) in enumerate(self.train_loader):
-            if cutoff and cutoff <= idx:
-                break
-            self.dummy_network.train()
-            self.optimizer.zero_grad()
-            output = self.dummy_network(image)
-            prediction = output.argmax(dim=1, keepdim=True)
-            losses_batch = F.cross_entropy(output, label, reduction='none')
-            loss = th.mean(losses_batch)
-            loss.backward()
-            self.optimizer.step()
-            corrects += prediction.eq(label.view_as(prediction)).sum().item()
-        return corrects
-
-    def eval_one_epoch(self, cutoff: int | None = None):
-        corrects = 0
-        for idx, (image, label) in enumerate(self.eval_loader):
-            if cutoff and cutoff <= idx:
-                break
-            self.dummy_network.eval()
-            output = self.dummy_network(image)
-            prediction = output.argmax(dim=1, keepdim=True)
-            corrects += prediction.eq(label.view_as(prediction)).sum().item()
-        return corrects
-
     def test_train_add_neurons_train(self):
         # Set Tracker
         self.dummy_network.set_tracking_mode(TrackingMode.TRAIN)
 
         # Train for like 10 epochs
         for _ in trange(1, desc="Training.."):
-            corrects_first_epochs = self.train_one_epoch(cutoff=10)
+            corrects_first_epochs = self._train_one_epoch(cutoff=10)
 
         # Operate on the first layer - ADD
         with self.dummy_network as model:
@@ -178,7 +177,7 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         # Train for another 10 epochs
         for _ in trange(1, desc="Training again.."):
-            corrects_secnd_epochs = self.train_one_epoch(cutoff=10)
+            corrects_secnd_epochs = self._train_one_epoch(cutoff=10)
 
         # Check if the model has been trained correctly and any updated ?
         self.assertNotEqual(
@@ -190,10 +189,10 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         # Train for like 10 epochs
         for _ in trange(10, desc="Training.."):
-            self.train_one_epoch(cutoff=20)
+            self._train_one_epoch(cutoff=20)
 
         # Evaluate
-        corrects_first_epoch = self.eval_one_epoch(cutoff=50)
+        corrects_first_epoch = self._eval_one_epoch(cutoff=50)
 
         # Operate on the first layer - PRUNE
         to_remove_ids = set()
@@ -214,7 +213,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             )
 
         # Evaluate
-        corrects_after_prunning = self.eval_one_epoch(cutoff=50)
+        corrects_after_prunning = self._eval_one_epoch(cutoff=50)
 
         # Check if the model has been trained correctly and any updated?
         self.assertNotEqual(
@@ -228,7 +227,7 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         # Train for like 10 epochs
         for _ in trange(10, desc="Training.."):
-            self.train_one_epoch(cutoff=20)
+            self._train_one_epoch(cutoff=20)
 
         # Operate on the first layer - FREEZE
         to_freeze_ids = {-1, -3}
@@ -253,7 +252,7 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         # Train for like 5 epochs again
         for _ in trange(5, desc="Training again.."):
-            self.train_one_epoch(cutoff=20)
+            self._train_one_epoch(cutoff=20)
 
         # Get weights sum
         learnable_weights_sum_value = th.sum(
@@ -288,7 +287,7 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         # Train for like 10 epochs
         for _ in trange(10, desc="Training.."):
-            self.train_one_epoch(cutoff=20)
+            self._train_one_epoch(cutoff=20)
 
         # Get weights sum
         weights_sum_value = th.sum(
@@ -310,7 +309,7 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         # Train for like 5 epochs again
         for _ in trange(5, desc="Training again.."):
-            self.train_one_epoch(cutoff=20)
+            self._train_one_epoch(cutoff=20)
 
         # Check that weights have been trained
         self.assertNotEqual(
