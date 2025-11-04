@@ -346,7 +346,7 @@ class WatcherEditor(NetworkWithOps):
 
 if __name__ == "__main__":
     from weightslab.tests.torch_models import \
-        UNet3p as Model
+        TinyUNet as Model
 
     # Setup prints
     setup_logging('DEBUG')
@@ -370,22 +370,14 @@ if __name__ == "__main__":
     # Model Operations
     # # Test: add neurons
     print("--- Test: Op Neurons ---")
-    # model_op_neurons(model, op=1, dummy_input=dummy_input)
-    with model as m:
-        m.operate(71, {-1}, neuron_operation=2)
+    model_op_neurons(model, op=2, layer_id=3)
+    model(dummy_input)  # Inference test
     model_op_neurons(model, op=1)
+    model(dummy_input)  # Inference test
     model_op_neurons(model, op=2)
+    model(dummy_input)  # Inference test
     model_op_neurons(model, op=3)
+    model(dummy_input)  # Inference test
     model_op_neurons(model, op=4)
-    # # Left grouped operator
-    # with model as m:
-    #     m.operate(1, {2}, neuron_operation=1)
-    # model(dummy_input)  # Inference test
-    # # Right grouped operator
-    # with model as m:
-    #     m.operate(2, {2}, neuron_operation=1)
-    # model(dummy_input)  # Inference test
-    # with model as m:
-    #     m.operate(3, {-1}, neuron_operation=1)
     model(dummy_input)  # Inference test
     print(f'Inference test of the modified model is:\n{model(dummy_input)}')

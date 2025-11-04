@@ -228,6 +228,7 @@ class TriggersTracker(Tracker):
 
     def prune(self, indices: Set[int], update_neuron_count: bool = True):
         neurons = set(range(self.number_of_neurons))
+        indices = set(indices) if not isinstance(indices, set) else indices
         if not indices & neurons:
             raise ValueError(
                 f"TriggersTracker.prune indices and neurons set do not "

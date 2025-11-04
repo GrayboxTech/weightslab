@@ -3,7 +3,7 @@ import torch as th
 
 from torch import nn
 from enum import Enum, auto
-from typing import List, Set, Optional
+from typing import List, Set, Optional, Callable
 
 from weightslab.components.tracking import TrackingMode
 from weightslab.utils.tools import get_children
@@ -193,6 +193,7 @@ class NetworkWithOps(nn.Module):
         _suppress_incoming_ids: Optional[Set[int]] = set(),
         _suppress_rec_ids: Optional[Set[int]] = set(),
         _suppress_same_ids: Optional[Set[int]] = set(),
+        dependency: Optional[Callable] = None,
         **kwargs
     ):
         """
@@ -339,6 +340,7 @@ class NetworkWithOps(nn.Module):
                 neuron_operation=neuron_operation,
                 skip_initialization=False,
                 current_parent_name=module.get_name_wi_id(),
+                dependency=DepType.INCOMING,
                 **kwargs
             )
             # Keep visited node in mem. if bypass flag,
@@ -349,12 +351,17 @@ class NetworkWithOps(nn.Module):
             updated_incoming_children.append(incoming_id)
 
         # Operate in module out neurons
+        # # Check first the relation dependency
+        if dependency is None:
+            dependency = DepType.SAME if hasattr(module, 'wl_same_flag') and module.wl_same_flag else None
+        # # Operate the module
         module.operate(
                 neuron_indices,
                 neuron_operation=neuron_operation,
                 skip_initialization=skip_initialization,
                 current_child_name=incoming_module.get_name_wi_id()
                 if incoming_module is not None else current_child_name,
+                dependency=dependency,
                 **kwargs
         ) if layer_id not in self.visited_nodes else None
         self.visited_nodes.add(layer_id)  # Update visited node
@@ -388,6 +395,7 @@ class NetworkWithOps(nn.Module):
                         skip_initialization=True,
                         neuron_operation=neuron_operation,
                         _suppress_incoming_ids={child_id},
+                        dependency=DepType.INCOMING,
                         **kwargs
                     )
                     try:

@@ -4,6 +4,7 @@ import collections
 import torch as th
 import torch.nn as nn
 
+from copy import deepcopy
 from torch.fx import GraphModule, Node
 from typing import Tuple, Optional, List, Any, Type
 
@@ -53,6 +54,10 @@ def extract_in_out_params(module: nn.Module) -> List[int | str]:
         in_name = "in_channels"
         out_dim = module.out_channels
         out_name = "out_channels"
+        # TODO (GP): Hardcoded for now, but should be wrapped somehow, i.e.,
+        # TODO (GP): you customize how you define layers flag like transposed.
+        if 'transposed' in module._get_name():
+            module.wl_transposed = True
         return in_dim, out_dim, in_name, out_name
 
     # 3. Like BatchNorm Layers use 'num_features' template
@@ -62,7 +67,7 @@ def extract_in_out_params(module: nn.Module) -> List[int | str]:
         in_name = "num_features"
         out_dim = module.num_features
         out_name = "num_features"
-        module.same_flag = True
+        module.wl_same_flag = True
         return in_dim, out_dim, in_name, out_name
 
     # 4. Layers using in or out shape/size attributes
@@ -84,7 +89,7 @@ def extract_in_out_params(module: nn.Module) -> List[int | str]:
             in_name = in_shape_attrs[0]
             out_dim = getattr(module, out_shape_attrs[0])
             out_name = out_shape_attrs[0]
-        module.same_flag = True
+        module.wl_same_flag = True
         return in_dim, out_dim, in_name, out_name
 
     # 5. Catch all or return None for non-parameterized layers
@@ -515,7 +520,7 @@ def generate_graph_dependencies(
                         if current_layer_type == 1 and \
                             source_out_channels is not None and \
                                 dst_out_channels is not None:
-                            if hasattr(current_module, 'same_flag'):
+                            if hasattr(current_module, 'wl_same_flag'):
                                 dep_type = DepType.SAME
                         else:
                             dep_type = DepType.SAME
@@ -558,7 +563,7 @@ def generate_graph_dependencies(
             # (e.g., cat)
             if 'cat' in node.name or 'cat_' in node.name:
                 bypass.append(str(node.next))
-                bypassed = True
+                # bypassed = True
 
             # 1. Identify all source modules that feed into this function node
             # TODO (GP): Find recursive approach to do that, if there are
@@ -618,41 +623,65 @@ def generate_graph_dependencies(
                 node_to_module[node] = None  # Placeholder or constant input
 
     # Generate mapping tensor btw deps
-    for dep in dependencies:
+    for edge in dependencies:
         # Get src and dst modules and type
-        src_mod, dst_mod, dep_type = dep[0], dep[1], dep[2]
+        src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]
+        recursive_dep = edge_label == DepType.REC  # A recursive dependency ?
 
-        # Is it a recursive dependency ?
-        recursive_dep = dep_type == DepType.REC
-
-        source_out_channels = range(src_mod.get_neurons(attr_name='out_neurons'))
-        dst_in_channels = range(dst_mod.get_neurons(attr_name='in_neurons') if not recursive_dep else
-                                dst_mod.get_neurons(attr_name='out_neurons'))
-        if hasattr(dst_mod, 'bypass') or hasattr(dst_mod, 'bypassed'):
+        # 1.1. Determine the number of neurons in each direction
+        source_out_channels = range(
+            src_mod.get_neurons(attr_name='out_neurons') if
+            not hasattr(src_mod, 'wl_transposed')
+            else src_mod.get_neurons(attr_name='in_neurons')
+        )
+        dst_in_channels = range(
+            dst_mod.get_neurons(attr_name='in_neurons') if not recursive_dep
+            and not hasattr(dst_mod, 'wl_transposed')
+            else dst_mod.get_neurons(attr_name='out_neurons')
+        )
+        # # For multi-input / one output layers (e.g., Cat)
+        if hasattr(dst_mod, 'bypass'):
             dst_in_channels = range(
                 dst_mod.bypass,
                 len(source_out_channels) + dst_mod.bypass
             )
             dst_mod.bypass += len(source_out_channels)
 
-        # 1.4. Generate mappings tnsr for src and dst layers
-        groups = dst_mod.groups if hasattr(dst_mod, 'groups') else (src_mod.groups) if hasattr(src_mod, 'groups') else None
+        # 1.2. Generate mappings tnsr for src and dst layers
+        groups = dst_mod.groups if hasattr(dst_mod, 'groups') else (
+            src_mod.groups
+        ) if hasattr(src_mod, 'groups') else None
         src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = \
             generate_mappings(
                 source_out_channels,
                 dst_in_channels,
-                dst_groups=(len(dst_in_channels) // groups) if groups is not None else None,
-                src_groups=len(source_out_channels) // groups if groups is not None else None
+                dst_groups=(len(dst_in_channels) // groups) if groups is
+                not None else None,
+                src_groups=len(source_out_channels) // groups if groups is
+                not None else None
             )
+
+        # 1.3 Update neurons mapping tensors
+        # # Update edge dst node with neurons mapping tensor
         if not recursive_dep:
-            # should be reverse mapping
+            # should be_ reverse mapping
             dst_mod.dst_to_src_mapping_tnsrs.update(
                 {
                     src_mod.get_name_wi_id():
                         dst_to_src_mapping_tnsr
                 }
             )
+            # # Update edge child and parent node with neurons mapping tensor
+            dst_mod.related_src_to_dst_mapping_tnsrs.update(
+                {
+                    dst_mod.get_name_wi_id():
+                        deepcopy(src_to_dst_mapping_tnsr)
+                } if not hasattr(dst_mod, 'bypass') else {}
+            )
+
         else:
+            # Recursive dependency: src & dst are reversed
+            # here for mapping logic
             dst_mod.src_to_dst_mapping_tnsrs.update(
                 {
                     src_mod.get_name_wi_id():
@@ -660,18 +689,26 @@ def generate_graph_dependencies(
                 }
 
             )
+            # # Update edge child and parent node with neurons mapping tensor
+            dst_mod.related_dst_to_src_mapping_tnsrs.update(
+                {
+                    dst_mod.get_name_wi_id():
+                        deepcopy(src_to_dst_mapping_tnsr)
+                } if not hasattr(dst_mod, 'bypass') else {}
+            )  # Child equivalent here
+
+        # # Update edge src node with neurons mapping tensor
         src_mod.src_to_dst_mapping_tnsrs.update(
             {
                 dst_mod.get_name_wi_id():
                     src_to_dst_mapping_tnsr
             }
         )
-        # Add to dst node, the parent indexs maps also
-        dst_mod.parents_src_to_dst_mapping_tnsrs.update(
+        src_mod.related_dst_to_src_mapping_tnsrs.update(
             {
-                dst_mod.get_name_wi_id():
-                    src_to_dst_mapping_tnsr
-            }
+                src_mod.get_name_wi_id():
+                    deepcopy(dst_to_src_mapping_tnsr)
+            } if not hasattr(src_mod, 'bypass') else {}
         )
 
     return dependencies
@@ -757,6 +794,7 @@ def reindex_and_compress_blocks(data_dict, block_size, offset_index=0):
 
     # 2. Iterate through the remaining blocks, assigning a new contiguous index
     for new_index in range(len(list(sorted_blocks.items()))):
+        new_index = new_index + offset_index
         index_batch = new_index // block_size
         # Calculate the new starting point for the range.
         # This point ensures the range is contiguous (0 * size, n * size, ...)
@@ -767,7 +805,7 @@ def reindex_and_compress_blocks(data_dict, block_size, offset_index=0):
         new_range = list(range(new_start, new_end))
 
         # Assign the new key and the compressed value range
-        reindexed_dict[new_index+offset_index] = new_range
+        reindexed_dict[new_index] = new_range
 
     return reindexed_dict
 

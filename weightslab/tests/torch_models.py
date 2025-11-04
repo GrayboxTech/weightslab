@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
 
 
+# --- Basic CNN & MLP Models ---
 class FashionCNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -137,6 +138,7 @@ class SimpleMLP(nn.Module):
         return x
 
 
+# --- Residual model - subpart ---
 class GraphMLP_res_test_A(nn.Module):
     def __init__(self):
         super().__init__()
@@ -288,7 +290,6 @@ class GraphMLP_res_test_D(nn.Module):
         return x_out
 
 
-# --- Residual model - subpart ---
 # --- The Core Residual Block for ResNet-18 and ResNet-34 ---
 class SingleBlockResNetTruncated(nn.Module):
     """
@@ -486,7 +487,7 @@ class TinyUNet_Straightforward(nn.Module):
 
         # --- C. DECODER (Up Path) ---
         # 3. UPSAMPLE 1 (Transition Bottleneck -> Up1)
-        # Interpolation du Bottleneck (16 -> 16)
+        # Interpolation du Bottleneck (16 -> 32)
         self.up_interp1 = nn.Upsample(
             scale_factor=2,
             mode='bilinear',
@@ -1105,6 +1106,90 @@ class ToyAvgPoolNet(nn.Module):
         # Pass through classifier head
         x = self.classifier(x)
         return x
+
+
+class TinyUNet(nn.Module):
+    """
+    A full U-Net implementation contained within a single class,
+    using nn.Sequential for all core DoubleConv blocks.
+
+    This architecture is designed for semantic segmentation tasks.
+    """
+    def __init__(self, n_channels=3, n_classes=1):
+        super(TinyUNet, self).__init__()
+        self.input_shape = (1, n_channels, 256, 256)
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+
+        # Helper function to define the DoubleConv block as an nn.Sequential
+        def double_conv(in_c, out_c):
+            return nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True)
+            )
+
+        # ------------------ ENCODER (Downsampling Path) ------------------
+        # 0. Initial Layer
+        self.inc = double_conv(n_channels, 64)
+
+        # 1. Down 1 (Max pool + Conv)
+        self.down1_pool = nn.MaxPool2d(2)
+        self.down1_conv = double_conv(64, 128)
+
+        # ------------------ DECODER (Upsampling Path) ------------------
+        # 4. Up 4
+        self.up4_up = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=1)
+        self.up4_conv = double_conv(128, 64)  # Input channels: 64 + 64 = 128
+
+        # ------------------ OUTPUT Layer ------------------
+        # 1x1 convolution to map the final feature channels (64) to the number of classes
+        self.outc = nn.Conv2d(64, n_classes, kernel_size=1)
+
+    def forward(self, x):
+        # ------------------ ENCODER (Store for skip connections) ------------------
+        x1 = self.inc(x)
+
+        x2 = self.down1_pool(x1)
+        x2 = self.down1_conv(x2)
+
+        # ------------------ DECODER (Concatenate and Convolve) ------------------
+        # Up 4
+        x = self.up4_up(x2)  # B3
+        x = self._align_and_concat(x, x1)
+        x = self.up4_conv(x)
+
+        # ------------------ OUTPUT ------------------
+        logits = self.outc(x)
+
+        return logits
+
+    def _align_and_concat(self, upsampled, skip):
+        """
+        Helper method to align upsampled tensor size to match the skip connection.
+        Uses F.interpolate, which is tracer-friendly.
+
+        Args:
+            upsampled (Tensor): The upsampled tensor from the decoder path.
+            skip (Tensor): The higher-resolution tensor from the encoder (skip connection).
+
+        Returns:
+            Tensor: The concatenated tensor.
+        """
+        # Explicitly resize the upsampled tensor to match the spatial dimensions of the skip connection
+        # skip.shape[-2:] extracts (H, W)
+        upsampled = F.interpolate(
+            upsampled,
+            size=skip.shape[-2:],
+            mode='bilinear',
+            align_corners=False  # Set to False for compatibility and best practice
+        )
+
+        # Concatenate along the channel dimension (dim=1)
+        return th.cat([skip, upsampled], dim=1)
 
 
 class UNet(nn.Module):
