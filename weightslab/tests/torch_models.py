@@ -1810,8 +1810,7 @@ if __name__ == "__main__":
             x = torch.flatten(x, 1)
             x = self.classifier(x)
             return x
-        
-        
+
     # Setup prints
     setup_logging('DEBUG')
     print('Hello World')
