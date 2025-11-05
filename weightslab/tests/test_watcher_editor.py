@@ -138,7 +138,7 @@ def create_inference_test(ModelClass):
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
-        model_op_neurons(model, layer_id=layer_id, op=op)
+        model_op_neurons(model, layer_id=layer_id, op=op, rand=False)
         test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
@@ -157,7 +157,7 @@ def create_inference_test(ModelClass):
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
-        model_op_neurons(model, layer_id=layer_id, op=op)
+        model_op_neurons(model, layer_id=layer_id, op=op, rand=False)
         test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
@@ -176,7 +176,7 @@ def create_inference_test(ModelClass):
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
-        model_op_neurons(model, layer_id=layer_id, op=op)
+        model_op_neurons(model, layer_id=layer_id, op=op, rand=False)
         test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)

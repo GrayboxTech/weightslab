@@ -623,6 +623,7 @@ def generate_graph_dependencies(
                 node_to_module[node] = None  # Placeholder or constant input
 
     # Generate mapping tensor btw deps
+    # deepcopy = lambda x: x
     for edge in dependencies:
         # Get src and dst modules and type
         src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]
@@ -678,6 +679,8 @@ def generate_graph_dependencies(
                         deepcopy(src_to_dst_mapping_tnsr)
                 } if not hasattr(dst_mod, 'bypass') else {}
             )
+            dst_mod.dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.dst_to_src_mapping_tnsrs)
+            dst_mod.related_src_to_dst_mapping_tnsrs = normalize_dicts(dst_mod.related_src_to_dst_mapping_tnsrs)
 
         else:
             # Recursive dependency: src & dst are reversed
@@ -696,6 +699,8 @@ def generate_graph_dependencies(
                         deepcopy(src_to_dst_mapping_tnsr)
                 } if not hasattr(dst_mod, 'bypass') else {}
             )  # Child equivalent here
+            dst_mod.src_to_dst_mapping_tnsrs = normalize_dicts(dst_mod.src_to_dst_mapping_tnsrs)
+            dst_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.related_dst_to_src_mapping_tnsrs)
 
         # # Update edge src node with neurons mapping tensor
         src_mod.src_to_dst_mapping_tnsrs.update(
@@ -710,6 +715,8 @@ def generate_graph_dependencies(
                     deepcopy(dst_to_src_mapping_tnsr)
             } if not hasattr(src_mod, 'bypass') else {}
         )
+        src_mod.src_to_dst_mapping_tnsrs = normalize_dicts(src_mod.src_to_dst_mapping_tnsrs)
+        src_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(src_mod.related_dst_to_src_mapping_tnsrs)
 
     return dependencies
 
@@ -728,13 +735,15 @@ def get_original_torch_class(
     return replacement_map.get(custom_class)
 
 
-def model_op_neurons(model, layer_id=None, dummy_input=None, op=None):
+def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False):
     """
         Test function to iteratively update neurons for each layer,
         then test inference. Everything match ?
     """
     n_layers = len(model.layers)
     for n in range(n_layers-1, -1, -1):
+        if rand and th.rand(1) > 0.5 and layer_id is None and dummy_input is None:
+            continue
         if layer_id is not None:
             if layer_id >= 0:
                 if n != layer_id:
@@ -856,3 +865,40 @@ def get_model_parameters_neuronwise(model: th.nn.Module, trainable_only=True):
 
     return (params, trainable_params) if not trainable_only else \
         trainable_params
+
+
+def normalize_dicts(a):
+    offset_index = 0
+    for deps_name_ in a:
+        if len(a[deps_name_]) == 0:
+            continue
+        channel_size = len(
+            list(
+                a[
+                    deps_name_
+                ].values()
+            )[-1]
+        )
+        # if dict has several items that are bypass of the module,
+        # we split the new neurons between the two inputs channels
+        # from the two input tensors, and so re index every neurons
+        # with unique sequential indexs.
+        if offset_index > 0:
+            tmp_ = deepcopy(a[deps_name_])
+            a[deps_name_].clear()
+            for k in range(len(tmp_.items())):
+                a[deps_name_][
+                    k + offset_index
+                ] = [k + offset_index]
+        a[deps_name_] = reindex_and_compress_blocks(
+            a[deps_name_],
+            channel_size,
+            offset_index=offset_index
+        )
+        indexs = list(a[
+            deps_name_
+        ].keys())
+        offset_index += len(
+            indexs
+        ) if len(indexs) else 0
+    return a

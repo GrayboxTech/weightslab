@@ -1142,8 +1142,8 @@ class TinyUNet(nn.Module):
 
         # ------------------ DECODER (Upsampling Path) ------------------
         # 4. Up 4
-        self.up4_up = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=1)
-        self.up4_conv = double_conv(128, 64)  # Input channels: 64 + 64 = 128
+        self.up4_up = nn.ConvTranspose2d(128, 128, kernel_size=2, stride=1)
+        self.up4_conv = double_conv(192, 64)  # Input channels: 64 + 64 = 128
 
         # ------------------ OUTPUT Layer ------------------
         # 1x1 convolution to map the final feature channels (64) to the number of classes

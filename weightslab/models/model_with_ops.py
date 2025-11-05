@@ -246,6 +246,7 @@ class NetworkWithOps(nn.Module):
             if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
+            kwargs['current_child_name'] = module.get_name_wi_id()
             self.operate(
                 rec_dep_id,
                 neuron_indices,
@@ -264,6 +265,7 @@ class NetworkWithOps(nn.Module):
             if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
+            kwargs['current_parent_name'] = module.get_name_wi_id()
             self.operate(
                 rec_dep_id,
                 neuron_indices,
@@ -286,6 +288,7 @@ class NetworkWithOps(nn.Module):
             if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
+            kwargs['current_child_name'] = module.get_name_wi_id()
             self.operate(
                 same_dep_id,
                 neuron_indices,
@@ -303,6 +306,7 @@ class NetworkWithOps(nn.Module):
             if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
+            kwargs['current_parent_name'] = module.get_name_wi_id()
             self.operate(
                 same_dep_id,
                 neuron_indices,
@@ -334,12 +338,12 @@ class NetworkWithOps(nn.Module):
                 continue
 
             # # Operate on module incoming neurons
+            kwargs['current_parent_name'] = module.get_name_wi_id()
             incoming_module.operate(
                 neuron_indices=neuron_indices,
                 is_incoming=True,
                 neuron_operation=neuron_operation,
                 skip_initialization=False,
-                current_parent_name=module.get_name_wi_id(),
                 dependency=DepType.INCOMING,
                 **kwargs
             )
@@ -355,12 +359,12 @@ class NetworkWithOps(nn.Module):
         if dependency is None:
             dependency = DepType.SAME if hasattr(module, 'wl_same_flag') and module.wl_same_flag else None
         # # Operate the module
+        kwargs['current_child_name'] = incoming_module.get_name_wi_id() \
+            if incoming_module is not None else current_child_name
         module.operate(
                 neuron_indices,
                 neuron_operation=neuron_operation,
                 skip_initialization=skip_initialization,
-                current_child_name=incoming_module.get_name_wi_id()
-                if incoming_module is not None else current_child_name,
                 dependency=dependency,
                 **kwargs
         ) if layer_id not in self.visited_nodes else None
@@ -389,6 +393,7 @@ class NetworkWithOps(nn.Module):
                         continue
 
                     old_nc = int(sib_prod_module.get_neurons(attr_name='out_neurons'))
+                    kwargs['current_parent_name'] = module.get_name_wi_id()
                     self.operate(
                         producer_id,
                         neuron_indices=delta,

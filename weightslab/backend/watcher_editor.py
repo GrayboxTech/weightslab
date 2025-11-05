@@ -346,7 +346,7 @@ class WatcherEditor(NetworkWithOps):
 
 if __name__ == "__main__":
     from weightslab.tests.torch_models import \
-        TinyUNet as Model
+        TwoLayerUnflattenNet as Model
 
     # Setup prints
     setup_logging('DEBUG')
@@ -370,14 +370,21 @@ if __name__ == "__main__":
     # Model Operations
     # # Test: add neurons
     print("--- Test: Op Neurons ---")
-    model_op_neurons(model, op=2, layer_id=3)
+    # model_op_neurons(model, op=1, layer_id=3)
+    # model(dummy_input)  # Inference test
+    # model_op_neurons(model, op=1)
+    # model(dummy_input)  # Inference test
+    # model_op_neurons(model, op=2, layer_id=2)
+    # model(dummy_input)  # Inference test
+    # model_op_neurons(model, op=2)
+    # model(dummy_input)  # Inference test
+    #
+    model_op_neurons(model, op=1, rand=False)
     model(dummy_input)  # Inference test
-    model_op_neurons(model, op=1)
+    model_op_neurons(model, op=2, rand=False)
     model(dummy_input)  # Inference test
-    model_op_neurons(model, op=2)
+    model_op_neurons(model, op=3, rand=False)
     model(dummy_input)  # Inference test
-    model_op_neurons(model, op=3)
-    model(dummy_input)  # Inference test
-    model_op_neurons(model, op=4)
+    model_op_neurons(model, op=4, rand=False)
     model(dummy_input)  # Inference test
     print(f'Inference test of the modified model is:\n{model(dummy_input)}')

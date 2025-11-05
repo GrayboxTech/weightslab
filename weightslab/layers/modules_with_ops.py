@@ -13,7 +13,7 @@ from weightslab.components.tracking import TrackingMode
 from weightslab.components.tracking import TriggersTracker
 from weightslab.layers.neuron_ops import NeuronWiseOperations
 from weightslab.utils.tools import \
-    reindex_and_compress_blocks
+    reindex_and_compress_blocks, normalize_dicts
 from weightslab.components.tracking import copy_forward_tracked_attrs
 from weightslab.models.model_with_ops import ArchitectureNeuronsOpType
 from weightslab.utils.modules_dependencies import DepType
@@ -457,12 +457,13 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         if current_parent_name is not None and current_parent_name in \
                 self.dst_to_src_mapping_tnsrs and is_incoming:
-            mapped_indexs = self.dst_to_src_mapping_tnsrs[current_parent_name]
+            # mapped_indexs = self.dst_to_src_mapping_tnsrs[current_parent_name]
+            mapped_indexs = normalize_dicts({'test': self.dst_to_src_mapping_tnsrs[current_parent_name]})['test']
         elif len(list(self.src_to_dst_mapping_tnsrs.keys())):
-            mapped_indexs = self.src_to_dst_mapping_tnsrs[
+            mapped_indexs = normalize_dicts({'test': self.src_to_dst_mapping_tnsrs[
                 current_child_name if current_child_name is not None else
                 list(self.src_to_dst_mapping_tnsrs.keys())[0]
-            ]
+            ]})['test']
         else:
             mapped_indexs = self.get_neurons(attr_name='out_neurons') if not is_incoming else \
                 self.get_neurons(attr_name='in_neurons')
@@ -476,14 +477,15 @@ class LayerWiseOperations(NeuronWiseOperations):
         original_indexs = list(
             len(mapped_indexs)+i for i in reversed_indexs
         )
-        if hasattr(self, 'bypass'):
+        if hasattr(self, 'bypass') or hasattr(self, 'src_bypass'):
             offset = min(list(mapped_indexs.keys()))
             flat_indexs = list(
                 mapped_indexs[len(mapped_indexs)+i+offset][::-1] for i in reversed_indexs
             )
         elif not hasattr(self, 'src_bypass') or is_incoming:
+            offset = min(list(mapped_indexs.keys()))
             flat_indexs = list(
-                mapped_indexs[len(mapped_indexs)+i][::-1] for i in reversed_indexs
+                mapped_indexs[len(mapped_indexs)+i+offset][::-1] for i in reversed_indexs
             )
         else:
             flat_indexs = list(
@@ -575,6 +577,8 @@ class LayerWiseOperations(NeuronWiseOperations):
     # ---------------
     # Neurons Operations
     def _process_input_neurons_index(self, neuron_indices: int | Set[int]):
+        if neuron_indices is None:
+            return neuron_indices
         if not isinstance(neuron_indices, set):
             if isinstance(neuron_indices, list):
                 neuron_indices = set(neuron_indices)
@@ -716,38 +720,51 @@ class LayerWiseOperations(NeuronWiseOperations):
 
             # Update index maps
             # # Self src to dst
-            key_index = int(
-                (
-                    self.get_neurons(self.super_out_name) - nb_neurons
-                ) / nb_neurons
-            )
-            for parent_name in self.src_to_dst_mapping_tnsrs:
-                # Update here and not = to kept the common adress
-                # between this dict and the same dict in related nodes
-                self.src_to_dst_mapping_tnsrs[
-                    parent_name
-                ].update(
-                    {
-                        key_index: [
-                            i + max(
-                                self.src_to_dst_mapping_tnsrs[
-                                    parent_name
-                                ][key_index - 1]
-                            ) for i in range(1, nb_neurons + 1)
-                        ]
-                    }
-                )
+            # key_index = int(
+            #     (
+            #         self.get_neurons(self.super_out_name) - nb_neurons
+            #     ) / nb_neurons
+            # )
+            # deps_name = kwargs.get('current_child_name', kwargs.get('current_parent_name'))
+            deps_names = list(self.src_to_dst_mapping_tnsrs.keys())  # if deps_name not in self.src_to_dst_mapping_tnsrs else [deps_name]
+            if len(deps_names) > 0:
+                # index_name = [n for n, name in enumerate(self.src_to_dst_mapping_tnsrs.keys()) if name in deps_names]
+                # index_name = index_name[0] if len(index_name) > 0 else 1
+                length = len(self.src_to_dst_mapping_tnsrs[deps_names[0]]) if len(deps_names) > 0 else None
+                for deps_name in deps_names:
+                    # Update here and not = to kept the common adress
+                    # between this dict and the same dict in related nodes
+                    for neuron_indice in neuron_indices:
+                        neuron_indice = list(
+                            self.src_to_dst_mapping_tnsrs[
+                                deps_name
+                            ].keys()
+                        )[neuron_indice % length]
+
+                        self.src_to_dst_mapping_tnsrs[
+                            deps_name
+                        ].update(
+                            {
+                                neuron_indice + 1: [
+                                    i + max(
+                                        self.src_to_dst_mapping_tnsrs[
+                                            deps_name
+                                        ][neuron_indice]
+                                    ) for i in range(1, nb_neurons + 1)
+                                ]
+                            }
+                        )
+                # normalize dicts
+                self.src_to_dst_mapping_tnsrs = normalize_dicts(self.src_to_dst_mapping_tnsrs)
+
             # # Related neurons
             current_name = self.get_name_wi_id()
             nb_original_neurons_channels = len([original_neuron_indices])
+            self.related_dst_to_src_mapping_tnsrs = normalize_dicts(self.related_dst_to_src_mapping_tnsrs)
             if current_name in self.related_dst_to_src_mapping_tnsrs:
-                offset_index = min(
-                    list(
-                        self.related_dst_to_src_mapping_tnsrs[
-                            current_name
-                        ].keys()
-                    )
-                )
+                length = len(self.related_dst_to_src_mapping_tnsrs[current_name])
+                if length == 0:
+                    return
                 channel_size = len(
                     list(
                         self.related_dst_to_src_mapping_tnsrs[
@@ -755,43 +772,33 @@ class LayerWiseOperations(NeuronWiseOperations):
                         ].values()
                     )[-1]
                 )
-                for index in list(
-                    range(
-                        key_index * channel_size,
-                        (key_index + 1) * channel_size
-                    )
-                ):
+                for neuron_indice in neuron_indices:
+                    neuron_indice = list(
+                        self.related_dst_to_src_mapping_tnsrs[
+                            current_name
+                        ].keys()
+                    )[neuron_indice % length]  # get new index
                     self.related_dst_to_src_mapping_tnsrs[
                         current_name
                     ].update(
                         {
-                            index + offset_index: [
-                                n+1 + max(
+                            neuron_indice + 1: [
+                                n + max(
                                     self.related_dst_to_src_mapping_tnsrs[
                                         current_name
-                                    ][offset_index + index-1]
-                                ) for n, i in enumerate(
+                                    ][neuron_indice]
+                                ) for n, _ in enumerate(
                                     range(
-                                        (key_index-1) * channel_size,
-                                        key_index * channel_size
+                                        (neuron_indice-1) * channel_size,
+                                        neuron_indice * channel_size
                                     )
                                 )
                             ]
                         }
                     )
-                # Re-index every neurons
-                d = reindex_and_compress_blocks(
-                    self.related_dst_to_src_mapping_tnsrs[
-                        current_name
-                    ],
-                    channel_size,
-                    offset_index=offset_index
-                )
-                self.related_dst_to_src_mapping_tnsrs.update(
-                    {
-                        current_name: d
-                    }
-                )
+
+            # Normalize dicts
+            self.related_dst_to_src_mapping_tnsrs = normalize_dicts(self.related_dst_to_src_mapping_tnsrs)
 
             # Tracking
             for tracker in self.get_trackers():
@@ -813,68 +820,126 @@ class LayerWiseOperations(NeuronWiseOperations):
 
             # Update index maps
             # # Self dst to src
-            offset_index = 0
             # current_parent_name = kwargs.get('current_parent_name', [])
-            for parent_name in self.dst_to_src_mapping_tnsrs:
-                # # if dict has several items that are bypass of the module,
-                # # we split the new neurons between the two inputs channels
-                # # from the two input tensors, and so re index every neurons
-                # # with unique sequential indexs.
-                # if offset_index > 0:
-                #     tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[parent_name])
-                #     self.dst_to_src_mapping_tnsrs[parent_name].clear()
-                #     for k, v in tmp_.items():
-                #         self.dst_to_src_mapping_tnsrs[parent_name][
-                #             k + offset_index
-                #         ] = v
-                # if hasattr(self, 'bypass') and parent_name in \
-                #         current_parent_name:
-                key_index = max(
-                    list(
+            # for parent_name in self.dst_to_src_mapping_tnsrs:
+            if is_incoming:
+                deps_name = kwargs.get('current_parent_name')
+            else:
+                deps_name = kwargs.get('current_child_name', kwargs.get('current_parent_name'))
+
+            # # Normalize
+            # offset_index = 0
+            # for deps_name_ in self.dst_to_src_mapping_tnsrs:
+            #     # if dict has several items that are bypass of the module,
+            #     # we split the new neurons between the two inputs channels
+            #     # from the two input tensors, and so re index every neurons
+            #     # with unique sequential indexs.
+            #     if offset_index > 0:
+            #         tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[deps_name_])
+            #         self.dst_to_src_mapping_tnsrs[deps_name_].clear()
+            #         for k in range(len(tmp_.items())):
+            #             self.dst_to_src_mapping_tnsrs[deps_name_][
+            #                 k + offset_index
+            #             ] = [k + offset_index]
+            #     indexs = list(self.dst_to_src_mapping_tnsrs[
+            #         deps_name_
+            #     ].keys())
+            #     offset_index += len(
+            #         indexs
+            #     ) if len(indexs) else 0
+
+            # By default get deps name from current relation
+            deps_names = list(self.dst_to_src_mapping_tnsrs.keys())  #  if deps_name not in self.dst_to_src_mapping_tnsrs else [deps_name]
+            if len(deps_names) > 0:
+                length = len(self.dst_to_src_mapping_tnsrs[deps_names[0]])
+                for deps_name in deps_names:
+                    neuron_indice = list(self.dst_to_src_mapping_tnsrs[deps_name].keys())[-1]
+                    neuron_indice = list(
                         self.dst_to_src_mapping_tnsrs[
-                            parent_name
+                            deps_name
                         ].keys()
+                    )[neuron_indice % length]
+                    self.dst_to_src_mapping_tnsrs[
+                        deps_name
+                    ].update(
+                        {
+                            neuron_indice + 1 + j: [
+                                i + 1 + max(
+                                    self.dst_to_src_mapping_tnsrs[
+                                        deps_name
+                                    ][neuron_indice]
+                                ) for i in range(0, nb_neurons)
+                            ] for j in range(0, nb_neurons)
+                        }
                     )
-                )
-                self.dst_to_src_mapping_tnsrs[
-                    parent_name
-                ].update(
-                    {
-                        key_index + 1 + j: [
-                            i + 1 + max(
-                                self.dst_to_src_mapping_tnsrs[
-                                    parent_name
-                                ][key_index]
-                            ) for i in range(0, nb_neurons)
-                        ] for j in range(0, nb_neurons)
-                    }
-                )
-                if hasattr(self, 'bypass'):
-                    offset_index += nb_neurons
+
+                # Normalize dicts
+                self.dst_to_src_mapping_tnsrs = normalize_dicts(self.dst_to_src_mapping_tnsrs)
+
+            # offset_index = 0
+            # for deps_name_ in self.dst_to_src_mapping_tnsrs:
+            #     # if dict has several items that are bypass of the module,
+            #     # we split the new neurons between the two inputs channels
+            #     # from the two input tensors, and so re index every neurons
+            #     # with unique sequential indexs.
+            #     if offset_index > 0:
+            #         tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[deps_name_])
+            #         self.dst_to_src_mapping_tnsrs[deps_name_].clear()
+            #         for k in range(len(tmp_.items())):
+            #             self.dst_to_src_mapping_tnsrs[deps_name_][
+            #                 k + offset_index
+            #             ] = [k + offset_index]
+            #     indexs = list(self.dst_to_src_mapping_tnsrs[
+            #         deps_name_
+            #     ].keys())
+            #     offset_index += len(
+            #         indexs
+            #     ) if len(indexs) else 0
+            # self.dst_to_src_mapping_tnsrs[
+            #     parent_name
+            # ] = reindex_and_compress_blocks(
+            #         self.dst_to_src_mapping_tnsrs[
+            #                 parent_name
+            #         ],
+            #         block_size=len(
+            #             list(
+            #                 self.dst_to_src_mapping_tnsrs[
+            #                     parent_name
+            #                 ].values()
+            #             )[-1]
+            #         ),
+            #         offset_index=0
+            #     )  # No needs as ADD
             # # Related neurons
             current_name = self.get_name_wi_id()
+            self.related_src_to_dst_mapping_tnsrs = normalize_dicts(self.related_src_to_dst_mapping_tnsrs)
             nb_original_neurons_channels = len([original_neuron_indices])
             if current_name in self.related_src_to_dst_mapping_tnsrs:
-                key_index = max(
-                    list(
-                        self.related_src_to_dst_mapping_tnsrs[
-                            current_name
-                        ].keys()
-                    )
+                length = len(self.related_src_to_dst_mapping_tnsrs[current_name])
+                if length == 0:
+                    return
+                indexs = list(
+                    self.related_src_to_dst_mapping_tnsrs[
+                        current_name
+                    ].keys()
                 )
+                neuron_indice = indexs[neuron_indice % length]
                 self.related_src_to_dst_mapping_tnsrs[
                     current_name
                 ].update(
-                    { 
-                        key_index + 1: [
+                    {
+                        neuron_indice + 1: [
                             i + 1 + max(
                                 self.related_src_to_dst_mapping_tnsrs[
                                     current_name
-                                ][key_index]
+                                ][neuron_indice]
                             ) for i in range(0, nb_original_neurons_channels)
                         ]
                     }
                 )
+            # Normalize dicts
+            self.related_src_to_dst_mapping_tnsrs = normalize_dicts(self.related_src_to_dst_mapping_tnsrs)
+
             print(f'New {"INCOMING" if dependency != DepType.SAME else "SAME"} layer is {self}', level='DEBUG')
 
     def _prune_neurons(
@@ -975,44 +1040,60 @@ class LayerWiseOperations(NeuronWiseOperations):
 
             # Update index maps
             # # Self dst to src
-            for child_name in self.src_to_dst_mapping_tnsrs:
-                channel_size = len(
-                    list(
-                        self.src_to_dst_mapping_tnsrs[
-                            child_name
-                        ].values()
-                    )[-1]
-                )
+            deps_name = kwargs.get('current_child_name', kwargs.get('current_parent_name'))
+            deps_names = self.src_to_dst_mapping_tnsrs.keys()  #  if deps_name not in self.src_to_dst_mapping_tnsrs else [deps_name]
+            if len(deps_names) > 0:
+                for deps_name in deps_names:
+                    length = len(self.src_to_dst_mapping_tnsrs[deps_name])
+                    # channel_size = len(
+                    #     list(
+                    #         self.src_to_dst_mapping_tnsrs[
+                    #             deps_name
+                    #         ].values()
+                    #     )[-1]
+                    # )
+                    for neuron_indice in neuron_indices:
+                        try:
+                            neuron_indice = neuron_indice % length
+                            # for index in list(
+                            #     range(
+                            #         neuron_indice*channel_size,
+                            #         (neuron_indice+1)*channel_size
+                            #     )
+                            # ):
+                            self.src_to_dst_mapping_tnsrs[
+                                deps_name
+                            ].pop(
+                                list(
+                                    self.src_to_dst_mapping_tnsrs[
+                                        deps_name
+                                    ].keys()
+                                )[neuron_indice]
+                            )
+                        except IndexError:
+                            # pass for specific batch linear case, where you have only onle neuron [32: [32, 32, 34, 35]], shoud have create 3 others but only one required
+                            pass
+                # Normalize
+                self.src_to_dst_mapping_tnsrs = normalize_dicts(self.src_to_dst_mapping_tnsrs)
 
-                for neuron_indice in neuron_indices:
-                    for index in list(
-                        range(
-                            neuron_indice*channel_size,
-                            (neuron_indice+1)*channel_size
-                        )
-                    ):
-                        self.src_to_dst_mapping_tnsrs[
-                            child_name
-                        ].pop(index)
-
-                offset_index = 0
-                for name in self.src_to_dst_mapping_tnsrs:
-                    indexs = list(self.src_to_dst_mapping_tnsrs[
-                        name
-                    ].keys())
-                    d = reindex_and_compress_blocks(
-                        self.src_to_dst_mapping_tnsrs[name],
-                        channel_size,
-                        offset_index=offset_index
-                    )
-                    self.src_to_dst_mapping_tnsrs.update(
-                        {
-                            name: d
-                        }
-                    )
-                    offset_index = len(
-                        indexs
-                    ) if len(indexs) else 0
+            # offset_index = 0
+            # for name in self.src_to_dst_mapping_tnsrs:
+            #     indexs = list(self.src_to_dst_mapping_tnsrs[
+            #         name
+            #     ].keys())
+            #     d = reindex_and_compress_blocks(
+            #         self.src_to_dst_mapping_tnsrs[name],
+            #         channel_size,
+            #         offset_index=offset_index
+            #     )
+            #     self.src_to_dst_mapping_tnsrs.update(
+            #         {
+            #             name: d
+            #         }
+            #     )
+            #     offset_index += len(
+            #         indexs
+            #     ) if len(indexs) else 0
             # # Update related
             # current_name = self.get_name_wi_id()
             # i = 0
@@ -1022,44 +1103,65 @@ class LayerWiseOperations(NeuronWiseOperations):
             #     rel_name = current_name + f'_{i}'
             try:
                 for rel_name in self.related_dst_to_src_mapping_tnsrs:
-                    channel_size = len(
-                        list(
-                            self.related_dst_to_src_mapping_tnsrs[
-                                rel_name
-                            ].values()
-                        )[-1]
-                    )
+                    length = len(self.related_dst_to_src_mapping_tnsrs[rel_name])
+                    if length == 0:
+                        continue
+                    # channel_size = len(
+                    #     list(
+                    #         self.related_dst_to_src_mapping_tnsrs[
+                    #             rel_name
+                    #         ].values()
+                    #     )[-1]
+                    # )
                     indexs = list(self.related_dst_to_src_mapping_tnsrs[
                         rel_name
                     ].keys())
-                    offset_index = min(
-                        indexs
-                    ) if len(indexs) else 0
                     for neuron_indice in neuron_indices:
-                        for index in list(
-                            range(
-                                neuron_indice*channel_size,
-                                (neuron_indice+1)*channel_size
-                            )
-                        ):
-                            # Remove indexs from all childs as its a src
-                            self.related_dst_to_src_mapping_tnsrs[
-                                    rel_name
-                                ].pop(index + offset_index)
-
-                    # Re-index every neurons
-                    d = reindex_and_compress_blocks(
+                        if neuron_indice >=length:
+                            continue
+                        neuron_indice = neuron_indice % length
+                        # for index in list(
+                        #     range(
+                        #         neuron_indice*channel_size,
+                        #         (neuron_indice+1)*channel_size
+                        #     )
+                        # ):
+                        # Remove indexs from all childs as its a src
                         self.related_dst_to_src_mapping_tnsrs[
-                            rel_name
-                        ],
-                        channel_size,
-                        offset_index=offset_index
-                    )
-                    self.related_dst_to_src_mapping_tnsrs.update(
-                        {
-                            rel_name: d
-                        }
-                    )
+                                rel_name
+                            ].pop(neuron_indice)
+                # Normalize
+                self.related_dst_to_src_mapping_tnsrs = normalize_dicts(self.related_dst_to_src_mapping_tnsrs)
+
+                # offset_index = 0
+                # for name in self.related_dst_to_src_mapping_tnsrs:
+                #     indexs = list(self.related_dst_to_src_mapping_tnsrs[
+                #         name
+                #     ].keys())
+                #     d = reindex_and_compress_blocks(
+                #         self.related_dst_to_src_mapping_tnsrs[name],
+                #         channel_size,
+                #         offset_index=offset_index
+                #     )
+                #     self.related_dst_to_src_mapping_tnsrs.update(
+                #         {
+                #             name: d
+                #         }
+                #     )
+                #     offset_index += len(
+                # # Re-index every neurons
+                # d = reindex_and_compress_blocks(
+                #     self.related_dst_to_src_mapping_tnsrs[
+                #         rel_name
+                #     ],
+                #     channel_size,
+                #     offset_index=offset_index
+                # )
+                # self.related_dst_to_src_mapping_tnsrs.update(
+                #     {
+                #         rel_name: d
+                #     }
+                # )
             except KeyError as e:
                 print(f'IndexError: {rel_name}; Error: {str(e)}')
             # Tracker
@@ -1081,71 +1183,59 @@ class LayerWiseOperations(NeuronWiseOperations):
                 )
             # Update index maps
             # # Self dst to src
-            offset_index = 0
+            # offset_index = 0
             current_parent_name = kwargs.get('current_parent_name', [])
-            for parent_name in self.dst_to_src_mapping_tnsrs:
-                # # if dict has several items that are bypass of the module,
-                # # we split the new neurons between the two inputs channels
-                # # from the two input tensors, and so re index every neurons
-                # if offset_index > 0:
-                #     tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[parent_name])
-                #     self.dst_to_src_mapping_tnsrs[parent_name].clear()
-                #     for k, v in tmp_.items():
-                #         self.dst_to_src_mapping_tnsrs[parent_name].update(
-                #             {
-                #                 k - offset_index: v
-                #             }
-                #         )
-                if not hasattr(self, 'bypass') or (hasattr(self, 'bypass')
-                                                   and parent_name in
-                                                   current_parent_name):
-                    channel_size = len(
-                        list(
-                            self.dst_to_src_mapping_tnsrs[
-                                parent_name
-                            ].values()
-                        )[-1]
-                    )
-                    indexs = list(self.dst_to_src_mapping_tnsrs[
-                        parent_name
-                    ].keys())
-                    offset_index = min(
-                        indexs
-                    ) if len(indexs) else 0
-                    for neuron_indice in sorted(neuron_indices)[::-1]:
-                        for index in list(
-                            range(
-                                neuron_indice*channel_size,
-                                (neuron_indice+1)*channel_size
-                            )
-                        ):
-                            self.dst_to_src_mapping_tnsrs[
-                                parent_name
-                            ].pop(index)
-                    # Re-index every neurons - no use to keep active pointer
-                    # here as it's dst2src
-                    offset_index = 0
-                    for name in self.dst_to_src_mapping_tnsrs:
+            deps_name = kwargs.get('current_child_name', kwargs.get('current_parent_name'))
+            deps_names = self.dst_to_src_mapping_tnsrs.keys() if deps_name not in self.dst_to_src_mapping_tnsrs else [deps_name]
+            if len(deps_names) > 0:
+                # for parent_name in self.dst_to_src_mapping_tnsrs:
+                for dep_name in deps_names:
+                    length = len(self.dst_to_src_mapping_tnsrs[dep_name])
+                    # # if dict has several items that are bypass of the module,
+                    # # we split the new neurons between the two inputs channels
+                    # # from the two input tensors, and so re index every neurons
+                    # if offset_index > 0:
+                    #     tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[parent_name])
+                    #     self.dst_to_src_mapping_tnsrs[parent_name].clear()
+                    #     for k, v in tmp_.items():
+                    #         self.dst_to_src_mapping_tnsrs[parent_name].update(
+                    #             {
+                    #                 k - offset_index: v
+                    #             }
+                    #         )
+                    if not hasattr(self, 'bypass') or (hasattr(self, 'bypass')
+                                                    and dep_name in
+                                                    current_parent_name):
+                        # channel_size = len(
+                        #     list(
+                        #         self.dst_to_src_mapping_tnsrs[
+                        #             dep_name
+                        #         ].values()
+                        #     )[-1]
+                        # )
                         indexs = list(self.dst_to_src_mapping_tnsrs[
-                            name
+                            dep_name
                         ].keys())
-                        d = reindex_and_compress_blocks(
-                            self.dst_to_src_mapping_tnsrs[name],
-                            channel_size,
-                            offset_index=offset_index
-                        )
-                        self.dst_to_src_mapping_tnsrs.update(
-                            {
-                                name: d
-                            }
-                        )
-                        offset_index = len(
-                            indexs
-                        ) if len(indexs) else 0
-                    if hasattr(self, 'bypass'):
-                        offset_index = channel_size
+                        for neuron_indice in sorted(neuron_indices)[::-1]:
+                            try:
+                                neuron_indice = indexs[neuron_indice % length]
+                                # for index in list(
+                                #     range(
+                                #         neuron_indice * channel_size,
+                                #         (neuron_indice + 1) * channel_size
+                                #     )
+                                # ):
+                                self.dst_to_src_mapping_tnsrs[
+                                    dep_name
+                                ].pop(neuron_indice)
+                            except IndexError:
+                                # pass for specific batch linear case, where you have only one neuron [32: [32, 32, 34, 35]], shoud have create 3 others but only one required
+                                pass
+                # Normalize
+                self.dst_to_src_mapping_tnsrs = normalize_dicts(self.dst_to_src_mapping_tnsrs)
+
             # # Related neurons
-            offset_index = 0
+            # offset_index = 0
             # current_name = self.get_name_wi_id()
             # i = 0
             # rel_name = current_name + f'_{i}'
@@ -1154,6 +1244,13 @@ class LayerWiseOperations(NeuronWiseOperations):
             #     rel_name = current_name + f'_{i}'
             try:
                 for rel_name in self.related_src_to_dst_mapping_tnsrs:
+                    length = len(
+                        self.related_src_to_dst_mapping_tnsrs[
+                            rel_name
+                        ]
+                    )
+                    if length == 0:
+                        continue
                     # # if dict has several items that are bypass of the module,
                     # # we split the new neurons between the two inputs channels
                     # # from the two input tensors, and so re index every neurons
@@ -1168,44 +1265,34 @@ class LayerWiseOperations(NeuronWiseOperations):
                     #         self.related_src_to_dst_mapping_tnsrs[rel_name][
                     #             k - offset_index
                     #         ] = v
-                    channel_size = len(
-                        list(
-                            self.related_src_to_dst_mapping_tnsrs[
-                                rel_name
-                            ].values()
-                        )[-1]
-                    )
-                    indexs = self.related_src_to_dst_mapping_tnsrs[
+                    # channel_size = len(
+                    #     list(
+                    #         self.related_src_to_dst_mapping_tnsrs[
+                    #             rel_name
+                    #         ].values()
+                    #     )[-1]
+                    # )
+                    indexs = list(self.related_src_to_dst_mapping_tnsrs[
                         rel_name
-                    ]
-                    offset_index = min(
-                        indexs.keys()
-                    ) if len(indexs) else 0
+                    ].keys())
+                    if len(indexs) == 0:
+                        neuron_indices = []
                     for neuron_indice in neuron_indices:
-                        for index in list(
-                            range(
-                                neuron_indice*channel_size,
-                                (neuron_indice+1)*channel_size
-                            )
-                        ):
-                            self.related_src_to_dst_mapping_tnsrs[
-                                rel_name
-                            ].pop(index + offset_index)
-                    if channel_size is not None:
-                        # Re-index every neurons - no use to keep active pointer
-                        # here as it's dst2src
-                        d = reindex_and_compress_blocks(
-                            self.related_src_to_dst_mapping_tnsrs[rel_name],
-                            channel_size,
-                            offset_index=offset_index
-                        )
-                        self.related_src_to_dst_mapping_tnsrs.update(
-                            {
-                                rel_name: d
-                            }
-                        )
-                        if hasattr(self, 'bypass'):
-                            offset_index = channel_size
+                        if neuron_indice >=length:
+                            continue
+                        neuron_indice = indexs[neuron_indice % length]
+                        # for index in list(
+                        #     range(
+                        #         neuron_indice*channel_size,
+                        #         (neuron_indice+1)*channel_size
+                        #     )
+                        # ):
+                        self.related_src_to_dst_mapping_tnsrs[
+                            rel_name
+                        ].pop(neuron_indice)
+                # Normalize
+                self.related_src_to_dst_mapping_tnsrs = normalize_dicts(self.related_src_to_dst_mapping_tnsrs)
+
             except KeyError as e:
                 print(f'IndexError: {rel_name}; Error: {str(e)}')
             print(f'New {"INCOMING" if dependency != DepType.SAME else "SAME"} layer is {self}', level='DEBUG')
