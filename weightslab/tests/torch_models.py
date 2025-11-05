@@ -6,8 +6,9 @@
     our neuron operations.
 """
 import warnings; warnings.filterwarnings("ignore")
-import torch as th
+import torch
 import torch.nn as nn
+from typing import Callable
 import torchvision.models as models
 
 from torch.nn import functional as F
@@ -85,7 +86,7 @@ class FashionCNNSequential(nn.Module):
         x = self.features(y)
         x = self.classifier(x)
 
-        if not isinstance(x, th.fx._symbolic_trace.Proxy):
+        if not isinstance(x, torch.fx._symbolic_trace.Proxy):
             one_hot = F.one_hot(
                 x.argmax(dim=1), num_classes=self.classifier[-1].out_features
             )
@@ -517,7 +518,7 @@ class TinyUNet_Straightforward(nn.Module):
 
         # 3. DECODER 1: Interp + Concat (x1) + Conv
         up_b = self.up_interp1(bottleneck)
-        merged1 = th.cat([x1, self.up_interp1(p1), up_b], dim=1)
+        merged1 = torch.cat([x1, self.up_interp1(p1), up_b], dim=1)
         d1 = self.up_conv1(merged1)
 
         # 4. OUTPUT
@@ -962,10 +963,10 @@ class SimpleVAE(nn.Module):
         This allows gradients to flow back through the sampling process.
         """
         # Calculate standard deviation (sigma) from log variance
-        std = th.exp(0.5 * log_var)
+        std = torch.exp(0.5 * log_var)
 
         # Sample epsilon from standard normal distribution
-        eps = th.randn_like(std)
+        eps = torch.randn_like(std)
 
         # Return the sampled latent vector z
         return mu + std * eps
@@ -994,35 +995,35 @@ class SimpleVAE(nn.Module):
         return reconstruction, mu, log_var
 
 
-class TwoLayerUnflattenNet(th.nn.Module):
+class TwoLayerUnflattenNet(torch.nn.Module):
     def __init__(self, D_in=1000, D_out=10):
         super().__init__()
         self.input_shape = (64, D_in, 8, 8)
 
         # --- Layer 1: Conv2d (3 -> 16 channels) ---
         # Output spatial size is maintained (32x32 -> 32x32)
-        self.conv1 = th.nn.Conv2d(in_channels=D_in, out_channels=16,
+        self.conv1 = torch.nn.Conv2d(in_channels=D_in, out_channels=16,
                                   kernel_size=3, padding=1)
 
         # --- Layer 2: Conv2d (16 -> 32 channels) ---
         # Spatial size is halved (32x32 -> 16x16)
-        self.conv2 = th.nn.Conv2d(in_channels=16, out_channels=32,
+        self.conv2 = torch.nn.Conv2d(in_channels=16, out_channels=32,
                                   kernel_size=3, stride=2, padding=1)
 
-        self.linear1 = th.nn.Linear(512, 128)
-        self.linear2 = th.nn.Linear(128, 8192)
+        self.linear1 = torch.nn.Linear(512, 128)
+        self.linear2 = torch.nn.Linear(128, 8192)
 
         # --- Unflattening (Required before final Conv2d) ---
         # Reshapes the 8192 tensor back to (32, 16, 16)
         # dim=1 means we are reshaping starting from the channel dimension
-        self.unflatten = th.nn.Unflatten(
+        self.unflatten = torch.nn.Unflatten(
             dim=1,
             unflattened_size=(32, 16, 16)
         )
 
         # --- Layer 5: Conv2d (32 -> 10 channels) ---
         # Final convolution layer for 10 classes
-        self.conv3 = th.nn.Conv2d(
+        self.conv3 = torch.nn.Conv2d(
             in_channels=32,
             out_channels=D_out,
             kernel_size=1
@@ -1173,7 +1174,7 @@ class TinyUNet(nn.Module):
         Uses F.interpolate, which is tracer-friendly.
 
         Args:
-            upsampled (Tensor): The upsampled tensor from the decoder path.
+            upsampled (Tensor): The upsampled tensor from the decoder patorch.
             skip (Tensor): The higher-resolution tensor from the encoder (skip connection).
 
         Returns:
@@ -1189,7 +1190,7 @@ class TinyUNet(nn.Module):
         )
 
         # Concatenate along the channel dimension (dim=1)
-        return th.cat([skip, upsampled], dim=1)
+        return torch.cat([skip, upsampled], dim=1)
 
 
 class UNet(nn.Module):
@@ -1305,7 +1306,7 @@ class UNet(nn.Module):
         Uses F.interpolate, which is tracer-friendly.
 
         Args:
-            upsampled (Tensor): The upsampled tensor from the decoder path.
+            upsampled (Tensor): The upsampled tensor from the decoder patorch.
             skip (Tensor): The higher-resolution tensor from the encoder (skip connection).
 
         Returns:
@@ -1321,7 +1322,7 @@ class UNet(nn.Module):
         )
 
         # Concatenate along the channel dimension (dim=1)
-        return th.cat([skip, upsampled], dim=1)
+        return torch.cat([skip, upsampled], dim=1)
 
 
 # TODO (GP): Not working now: indexing dict not updated from src edges for dst or inverse
@@ -1466,7 +1467,7 @@ class UNet3p(nn.Module):
         h5_d4 = self.h5_L4(self._interpolate_to_size(e5, e3.shape[-2:]))
 
         # Concatenate and convolve
-        d4 = th.cat((h1_d4, h2_d4, h3_d4, h4_d4, h5_d4), dim=1)
+        d4 = torch.cat((h1_d4, h2_d4, h3_d4, h4_d4, h5_d4), dim=1)
         d4 = self.up_conv4(d4) # Output D4 (512 channels, Size H/8)
 
         # ------------------- DECODER D3 (Size H/4) -------------------
@@ -1488,7 +1489,7 @@ class UNet3p(nn.Module):
         h5_d3 = self.h5_L3(self._interpolate_to_size(e5, e2.shape[-2:]))
 
         # Concatenate and convolve
-        d3 = th.cat((h1_d3, h2_d3, h3_d3, h4_d3, h5_d3), dim=1)
+        d3 = torch.cat((h1_d3, h2_d3, h3_d3, h4_d3, h5_d3), dim=1)
         d3 = self.up_conv3(d3) # Output D3 (256 channels, Size H/4)
 
         # ------------------- DECODER D2 (Size H/2) -------------------
@@ -1510,7 +1511,7 @@ class UNet3p(nn.Module):
         h5_d2 = self.h5_L2(self._interpolate_to_size(e5, e1.shape[-2:]))
 
         # Concatenate and convolve
-        d2 = th.cat((h1_d2, h2_d2, h3_d2, h4_d2, h5_d2), dim=1)
+        d2 = torch.cat((h1_d2, h2_d2, h3_d2, h4_d2, h5_d2), dim=1)
         d2 = self.up_conv2(d2) # Output D2 (128 channels, Size H/2)
 
         # ------------------- DECODER D1 (Size H/1) -------------------
@@ -1532,7 +1533,7 @@ class UNet3p(nn.Module):
         h5_d1 = self.h5_L1(self._interpolate_to_size(e5, x.shape[-2:]))
 
         # Concatenate and convolve
-        d1 = th.cat((h1_d1, h2_d1, h3_d1, h4_d1, h5_d1), dim=1)
+        d1 = torch.cat((h1_d1, h2_d1, h3_d1, h4_d1, h5_d1), dim=1)
         d1 = self.up_conv1(d1)  # Output D1 (64 channels, Size H/1)
 
         # ------------------- OUTPUT -------------------
@@ -1619,58 +1620,208 @@ class UNet3D(nn.Module):
         # Up 3
         up3 = self.up3_upsample(x4)      # B x 128 x D/4 x H/4 x W/4 (Upsampled)
         # Skip connection: Concatenate with x3 (128 channels)
-        cat3 = th.cat([x3, up3], dim=1) # B x 256 x D/4 x H/4 x W/4
+        cat3 = torch.cat([x3, up3], dim=1) # B x 256 x D/4 x H/4 x W/4
         x = self.up3_conv(cat3)          # B x 128 x D/4 x H/4 x W/4
         
         # Up 2
         up2 = self.up2_upsample(x)       # B x 64 x D/2 x H/2 x W/2
         # Skip connection: Concatenate with x2 (64 channels)
-        cat2 = th.cat([x2, up2], dim=1) # B x 128 x D/2 x H/2 x W/2
+        cat2 = torch.cat([x2, up2], dim=1) # B x 128 x D/2 x H/2 x W/2
         x = self.up2_conv(cat2)          # B x 64 x D/2 x H/2 x W/2
         
         # Up 1
         up1 = self.up1_upsample(x)       # B x 32 x D x H x W
         # Skip connection: Concatenate with x1 (32 channels)
-        cat1 = th.cat([x1, up1], dim=1) # B x 64 x D x H x W
+        cat1 = torch.cat([x1, up1], dim=1) # B x 64 x D x H x W
         x = self.up1_conv(cat1)          # B x 32 x D x H x W
         
         # Final Output
         logits = self.out_conv(x)        # B x C_out x D x H x W
         
         return logits
-    
-
-# # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
-# class MobileNet_v3(nn.Module):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-
-#         # Set input shape
-#         self.input_shape = (1, 3, 224, 224)
-
-#         # Get the pre-trained VGG-13
-#         self.model = models.mobilenet_v3_large(
-#             weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
-#         )
-
-#     def forward(self, input):
-#         return self.model(input)
 
 
 if __name__ == "__main__":
     from weightslab.backend.watcher_editor import WatcherEditor
     from weightslab.utils.logs import print, setup_logging
 
+    # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
+    class MobileNet_v3(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+
+            # Set input shape
+            self.input_shape = (1, 3, 224, 224)
+
+            # Get the pre-trained VGG-13
+            self.model = models.mobilenet_v3_large(
+                weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
+            )
+
+        def forward(self, input):
+            return self.model(input)
+    class MobileNetV3Tiny(nn.Module):
+        """
+        Implémentation 'Toy' du MobileNetV3 encapsulée en une seule classe.
+        Contient les blocs HSwish, SELayer et InvertedResidual comme classes internes.
+        """
+        
+        # --- 1. Activation Hard-Swish (h-swish) ---
+        class HSwish(nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                # Hard-Swish: x * ReLU6(x + 3) / 6
+                return x * nn.functional.relu6(x + 3., inplace=True) / 6.
+
+        # --- 2. Squeeze-and-Excitation Layer (SE) ---
+        class SELayer(nn.Module):
+            def __init__(self, channel: int, reduction: int = 4):
+                super().__init__()
+                # Calcul du nombre de canaux "squeeze" (doit être un multiple de 8)
+                squeeze_channels = max(1, channel // reduction)
+                self.avg_pool = nn.AdaptiveAvgPool2d(1)
+                self.fc = nn.Sequential(
+                    nn.Conv2d(channel, squeeze_channels, 1, 1, 0),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(squeeze_channels, channel, 1, 1, 0),
+                    # Utilise Hard-Sigmoid: ReLU6(x + 3) / 6
+                    nn.Hardsigmoid(inplace=True)
+                )
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                out = self.avg_pool(x)
+                out = self.fc(out)
+                return x * out
+
+        # --- 3. Inverted Residual Block ---
+        class InvertedResidual(nn.Module):
+            def __init__(self, inp: int, hidden: int, oup: int, kernel_size: int,
+                        stride: int, use_se: bool, activation_fn: Callable[[], nn.Module]):
+                super().__init__()
+                assert stride in [1, 2]
+                self.use_res_connect = stride == 1 and inp == oup
+
+                NormLayer = nn.BatchNorm2d 
+
+                layers = []
+
+                # 1x1 Convolution pour l'expansion
+                if inp != hidden:
+                    layers.extend([
+                        nn.Conv2d(inp, hidden, 1, 1, 0, bias=False),
+                        NormLayer(hidden),
+                        activation_fn()
+                    ])
+                    
+                layers.extend([
+                    nn.Conv2d(hidden, hidden, kernel_size, stride, (kernel_size - 1) // 2,
+                            groups=hidden, bias=False),
+                    NormLayer(hidden),
+                    activation_fn()
+                ])
+
+                # Squeeze-and-Excitation (SE)
+                if use_se:
+                    # La SELayer doit être instanciée de la classe interne de MobileNetV3Tiny
+                    # On triche un peu ici car self.SELayer n'est pas directement accessible, 
+                    # mais dans ce contexte, si on le sort, ça marche mieux pour l'encapsulation.
+                    # Pour l'exemple, nous allons assumer que SELayer est accessible dans l'espace de nom.
+                    # NOTE: Pour la production, il est souvent préférable de définir les blocs séparément.
+                    # Pour respecter la demande, nous devons appeler la classe SE par son nom.
+                    layers.append(MobileNetV3Tiny.SELayer(hidden))
+
+                # 1x1 Convolution pour la projection (sans activation)
+                layers.extend([
+                    nn.Conv2d(hidden, oup, 1, 1, 0, bias=False),
+                    NormLayer(oup)
+                ])
+
+                self.conv = nn.Sequential(*layers)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                if self.use_res_connect:
+                    return x + self.conv(x)
+                else:
+                    return self.conv(x)
+
+        # --- Constructeur de MobileNetV3Tiny ---
+        def __init__(self, num_classes: int = 10):
+            super().__init__()
+            self.input_shape = (1, 3, 64, 64)
+            # Références aux classes internes pour la configuration
+            self.HS = MobileNetV3Tiny.HSwish
+            self.IRB = MobileNetV3Tiny.InvertedResidual
+            self.ReLU = nn.ReLU6
+            
+            # Configuration simplifiée (inspirée de MobileNetV3-Small)
+            # inp, hidden, oup, k, s, se, nl (activation)
+            inverted_residual_setting = [
+                [16, 16, 16, 3, 2, True, self.ReLU],  
+                [16, 72, 24, 3, 2, False, self.ReLU], 
+                [24, 88, 24, 3, 1, False, self.ReLU],
+                [24, 96, 40, 5, 2, True, self.HS],   
+                [40, 240, 40, 5, 1, True, self.HS],
+                [40, 240, 40, 5, 1, True, self.HS],
+            ]
+            
+            # Couche initiale
+            self.features = [
+                nn.Sequential(
+                    nn.Conv2d(3, 16, 3, 2, 1, bias=False),
+                    nn.BatchNorm2d(16),
+                    self.HS()
+                )
+            ]
+            
+            # Empilement des blocs InvertedResidual
+            input_channel = 16
+            for t, h, c, k, s, se, nl in inverted_residual_setting:
+                output_channel = c
+                self.features.append(
+                    self.IRB(input_channel, h, output_channel, k, s, se, nl)
+                )
+                input_channel = output_channel
+                
+            # Dernières couches
+            last_conv_out = 576
+            
+            self.features.append(
+                nn.Sequential(
+                    nn.Conv2d(input_channel, last_conv_out, 1, 1, 0, bias=False),
+                    nn.BatchNorm2d(last_conv_out),
+                    self.HS()
+                )
+            )
+
+            self.features = nn.Sequential(*self.features)
+            self.avgpool = nn.AdaptiveAvgPool2d(1)
+
+            # Couche de classification
+            self.classifier = nn.Sequential(
+                nn.Linear(last_conv_out, 1280),
+                self.HS(),
+                nn.Dropout(0.2),
+                nn.Linear(1280, num_classes)
+            )
+
+        # --- Méthode Forward ---
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.features(x)
+            x = self.avgpool(x)
+            x = torch.flatten(x, 1)
+            x = self.classifier(x)
+            return x
+        
+        
     # Setup prints
     setup_logging('DEBUG')
     print('Hello World')
 
     # 0. Get the model
-    model = ToyAvgPoolNet()
+    model = FashionCNN()
     print(model)
 
     # 2. Create a dummy input and transform it
-    dummy_input = th.randn(model.input_shape)
+    dummy_input = torch.randn(model.input_shape)
 
     # 3. Test the model inference
     model(dummy_input)
