@@ -1,6 +1,9 @@
+import os
 import time
+import tempfile
 import unittest
 import numpy as np
+import torch as th
 import warnings; warnings.filterwarnings("ignore")
 
 from torchvision import datasets as ds
@@ -8,6 +11,12 @@ from torchvision import transforms as T
 
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.data.data_samples_with_ops import SampleStatsEx
+
+
+# Set Global Default Settings
+th.manual_seed(42)  # Set SEED
+TMP_DIR = tempfile.mkdtemp()
+DEVICE = th.device("cuda" if th.cuda.is_available() else "cpu")
 
 
 class DummyDataset:
@@ -235,7 +244,11 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
         self.stamp = time.time()
         transform = T.Compose([T.ToTensor()])
         mnist_train = ds.MNIST(
-            "../data", train=True, transform=transform, download=True)
+            os.path.join(TMP_DIR, "data"),
+            train=True,
+            transform=transform,
+            download=True
+        )
         self.wrapped_dataset = DataSampleTrackingWrapper(mnist_train)
         self.losses = []
 
