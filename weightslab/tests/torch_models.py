@@ -1640,21 +1640,21 @@ class UNet3D(nn.Module):
         return logits
     
 
-# TODO (GP): MobileNet not working; Inverted Residual Connexion I think
-class MobileNet_v3(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+# # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
+# class MobileNet_v3(nn.Module):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
 
-        # Set input shape
-        self.input_shape = (1, 3, 224, 224)
+#         # Set input shape
+#         self.input_shape = (1, 3, 224, 224)
 
-        # Get the pre-trained VGG-13
-        self.model = models.mobilenet_v3_large(
-            weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
-        )
+#         # Get the pre-trained VGG-13
+#         self.model = models.mobilenet_v3_large(
+#             weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
+#         )
 
-    def forward(self, input):
-        return self.model(input)
+#     def forward(self, input):
+#         return self.model(input)
 
 
 if __name__ == "__main__":
