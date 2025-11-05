@@ -735,7 +735,7 @@ def get_original_torch_class(
     return replacement_map.get(custom_class)
 
 
-def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False):
+def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True):
     """
         Test function to iteratively update neurons for each layer,
         then test inference. Everything match ?

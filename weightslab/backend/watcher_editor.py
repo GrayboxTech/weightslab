@@ -346,7 +346,7 @@ class WatcherEditor(NetworkWithOps):
 
 if __name__ == "__main__":
     from weightslab.tests.torch_models import \
-        TwoLayerUnflattenNet as Model
+        MobileNet_v3 as Model
 
     # Setup prints
     setup_logging('DEBUG')
@@ -370,15 +370,6 @@ if __name__ == "__main__":
     # Model Operations
     # # Test: add neurons
     print("--- Test: Op Neurons ---")
-    # model_op_neurons(model, op=1, layer_id=3)
-    # model(dummy_input)  # Inference test
-    # model_op_neurons(model, op=1)
-    # model(dummy_input)  # Inference test
-    # model_op_neurons(model, op=2, layer_id=2)
-    # model(dummy_input)  # Inference test
-    # model_op_neurons(model, op=2)
-    # model(dummy_input)  # Inference test
-    #
     model_op_neurons(model, op=1, rand=False)
     model(dummy_input)  # Inference test
     model_op_neurons(model, op=2, rand=False)
