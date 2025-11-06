@@ -46,7 +46,7 @@ def plot_fx_graph_with_details(
     """
     comment = traced_model.name if hasattr(traced_model, 'name') else 'Model'
     graph_attr = {
-        'rankdir': 'LR',
+        'rankdir': 'TB',
         'splines': 'ortho',
         'nodesep': '0.5',
         'ranksep': '0.75'

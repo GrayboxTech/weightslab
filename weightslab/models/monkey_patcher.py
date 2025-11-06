@@ -2,7 +2,7 @@ import types
 import torch as th
 import torch.nn as nn
 
-from weightslab.layers.modules_with_ops import \
+from weightslab.modules.modules_with_ops import \
     NeuronWiseOperations, LayerWiseOperations
 from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import \

@@ -11,7 +11,7 @@ from weightslab.utils.logs import print
 from weightslab.components.tracking import Tracker
 from weightslab.components.tracking import TrackingMode
 from weightslab.components.tracking import TriggersTracker
-from weightslab.layers.neuron_ops import NeuronWiseOperations
+from weightslab.modules.neuron_ops import NeuronWiseOperations
 from weightslab.utils.tools import \
     reindex_and_compress_blocks, normalize_dicts
 from weightslab.components.tracking import copy_forward_tracked_attrs
@@ -195,8 +195,8 @@ class LayerWiseOperations(NeuronWiseOperations):
     def get_per_neuron_learning_rate(
             self,
             neurons_id: int,
-            is_incoming: bool,
-            tensor_name: str
+            is_incoming: bool = 'False',
+            tensor_name: str = 'weight'
     ) -> float:
         """
         Get the learning rate for a specific neuron.
@@ -207,25 +207,19 @@ class LayerWiseOperations(NeuronWiseOperations):
         Returns:
             float: The learning rate for the specific neuron.
         """
-        if isinstance(neurons_id, set):
-            neurons_id = [i for i in list(neurons_id)]
-
         neuron_2_lr = self.neuron_2_lr if not is_incoming else \
             self.incoming_neuron_2_lr
 
         if not neuron_2_lr or \
                 tensor_name not in neuron_2_lr:
-            return [1.0]*len(neurons_id)
-        return [
-            neuron_2_lr[tensor_name][neuron_id] for neuron_id in
-            neurons_id
-        ]
+            return [1.0] * len(neurons_id)
+        return neuron_2_lr[tensor_name][neurons_id]
 
     def set_per_neuron_learning_rate(
             self,
             neurons_id: Set[int],
             neurons_lr: Set[float],
-            tensor_name: str,
+            tensor_name: str = 'weight',
             is_incoming: bool = False,
     ):
         """
@@ -1329,14 +1323,12 @@ class LayerWiseOperations(NeuronWiseOperations):
             else ['weight']  # Weight is the only learnable tensor input
         for tensor_name in tensors_name:
             neurons_lr = {
-                neuron_indices[neuron_indice]:
-                    1.0 - neuron_lr for neuron_indice, neuron_lr in enumerate(
-                        self.get_per_neuron_learning_rate(
-                            neuron_indices,
-                            is_incoming=is_incoming,
-                            tensor_name=tensor_name
-                        )
-                    )
+                neuron_indices[n]:
+                    1.0 - self.get_per_neuron_learning_rate(
+                        neuron_indice,
+                        is_incoming=is_incoming,
+                        tensor_name=tensor_name
+                    ) for n, neuron_indice in enumerate(neuron_indices)
             }
             self.set_per_neuron_learning_rate(
                 neurons_id=set(neuron_indices),

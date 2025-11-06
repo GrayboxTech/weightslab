@@ -6,7 +6,7 @@ from torch.fx import symbolic_trace
 
 from weightslab.components.tracking import TrackingMode
 from weightslab.models.model_with_ops import NetworkWithOps
-from weightslab.layers.neuron_ops import NeuronWiseOperations
+from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.utils.logs import print, setup_logging
@@ -191,7 +191,8 @@ class WatcherEditor(NetworkWithOps):
             print("--- Generated Graph Dependencies (FX Tracing) ---")
             or_dependencies = generate_graph_dependencies(
                 self.model,
-                self.traced_model
+                self.traced_model,
+                indexing_neurons=False
             )
             plot_fx_graph_with_details(
                 self.traced_model,
@@ -346,7 +347,7 @@ class WatcherEditor(NetworkWithOps):
 
 if __name__ == "__main__":
     from weightslab.tests.torch_models import \
-        MobileNet_v3 as Model
+        UNet as Model
 
     # Setup prints
     setup_logging('DEBUG')

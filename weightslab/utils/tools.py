@@ -454,7 +454,9 @@ def generate_mappings(
 
 def generate_graph_dependencies(
         model: nn.Module,
-        traced_graph: GraphModule) -> \
+        traced_graph: GraphModule,
+        indexing_neurons: bool = True
+) -> \
             List[Tuple[nn.Module, nn.Module, DepType]]:
     """
         Infers dependencies from the traced graph, explicitly marking
@@ -623,7 +625,8 @@ def generate_graph_dependencies(
                 node_to_module[node] = None  # Placeholder or constant input
 
     # Generate mapping tensor btw deps
-    # deepcopy = lambda x: x
+    if not indexing_neurons:
+        return dependencies 
     for edge in dependencies:
         # Get src and dst modules and type
         src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]

@@ -77,8 +77,7 @@ class FashionCNNSequential(nn.Module):
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(in_features=4 * 6 * 6, out_features=128),
-            nn.Linear(in_features=128, out_features=10),
-            nn.Linear(in_features=10, out_features=1)
+            nn.Linear(in_features=128, out_features=10)
         )
         self.out_softmax = nn.Softmax(dim=1)
 
@@ -600,7 +599,7 @@ class ResNet18(nn.Module):
         super().__init__(*args, **kwargs)
 
         # Set input shape
-        self.input_shape = (1, 3, 224, 224)
+        self.input_shape = (1, 1, 224, 224)
 
         # Get the pre-trained ResNet-18
         self.model = models.resnet18(
@@ -608,6 +607,7 @@ class ResNet18(nn.Module):
         )
 
     def forward(self, input):
+        input = torch.cat([input,]*3, dim=1)  # Add channels dim
         return self.model(input)
 
 
@@ -1426,8 +1426,6 @@ class UNet3p(nn.Module):
         return F.interpolate(x, size=size, mode='bilinear', align_corners=True)
 
     def forward(self, x):
-        H, W = x.shape[-2:] # Store original size for final output
-
         # ------------------- ENCODER -------------------
         # E1 (64 channels) - Size H/1
         e1 = self.conv1(x)
@@ -1539,7 +1537,6 @@ class UNet3p(nn.Module):
         # ------------------- OUTPUT -------------------
         logits = self.outc(d1)
         return logits
-
 
 
 class UNet3D(nn.Module):
@@ -1816,7 +1813,7 @@ if __name__ == "__main__":
     print('Hello World')
 
     # 0. Get the model
-    model = FashionCNN()
+    model = ResNet18()
     print(model)
 
     # 2. Create a dummy input and transform it

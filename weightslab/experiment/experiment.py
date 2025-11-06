@@ -115,7 +115,7 @@ class Experiment:
         self.eval_iterator = iter(self.eval_loader)
 
         # Model WatcherEditor & Registration
-        self.model = self.interface_model()
+        self.interface_model()
         self.model.register_hook_fn_for_architecture_change(
             lambda model: self._update_optimizer(model))
 
@@ -142,7 +142,7 @@ class Experiment:
             model.parameters(), lr=self.learning_rate)
 
     def interface_model(self):
-        return WatcherEditor(
+        self.model = WatcherEditor(
             self.model,
             dummy_input=th.randn(self.input_shape),
             device=self.device
@@ -297,12 +297,6 @@ class Experiment:
         try:
             input_in_id_label = next(loader_iterator)
         except Exception as e:
-            print(
-                "Exception in _pass_one_batch: ",
-                e,
-                self.occured_train_steps
-            )
-
             raise StopIteration
 
         input_in_id_label = [
@@ -313,12 +307,13 @@ class Experiment:
         self.last_input = data
         return data, self.model(data)
 
-    def train_one_step(self):
+    def train_one_step(self, locking=False):
         """Train the model for one step."""
-        with self.lock:
-            if self.is_training is False:
-                return
-            self.occured_train_steps += 1
+        if locking:
+            with self.lock:
+                if self.is_training is False:
+                    return
+                self.occured_train_steps += 1
 
         with self.architecture_guard:
             self.model.train()
@@ -417,10 +412,9 @@ class Experiment:
                     # Output: (N, C, H, W), argmax over channel dim
                     pred = output.argmax(dim=1)
                 else:
-                    output = output.max(dim=1)[0]
                     losses_batch = self.criterion(
                         output,
-                        input.label_batch.flatten().float()
+                        input.label_batch.long()
                     )
                     if output.ndim == 1:
                         pred = (output > 0.0).long()
@@ -429,7 +423,7 @@ class Experiment:
 
                 if losses_batch.ndim == 0:
                     losses_batch = losses_batch.unsqueeze(0)
-                loss = th.mean(losses_batch)
+                loss = th.mean(losses_batch)  # Average over samples
                 try:
                     loss.backward()
                 except Exception as e:
@@ -510,7 +504,7 @@ class Experiment:
                 if hasattr(metric, 'to'):
                     metric = metric.to(self.device)
                     metric_value = metric(
-                        output.flatten(),
+                        output.argmax(dim=1).flatten(),
                         input.label_batch.flatten()
                     )
                     if hasattr(metric, 'compute'):
@@ -518,7 +512,10 @@ class Experiment:
                         metric.reset()
                 else:
                     # custom metric
-                    metric_value = metric(output, input.label_batch)
+                    metric_value = metric(
+                        output.argmax(dim=1).flatten(),
+                        input.label_batch
+                    )
                     if hasattr(metric_value, 'item'):
                         metric_value = metric_value.item()
 
@@ -532,13 +529,13 @@ class Experiment:
             self.training_steps_to_do -= 1
             self.is_training = self.training_steps_to_do > 0
 
-    def train_n_steps(self, n: int):
+    def train_n_steps(self, n: int, tqdm: bool = True):
         """Train the model for n steps.
 
         Args:
             n (int): The number of steps to be performed.
         """
-        train_range = trange(n, desc='Training..', total=n)
+        train_range = trange(n, desc='Training..', total=n) if tqdm else range(n)
         try:
             for _ in train_range:
                 self.train_one_step()
@@ -822,6 +819,80 @@ class Experiment:
         with self.architecture_guard, self.model as model:
             model.operate(
                 layer_id=kwargs['layer_id'],
-                neuron_indices=kwargs['neuron_ids'],
+                neuron_indices=kwargs['neuron_indices'],
                 neuron_operation=op_type
             )
+
+
+if __name__ == "__main__":
+    import os
+    import tempfile
+
+    from torch import optim
+
+    from torchvision import transforms as T
+    from torchvision import datasets as ds
+
+    from torchmetrics import Accuracy
+
+    from weightslab.tests.torch_models import FashionCNN
+
+    print("\n--- Hello World ---\n")
+
+    # Init Variables
+    temporary_directory = tempfile.mkdtemp()
+
+    # Instanciate the model
+    model = FashionCNN()
+
+    # Dataset initialization
+    data_eval = ds.MNIST(
+        os.path.join(temporary_directory, "data"),
+        download=True,
+        train=False,
+        transform=T.Compose([T.ToTensor()])
+    )
+    data_train = ds.MNIST(
+        os.path.join(temporary_directory, "data"),
+        train=True,
+        transform=T.Compose([T.ToTensor()]),
+        download=True
+    )
+
+    # Init Experiment
+    experiment = Experiment(
+        model=model,
+        optimizer_class=optim.Adam,
+        train_dataset=data_train,
+        metrics={
+            'acc': Accuracy(task="multiclass", num_classes=10)
+        },
+        input_shape=model.input_shape,
+        eval_dataset=data_eval,
+        device='cpu',
+        learning_rate=1e-2,
+        batch_size=128,
+        name="MNIST Training & Testing",
+        root_log_dir=temporary_directory,
+        train_shuffle=True
+    )
+
+    # PreTrain Evaluation ACC
+    _, pre_train_eval_accuracy = experiment.eval_full()
+
+    # Set Training Status
+    experiment.set_is_training(True)
+
+    # Train the model
+    epochs = 100
+    for epoch in trange(epochs, desc='Training..'):
+        experiment.train_n_steps(len(experiment.train_loader), tqdm=True)
+        if epoch % 1 == 0:
+            _, post_train_eval_accuracy = experiment.eval_full()
+            print(
+                f"Epoch {epoch+1}/{epochs}, Pre-Train Eval Accuracy: " +
+                f"{pre_train_eval_accuracy['acc']:.4f}, " +
+                f"Post-Train Eval Accuracy: {post_train_eval_accuracy['acc']:.4f}"
+            )
+
+    print('trained model')

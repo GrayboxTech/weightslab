@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import Set, List
 import torch as th
 
-from weightslab.layers.neuron_ops import NeuronWiseOperations
+from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 
 _TRACKING_TENSOR_DISPLAY_LIMIT = 8

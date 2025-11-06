@@ -6,7 +6,7 @@ import unittest
 import torch as th
 
 from weightslab.models.monkey_patcher import monkey_patch
-from weightslab.layers.modules_with_ops import \
+from weightslab.modules.modules_with_ops import \
     ArchitectureNeuronsOpType
 from weightslab.utils.tools import \
     get_layer_trainable_parameters_neuronwise
