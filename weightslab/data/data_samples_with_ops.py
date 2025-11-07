@@ -1,11 +1,6 @@
 import numpy as np
 import pandas as pd
 import random as rnd
-<<<<<<< HEAD:weightslab/data/data_samples_with_ops.py
-=======
-import math
-import torch as th  
->>>>>>> 105bc45013166e40b1abf3302ef98dbf63ea6cf3:weightslab/data_samples_with_ops.py
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
