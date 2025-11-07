@@ -652,7 +652,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
             Args:
                 neuron_indices (int | Set[int]): Neuron indices to process.
-                
+
             Returns:
                 int | Set[int]: Processed neuron indices.
         """
@@ -786,41 +786,45 @@ class LayerWiseOperations(NeuronWiseOperations):
                             th.ones(nb_neurons).to(self.device))
                         )
 
-        # Update neurons count & indexing
+        # ----------------------------------
+        # ----- Neurons Mapping Update -----
+        # ----------------------------------
+        # Outcoming neurons
         if not is_incoming:
             # Update neurons count
-            new_value = self.set_neurons(
-                self.super_out_name,
-                self.get_neurons(self.super_out_name) + nb_neurons
-            )
             self.set_neurons(
                 attr_name='out_neurons',
-                new_value=new_value
+                new_value=self.set_neurons(
+                    self.super_out_name,
+                    self.get_neurons(self.super_out_name) + nb_neurons
+                )
             )
 
-            # Update index maps
-            # # Self src to dst
-            # key_index = int(
-            #     (
-            #         self.get_neurons(self.super_out_name) - nb_neurons
-            #     ) / nb_neurons
-            # )
-            # deps_name = kwargs.get('current_child_name', kwargs.get('current_parent_name'))
-            deps_names = list(self.src_to_dst_mapping_tnsrs.keys())  # if deps_name not in self.src_to_dst_mapping_tnsrs else [deps_name]
+            # Update the src2dst mapping dictionary
+            # # Get dependencies
+            deps_names = list(self.src_to_dst_mapping_tnsrs.keys())
             if len(deps_names) > 0:
-                # index_name = [n for n, name in enumerate(self.src_to_dst_mapping_tnsrs.keys()) if name in deps_names]
-                # index_name = index_name[0] if len(index_name) > 0 else 1
-                length = len(self.src_to_dst_mapping_tnsrs[deps_names[0]]) if len(deps_names) > 0 else None
+                # Update mapping dictionary
+                # We get the length of the first dependency to know the length
+                # of every src2dst mapping tensor, as src is equal to dst,
+                # except for Linear layers for instance.
+                # TODO (GP): Not true when output to multi input (e.g., Conv2d, Linear, Conv2d)
+                # TODO (GP): Modulo should not be used but indice - sum(previous lengths)
+                length = len(self.src_to_dst_mapping_tnsrs[deps_names[0]]) \
+                    if len(deps_names) > 0 else None
                 for deps_name in deps_names:
-                    # Update here and not = to kept the common adress
-                    # between this dict and the same dict in related nodes
                     for neuron_indice in neuron_indices:
+                        # Get the corresponding dst indexs (e.g., Linear)
                         neuron_indice = list(
                             self.src_to_dst_mapping_tnsrs[
                                 deps_name
                             ].keys()
                         )[neuron_indice % length]
 
+                        # Update the mapping tensor wiht 1 neurons or
+                        # range(x) neurons if its a Linear layer, i.e.,
+                        # we add several neurons for a new convolutional
+                        # channel.
                         self.src_to_dst_mapping_tnsrs[
                             deps_name
                         ].update(
@@ -834,107 +838,95 @@ class LayerWiseOperations(NeuronWiseOperations):
                                 ]
                             }
                         )
-                # normalize dicts
-                self.src_to_dst_mapping_tnsrs = normalize_dicts(self.src_to_dst_mapping_tnsrs)
-
-            # # Related neurons
-            current_name = self.get_name_wi_id()
-            nb_original_neurons_channels = len([original_neuron_indices])
-            self.related_dst_to_src_mapping_tnsrs = normalize_dicts(self.related_dst_to_src_mapping_tnsrs)
-            if current_name in self.related_dst_to_src_mapping_tnsrs:
-                length = len(self.related_dst_to_src_mapping_tnsrs[current_name])
-                if length == 0:
-                    return
-                channel_size = len(
-                    list(
-                        self.related_dst_to_src_mapping_tnsrs[
-                            current_name
-                        ].values()
-                    )[-1]
+                # Normalize mapping dictionary
+                # Normalize the mapping tensors to ensure continuouty between
+                # mapping and neurons, i.e., {'a': [1, 2, 3], 'b': [4, 5, 6]}.
+                self.src_to_dst_mapping_tnsrs = normalize_dicts(
+                    self.src_to_dst_mapping_tnsrs
                 )
-                for neuron_indice in neuron_indices:
-                    neuron_indice = list(
+
+            # # Update the dst2src mapping dictionary from child module
+            current_name = self.get_name_wi_id()
+            if current_name in self.related_dst_to_src_mapping_tnsrs:
+                # Update mapping dictionary
+                length = len(
+                    self.related_dst_to_src_mapping_tnsrs[current_name]
+                )
+                if length > 0:
+                    # Determine the channel size, e.g., 1 for conv2d (1 <> 1), but
+                    # x for linear layers (1 <> x) with linear in
+                    # neuron x times out neurons.
+                    channel_size = len(
+                        list(
+                            self.related_dst_to_src_mapping_tnsrs[
+                                current_name
+                            ].values()
+                        )[-1]
+                    )
+                    for neuron_indice in neuron_indices:
+                        mapped_neuron_indice = list(
+                            self.related_dst_to_src_mapping_tnsrs[
+                                current_name
+                            ].keys()
+                        )[neuron_indice % length]  # get new index
+
+                        # Update the mapping tensor with 1 or range(x) neurons
                         self.related_dst_to_src_mapping_tnsrs[
                             current_name
-                        ].keys()
-                    )[neuron_indice % length]  # get new index
-                    self.related_dst_to_src_mapping_tnsrs[
-                        current_name
-                    ].update(
-                        {
-                            neuron_indice + 1: [
-                                n + max(
-                                    self.related_dst_to_src_mapping_tnsrs[
-                                        current_name
-                                    ][neuron_indice]
-                                ) for n, _ in enumerate(
-                                    range(
-                                        (neuron_indice-1) * channel_size,
-                                        neuron_indice * channel_size
-                                    )
-                                )
-                            ]
-                        }
+                        ].update(
+                            {
+                                mapped_neuron_indice + 1: [
+                                    neuron_index + max(
+                                        self.related_dst_to_src_mapping_tnsrs[
+                                            current_name
+                                        ][mapped_neuron_indice]
+                                    ) for neuron_index, _ in enumerate(
+                                        range(
+                                            (mapped_neuron_indice - 1) *
+                                            channel_size,
+                                            mapped_neuron_indice * channel_size
+                                        )
+                                    )  # in range of x neurons
+                                ]
+                            }
+                        )
+
+                    # Normalize mapping dictionary
+                    self.related_dst_to_src_mapping_tnsrs = normalize_dicts(
+                        self.related_dst_to_src_mapping_tnsrs
                     )
 
-            # Normalize dicts
-            self.related_dst_to_src_mapping_tnsrs = normalize_dicts(self.related_dst_to_src_mapping_tnsrs)
-
-            # Tracking
+            # Update the trackers with new neurons
             for tracker in self.get_trackers():
                 tracker.add_neurons(nb_neurons)
 
-            print(f'New layer is {self}', level='DEBUG')
+            # Verbose
+            print(f'Add one neuron to layer {self}', level='DEBUG')
 
+        # Incoming neurons, e.g., in conv2d for instance, or in norm
         if is_incoming or dependency == DepType.SAME:
             if dependency != DepType.SAME:
-                # Update neurons count
-                new_value = self.set_neurons(
-                    self.super_in_name,
-                    self.get_neurons(self.super_in_name) + nb_neurons
-                )
+                # We don't need to update here if already done before
+                # for same flag layers (e.g., batchnorm).
                 self.set_neurons(
                     attr_name='in_neurons',
-                    new_value=new_value
-                )
-
-            # Update index maps
-            # # Self dst to src
-            # current_parent_name = kwargs.get('current_parent_name', [])
-            # for parent_name in self.dst_to_src_mapping_tnsrs:
-            if is_incoming:
-                deps_name = kwargs.get('current_parent_name')
-            else:
-                deps_name = kwargs.get('current_child_name', kwargs.get('current_parent_name'))
-
-            # # Normalize
-            # offset_index = 0
-            # for deps_name_ in self.dst_to_src_mapping_tnsrs:
-            #     # if dict has several items that are bypass of the module,
-            #     # we split the new neurons between the two inputs channels
-            #     # from the two input tensors, and so re index every neurons
-            #     # with unique sequential indexs.
-            #     if offset_index > 0:
-            #         tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[deps_name_])
-            #         self.dst_to_src_mapping_tnsrs[deps_name_].clear()
-            #         for k in range(len(tmp_.items())):
-            #             self.dst_to_src_mapping_tnsrs[deps_name_][
-            #                 k + offset_index
-            #             ] = [k + offset_index]
-            #     indexs = list(self.dst_to_src_mapping_tnsrs[
-            #         deps_name_
-            #     ].keys())
-            #     offset_index += len(
-            #         indexs
-            #     ) if len(indexs) else 0
+                    new_value=self.set_neurons(
+                        self.super_in_name,
+                        self.get_neurons(self.super_in_name) + nb_neurons
+                    )
+                )  # Update neurons count
 
             # By default get deps name from current relation
-            deps_names = list(self.dst_to_src_mapping_tnsrs.keys())  #  if deps_name not in self.dst_to_src_mapping_tnsrs else [deps_name]
+            deps_names = list(self.dst_to_src_mapping_tnsrs.keys())
             if len(deps_names) > 0:
+                # Update mapping dictionary
+                # TODO (GP): Same comment as before src2dst
                 length = len(self.dst_to_src_mapping_tnsrs[deps_names[0]])
                 for deps_name in deps_names:
-                    neuron_indice = list(self.dst_to_src_mapping_tnsrs[deps_name].keys())[-1]
                     neuron_indice = list(
+                        self.dst_to_src_mapping_tnsrs[deps_name].keys()
+                    )[-1]
+                    mapped_neuron_indice = list(
                         self.dst_to_src_mapping_tnsrs[
                             deps_name
                         ].keys()
@@ -943,84 +935,65 @@ class LayerWiseOperations(NeuronWiseOperations):
                         deps_name
                     ].update(
                         {
-                            neuron_indice + 1 + j: [
+                            mapped_neuron_indice + 1 + j: [
                                 i + 1 + max(
                                     self.dst_to_src_mapping_tnsrs[
                                         deps_name
-                                    ][neuron_indice]
-                                ) for i in range(0, nb_neurons)
-                            ] for j in range(0, nb_neurons)
+                                    ][mapped_neuron_indice]
+                                ) for i in range(0, nb_neurons)  # neurons
+                            ] for j in range(0, nb_neurons)  # neurons | chan.
                         }
                     )
 
-                # Normalize dicts
-                self.dst_to_src_mapping_tnsrs = normalize_dicts(self.dst_to_src_mapping_tnsrs)
+                # Normalize mapping dictionary
+                self.dst_to_src_mapping_tnsrs = normalize_dicts(
+                    self.dst_to_src_mapping_tnsrs
+                )
 
-            # offset_index = 0
-            # for deps_name_ in self.dst_to_src_mapping_tnsrs:
-            #     # if dict has several items that are bypass of the module,
-            #     # we split the new neurons between the two inputs channels
-            #     # from the two input tensors, and so re index every neurons
-            #     # with unique sequential indexs.
-            #     if offset_index > 0:
-            #         tmp_ = deepcopy(self.dst_to_src_mapping_tnsrs[deps_name_])
-            #         self.dst_to_src_mapping_tnsrs[deps_name_].clear()
-            #         for k in range(len(tmp_.items())):
-            #             self.dst_to_src_mapping_tnsrs[deps_name_][
-            #                 k + offset_index
-            #             ] = [k + offset_index]
-            #     indexs = list(self.dst_to_src_mapping_tnsrs[
-            #         deps_name_
-            #     ].keys())
-            #     offset_index += len(
-            #         indexs
-            #     ) if len(indexs) else 0
-            # self.dst_to_src_mapping_tnsrs[
-            #     parent_name
-            # ] = reindex_and_compress_blocks(
-            #         self.dst_to_src_mapping_tnsrs[
-            #                 parent_name
-            #         ],
-            #         block_size=len(
-            #             list(
-            #                 self.dst_to_src_mapping_tnsrs[
-            #                     parent_name
-            #                 ].values()
-            #             )[-1]
-            #         ),
-            #         offset_index=0
-            #     )  # No needs as ADD
             # # Related neurons
             current_name = self.get_name_wi_id()
-            self.related_src_to_dst_mapping_tnsrs = normalize_dicts(self.related_src_to_dst_mapping_tnsrs)
             nb_original_neurons_channels = len([original_neuron_indices])
             if current_name in self.related_src_to_dst_mapping_tnsrs:
-                length = len(self.related_src_to_dst_mapping_tnsrs[current_name])
-                if length == 0:
-                    return
-                indexs = list(
+                # Update mapping dictionary
+                length = len(
                     self.related_src_to_dst_mapping_tnsrs[
                         current_name
-                    ].keys()
+                    ]
                 )
-                neuron_indice = indexs[neuron_indice % length]
-                self.related_src_to_dst_mapping_tnsrs[
-                    current_name
-                ].update(
-                    {
-                        neuron_indice + 1: [
-                            i + 1 + max(
-                                self.related_src_to_dst_mapping_tnsrs[
-                                    current_name
-                                ][neuron_indice]
-                            ) for i in range(0, nb_original_neurons_channels)
-                        ]
-                    }
-                )
-            # Normalize dicts
-            self.related_src_to_dst_mapping_tnsrs = normalize_dicts(self.related_src_to_dst_mapping_tnsrs)
+                if length > 0:
+                    indexs = list(
+                        self.related_src_to_dst_mapping_tnsrs[
+                            current_name
+                        ].keys()
+                    )
+                    neuron_indice = indexs[neuron_indice % length]
+                    self.related_src_to_dst_mapping_tnsrs[
+                        current_name
+                    ].update(
+                        {
+                            neuron_indice + 1: [
+                                i + 1 + max(
+                                    self.related_src_to_dst_mapping_tnsrs[
+                                        current_name
+                                    ][neuron_indice]
+                                ) for i in range(
+                                    0,
+                                    nb_original_neurons_channels
+                                )
+                            ]
+                        }
+                    )
 
-            print(f'New {"INCOMING" if dependency != DepType.SAME else "SAME"} layer is {self}', level='DEBUG')
+                    # Normalize mapping dictionary
+                    self.related_src_to_dst_mapping_tnsrs = normalize_dicts(
+                        self.related_src_to_dst_mapping_tnsrs
+                    )
+
+            # Verbose
+            print(
+                f'New {"INCOMING" if dependency != DepType.SAME else "SAME"}' +
+                f'layer is {self}', level='DEBUG'
+            )
 
     def _prune_neurons(
         self,
@@ -1069,7 +1042,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             print(f'Not enough neurons to operate (currently {neurons})')
             return
 
-        # Generate idx to keep
+        # Tensor indices to keep
         idx_tokeep = neurons - neuron_indices
         idx_tnsr = th.unique(
             th.Tensor(list(idx_tokeep)).long() // group_size

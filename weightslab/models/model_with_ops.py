@@ -6,7 +6,6 @@ from enum import Enum
 from typing import List, Set, Optional, Callable
 
 from weightslab.components.tracking import TrackingMode
-from weightslab.modules.
 from weightslab.utils.tools import get_children
 from weightslab.utils.modules_dependencies import _ModulesDependencyManager, \
     DepType
@@ -19,7 +18,7 @@ class NetworkWithOps(nn.Module):
         # Initialize variables
         self.seen_samples = 0
         self.visited_nodes = set()  # Memory trace of explored nodes
-        self.name = self.get_name()  # Name of the model
+        self.name = self._get_name()  # Name of the model
         self.linearized_layers = []
         self._architecture_change_hook_fns = []
         self.tracking_mode = TrackingMode.DISABLED
@@ -96,6 +95,30 @@ class NetworkWithOps(nn.Module):
         for layer in self.parameters():
             count += np.prod(layer.shape)
         return count
+
+    def register_dependencies(
+        self,
+        dependencies_list: List
+    ):
+        """Register the dependencies between children modules.
+
+        Args:
+            dependencies_dict (Dict): a dictionary in which the key is a
+                pair of modules and the value is the type of the dependency
+                between them.
+        """
+        for child_module in self.layers:
+            self._dep_manager.register_module(
+                child_module.get_module_id(), child_module)
+
+        for module1, module2, value in dependencies_list:
+            id1, id2 = module1.get_module_id(), module2.get_module_id()
+            if value == DepType.INCOMING:
+                self._dep_manager.register_incoming_dependency(id1, id2)
+            elif value == DepType.SAME:
+                self._dep_manager.register_same_dependency(id1, id2)
+            elif value == DepType.REC:
+                self._dep_manager.register_rec_dependency(id1, id2)
 
     def register_hook_fn_for_architecture_change(self, fn):
         self._architecture_change_hook_fns.append(fn)
@@ -393,10 +416,10 @@ class NetworkWithOps(nn.Module):
             state_dict, strict=strict, assign=assign, **kwargs)
 
     def forward(self,
-                x: th.Tensor,
+                tensor: th.Tensor,
                 intermediary_outputs: List[int] = []):
         intermediaries = {}
-
+        x = tensor
         for layer in self.layers:
             x = layer(x)
 

@@ -1,5 +1,6 @@
 """ This module contains the interface for neuron-wise operations. """
-from typing import List, Enum, auto
+from typing import List
+from enum import Enum, auto
 
 
 class ArchitectureNeuronsOpType(Enum):

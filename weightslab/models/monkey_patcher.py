@@ -62,8 +62,10 @@ def monkey_patch(module: nn.Module):
     rename_with_ops(module)
 
     # --- Step 4: Wrap the 'forward' Method ---
+    original_forward = module.forward
+
     def wrapped_forward(self, input):
-        activation_map = module.forward(input)
+        activation_map = original_forward(input)
         output = self.perform_layer_op(
             activation_map=activation_map,
             data=input

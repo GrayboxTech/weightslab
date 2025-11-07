@@ -17,7 +17,7 @@ from torchvision import transforms as T
 from weightslab.components.tracking import TrackingMode
 from weightslab.backend.watcher_editor import WatcherEditor
 from weightslab.tests.torch_models import FashionCNN as Model
-from weightslab.models.model_with_ops import ArchitectureNeuronsOpType
+from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 
 # Set Global Default Settings

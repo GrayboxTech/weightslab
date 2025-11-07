@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import inspect
 import warnings; warnings.filterwarnings("ignore")
@@ -10,7 +11,7 @@ import torch.nn as nn
 
 from typing import Type
 
-from weightslab.models.model_with_ops import ArchitectureNeuronsOpType
+from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.backend.watcher_editor import WatcherEditor
 from weightslab.utils.tools import model_op_neurons, \
     get_model_parameters_neuronwise
@@ -237,8 +238,11 @@ def create_inference_test(ModelClass):
 
 # Add dynamic tests to TestAllModelInference
 for ModelClass in ALL_MODEL_CLASSES:
-    test_method = create_inference_test(ModelClass)
-    setattr(TestAllModelInference, test_method.__name__, test_method)
+    if len(sys.argv) == 1 or len(sys.argv) >= 2 \
+            and sys.argv[1] != "" \
+            and sys.argv[1] in ModelClass.__name__:
+        test_method = create_inference_test(ModelClass)
+        setattr(TestAllModelInference, test_method.__name__, test_method)
 
 
 # --- Execution ---

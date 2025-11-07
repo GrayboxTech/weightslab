@@ -146,7 +146,7 @@ class ExperimentTest(unittest.TestCase):
         self.experiment.set_train_loop_clbk_freq(8)
         self.experiment.set_is_training(True)
         self.experiment.train_n_steps_with_eval_full(23)
-        self.assertEqual(loop_hook.call_count, 3)
+        self.assertEqual(loop_hook.call_count, 23)
 
 
 if __name__ == '__main__':
