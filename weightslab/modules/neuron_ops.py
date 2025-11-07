@@ -1,5 +1,15 @@
 """ This module contains the interface for neuron-wise operations. """
-from typing import List
+from typing import List, Enum, auto
+
+
+class ArchitectureNeuronsOpType(Enum):
+    """
+        Different types of operation.
+    """
+    ADD = auto()
+    PRUNE = auto()
+    FREEZE = auto()
+    RESET = auto()
 
 
 class NeuronWiseOperations:

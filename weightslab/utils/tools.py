@@ -100,8 +100,12 @@ def get_children(module: nn.Module):
     """
         Get module children (other modules).
     """
+    # Return the current module, e.g., conv2d_with_ops
     if is_module_with_ops(module):
         return [module]
+
+    # If current module is not with_ops, i.e., not learnable, i.e., maxpool2d
+    # Find next deps with_ops
     flatt_children = []
     for child in module.children():
         flatt_children.extend(get_children(child))
@@ -905,3 +909,29 @@ def normalize_dicts(a):
             indexs
         ) if len(indexs) else 0
     return a
+
+
+def reversing_indices(n_neurons, indices_set):
+    """
+        Reverse index from -x to x, given a set of indices, and sort them
+        from higher to lower.
+
+        Args:
+            n_neurons (int): The total number of neurons.
+            indices_set (Set[int]): The indices to reverse.
+        Returns:
+            List[int]: The reversed indices.
+
+        Example:
+        >>> reversing_indices(10, {-3, -5, 8})
+        [7, 5, 8]
+    """
+    return sorted(
+        {
+            neg_idx for i in indices_set
+            if -n_neurons <= (
+                neg_idx :=
+                (i if i < 0 else -(n_neurons - i))
+            ) <= -1
+        }
+    )[::-1]

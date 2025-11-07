@@ -4,19 +4,17 @@ import torch as th
 
 from torch import nn
 from enum import Enum
-from copy import deepcopy
-from typing import List, Set, Optional, Callable
+from typing import List, Set, Optional, Callable, Tuple
 
 from weightslab.utils.logs import print
+from weightslab.utils.tools import normalize_dicts, reversing_indices
 from weightslab.components.tracking import Tracker
 from weightslab.components.tracking import TrackingMode
+from weightslab.utils.modules_dependencies import DepType
 from weightslab.components.tracking import TriggersTracker
 from weightslab.modules.neuron_ops import NeuronWiseOperations
-from weightslab.utils.tools import \
-    reindex_and_compress_blocks, normalize_dicts
+from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.components.tracking import copy_forward_tracked_attrs
-from weightslab.models.model_with_ops import ArchitectureNeuronsOpType
-from weightslab.utils.modules_dependencies import DepType
 
 
 class LayerWiseOperations(NeuronWiseOperations):
@@ -24,7 +22,6 @@ class LayerWiseOperations(NeuronWiseOperations):
         Base class for the complementary operations needed in order to
         implement the neuron wise operations correctly.
     """
-    object_counter: int = 0
 
     def __init__(
             self,
@@ -36,35 +33,46 @@ class LayerWiseOperations(NeuronWiseOperations):
             super_out_name: str = "out_features"
     ) -> None:
 
-        # Init module ids
-        self.assign_id()  # assign ids
-
         # Variables
-        self.id = LayerWiseOperations.object_counter
-        LayerWiseOperations.object_counter += 1
-        self.out_neurons = out_neurons
+        # # Layer variables
+        self.super_in_name = super_in_name
         self.in_neurons = in_neurons
+        self.super_out_name = super_out_name
+        self.out_neurons = out_neurons
+        self.module_name = module_name
         self.device = device
         self.tracking_mode = TrackingMode.DISABLED
-        self.module_name = module_name
-        self.super_in_name = super_in_name
-        self.super_out_name = super_out_name
+
+        # IN/OUT neurons indexing & mapping dictionary
         self.src_to_dst_mapping_tnsrs = {}
         self.dst_to_src_mapping_tnsrs = {}
         self.related_src_to_dst_mapping_tnsrs = {}
         self.related_dst_to_src_mapping_tnsrs = {}
+
+        # Find and save learnable tensors that can be operated
         if hasattr(self, 'named_parameters'):
+            # Get every learnable tensors name
             self.learnable_tensors_name = [
                 name for name, param in self.named_parameters()
                 if param.requires_grad
-            ]  # Get every learnable tensors name
+            ]
+
+            # Initialize masking directory, i.e., for IN/OUT neurons
+            # lr to 0 to freeze specific neurons
             self.neuron_2_lr = {
                 tensor_name:
                     collections.defaultdict(lambda: 1.0) for tensor_name in
-                    self.learnable_tensors_name}
-            self.incoming_neuron_2_lr = {
-                'weight': collections.defaultdict(lambda: 1.0)
+                    self.learnable_tensors_name
             }
+            # TODO (GP): weight is the only incoming tensor to be learned ?
+            self.incoming_neuron_2_lr = {
+                tensor_name:
+                    collections.defaultdict(lambda: 1.0) for tensor_name in
+                    self.learnable_tensors_name if tensor_name == 'weight'
+            }
+
+        # Naming
+        self.assign_id()  # assign ids
 
         # Tracking
         self.regiser_trackers()
@@ -72,17 +80,23 @@ class LayerWiseOperations(NeuronWiseOperations):
         # Register hooks
         self.register_grad_hook()
 
-    def get_name(self):
-        return self.module_name
-
-    def set_name(self, n):
+    # ===================
+    # Getters and Setters
+    # ===================
+    def set_name(self, n: str):
         if isinstance(n, str):
             self.module_name = n
 
-    # =======================================================
-    # Getter and Setter for in_neurons and out_neurons
-    # =======================================================
-    def get_neurons_value(self, v):
+    def get_name(self) -> str:
+        return self.module_name
+
+    def get_neurons_value(self, v: int | List[int]) -> int:
+        """
+        Method to handle the specific case when IN/OUT updates are not
+        neurons information but shapes, e.g., unflatten layers.
+        Initial assumption: v is the shape of the tensor, i.e., (B, C, H, W)
+        or (C, H, W) only.
+        """
         value = v \
             if isinstance(v, int) else \
             (
@@ -91,7 +105,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             )
         return value
 
-    def get_neurons(self, attr_name: str):
+    def get_neurons(self, attr_name: str) -> int:
         """Getter: Returns the value of in_neurons."""
         if not hasattr(self, attr_name):
             raise AttributeError(
@@ -100,7 +114,11 @@ class LayerWiseOperations(NeuronWiseOperations):
             )
         return self.get_neurons_value(getattr(self, attr_name))
 
-    def set_neurons(self, attr_name: str, new_value: int | List[int] | th.Size | tuple):
+    def set_neurons(
+            self,
+            attr_name: str,
+            new_value: int | List[int] | th.Size | tuple
+    ) -> dict:
         """
         Setter (The Hook): This method runs whenever 'in_neurons' is assigned
         a value.
@@ -122,14 +140,15 @@ class LayerWiseOperations(NeuronWiseOperations):
         else:
             attr_value = new_value
         # Update attribute
-        return self.update_attr(
+        return self._update_attr(
             attr_name,
             attr_value
         )
 
-    # ------------------------------
-    # Magic OPS
-    def __eq__(self, other) -> bool:
+    # =================
+    # Magic. Operations
+    # =================
+    def __eq__(self, other: Callable) -> bool:
         _weight = th.allclose(self.weight.data, other.weight.data)
         _bias = th.allclose(self.bias.data, other.bias.data)
         _train_tracker = self.train_dataset_tracker == \
@@ -138,26 +157,24 @@ class LayerWiseOperations(NeuronWiseOperations):
             other.eval_dataset_tracker
         return _weight and _bias and _train_tracker and _eval_tracker
 
-    def __hash__(self):
-        # get all related learnable instance attributes,
-        # e.g.,self.in_features, self.out_features, and self.bias
+    def __hash__(self) -> int:
+        """
+            Get all related learnable instance attributes,
+            e.g.,self.in_features, self.out_features, and self.bias
+        """
         params = (
             self.__dict__
         )
         return int(hashlib.sha256(str(params).encode()).hexdigest(), 16)
 
-    # ------------------------------
+    # ==================
     # Trackers Functions
+    # ==================
     def regiser_trackers(self):
         self.register_module('train_dataset_tracker', TriggersTracker(
             self.get_neurons('out_neurons'), device=self.device))
         self.register_module('eval_dataset_tracker', TriggersTracker(
             self.get_neurons('out_neurons'), device=self.device))
-
-    def reset_stats(self):
-        """Reset stats for the trackers."""
-        self.train_dataset_tracker.reset_stats()
-        self.eval_dataset_tracker.reset_stats()
 
     def set_tracking_mode(self, tracking_mode: TrackingMode):
         """ Set what samples are the stats related to (train/eval/etc). """
@@ -176,7 +193,20 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     # ---------------
     # Utils Functions
-    def get_operation(self, op_type, **_):
+    def get_operation(
+            self,
+            op_type: ArchitectureNeuronsOpType | int,
+            **_
+    ) -> Callable:
+        """
+            Get the operation function based on the op_type.
+
+            Args:
+                op_type (ArchitectureNeuronsOpType | int): The operation type.
+
+            Returns:
+                Callable: The operation function.
+        """
         if callable(op_type):
             return op_type  # if already got, just return the fct
         elif op_type == ArchitectureNeuronsOpType.ADD or \
@@ -199,13 +229,13 @@ class LayerWiseOperations(NeuronWiseOperations):
             tensor_name: str = 'weight'
     ) -> float:
         """
-        Get the learning rate for a specific neuron.
+            Get the learning rate for a specific neuron.
 
-        Args:
-            neuron_id (int): The neuron id to get the learning rate for.
+            Args:
+                neuron_id (int): The neuron id to get the learning rate for.
 
-        Returns:
-            float: The learning rate for the specific neuron.
+            Returns:
+                float: The learning rate for the specific neuron.
         """
         neuron_2_lr = self.neuron_2_lr if not is_incoming else \
             self.incoming_neuron_2_lr
@@ -223,11 +253,11 @@ class LayerWiseOperations(NeuronWiseOperations):
             is_incoming: bool = False,
     ):
         """
-        Set per neuron learning rates.
+            Set per neuron learning rates.
 
-        Args:
-            neurons_id (Set[int]): The set of neurons to set the learning rate
-            lr (float): The value of the learning rate. Can be between [0, 1]
+            Args:
+                neurons_id (Set[int]): The set of neurons to set the learning rate
+                lr (float): The value of the learning rate. Can be between [0, 1]
         """
         if isinstance(neurons_id, (list, set)):
             if isinstance(neurons_id, set):
@@ -247,7 +277,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         invalid_ids = (set(neurons_id) - set(range(in_out_neurons)))
         if invalid_ids:
             raise ValueError(
-                f'Layer={self.get_name()}[id={self.id}]:'
+                f'Layer={self.get_name()}[id={self.module_id}]:'
                 f'Cannot set learning rate for neurons {invalid_ids} as they '
                 f'are outside the set of existent neurons {in_out_neurons}.'
             )
@@ -265,7 +295,11 @@ class LayerWiseOperations(NeuronWiseOperations):
                 neuron_2_lr[tensor_name][neuron_id] = lr
 
     def register_grad_hook(self):
-        # This is meant to be called in the children classes.
+        """
+            Register a hook for the gradient of the weights and biases.
+            This hook will be called when the gradients are computed and
+            constraints the gradients based on the neuron learning rate.
+        """
         def create_tensor_grad_hook(tensor_name: str, oneD: bool):
             def weight_grad_hook(weight_grad):
                 if tensor_name in self.neuron_2_lr:
@@ -308,38 +342,145 @@ class LayerWiseOperations(NeuronWiseOperations):
                 )
                 self.weight.register_hook(hook_fct)
 
-    def find_value_for_key_pattern_(self, key_pattern, state_dict):
+    def _update_attr(self, attribute_name: str, value: int) -> int:
+        """
+            Update the attribute value.
+
+            Args:
+                attribute_name (str): The name of the attribute to update.
+                value (int): The new value to set.
+
+            Returns:
+                int: The updated value.
+        """
+        # Get the current value using getattr()
+        if not hasattr(self, attribute_name):
+            return
+
+        # Set the new value back using setattr()
+        setattr(self, attribute_name, value)
+
+        return value
+
+    def _find_value_for_key_pattern(
+            self,
+            key_pattern: str,
+            state_dict: dict
+    ) -> object:
+        """
+            Find the value for a key pattern in the state_dict.
+
+            Args:
+                key_pattern (str): The pattern to search for in the keys.
+                state_dict (dict): The state dictionary.
+
+            Returns:
+                object: The value corresponding to the key pattern, or None
+                if not found.
+        """
         for key, value in state_dict.items():
             if key_pattern in key:
                 return value
-        return None
 
-    def get_parameter_count(self):
-        """Compute the rough number of parameters in the layer.
-
-        Returns:
-            int: The number of parameters in the layer.
+    def _process_neurons_indices(
+            self,
+            neuron_indices: Set[int] | int,
+            is_incoming: bool = False,
+            current_child_name: str = None,
+            current_parent_name: str = None,
+            **_
+    ) -> Tuple[List[int], List[int]]:
         """
-        parameters = 1
-        for i in range(len(self.weight.shape)):
-            parameters *= self.weight.shape[i]
-        if self.bias:
-            parameters += self.bias.shape[0]
-        return parameters
+            Intelligently processes high-level logical indices (like channels
+            or neurons) into the flat, absolute tensor indices required for
+            pruning.
+
+            This function handles:
+            1. 1-to-1 Mappings (Linear -> Linear, Conv -> Conv)
+            2. N-to-1 Mappings (Conv(N) -> Flatten -> Linear(N*H*W))
+            3. 1-to-N Mappings (Linear(N*H*W) -> Unflatten -> Conv(N))
+
+            Args:
+                neuron_indices (Set[int] | int): The neuron indices to process.
+                is_incoming (bool): Whether the indices are incoming.
+                current_child_name (str): The name of the current child.
+                current_parent_name (str): The name of the current parent.
+
+            Returns:
+                Tuple[List[int], List[int]]: The absolute tensor indices and
+                the orignal indices.
+        """
+        # Sanity checks
+        if not isinstance(neuron_indices, set):
+            neuron_indices = {neuron_indices}
+        if not len(neuron_indices) or neuron_indices is None:
+            neuron_indices = {-1}
+
+        # Get the corresponding indexs mapping dictionary
+        if current_parent_name is not None and current_parent_name in \
+                self.dst_to_src_mapping_tnsrs and is_incoming:
+            mapped_indexs = normalize_dicts(
+                {'normed': self.dst_to_src_mapping_tnsrs[current_parent_name]}
+            )['normed']  # TODO (GP): Improve this function
+        elif len(list(self.src_to_dst_mapping_tnsrs.keys())):
+            mapped_indexs = normalize_dicts(
+                {'test': self.src_to_dst_mapping_tnsrs[
+                    current_child_name if current_child_name is not None else
+                    list(self.src_to_dst_mapping_tnsrs.keys())[0]
+                ]}
+            )['test']  # TODO (GP): Improve this function
+        else:
+            mapped_indexs = self.get_neurons(attr_name='out_neurons') \
+                if not is_incoming else \
+                self.get_neurons(attr_name='in_neurons')
+            mapped_indexs = {i: [i] for i in range(mapped_indexs)}
+
+        # Reverse index to last first, i.e., -1, -3, -5, ..etc
+        original_indexs = reversing_indices(
+            len(mapped_indexs),
+            neuron_indices  # Ensure it's a set
+        )
+
+        # If there's a bypass flag, we need to adjust the flat indices to the
+        # index of the input tensor, i.e.,
+        # if incoming = th.cat([th.randn(8),]*4), we set the offset
+        # from the min. value of the tensor, which are continuous.
+        offset = min(list(mapped_indexs.keys()))
+        flat_indexs = list(
+            mapped_indexs[len(mapped_indexs)+i+offset][::-1]
+            for i in original_indexs
+        )
+
+        # Return the final set of flat indices, sorted last-to-first as in
+        # your original
+        return flat_indexs, original_indexs
 
     # ---------------
     # Torch Functions
     def load_from_state_dict(
             self,
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs
+            state_dict: dict,
+            prefix: str,
+            local_metadata: dict,
+            strict: bool,
+            missing_keys: List[str],
+            unexpected_keys: List[str],
+            error_msgs: str
     ):
-        tnsr = self.find_value_for_key_pattern_('weight', state_dict)
+        """
+        Load the model from a state dictionary.
+
+        Args:
+            state_dict (dict): The state dictionary to load from.
+            prefix (str): The prefix to use when searching for keys in the state_dict.
+            local_metadata (dict): The local metadata to use when searching for keys in the state_dict.
+            strict (bool): Whether to strictly enforce that the keys in the state_dict match
+                the keys in this module.
+            missing_keys (List[str]): List of keys that are missing in the state_dict.
+            unexpected_keys (List[str]): List of keys that are present in the state_dict but not in this module.
+            error_msgs (str): Error messages to return.
+        """
+        tnsr = self._find_value_for_key_pattern('weight', state_dict)
         if tnsr is not None:
             in_size, out_size = tnsr.shape[1], tnsr.shape[0]
             with th.no_grad():
@@ -350,22 +491,44 @@ class LayerWiseOperations(NeuronWiseOperations):
                     self.bias.data = nn.Parameter(
                         th.ones(out_size)).to(self.device)
 
-            self.update_attr(self.super_in_name, in_size)
-            self.set_neurons(attr_name='in_neurons', new_value=in_size)
-            self.update_attr(self.super_out_name, out_size)
-            self.set_neurons(attr_name='out_neurons', new_value=out_size)
+            # Update neurons information
+            self.set_neurons(
+                attr_name='in_neurons',
+                new_value=self._update_attr(self.super_in_name, in_size)
+            )
+            self.set_neurons(
+                attr_name='out_neurons',
+                new_value=self._update_attr(self.super_out_name, out_size)
+            )
+        # Update state dict from torch.nn.Module class
         self._load_from_state_dict(
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs)
 
     def to(self, *args, **kwargs):
+        """
+        Move all tensors and modules to a specified device.
+
+        Args:
+            args: Positional arguments passed to the `to` method of the
+            underlying tensors.
+            kwargs: Keyword arguments passed to the `to` method of the
+            underlying tensors.
+        """
         self.device = args[0]
         for tracker in self.get_trackers():
             tracker.to(*args, **kwargs)
 
     def register(
             self,
-            activation_map: th.Tensor):
+            activation_map: th.Tensor
+    ):
+        """
+        Register the activation map to the layer.
+
+        Args:
+            activation_map (th.Tensor): The activation map for the layer.
+        """
         tracker = self.get_tracker()
         if tracker is None or activation_map is None or input is None:
             return
@@ -374,14 +537,21 @@ class LayerWiseOperations(NeuronWiseOperations):
         copy_forward_tracked_attrs(processed_activation_map, activation_map)
         tracker.update(processed_activation_map)
 
-    def perform_layer_op(self,
-                         activation_map: th.Tensor,
-                         data: th.Tensor,
-                         skip_register: bool = False,
-                         intermediary: dict | None = None):
+    def perform_layer_op(
+        self,
+        activation_map: th.Tensor,
+        data: th.Tensor,
+        skip_register: bool = False,
+        intermediary: dict | None = None
+    ) -> th.Tensor:
+        # Update tensor information
         copy_forward_tracked_attrs(activation_map, data)
+
+        # Sanity check
         if not skip_register:
             self.register(activation_map)
+        
+        # Handle intermediary layers
         if intermediary is not None and self.get_module_id() in intermediary:
             try:
                 intermediary[self.get_module_id()] = activation_map
@@ -390,105 +560,8 @@ class LayerWiseOperations(NeuronWiseOperations):
                     f"Error {e} occurred while updating intermediary outputs",
                     self.get_module_id(), str(activation_map)[:50],
                     level='ERROR')
+
         return activation_map
-
-    def update_attr(self, attribute_name, value):
-        # Get the current value using getattr()
-        if not hasattr(self, attribute_name):
-            return
-
-        # Set the new value back using setattr()
-        setattr(self, attribute_name, value)
-
-        return value
-
-    def is_flatten_layer(self):
-        """
-        Flatten dimensions are based on the shape of the layer.
-        What is a flatten layer ? If every layers concerned have weights, and
-        so tensor with shape, they must match (B, C, H, W), or (B, H, W, C).
-        The B is important and here everytime. So we base our analysis on the
-        tensor shape.
-        """
-        if hasattr(self, 'weight'):
-            shape = self.weight.shape[1:]  # Remove the batch shape
-            return len(shape) == 1
-        return False
-
-    def _process_neurons_indices(
-            self,
-            neuron_indices: Set[int] | int,
-            is_incoming: bool = False,
-            current_child_name: str = None,
-            current_parent_name: str = None,
-            **_
-    ):
-        """
-        Intelligently processes high-level logical indices (like channels or
-        neurons) into the flat, absolute tensor indices required for pruning.
-
-        This function handles:
-        1. 1-to-1 Mappings (Linear -> Linear, Conv -> Conv)
-        2. N-to-1 Mappings (Conv(N) -> Flatten -> Linear(N*H*W))
-        3. 1-to-N Mappings (Linear(N*H*W) -> Unflatten -> Conv(N))
-        """
-        if not isinstance(neuron_indices, set):
-            neuron_indices = {neuron_indices}
-        if not len(neuron_indices) or neuron_indices is None:
-            neuron_indices = {-1}
-
-        def reversing_indices(n_neurons, indices_set):
-            """Your provided function to normalize indices."""
-            return sorted(
-                {
-                    neg_idx for i in indices_set
-                    if -n_neurons <= (
-                        neg_idx :=
-                        (i if i < 0 else -(n_neurons - i))
-                    ) <= -1
-                }
-            )[::-1]
-
-        if current_parent_name is not None and current_parent_name in \
-                self.dst_to_src_mapping_tnsrs and is_incoming:
-            # mapped_indexs = self.dst_to_src_mapping_tnsrs[current_parent_name]
-            mapped_indexs = normalize_dicts({'test': self.dst_to_src_mapping_tnsrs[current_parent_name]})['test']
-        elif len(list(self.src_to_dst_mapping_tnsrs.keys())):
-            mapped_indexs = normalize_dicts({'test': self.src_to_dst_mapping_tnsrs[
-                current_child_name if current_child_name is not None else
-                list(self.src_to_dst_mapping_tnsrs.keys())[0]
-            ]})['test']
-        else:
-            mapped_indexs = self.get_neurons(attr_name='out_neurons') if not is_incoming else \
-                self.get_neurons(attr_name='in_neurons')
-            mapped_indexs = {i: [i] for i in range(mapped_indexs)}
-
-        # Reverse index to last first, i.e., -1, -3, -5, ..etc
-        reversed_indexs = reversing_indices(
-            len(mapped_indexs),
-            neuron_indices  # Ensure it's a set
-        )
-        original_indexs = list(
-            len(mapped_indexs)+i for i in reversed_indexs
-        )
-        if hasattr(self, 'bypass') or hasattr(self, 'src_bypass'):
-            offset = min(list(mapped_indexs.keys()))
-            flat_indexs = list(
-                mapped_indexs[len(mapped_indexs)+i+offset][::-1] for i in reversed_indexs
-            )
-        elif not hasattr(self, 'src_bypass') or is_incoming:
-            offset = min(list(mapped_indexs.keys()))
-            flat_indexs = list(
-                mapped_indexs[len(mapped_indexs)+i+offset][::-1] for i in reversed_indexs
-            )
-        else:
-            flat_indexs = list(
-                len(mapped_indexs)+i for i in reversed_indexs
-            )  # chose only mapped indexs if bypass flag
-
-        # Return the final set of flat indices, sorted last-to-first as in
-        # your original
-        return flat_indexs, original_indexs
 
     def get_canal_length(self, incoming=False, parent_name=None, child_name=None):
         if incoming:
@@ -568,11 +641,24 @@ class LayerWiseOperations(NeuronWiseOperations):
                 **kwargs
             )
 
-    # ---------------
+    # ------------------
     # Neurons Operations
-    def _process_input_neurons_index(self, neuron_indices: int | Set[int]):
+    def _process_input_neurons_index(
+            self,
+            neuron_indices: int | Set[int]
+    ) -> int | Set[int]:
+        """
+            Sanity function to process neuron indices.
+
+            Args:
+                neuron_indices (int | Set[int]): Neuron indices to process.
+                
+            Returns:
+                int | Set[int]: Processed neuron indices.
+        """
         if neuron_indices is None:
             return neuron_indices
+
         if not isinstance(neuron_indices, set):
             if isinstance(neuron_indices, list):
                 neuron_indices = set(neuron_indices)

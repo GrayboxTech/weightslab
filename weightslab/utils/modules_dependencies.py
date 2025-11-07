@@ -85,7 +85,7 @@ class _ModulesDependencyManager():
         """
         self._register_dependency(id1, id2, DepType.INCOMING)
 
-    def get_dependent_ids(self, idd: int, dep_type: DepType):
+    def get_child_ids(self, idd: int, dep_type: DepType):
         """Get the ids of the modules that are dependent on the module with the
         given id.
 
