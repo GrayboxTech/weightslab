@@ -240,7 +240,7 @@ def create_inference_test(ModelClass):
 for ModelClass in ALL_MODEL_CLASSES:
     if len(sys.argv) == 1 or len(sys.argv) >= 2 \
             and sys.argv[1] != "" \
-            and sys.argv[1] in ModelClass.__name__:
+            and sys.argv[1].lower() in ModelClass.__name__.lower():
         test_method = create_inference_test(ModelClass)
         setattr(TestAllModelInference, test_method.__name__, test_method)
 

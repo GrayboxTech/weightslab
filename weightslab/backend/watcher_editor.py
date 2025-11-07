@@ -11,8 +11,9 @@ from weightslab.modules.neuron_ops import NeuronWiseOperations
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.utils.logs import print, setup_logging
 from weightslab.models.monkey_patcher import monkey_patch
-from weightslab.utils.tools import generate_graph_dependencies, \
-    model_op_neurons
+from weightslab.utils.tools import model_op_neurons
+from weightslab.utils.computational_graph import \
+    generate_graph_dependencies
 
 
 class WatcherEditor(NetworkWithOps):
