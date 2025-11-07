@@ -1,15 +1,19 @@
-from enum import Enum
-from typing import Callable, Tuple, Any, Set, Dict, Sequence, Optional
 import numpy as np
 import pandas as pd
 import random as rnd
+<<<<<<< HEAD:weightslab/data/data_samples_with_ops.py
+=======
 import math
 import torch as th  
+>>>>>>> 105bc45013166e40b1abf3302ef98dbf63ea6cf3:weightslab/data_samples_with_ops.py
 
+from enum import Enum
+from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset
 
 
 SamplePredicateFn = Callable[[], bool]
+
 
 def _is_scalarish(x) -> bool:
     if isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_)):
@@ -20,8 +24,10 @@ def _is_scalarish(x) -> bool:
         return True
     return False
 
+
 def _is_dense_array(x) -> bool:
     return isinstance(x, np.ndarray) and x.ndim >= 2
+
 
 def _to_numpy_safe(x):
     if isinstance(x, np.ndarray):
@@ -37,6 +43,7 @@ def _to_numpy_safe(x):
     except Exception:
         pass
     return None
+
 
 def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
     """
@@ -78,6 +85,7 @@ class SampleStatsEx(str, Enum):
     def ALL(cls):
         return list(map(lambda c: c.value, cls))
 
+
 # I just like it when the enum values have the same name leghts.
 class _StateDictKeys(str, Enum):
     IDX_TO_IDX_MAP = "idx_to_idx_map"
@@ -87,6 +95,7 @@ class _StateDictKeys(str, Enum):
     @classmethod
     def ALL(cls):
         return list(map(lambda c: c.value, cls))
+
 
 class DataSampleTrackingWrapper(Dataset):
     def __init__(self, wrapped_dataset: Dataset, task_type: str = "classification"):
@@ -226,7 +235,6 @@ class DataSampleTrackingWrapper(Dataset):
                 raise Exception(f"Tried to update loss for discarded sample_id={sample_id}")
         self.sample_statistics[stat_name][sample_id] = stat_value
 
-
     def get(self, sample_id: int, stat_name: str, raw: bool = False) -> int | float | bool:
         self._raise_if_invalid_stat_name(stat_name)
         if sample_id in self.sample_statistics[stat_name]:
@@ -292,7 +300,6 @@ class DataSampleTrackingWrapper(Dataset):
             self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
         self.set(sample_id=sample_id, stat_name=SampleStatsEx.SAMPLE_ID, stat_value=sample_id)
 
-
     def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None):
         self.dataframe = None
         if predct_batch is None:
@@ -311,6 +318,66 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_RAW.value: sample_pred,
                     SampleStatsEx.PREDICTION_LOSS.value: sample_loss
                 })
+    def update_sample_stats_ex(
+        self,
+        sample_id: int,
+        sample_stats_ex: Dict[str, Any]
+    ):
+        """
+        Extended per-sample stats.
+        - Scalar-ish values -> self.sample_statistics_ex[key][sample_id]
+        - Dense arrays (ndim>=2) -> self.dense_stats_store[key][sample_id]
+          (downsampled)
+        """
+        self.dataframe = None
+
+        for key, val in (sample_stats_ex or {}).items():
+            if val is None:
+                continue
+
+            np_val = _to_numpy_safe(val)
+
+            # Dense arrays (e.g., segmentation mask / reconstruction)
+            if _is_dense_array(np_val):
+                if key not in self.dense_stats_store:
+                    self.dense_stats_store[key] = {}
+                self.dense_stats_store[key][sample_id] = _downsample_nn(
+                    np_val, max_hw=96
+                )
+                continue
+
+            # Scalar-ish
+            if _is_scalarish(val):
+                if key not in self.sample_statistics_ex:
+                    self.sample_statistics_ex[key] = {}
+                if isinstance(val, np.ndarray) and val.ndim == 0:
+                    val = val.item()
+                self.sample_statistics_ex[key][sample_id] = val
+                self._ex_columns_cache.add(key)
+                continue
+
+            # Small vectors -> list
+            if (isinstance(np_val, np.ndarray) and
+                    np_val.ndim == 1 and np_val.size <= 64):
+                if key not in self.sample_statistics_ex:
+                    self.sample_statistics_ex[key] = {}
+                self.sample_statistics_ex[key][sample_id] = np_val.tolist()
+                self._ex_columns_cache.add(key)
+                continue
+
+            # Fallback to truncated string
+            stringy = str(val)
+            if len(stringy) > 512:
+                stringy = stringy[:509] + "..."
+            if key not in self.sample_statistics_ex:
+                self.sample_statistics_ex[key] = {}
+            self.sample_statistics_ex[key][sample_id] = stringy
+            self._ex_columns_cache.add(key)
+
+        if sample_id not in self.sample_statistics[SampleStatsEx.SAMPLE_ID]:
+            self.set(sample_id, SampleStatsEx.SAMPLE_ID, sample_id)
+        if sample_id not in self.sample_statistics[SampleStatsEx.DENY_LISTED]:
+            self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
 
     def update_sample_stats_ex(
         self,
@@ -448,7 +515,6 @@ class DataSampleTrackingWrapper(Dataset):
                     denied_cnt += 1
             self.denied_sample_cnt = denied_cnt
         self._update_index_to_index()
-
 
     def _get_denied_sample_ids(
         self,

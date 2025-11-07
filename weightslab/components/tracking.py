@@ -5,10 +5,11 @@ from collections import defaultdict
 from typing import Set, List
 import torch as th
 
-from .neuron_ops import NeuronWiseOperations
+from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 
 _TRACKING_TENSOR_DISPLAY_LIMIT = 8
+
 
 class TrackingMode(str, enum.Enum):
     """ Tracking mode w.r.t the dataset. """
@@ -116,8 +117,8 @@ class TriggersTracker(Tracker):
         super().__init__()
         self.device = device
         self.number_of_neurons = number_of_neurons
-        self.triggrs_by_neuron = th.zeros(number_of_neurons).long()
-        self.updates_by_neuron = th.zeros(number_of_neurons).long()
+        self.triggrs_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
+        self.updates_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
 
     def reset_stats(self):
         """
@@ -134,9 +135,10 @@ class TriggersTracker(Tracker):
         triggers_tuple = tuple(self.triggrs_by_neuron.tolist())
         updates_tuple = tuple(self.updates_by_neuron.tolist())
 
+        # Convert device to string or another immutable representation
         return hash(
             (
-                str(self.device),  # Convert device to string or another immutable representation
+                str(self.device),
                 self.number_of_neurons,
                 triggers_tuple,
                 updates_tuple
@@ -166,15 +168,16 @@ class TriggersTracker(Tracker):
     def _load_from_state_dict(
             self, state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs):
-        self.number_of_neurons = \
-            state_dict[prefix + 'number_of_neurons']
-        self.triggrs_by_neuron = \
-            state_dict[prefix + 'triggrs_by_neuron'].to(self.device)
-        self.updates_by_neuron = \
-            state_dict[prefix + 'updates_by_neuron'].to(self.device)
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs)
+        if state_dict:
+            self.number_of_neurons = \
+                state_dict[prefix + 'number_of_neurons']
+            self.triggrs_by_neuron = \
+                state_dict[prefix + 'triggrs_by_neuron'].to(self.device)
+            self.updates_by_neuron = \
+                state_dict[prefix + 'updates_by_neuron'].to(self.device)
+            super()._load_from_state_dict(
+                state_dict, prefix, local_metadata, strict,
+                missing_keys, unexpected_keys, error_msgs)
 
     def to(
             self,
@@ -213,6 +216,8 @@ class TriggersTracker(Tracker):
             #     f"activation map has shape: {str(tensor.shape)}")
             tensor = tensor.view(-1, self.number_of_neurons)
         try:
+            if tensor.shape == th.Size([]):
+                tensor = tensor[None, None]  # Add one dim
             bs = tensor.shape[0]
             self.triggrs_by_neuron += th.sum(
                 tensor, dim=(0, )).view(-1).long().to(self.device)
@@ -220,30 +225,10 @@ class TriggersTracker(Tracker):
                 self.number_of_neurons).long().to(self.device) * bs
         except RuntimeError as err:
             raise err
-            # raise ValueError(
-            #     f"Number of neurons in the input {tensor.shape[1]} differs "
-            #     f"from tracked neurons {self.number_of_neurons}.") from err
-
-    def reorder(self, indices: List[int]):
-        neurons = set(range(self.number_of_neurons))
-
-        if not set(indices) & neurons:
-            raise ValueError(
-                f"TriggersTracker.reorder indices and neurons set do not "
-                f"overlap: {indices} & {neurons} => {indices & neurons}")
-
-        triggrs_by_neuron = th.zeros_like(self.triggrs_by_neuron)
-        updates_by_neuron = th.zeros_like(self.updates_by_neuron)
-        for index_dest, index_from in enumerate(indices):
-            triggrs_by_neuron[index_dest] = self.triggrs_by_neuron[index_from]
-            updates_by_neuron[index_dest] = self.updates_by_neuron[index_from]
-        self.triggrs_by_neuron = triggrs_by_neuron
-        self.updates_by_neuron = updates_by_neuron
-
-        self.to(self.device)
 
     def prune(self, indices: Set[int], update_neuron_count: bool = True):
         neurons = set(range(self.number_of_neurons))
+        indices = set(indices) if not isinstance(indices, set) else indices
         if not indices & neurons:
             raise ValueError(
                 f"TriggersTracker.prune indices and neurons set do not "

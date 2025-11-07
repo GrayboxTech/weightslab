@@ -1,18 +1,23 @@
 """ Test tracking related interfaces and classes. """
-import unittest
+import time
 import shutil
+import unittest
 import tempfile
+import warnings; warnings.filterwarnings("ignore")
+import torch as th
 
 from os import path
 
-import torch as th
-
-
-from weightslab.tracking import (
+from weightslab.components.tracking import (
     add_tracked_attrs_to_input_tensor,
     TriggersTracker,
     TriggersTrackerClazzAndSampleID
 )
+
+
+# Set Global Default Settings
+DEVICE = 'cpu' if not th.cuda.is_available() else 'cuda'
+th.manual_seed(42)  # Set SEED
 
 
 class TriggersTrackerTest(unittest.TestCase):
@@ -21,13 +26,22 @@ class TriggersTrackerTest(unittest.TestCase):
         storage capability.
     """
     def setUp(self):
+        print(f"\n--- Start {self._testMethodName} ---\n")
         self.batch_size = 2
-        self.device = th.device("cpu")
+        self.device = DEVICE
         self.triggers_tracker = TriggersTracker(2, self.device)
         self.test_dir = tempfile.mkdtemp()
+        self.stamp = time.time()
 
     def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
         shutil.rmtree(self.test_dir)
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
     def test_triggers_tracker_one_update(self):
         # [batch_size x neuron_count]
@@ -56,15 +70,6 @@ class TriggersTrackerTest(unittest.TestCase):
         self.assertEqual(self.triggers_tracker.get_neuron_age(1), 6)
         self.assertEqual(self.triggers_tracker.get_neuron_triggers(0), 26)
         self.assertEqual(self.triggers_tracker.get_neuron_triggers(1), 14)
-
-    def test_triggers_tracker_one_update_and_reorder(self):
-        processed_activation_map = th.tensor([[4, 6], [0, 2]]).to(self.device)
-        self.triggers_tracker.update(processed_activation_map)
-        self.triggers_tracker.reorder([1, 0])
-        self.assertEqual(self.triggers_tracker.get_neuron_age(0), 2)
-        self.assertEqual(self.triggers_tracker.get_neuron_age(1), 2)
-        self.assertEqual(self.triggers_tracker.get_neuron_triggers(0), 8)
-        self.assertEqual(self.triggers_tracker.get_neuron_triggers(1), 4)
 
     def test_triggers_tracker_one_update_and_prune(self):
         processed_activation_map = th.tensor([[4, 6], [0, 2]]).to(self.device)
@@ -112,14 +117,13 @@ class TriggersTrackerTest(unittest.TestCase):
         self.triggers_tracker.update(processed_activation_map_2)
         self.triggers_tracker.reset({3})
         self.triggers_tracker.prune({2})
-        self.triggers_tracker.reorder([2, 0, 1])
         self.assertEqual(self.triggers_tracker.get_neuron_number(), 3)
-        self.assertEqual(self.triggers_tracker.get_neuron_age(0), 0)
+        self.assertEqual(self.triggers_tracker.get_neuron_age(0), 6)
         self.assertEqual(self.triggers_tracker.get_neuron_age(1), 6)
-        self.assertEqual(self.triggers_tracker.get_neuron_age(2), 6)
-        self.assertEqual(self.triggers_tracker.get_neuron_triggers(0), 0)
-        self.assertEqual(self.triggers_tracker.get_neuron_triggers(1), 15)
-        self.assertEqual(self.triggers_tracker.get_neuron_triggers(2), 18)
+        self.assertEqual(self.triggers_tracker.get_neuron_age(2), 0)
+        self.assertEqual(self.triggers_tracker.get_neuron_triggers(0), 15)
+        self.assertEqual(self.triggers_tracker.get_neuron_triggers(1), 18)
+        self.assertEqual(self.triggers_tracker.get_neuron_triggers(2), 0)
 
     def test_triggers_tracker_all_ops_plus_save_and_load(self):
         replica_triggers_tracker = TriggersTracker(2, self.device)
@@ -133,7 +137,6 @@ class TriggersTrackerTest(unittest.TestCase):
         self.triggers_tracker.update(processed_activation_map_2)
         self.triggers_tracker.reset({3})
         self.triggers_tracker.prune({2})
-        self.triggers_tracker.reorder([2, 0, 1])
 
         state_dict_file_path = path.join(self.test_dir, 'triggers_tracker.txt')
         th.save(self.triggers_tracker.state_dict(), state_dict_file_path)
@@ -175,25 +178,6 @@ class TriggersTrackerClazzAndSampleIDTest(unittest.TestCase):
         neuron1_stats = self.triggers_tracker.get_neuron_stats(1)
         self.assertListEqual(neuron1_stats[1], [12, 789])
         self.assertListEqual(neuron1_stats[2], [(0, 1), (4, 1)])
-
-    def test_update_and_reorder(self):
-        processed_activation_map = th.tensor([[1, 1], [0, 1]])
-        add_tracked_attrs_to_input_tensor(
-            processed_activation_map,
-            in_id_batch=th.tensor([12, 789]),
-            label_batch=th.tensor([0, 4])
-        )
-
-        self.triggers_tracker.update(processed_activation_map)
-        self.triggers_tracker.reorder([1, 0])
-
-        neuron0_stats = self.triggers_tracker.get_neuron_stats(0)
-        self.assertListEqual(neuron0_stats[1], [12, 789])
-        self.assertListEqual(neuron0_stats[2], [(0, 1), (4, 1)])
-
-        neuron1_stats = self.triggers_tracker.get_neuron_stats(1)
-        self.assertListEqual(neuron1_stats[1], [12])
-        self.assertListEqual(neuron1_stats[2], [(0, 1)])
 
     def test_update_and_prune(self):
         processed_activation_map = th.tensor([[1, 1], [0, 1]])
@@ -267,7 +251,7 @@ class TriggersTrackerClazzAndSampleIDTest(unittest.TestCase):
         self.triggers_tracker.update(processed_activation_map)
         self.triggers_tracker.add_neurons(1)
         self.assertTrue(self.triggers_tracker.number_of_neurons == 3)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(RuntimeError):
             self.triggers_tracker.update(processed_activation_map)
         processed_activation_map = th.tensor([[1, 8, 3], [0, 2, 4]])
 

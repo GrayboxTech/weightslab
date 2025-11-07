@@ -3,9 +3,10 @@ import os
 import json
 import uuid
 import logging
+import torch as th
+
 from pathlib import Path
 from typing import Set
-import torch as th
 
 CHECKPOPINTS_METADATA_FILE_NAME = 'checkpoints.metadata'
 
@@ -32,7 +33,10 @@ class _CheckpointDictKeys(str, enum.Enum):
 
 class CheckpointManager(object):
     def __init__(self, root_directory: str = 'root_experiment') -> None:
+        # Init paths
         self.root_directory = Path(root_directory)
+        self.root_directory.mkdir(parents=True, exist_ok=True)
+        self.root_directory = self.root_directory.absolute()  # Get abs path
 
         self.next_id = -1
         self.prnt_id = -1
@@ -40,7 +44,7 @@ class CheckpointManager(object):
         self.id_to_prnt = {}
         self.id_to_meta = {}
 
-        Path(root_directory).mkdir(parents=True, exist_ok=True)
+        # Load metadata from chkpt if exists
         self._load_metadata()
 
     def __repr__(self) -> str:
@@ -127,7 +131,7 @@ class CheckpointManager(object):
                 json.dump(info, f, indent=2)
             return -1
 
-        else:    
+        else:
             current_ckpt_id = self._generate_checkpoint_id()
             _logger.info(
                 "Dumping experiment: %d", current_ckpt_id)

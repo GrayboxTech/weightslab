@@ -1,16 +1,35 @@
 """ This module contains the interface for neuron-wise operations. """
 from typing import List
+from enum import Enum, auto
+
+
+class ArchitectureNeuronsOpType(Enum):
+    """
+        Different types of operation.
+    """
+    ADD = auto()
+    PRUNE = auto()
+    FREEZE = auto()
+    RESET = auto()
 
 
 class NeuronWiseOperations:
     """ This module contains the interface for neuron-wise operations. """
     MODULE_ID: int = 0
 
+    def reset_id(self):
+        """Reset the common ID"""
+        NeuronWiseOperations.MODULE_ID = 0
+
     def assign_id(self):
         """Self assign an id for each unique instance of this class."""
 
         self.module_id = NeuronWiseOperations.MODULE_ID
         NeuronWiseOperations.MODULE_ID += 1
+
+    def get_name_wi_id(self):
+        """Return the unique module name"""
+        return self.get_name() + "_" + str(self.get_module_id())
 
     def get_module_id(self):
         """Return the id of the instance."""
