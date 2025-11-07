@@ -6,6 +6,7 @@ import torch as th
 from tqdm import tqdm, trange
 from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
+from collections import defaultdict
 from threading import Lock, RLock
 
 from weightslab.components.checkpoint import CheckpointManager
