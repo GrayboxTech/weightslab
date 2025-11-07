@@ -14,10 +14,6 @@ mpmath==1.3.0
 pandas==2.2.3
 numpy==1.24.1
 sympy==1.12.1
-tensorboard==2.20
-torch==2.1
-torchvision==0.16
-torchmetrics==1.0.3
 tqdm==4.66.4
 typing_extensions==4.12.2
 tqdm==4.66.4
