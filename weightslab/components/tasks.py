@@ -16,15 +16,16 @@ class Task:
         criterion,
         metrics: Optional[Dict[str, Any]] = None,
         loss_weight: float = 1.0,
-        target_fn: Optional[TargetFn] = None,  # NEW
+        target_fn: Optional[TargetFn] = None,
+        primary: bool = False,
     ):
         self.name = name
         self.model = model
         self.criterion = criterion             # must return per-sample loss (reduction='none')
         self.metrics = metrics or {}
         self.loss_weight = float(loss_weight)
-        # by default use classification labels that your dataset wrapper attaches
         self.target_fn = target_fn or (lambda inp: inp.label_batch)
+        self.primary = primary
 
     def get_targets(self, inp: th.Tensor) -> th.Tensor:
         return self.target_fn(inp)

@@ -74,7 +74,7 @@ class Experiment:
         self.lock = Lock()
         self.architecture_guard = RLock()
 
-        self.eval_full_to_train_steps_ratio = 256
+        self.eval_full_to_train_steps_ratio = 64
         self.experiment_dump_to_train_steps_ratio = 1024
         self.occured_train_steps = 0
         self.occured_eval__steps = 0
@@ -374,11 +374,16 @@ class Experiment:
                 self.optimizer.step()
 
                 with th.no_grad():
+                    primary_task = self._get_primary_task_metrics() 
                     for t in self.tasks:
                         if not getattr(t, "metrics", None):
                             continue
                         targets = t.get_targets(input)
                         outs = head_outputs[t.name]
+                        if hasattr(t, 'infer_pred') and callable(t.infer_pred):
+                            outs = t.infer_pred(outs)
+                        else:
+                            outs = outs
                         for mname, metric in t.metrics.items():
                             m = metric.to(self.device) \
                                 if hasattr(metric, "to") else metric
@@ -438,6 +443,9 @@ class Experiment:
                         'error:', str(e)
                     )
                 self.optimizer.step()
+                self.logger.add_scalars(
+                    'train-loss', {self.name: loss.detach().cpu().numpy()},
+                    global_step=model_age)
 
         with self.lock:
             if getattr(self, "tasks", None):
@@ -455,7 +463,8 @@ class Experiment:
                     model_age,
                     ids_np,
                     comb_np,
-                    first_pred.detach().cpu().numpy()
+                    # first_pred.detach().cpu().numpy()
+                    None
                 )
 
                 # extended per-task stats (non-breaking)
@@ -493,11 +502,6 @@ class Experiment:
                 except Exception:
                     pass
 
-        self.logger.add_scalars(
-            'train-loss', {self.name: loss.detach().cpu().numpy()},
-            global_step=model_age)
-
-        # original per-epoch metrics remain for single-task (no change)
         if not getattr(self, "tasks", None):
             for name, metric in self.metrics.items():
                 # torchmetrics.Metric
@@ -590,19 +594,19 @@ class Experiment:
                 if combined_losses_batch.ndim > 0 else combined_losses_batch
 
             model_age = self.model.get_age()
-            first_pred = self._pick_legacy_dense_pred(per_task_preds, input)
             self.eval_loader.dataset.update_batch_sample_stats(
                 model_age,
                 input.in_id_batch.detach().cpu().numpy(),
                 combined_losses_batch.detach().cpu().numpy(),
-                first_pred.detach().cpu().numpy()
+                # first_pred.detach().cpu().numpy()
+                None
             )
 
             try:
                 ids_np = input.in_id_batch.detach().cpu().numpy()
                 stats_map = {}
                 for name, lb in per_task_losses.items():
-                    stats_map[f"loss/{name}_eval"] = lb.detach().cpu().numpy()
+                    stats_map[f"loss/{name}"] = lb.detach().cpu().numpy()
                 for name, pr in per_task_preds.items():
                     stats_map[f"pred/{name}_eval"] = pr.detach().cpu().numpy()
                 self.eval_loader.dataset.update_sample_stats_ex_batch(
@@ -612,14 +616,18 @@ class Experiment:
             except Exception:
                 pass
 
-            # preserve original return contract (loss tensor, metrics dict)
             metric_results = {}
             with th.no_grad():
+                primary_task = self._get_primary_task_metrics()
                 for t in self.tasks:
                     if not getattr(t, "metrics", None):
                         continue
                     targets = t.get_targets(input)
                     outs = head_outputs[t.name]
+                    if hasattr(t, 'infer_pred') and callable(t.infer_pred):
+                        outs = t.infer_pred(outs)
+                    else:
+                        outs = outs
                     for mname, metric in t.metrics.items():
                         m = metric.to(self.device) if hasattr(metric, "to") \
                             else metric
@@ -630,7 +638,8 @@ class Experiment:
                                 m.reset()
                         elif hasattr(val, "item"):
                             val = val.item()
-                        metric_results[f"{t.name}/{mname}"] = val
+                        if t == primary_task:
+                            metric_results[mname] = val
 
                 # also expose per-task mean loss (unweighted) for eval
                 for t in self.tasks:
@@ -700,7 +709,7 @@ class Experiment:
     @th.no_grad()
     def eval_n_steps(self, n: int):
         losses = 0.0
-        metric_totals = {name: 0.0 for name in self.metrics}
+        metric_totals = defaultdict(float)
         count = 0
         eval_range = range(n)
         try:
@@ -715,7 +724,7 @@ class Experiment:
 
         if count == 0:
             mean_loss = 0.0
-            mean_metrics = {name: 0.0 for name in self.metrics}
+            mean_metrics = {}
         else:
             mean_loss = losses / count
             mean_metrics = {name: metric_totals[name] / count for name in

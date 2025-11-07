@@ -1,6 +1,11 @@
 import numpy as np
 import pandas as pd
 import random as rnd
+<<<<<<< HEAD:weightslab/data/data_samples_with_ops.py
+=======
+import math
+import torch as th  
+>>>>>>> 105bc45013166e40b1abf3302ef98dbf63ea6cf3:weightslab/data_samples_with_ops.py
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
@@ -33,7 +38,6 @@ def _to_numpy_safe(x):
         except Exception:
             return None
     try:
-        import torch as th  # optional
         if isinstance(x, th.Tensor):
             return x.detach().cpu().numpy()
     except Exception:
@@ -397,7 +401,7 @@ class DataSampleTrackingWrapper(Dataset):
             if _is_dense_array(np_val):
                 if key not in self.dense_stats_store:
                     self.dense_stats_store[key] = {}
-                self.dense_stats_store[key][sample_id] = _downsample_nn(np_val, max_hw=96)
+                self.dense_stats_store[key][sample_id] = _downsample_nn(np_val, max_hw=128)
                 continue
 
             # Scalar-ish
@@ -426,11 +430,6 @@ class DataSampleTrackingWrapper(Dataset):
                 self.sample_statistics_ex[key] = {}
             self.sample_statistics_ex[key][sample_id] = stringy
             self._ex_columns_cache.add(key)
-
-        if sample_id not in self.sample_statistics[SampleStatsEx.SAMPLE_ID]:
-            self.set(sample_id, SampleStatsEx.SAMPLE_ID, sample_id)
-        if sample_id not in self.sample_statistics[SampleStatsEx.DENY_LISTED]:
-            self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
 
     def update_sample_stats_ex_batch(
         self,
@@ -688,7 +687,9 @@ class DataSampleTrackingWrapper(Dataset):
             for stat_name in SampleStatsEx.ALL():
                 row[stat_name] = self.get(sample_id, stat_name)
             for ex_key in self._ex_columns_cache:
-                row[ex_key] = self.sample_statistics_ex.get(ex_key, {}).get(sample_id)
+                v = self.sample_statistics_ex.get(ex_key, {}).get(sample_id)
+                if v is not None:
+                    row[ex_key] = v 
             rows.append(row)
             denied += int(bool(row.get(SampleStatsEx.DENY_LISTED, False)))
         return rows
@@ -723,6 +724,10 @@ class DataSampleTrackingWrapper(Dataset):
     def __len__(self):
         return len(self.wrapped_dataset) - self.denied_sample_cnt
     
-    def get_prediction_mask(self, sample_id):
+    def get_prediction_mask(self, sample_id, task_name=None):
+        if task_name:
+            key = f"pred/{task_name}"
+            if key in self.dense_stats_store:
+                return self.dense_stats_store[key].get(sample_id)
         return self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
 
