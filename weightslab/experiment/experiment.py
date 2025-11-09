@@ -308,13 +308,12 @@ class Experiment:
         self.last_input = data
         return data, self.model(data)
 
-    def train_one_step(self, locking=False):
+    def train_one_step(self):
         """Train the model for one step."""
-        if locking:
-            with self.lock:
-                if self.is_training is False:
-                    return
-                self.occured_train_steps += 1
+        with self.lock:
+            if self.is_training is False:
+                return
+            self.occured_train_steps += 1
 
         with self.architecture_guard:
             self.model.train()
