@@ -313,6 +313,7 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_RAW.value: sample_pred,
                     SampleStatsEx.PREDICTION_LOSS.value: sample_loss
                 })
+            
     def update_sample_stats_ex(
         self,
         sample_id: int,
@@ -373,58 +374,6 @@ class DataSampleTrackingWrapper(Dataset):
             self.set(sample_id, SampleStatsEx.SAMPLE_ID, sample_id)
         if sample_id not in self.sample_statistics[SampleStatsEx.DENY_LISTED]:
             self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
-
-    def update_sample_stats_ex(
-        self,
-        sample_id: int,
-        sample_stats_ex: Dict[str, Any]
-    ):
-        """
-        Extended per-sample stats.
-        - Scalar-ish values -> self.sample_statistics_ex[key][sample_id]
-        - Dense arrays (ndim>=2) -> self.dense_stats_store[key][sample_id] (downsampled)
-        """
-        self.dataframe = None
-
-        for key, val in (sample_stats_ex or {}).items():
-            if val is None:
-                continue
-
-            np_val = _to_numpy_safe(val)
-
-            # Dense arrays (e.g., segmentation mask / reconstruction)
-            if _is_dense_array(np_val):
-                if key not in self.dense_stats_store:
-                    self.dense_stats_store[key] = {}
-                self.dense_stats_store[key][sample_id] = _downsample_nn(np_val, max_hw=128)
-                continue
-
-            # Scalar-ish
-            if _is_scalarish(val):
-                if key not in self.sample_statistics_ex:
-                    self.sample_statistics_ex[key] = {}
-                if isinstance(val, np.ndarray) and val.ndim == 0:
-                    val = val.item()
-                self.sample_statistics_ex[key][sample_id] = val
-                self._ex_columns_cache.add(key)
-                continue
-
-            # Small vectors -> list
-            if isinstance(np_val, np.ndarray) and np_val.ndim == 1 and np_val.size <= 64:
-                if key not in self.sample_statistics_ex:
-                    self.sample_statistics_ex[key] = {}
-                self.sample_statistics_ex[key][sample_id] = np_val.tolist()
-                self._ex_columns_cache.add(key)
-                continue
-
-            # Fallback to truncated string
-            stringy = str(val)
-            if len(stringy) > 512:
-                stringy = stringy[:509] + "..."
-            if key not in self.sample_statistics_ex:
-                self.sample_statistics_ex[key] = {}
-            self.sample_statistics_ex[key][sample_id] = stringy
-            self._ex_columns_cache.add(key)
 
     def update_sample_stats_ex_batch(
         self,
