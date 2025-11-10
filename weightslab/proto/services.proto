@@ -1,0 +1,15 @@
+syntax = "proto3";
+package sdk_services;
+
+import "experiment_command.proto";
+import "streaming_signals.proto";
+
+
+// Empty message to represent an empty request or response is expected
+message Empty {}
+
+// Interface to communicate btw UI and SDK
+service ExperimentService {
+  rpc WatchSignals (Empty) returns (stream sdk_streaming_signals.W_TrainingStatusEx);
+  rpc ExperimentCommand (sdk_experiment_command.TrainerCommand) returns (sdk_experiment_command.CommandResponse);
+}

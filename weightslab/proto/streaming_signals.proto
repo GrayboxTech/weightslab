@@ -1,0 +1,23 @@
+syntax = "proto3";
+package sdk_streaming_signals;
+
+
+// Signals
+// -- Elements
+message MetricsStatus {
+  string name = 1;
+  float value = 2;
+}
+message AnnotationStatus {
+  string name = 1;
+  map<string, float> metadata = 2;
+}
+// -- Query / Answer
+message W_TrainingStatusEx {
+  optional string timestamp = 1;
+  optional string experiment_name = 2;
+  optional int32 model_age = 3;
+
+  optional MetricsStatus metrics_status = 4;
+  optional AnnotationStatus annotation_status = 5;
+}

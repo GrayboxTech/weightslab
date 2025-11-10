@@ -893,7 +893,7 @@ if __name__ == "__main__":
     experiment.set_is_training(True)
 
     # Train the model
-    epochs = 100
+    epochs = 1000
     for epoch in trange(epochs, desc='Training..'):
         experiment.train_n_steps(len(experiment.train_loader), tqdm=True)
         if epoch % 1 == 0:
@@ -901,7 +901,8 @@ if __name__ == "__main__":
             print(
                 f"Epoch {epoch+1}/{epochs}, Pre-Train Eval Accuracy: " +
                 f"{pre_train_eval_accuracy['acc']:.4f}, " +
-                f"Post-Train Eval Accuracy: {post_train_eval_accuracy['acc']:.4f}"
+                "Post-Train Eval Accuracy: " +
+                f"{post_train_eval_accuracy['acc']:.4f}"
             )
 
     print('trained model')
