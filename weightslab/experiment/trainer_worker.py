@@ -17,13 +17,13 @@ from typing import List, Tuple, Iterable
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "stubs"))
 from weightslab.stubs import services_pb2 as pb2
 from weightslab.stubs import services_pb2_grpc as pb2_grpc
-
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 
 sys.path.append(
     'C:/Users/GuillaumePelluet/Documents/Codes/grayBox/weightslab/weightslab/stubs'
 )
+HYPER_PARAMETERS = {}
 
 # if len(sys.argv) <= 1:
 #     sys.argv.append(
@@ -45,20 +45,20 @@ sys.path.append(
 
 
 def get_hyper_parameters_pb(
-        hype_parameters_desc_tuple: Tuple) -> List[pb2.HyperParameterDesc]:
+        hype_parameters_desc_tuple: Tuple) -> List[pb2.experiment__command__pb2.HyperParameterDesc]:
 
     hyper_parameters_pb2 = []
     for (label, name, type_, getter) in hype_parameters_desc_tuple:
         hyper_parameter_pb2 = None
         if type_ == "text":
-            hyper_parameter_pb2 = pb2.HyperParameterDesc(
+            hyper_parameter_pb2 = pb2.experiment__command__pb2.HyperParameterDesc(
                 label=label,
                 name=name,
                 type=type_,
                 string_value=getter()
             )
         else:
-            hyper_parameter_pb2 = pb2.HyperParameterDesc(
+            hyper_parameter_pb2 = pb2.experiment__command__pb2.HyperParameterDesc(
                 label=label,
                 name=name,
                 type=type_,
@@ -69,7 +69,7 @@ def get_hyper_parameters_pb(
     return hyper_parameters_pb2
 
 
-def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
+def get_neuron_representations(layer) -> Iterable[pb2.experiment__command__pb2.NeuronStatistics]:
     tensor_name = 'weight'
     layer_id = layer.get_module_id()
     neuron_representations = []
@@ -88,8 +88,8 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
             tensor_name=tensor_name
         )
 
-        neuron_representation = pb2.NeuronStatistics(
-            neuron_id=pb2.NeuronId(layer_id=layer_id, neuron_id=neuron_idx),
+        neuron_representation = pb2.experiment__command__pb2.NeuronStatistics(
+            neuron_id=pb2.experiment__command__pb2.NeuronId(layer_id=layer_id, neuron_id=neuron_idx),
             neuron_age=age,
             train_trigger_rate=trate,
             eval_trigger_rate=erate,
@@ -103,7 +103,7 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
     return neuron_representations
 
 
-def get_layer_representation(layer) -> pb2.LayerRepresentation:
+def get_layer_representation(layer) -> pb2.experiment__command__pb2.LayerRepresentation:
     layer_representation = None
     parameters = {
         'layer_id': layer.get_module_id(),
@@ -114,7 +114,7 @@ def get_layer_representation(layer) -> pb2.LayerRepresentation:
         'kernel_size': layer.kernel_size[0] if hasattr(layer, 'kernel_size') else None,
         'stride': layer.stride[0] if hasattr(layer, 'stride') else None
     }
-    layer_representation = pb2.LayerRepresentation(**parameters)
+    layer_representation = pb2.experiment__command__pb2.LayerRepresentation(**parameters)
     if layer_representation is None:
         return None
 
@@ -134,15 +134,15 @@ def get_layer_representations(model):
 
 def make_task_field(name, value):
     if isinstance(value, float):
-        return pb2.TaskField(name=name, float_value=value)
+        return pb2.experiment__command__pb2.TaskField(name=name, float_value=value)
     elif isinstance(value, bool):
-        return pb2.TaskField(name=name, bool_value=value)
+        return pb2.experiment__command__pb2.TaskField(name=name, bool_value=value)
     elif isinstance(value, int):
-        return pb2.TaskField(name=name, int_value=value)
+        return pb2.experiment__command__pb2.TaskField(name=name, int_value=value)
     elif isinstance(value, str):
-        return pb2.TaskField(name=name, string_value=value)
+        return pb2.experiment__command__pb2.TaskField(name=name, string_value=value)
     elif isinstance(value, bytes):
-        return pb2.TaskField(name=name, bytes_value=value)
+        return pb2.experiment__command__pb2.TaskField(name=name, bytes_value=value)
     else:
         raise ValueError(f"Unsupported value type for TaskField: {name}: {type(value)}")
 
@@ -196,8 +196,8 @@ def _labels_from_mask_path_histogram(path, num_classes=None, ignore_index=255):
         ids = [i for i in ids if i != ig]
     return ids
 
-def get_data_set_representation(dataset) -> pb2.SampleStatistics:
-    sample_stats = pb2.SampleStatistics()
+def get_data_set_representation(dataset) -> pb2.experiment__command__pb2.SampleStatistics:
+    sample_stats = pb2.experiment__command__pb2.SampleStatistics()
     sample_stats.sample_count = len(dataset.wrapped_dataset)
 
     tasks = getattr(experiment, "tasks", None)
@@ -210,7 +210,7 @@ def get_data_set_representation(dataset) -> pb2.SampleStatistics:
     num_classes  = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))
 
     for sample_id, row in enumerate(dataset.as_records()):
-        record = pb2.RecordMetadata(
+        record = pb2.experiment__command__pb2.RecordMetadata(
             sample_id=row.get('sample_id', sample_id),
             sample_last_loss=float(row.get('prediction_loss', -1)),
             sample_encounters=int(row.get('encountered', row.get('exposure_amount', 0))),
@@ -447,8 +447,10 @@ def process_sample(sid, dataset, do_resize, resize_dims):
         print(f"[Error] GetSamples({sid}) failed: {e}")
         return sid, None, None, -1, b"", b""
 
+
+# Define the gRPC server
 class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
-    def StreamStatus(self, request_iterator, context):
+    def WatchSignals(self, request_iterator, context):
         global experiment
         while True:
             log = experiment.logger.queue.get()
@@ -460,17 +462,17 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 break
             metrics_status, annotat_status = None, None
             if "metric_name" in log:
-                metrics_status = pb2_stream_status.MetricsStatus(
+                metrics_status = pb2.streaming__signals__pb2.MetricsStatus(
                     name=log["metric_name"],
                     value=log["metric_value"],
                 )
             elif "annotation" in log:
-                annotat_status = pb2_stream_status.AnnotatStatus(
+                annotat_status = pb2.streaming__signals__pb2.AnnotationStatus(
                     name=log["annotation"])
                 for key, value in log["metadata"].items():
                     annotat_status.metadata[key] = value
 
-            training_status = pb2_stream_status.TrainingStatusEx(
+            training_status = pb2.streaming__signals__pb2.W_TrainingStatusEx(
                 timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
                 experiment_name=log["experiment_name"],
                 model_age=log["model_age"],
@@ -485,8 +487,8 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
             yield training_status
 
-    def ExperimentCommand(self, request, context):
-        # print("ExperimentServiceServicer.ExperimentCommand", request)
+    def WatchOrEditExperiment(self, request, context):
+        # print("ExperimentServiceServicer.WatchOrEditExperiment", request)
         if request.HasField('hyper_parameter_change'):
             # TODO(rotaru): handle this request
             hyper_parameters = request.hyper_parameter_change.hyper_parameters
@@ -507,7 +509,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
             if hyper_parameters.HasField('experiment_name'):
                 experiment.set_name(hyper_parameters.experiment_name)
-            return pb2_exp_cmd.CommandResponse(
+            return pb2.experiment__command__pb2.ExperimentResponse(
                 success=True, message="Hyper parameter changed")
         if request.HasField('deny_samples_operation'):
             denied_cnt = len(request.deny_samples_operation.sample_ids)
@@ -515,7 +517,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 set(request.deny_samples_operation.sample_ids),
                 accumulate = request.deny_samples_operation.accumulate
             )
-            return pb2_exp_cmd.CommandResponse(
+            return pb2.experiment__command__pb2.ExperimentResponse(
                 success=True, message=f"Denied {denied_cnt} train samples")
         if request.HasField('deny_eval_samples_operation'):
             denied_cnt = len(request.deny_eval_samples_operation.sample_ids)
@@ -523,26 +525,26 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 set(request.deny_eval_samples_operation.sample_ids),
                 accumulate = request.deny_eval_samples_operation.accumulate
             )
-            return pb2_exp_cmd.CommandResponse(
+            return pb2.experiment__command__pb2.ExperimentResponse(
                 success=True, message=f"Denied {denied_cnt} eval samples")
 
         if request.HasField('remove_from_denylist_operation'):
             allowed = set(request.remove_from_denylist_operation.sample_ids)
             experiment.train_loader.dataset.allowlist_samples(allowed)
-            return pb2_exp_cmd.CommandResponse(
+            return pb2.experiment__command__pb2.ExperimentResponse(
                 success=True, message=f"Un-denied {len(allowed)} train samples")
 
         if request.HasField('remove_eval_from_denylist_operation'):
             allowed = set(request.remove_eval_from_denylist_operation.sample_ids)
             experiment.eval_loader.dataset.allowlist_samples(allowed)
-            return pb2_exp_cmd.CommandResponse(
+            return pb2.experiment__command__pb2.ExperimentResponse(
                 success=True, message=f"Un-denied {len(allowed)} eval samples")
 
         if request.HasField('load_checkpoint_operation'):
             checkpoint_id = request.load_checkpoint_operation.checkpoint_id
             experiment.load(checkpoint_id)
 
-        response = pb2_exp_cmd.CommandResponse(success=True, message="")
+        response = pb2.experiment__command__pb2.ExperimentResponse(success=True, message="")
         if request.get_hyper_parameters:
             response.hyper_parameters_descs.extend(
                 get_hyper_parameters_pb(HYPER_PARAMETERS))
@@ -570,119 +572,119 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
         return response
 
-    def GetSample(self, request, context):
-        # print(f"ExperimentServiceServicer.GetSample({request})")
+    # def GetSample(self, request, context):
+    #     # print(f"ExperimentServiceServicer.GetSample({request})")
 
-        if not request.HasField('sample_id') or not request.HasField('origin'):
-            return pb2.SampleRequestResponse(
-                error_message="Invalid request. Provide sample_id & origin.")
+    #     if not request.HasField('sample_id') or not request.HasField('origin'):
+    #         return pb2.SampleRequestResponse(
+    #             error_message="Invalid request. Provide sample_id & origin.")
 
-        if request.origin not in ["train", "eval"]:
-            return pb2.SampleRequestResponse(
-                error_message=f"Invalid origin {request.origin}")
+    #     if request.origin not in ["train", "eval"]:
+    #         return pb2.SampleRequestResponse(
+    #             error_message=f"Invalid origin {request.origin}")
 
-        if request.sample_id < 0:
-            return pb2.SampleRequestResponse(
-                error_message=f"Invalid sample_id {request.sample_id}")
+    #     if request.sample_id < 0:
+    #         return pb2.SampleRequestResponse(
+    #             error_message=f"Invalid sample_id {request.sample_id}")
 
-        dataset = None
-        if request.origin == "train":
-            dataset = experiment.train_loader.dataset
-        elif request.origin == "eval":
-            dataset = experiment.eval_loader.dataset
+    #     dataset = None
+    #     if request.origin == "train":
+    #         dataset = experiment.train_loader.dataset
+    #     elif request.origin == "eval":
+    #         dataset = experiment.eval_loader.dataset
 
-        if dataset is None:
-            return pb2.SampleRequestResponse(
-                error_message=f"Dataset {request.origin} not found.")
+    #     if dataset is None:
+    #         return pb2.SampleRequestResponse(
+    #             error_message=f"Dataset {request.origin} not found.")
 
-        if request.sample_id >= len(dataset):
-            return pb2.SampleRequestResponse(
-                error_message=f"Sample {request.sample_id} not found.")
+    #     if request.sample_id >= len(dataset):
+    #         return pb2.SampleRequestResponse(
+    #             error_message=f"Sample {request.sample_id} not found.")
 
-        transformed_tensor, idx, label = dataset._getitem_raw(request.sample_id)
-        # #TODO: apply transform too
+    #     transformed_tensor, idx, label = dataset._getitem_raw(request.sample_id)
+    #     # #TODO: apply transform too
         
-        transformed_image_bytes = tensor_to_bytes(transformed_tensor)
+    #     transformed_image_bytes = tensor_to_bytes(transformed_tensor)
 
-        try:
-            pil_img = load_raw_image(dataset, request.sample_id)
-            buf = io.BytesIO()
-            # pil_img.save(buf, format='PNG')
-            pil_img.save(buf, format='jpeg', quality=85)
-            raw_image_bytes = buf.getvalue()
-        except Exception as e:
-            return pb2.SampleRequestResponse(error_message=str(e))
+    #     try:
+    #         pil_img = load_raw_image(dataset, request.sample_id)
+    #         buf = io.BytesIO()
+    #         # pil_img.save(buf, format='PNG')
+    #         pil_img.save(buf, format='jpeg', quality=85)
+    #         raw_image_bytes = buf.getvalue()
+    #     except Exception as e:
+    #         return pb2.SampleRequestResponse(error_message=str(e))
 
-        response = pb2.SampleRequestResponse(
-            sample_id=request.sample_id,
-            origin=request.origin,
-            label=label,
-            raw_data=raw_image_bytes,         
-            data=transformed_image_bytes, 
-        )
+    #     response = pb2.SampleRequestResponse(
+    #         sample_id=request.sample_id,
+    #         origin=request.origin,
+    #         label=label,
+    #         raw_data=raw_image_bytes,         
+    #         data=transformed_image_bytes, 
+    #     )
 
-        return response
+    #     return response
 
-    def GetSamples(self, request, context):
-        print(f"ExperimentServiceServicer.GetSamples({request})")
+    # def GetSamples(self, request, context):
+    #     print(f"ExperimentServiceServicer.GetSamples({request})")
 
-        import concurrent.futures
+    #     import concurrent.futures
 
-        dataset = experiment.train_loader.dataset if request.origin == "train" else experiment.eval_loader.dataset
-        response = pb2.BatchSampleResponse()
+    #     dataset = experiment.train_loader.dataset if request.origin == "train" else experiment.eval_loader.dataset
+    #     response = pb2.BatchSampleResponse()
 
-        do_resize = request.HasField("resize_width") and request.HasField("resize_height")
-        resize_dims = (request.resize_width, request.resize_height) if do_resize else None
-        task_type = getattr(dataset, "task_type", getattr(experiment, "task_type", "classification"))
+    #     do_resize = request.HasField("resize_width") and request.HasField("resize_height")
+    #     resize_dims = (request.resize_width, request.resize_height) if do_resize else None
+    #     task_type = getattr(dataset, "task_type", getattr(experiment, "task_type", "classification"))
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            fut_map = {
-                executor.submit(process_sample, sid, dataset, do_resize, resize_dims): sid
-                for sid in request.sample_ids
-            }
-            results = {}
-            for future in concurrent.futures.as_completed(fut_map):
-                sid, transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes = future.result()
-                results[sid] = (transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes)
+    #     with concurrent.futures.ThreadPoolExecutor() as executor:
+    #         fut_map = {
+    #             executor.submit(process_sample, sid, dataset, do_resize, resize_dims): sid
+    #             for sid in request.sample_ids
+    #         }
+    #         results = {}
+    #         for future in concurrent.futures.as_completed(fut_map):
+    #             sid, transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes = future.result()
+    #             results[sid] = (transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes)
 
-        # build response preserving input order
-        for sid in request.sample_ids:
-            transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes = results.get(
-                sid, (None, None, -1, b"", b"")
-            )
-            if transformed_bytes is None or raw_bytes is None:
-                continue
+    #     # build response preserving input order
+    #     for sid in request.sample_ids:
+    #         transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes = results.get(
+    #             sid, (None, None, -1, b"", b"")
+    #         )
+    #         if transformed_bytes is None or raw_bytes is None:
+    #             continue
 
-            if task_type == "segmentation":
-                sample_response = pb2.SampleRequestResponse(
-                    sample_id=sid,
-                    label=cls_label,
-                    data=transformed_bytes,
-                    raw_data=raw_bytes,
-                    mask=mask_bytes,           
-                    prediction=pred_bytes or b""  
-                )
-            elif pred_bytes and len(pred_bytes) > 0:
-                sample_response = pb2.SampleRequestResponse(
-                    sample_id=sid,
-                    label=-1, 
-                    data=transformed_bytes,  
-                    raw_data=raw_bytes,      
-                    mask=b"",  # Empty for reconstruction        
-                    prediction=pred_bytes,   
-                )
-            else:
-                sample_response = pb2.SampleRequestResponse(
-                    sample_id=sid,
-                    label=cls_label,
-                    data=transformed_bytes,
-                    raw_data=raw_bytes,
-                    mask=b"",
-                    prediction=b"",
-                )     
-            response.samples.append(sample_response)
+    #         if task_type == "segmentation":
+    #             sample_response = pb2.SampleRequestResponse(
+    #                 sample_id=sid,
+    #                 label=cls_label,
+    #                 data=transformed_bytes,
+    #                 raw_data=raw_bytes,
+    #                 mask=mask_bytes,           
+    #                 prediction=pred_bytes or b""  
+    #             )
+    #         elif pred_bytes and len(pred_bytes) > 0:
+    #             sample_response = pb2.SampleRequestResponse(
+    #                 sample_id=sid,
+    #                 label=-1, 
+    #                 data=transformed_bytes,  
+    #                 raw_data=raw_bytes,      
+    #                 mask=b"",  # Empty for reconstruction        
+    #                 prediction=pred_bytes,   
+    #             )
+    #         else:
+    #             sample_response = pb2.SampleRequestResponse(
+    #                 sample_id=sid,
+    #                 label=cls_label,
+    #                 data=transformed_bytes,
+    #                 raw_data=raw_bytes,
+    #                 mask=b"",
+    #                 prediction=b"",
+    #             )     
+    #         response.samples.append(sample_response)
 
-        return response
+    #     return response
 
     def _apply_zerofy(self, layer, from_ids, to_ids):
         in_max = int(layer.in_neurons)
@@ -695,215 +697,216 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         else:
             print("ZEROFY skipped (empty sets or no method)")
 
-    def ManipulateWeights(self, request, context):
-        # (f"ExperimentServiceServicer.ManipulateWeights({request})")
-        answer = pb2.WeightsOperationResponse(
-            success=False, message="Unknown error")
-        weight_operations = request.weight_operation
+    # def ManipulateWeights(self, request, context):
+    #     # (f"ExperimentServiceServicer.ManipulateWeights({request})")
+    #     answer = pb2.WeightsOperationResponse(
+    #         success=False, message="Unknown error")
+    #     weight_operations = request.weight_operation
 
-        if weight_operations.op_type == pb2.WeightOperationType.REMOVE_NEURONS:
-            layer_id_to_neuron_ids_list = defaultdict(list)
-            for neuron_id in weight_operations.neuron_ids:
-                layer_id = neuron_id.layer_id
-                layer_id_to_neuron_ids_list[layer_id].append(
-                    neuron_id.neuron_id)
+    #     if weight_operations.op_type == pb2.WeightOperationType.REMOVE_NEURONS:
+    #         layer_id_to_neuron_ids_list = defaultdict(list)
+    #         for neuron_id in weight_operations.neuron_ids:
+    #             layer_id = neuron_id.layer_id
+    #             layer_id_to_neuron_ids_list[layer_id].append(
+    #                 neuron_id.neuron_id)
 
-            for layer_id, neuron_ids in layer_id_to_neuron_ids_list.items():
-                experiment.apply_architecture_op(
-                    op_type=ArchitectureNeuronsOpType.PRUNE,
-                    layer_id=layer_id,
-                    neuron_indices=set(neuron_ids))
+    #         for layer_id, neuron_ids in layer_id_to_neuron_ids_list.items():
+    #             experiment.apply_architecture_op(
+    #                 op_type=ArchitectureNeuronsOpType.PRUNE,
+    #                 layer_id=layer_id,
+    #                 neuron_indices=set(neuron_ids))
 
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Pruned {str(dict(layer_id_to_neuron_ids_list))}")
-        elif weight_operations.op_type == pb2.WeightOperationType.ADD_NEURONS:
-            experiment.apply_architecture_op(
-                op_type=ArchitectureNeuronsOpType.ADD,
-                layer_id=weight_operations.layer_id,
-                neuron_indices=weight_operations.neurons_to_add)
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=\
-                    f"Added {weight_operations.neurons_to_add} "
-                    f"neurons to layer {weight_operations.layer_id}")
-        elif weight_operations.op_type == pb2.WeightOperationType.FREEZE:
-            layer_id_to_neuron_ids_list = defaultdict(list)
-            for neuron_id in weight_operations.neuron_ids:
-                layer_id = neuron_id.layer_id
-                layer_id_to_neuron_ids_list[layer_id].append(
-                    neuron_id.neuron_id)
-            for layer_id, neuron_ids in layer_id_to_neuron_ids_list.items():
-                experiment.apply_architecture_op(
-                    op_type=ArchitectureNeuronsOpType.FREEZE,
-                    layer_id=layer_id,
-                    neuron_indices=neuron_ids)
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Frozen {str(dict(layer_id_to_neuron_ids_list))}")
-        elif weight_operations.op_type == pb2.WeightOperationType.REINITIALIZE:
-            for neuron_id in weight_operations.neuron_ids:
-                experiment.apply_architecture_op(
-                    op_type=ArchitectureNeuronsOpType.RESET,
-                    layer_id=neuron_id.layer_id,
-                    neuron_indices={neuron_id.neuron_id})
+    #         answer = pb2.WeightsOperationResponse(
+    #             success=True,
+    #             message=f"Pruned {str(dict(layer_id_to_neuron_ids_list))}")
+    #     elif weight_operations.op_type == pb2.WeightOperationType.ADD_NEURONS:
+    #         experiment.apply_architecture_op(
+    #             op_type=ArchitectureNeuronsOpType.ADD,
+    #             layer_id=weight_operations.layer_id,
+    #             neuron_indices=weight_operations.neurons_to_add)
+    #         answer = pb2.WeightsOperationResponse(
+    #             success=True,
+    #             message=\
+    #                 f"Added {weight_operations.neurons_to_add} "
+    #                 f"neurons to layer {weight_operations.layer_id}")
+    #     elif weight_operations.op_type == pb2.WeightOperationType.FREEZE:
+    #         layer_id_to_neuron_ids_list = defaultdict(list)
+    #         for neuron_id in weight_operations.neuron_ids:
+    #             layer_id = neuron_id.layer_id
+    #             layer_id_to_neuron_ids_list[layer_id].append(
+    #                 neuron_id.neuron_id)
+    #         for layer_id, neuron_ids in layer_id_to_neuron_ids_list.items():
+    #             experiment.apply_architecture_op(
+    #                 op_type=ArchitectureNeuronsOpType.FREEZE,
+    #                 layer_id=layer_id,
+    #                 neuron_indices=neuron_ids)
+    #         answer = pb2.WeightsOperationResponse(
+    #             success=True,
+    #             message=f"Frozen {str(dict(layer_id_to_neuron_ids_list))}")
+    #     elif weight_operations.op_type == pb2.WeightOperationType.REINITIALIZE:
+    #         for neuron_id in weight_operations.neuron_ids:
+    #             experiment.apply_architecture_op(
+    #                 op_type=ArchitectureNeuronsOpType.RESET,
+    #                 layer_id=neuron_id.layer_id,
+    #                 neuron_indices={neuron_id.neuron_id})
 
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Reinitialized {weight_operations.neuron_ids}")
+    #         answer = pb2.WeightsOperationResponse(
+    #             success=True,
+    #             message=f"Reinitialized {weight_operations.neuron_ids}")
 
-        elif weight_operations.op_type == pb2.WeightOperationType.ZEROFY:
-            layer_id = weight_operations.layer_id
-            layer = experiment.model.get_layer_by_id(layer_id)
+    #     elif weight_operations.op_type == pb2.WeightOperationType.ZEROFY:
+    #         layer_id = weight_operations.layer_id
+    #         layer = experiment.model.get_layer_by_id(layer_id)
 
-            from_ids = list(weight_operations.zerofy_from_incoming_ids)
-            to_ids   = list(weight_operations.zerofy_to_neuron_ids)
+    #         from_ids = list(weight_operations.zerofy_from_incoming_ids)
+    #         to_ids   = list(weight_operations.zerofy_to_neuron_ids)
 
-            if len(weight_operations.zerofy_predicates) > 0:
-                frozen = set()
-                try:
-                    for nid in range(getattr(layer, "out_neurons", 0)):
-                        if layer.get_per_neuron_learning_rate(
-                            nid,
-                            is_incoming=False,
-                            tensor_name='weight'
-                        ) == 0.0:
-                            frozen.add(nid)
-                except Exception:
-                    pass
+    #         if len(weight_operations.zerofy_predicates) > 0:
+    #             frozen = set()
+    #             try:
+    #                 for nid in range(getattr(layer, "out_neurons", 0)):
+    #                     if layer.get_per_neuron_learning_rate(
+    #                         nid,
+    #                         is_incoming=False,
+    #                         tensor_name='weight'
+    #                     ) == 0.0:
+    #                         frozen.add(nid)
+    #             except Exception:
+    #                 pass
 
-                older = set()
-                try:
-                    td_tracker = getattr(layer, "train_dataset_tracker", None)
-                    if td_tracker is not None:
-                        for nid in range(getattr(layer, "out_neurons", 0)):
-                            age = int(td_tracker.get_neuron_age(nid))
-                            if age > 0:
-                                older.add(nid)
-                except Exception:
-                    older = set()
+    #             older = set()
+    #             try:
+    #                 td_tracker = getattr(layer, "train_dataset_tracker", None)
+    #                 if td_tracker is not None:
+    #                     for nid in range(getattr(layer, "out_neurons", 0)):
+    #                         age = int(td_tracker.get_neuron_age(nid))
+    #                         if age > 0:
+    #                             older.add(nid)
+    #             except Exception:
+    #                 older = set()
 
-                expanded = set(to_ids)
-                for p in weight_operations.zerofy_predicates:
-                    if p == pb2.ZerofyPredicate.ZEROFY_PREDICATE_WITH_FROZEN:
-                        expanded |= frozen
-                    elif p == pb2.ZerofyPredicate.ZEROFY_PREDICATE_WITH_OLDER:
-                        expanded |= older
-                to_ids = list(expanded)
+    #             expanded = set(to_ids)
+    #             for p in weight_operations.zerofy_predicates:
+    #                 if p == pb2.ZerofyPredicate.ZEROFY_PREDICATE_WITH_FROZEN:
+    #                     expanded |= frozen
+    #                 elif p == pb2.ZerofyPredicate.ZEROFY_PREDICATE_WITH_OLDER:
+    #                     expanded |= older
+    #             to_ids = list(expanded)
 
-            self._apply_zerofy(layer, from_ids, to_ids)
+    #         self._apply_zerofy(layer, from_ids, to_ids)
 
-            return pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Zerofied L{layer_id} from={sorted(set(from_ids))} to={sorted(set(to_ids))}"
-            )
+    #         return pb2.WeightsOperationResponse(
+    #             success=True,
+    #             message=f"Zerofied L{layer_id} from={sorted(set(from_ids))} to={sorted(set(to_ids))}"
+    #         )
 
-        return answer
+    #     return answer
 
-    def GetWeights(self, request, context):
-        print(f"ExperimentServiceServicer.GetWeights({request})")
-        answer = pb2.WeightsResponse(success=True, error_message="")
+    # def GetWeights(self, request, context):
+    #     print(f"ExperimentServiceServicer.GetWeights({request})")
+    #     answer = pb2.WeightsResponse(success=True, error_message="")
 
-        neuron_id = request.neuron_id
-        layer = None
-        try:
-            layer = experiment.model.get_layer_by_id(neuron_id.layer_id)
-        except Exception as e:
-            answer.success = False
-            answer.error_messages = str(e)
-            return answer
+    #     neuron_id = request.neuron_id
+    #     layer = None
+    #     try:
+    #         layer = experiment.model.get_layer_by_id(neuron_id.layer_id)
+    #     except Exception as e:
+    #         answer.success = False
+    #         answer.error_messages = str(e)
+    #         return answer
 
-        answer.neuron_id.CopyFrom(request.neuron_id)
-        answer.layer_name = layer.__class__.__name__
-        answer.incoming = layer.in_neurons
-        answer.outgoing = layer.out_neurons
-        if "Conv2d" in layer.__class__.__name__:
-            answer.layer_type = "Conv2d"
-            answer.kernel_size = layer.kernel_size[0]
-        elif "Linear" in layer.__class__.__name__:
-            answer.layer_type = "Linear"
+    #     answer.neuron_id.CopyFrom(request.neuron_id)
+    #     answer.layer_name = layer.__class__.__name__
+    #     answer.incoming = layer.in_neurons
+    #     answer.outgoing = layer.out_neurons
+    #     if "Conv2d" in layer.__class__.__name__:
+    #         answer.layer_type = "Conv2d"
+    #         answer.kernel_size = layer.kernel_size[0]
+    #     elif "Linear" in layer.__class__.__name__:
+    #         answer.layer_type = "Linear"
 
-        if neuron_id.neuron_id >= layer.out_neurons:
-            answer.success = False
-            answer.error_messages = \
-                f"Neuron {neuron_id.neuron_id} outside bounds."
-            return answer
+    #     if neuron_id.neuron_id >= layer.out_neurons:
+    #         answer.success = False
+    #         answer.error_messages = \
+    #             f"Neuron {neuron_id.neuron_id} outside bounds."
+    #         return answer
 
-        if neuron_id.neuron_id < 0:
-            # Return all weights
-            weights = layer.weight.data.cpu().detach().numpy().flatten()
-        else:
-            weights = layer.weight[
-                neuron_id.neuron_id].data.cpu().detach().numpy().flatten()
-        answer.weights.extend(weights)
+    #     if neuron_id.neuron_id < 0:
+    #         # Return all weights
+    #         weights = layer.weight.data.cpu().detach().numpy().flatten()
+    #     else:
+    #         weights = layer.weight[
+    #             neuron_id.neuron_id].data.cpu().detach().numpy().flatten()
+    #     answer.weights.extend(weights)
 
-        return answer
+    #     return answer
 
-    def GetActivations(self, request, context):
-        print(f"ExperimentServiceServicer.GetActivations({request})")
-        empty_resp = pb2.ActivationResponse(layer_type="", neurons_count=0)
+    # def GetActivations(self, request, context):
+    #     print(f"ExperimentServiceServicer.GetActivations({request})")
+    #     empty_resp = pb2.ActivationResponse(layer_type="", neurons_count=0)
 
-        try:
-            last_layer = experiment.model.layers[-1]
-            last_layer_id = int(last_layer.get_module_id())
-            if int(request.layer_id) == last_layer_id:
-                return empty_resp
-            ds = experiment.train_loader.dataset
-            if request.origin == "eval":
-                ds = experiment.eval_loader.dataset
+    #     try:
+    #         last_layer = experiment.model.layers[-1]
+    #         last_layer_id = int(last_layer.get_module_id())
+    #         if int(request.layer_id) == last_layer_id:
+    #             return empty_resp
+    #         ds = experiment.train_loader.dataset
+    #         if request.origin == "eval":
+    #             ds = experiment.eval_loader.dataset
 
-            sid = int(request.sample_id)
-            if request.sample_id < 0 or request.sample_id >= len(ds):
-                raise ValueError(
-                    f"No sample id {request.sample_id} for {request.origin}")
+    #         sid = int(request.sample_id)
+    #         if request.sample_id < 0 or request.sample_id >= len(ds):
+    #             raise ValueError(
+    #                 f"No sample id {request.sample_id} for {request.origin}")
 
-            x = _get_input_tensor_for_sample(
-                ds, request.sample_id, experiment.device)
+    #         x = _get_input_tensor_for_sample(
+    #             ds, request.sample_id, experiment.device)
 
-            with torch.no_grad():
-                intermediaries = {request.layer_id: None}
-                experiment.model.forward(
-                    x, 
-                    intermediary_outputs=intermediaries
-                )
+    #         with torch.no_grad():
+    #             intermediaries = {request.layer_id: None}
+    #             experiment.model.forward(
+    #                 x, 
+    #                 intermediary_outputs=intermediaries
+    #             )
 
-            if intermediaries[request.layer_id] is None:
-                raise ValueError(f"No intermediary layer {request.layer_id}")
+    #         if intermediaries[request.layer_id] is None:
+    #             raise ValueError(f"No intermediary layer {request.layer_id}")
 
-            layer = experiment.model.get_layer_by_id(request.layer_id)
-            layer_type = layer.__class__.__name__
-            amap = intermediaries[request.layer_id].squeeze(0).detach().cpu().numpy()
-            resp = pb2.ActivationResponse(layer_type=layer_type)
+    #         layer = experiment.model.get_layer_by_id(request.layer_id)
+    #         layer_type = layer.__class__.__name__
+    #         amap = intermediaries[request.layer_id].squeeze(0).detach().cpu().numpy()
+    #         resp = pb2.ActivationResponse(layer_type=layer_type)
 
-            # At this point we will assume some things, otherwise we keep
-            # rechecking same things over and over again.
-            C, H, W = 1, 1, 1
-            if amap.ndim == 3:  # Conv2d output (C, H, W)
-                C, H, W = amap.shape
-            elif amap.ndim == 1:  # Linear output (C, ), will use C as features
-                C = amap.shape
+    #         # At this point we will assume some things, otherwise we keep
+    #         # rechecking same things over and over again.
+    #         C, H, W = 1, 1, 1
+    #         if amap.ndim == 3:  # Conv2d output (C, H, W)
+    #             C, H, W = amap.shape
+    #         elif amap.ndim == 1:  # Linear output (C, ), will use C as features
+    #             C = amap.shape
 
-            resp.neurons_count = C
-            for c in range(C):
-                vals = amap[c].astype(np.float32).reshape(-1).tolist()
-                if not isinstance(vals, list):
-                    vals = [vals, ]
-                resp.activations.append(
-                    pb2.ActivationMap(neuron_id=c, values=vals, H=H, W=W))
-            return resp
-        except (ValueError, Exception) as e:
-            print(
-                f"Error in GetActivations: {str(e)}",
-                f"Traceback: {traceback.format_exc()}")
+    #         resp.neurons_count = C
+    #         for c in range(C):
+    #             vals = amap[c].astype(np.float32).reshape(-1).tolist()
+    #             if not isinstance(vals, list):
+    #                 vals = [vals, ]
+    #             resp.activations.append(
+    #                 pb2.ActivationMap(neuron_id=c, values=vals, H=H, W=W))
+    #         return resp
+    #     except (ValueError, Exception) as e:
+    #         print(
+    #             f"Error in GetActivations: {str(e)}",
+    #             f"Traceback: {traceback.format_exc()}")
 
-        return empty_resp
-    
+    #     return empty_resp
+
 
 import os
 import sys
 import subprocess
 import signal
 import time
+
 
 def force_kill_all_python_processes():
     """
@@ -938,7 +941,11 @@ def force_kill_all_python_processes():
         print(f"Système d'exploitation '{sys.platform}' non supporté pour l'arrêt forcé.")
 
 
-def serve():
+def serve(hyper_parameters=None):
+    # Update global variable
+    if hyper_parameters is not None and isinstance(hyper_parameters, dict):
+        HYPER_PARAMETERS.update(hyper_parameters)
+
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=6))
     servicer = ExperimentServiceServicer()
     pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
@@ -961,14 +968,15 @@ if __name__ == "__main__":
     from torchvision import transforms as T
     from torchvision import datasets as ds
 
-    from weightslab.experiment import Experiment
+    from weightslab.experiment.experiment import Experiment
     from weightslab.tests.torch_models import FashionCNN
 
     # Run the experiment
     print("\n--- Hello World ---\n")
 
     # Init Variables
-    temporary_directory = tempfile.mkdtemp()
+    temporary_directory = tempfile.mkdtemp() if not os.name == "nt" else \
+        r"C:\Users\GuillaumePelluet\Documents\Codes\grayBox\outputs\test_mnist"
 
     # Instanciate the model
     model = FashionCNN()
@@ -1000,27 +1008,37 @@ if __name__ == "__main__":
         device='cpu',
         learning_rate=1e-2,
         batch_size=128,
+        training_steps_to_do=1e6,
+        experiment_dump_to_train_steps_ratio=1e9,
         name="MNIST Training & Testing",
         root_log_dir=temporary_directory,
         train_shuffle=True
     )
+    experiment.set_is_training(False)
 
     def training_thread_callback():
+        n = 0
         while True:
             if experiment.get_is_training():
+                print(f'Training one step further.. {n}')
                 experiment.train_step_or_eval_full()
+                eval_loss, eval_accuracy = experiment.eval_n_steps(32)
+                print(f'Eval loss: {eval_loss}, Eval accuracy: {eval_accuracy}')
+                n += 1
 
     training_thread = Thread(target=training_thread_callback)
     training_thread.start()
 
-    HYPER_PARAMETERS = {
-        ("Experiment Name", "experiment_name", "text", lambda: experiment.name),
-        ("Left Training Steps", "training_left", "number", lambda: experiment.training_steps_to_do),
-        ("Learning Rate", "learning_rate", "number", lambda: experiment.learning_rate),
-        ("Batch Size", "batch_size", "number", lambda: experiment.batch_size),
-        ("Eval Frequency", "eval_frequency", "number", lambda: experiment.eval_full_to_train_steps_ratio),
-        ("Checkpoint Frequency", "checkpooint_frequency", "number", lambda: experiment.experiment_dump_to_train_steps_ratio),
-    }
+    HYPER_PARAMETERS.update(
+        {
+            ("Experiment Name", "experiment_name", "text", lambda: experiment.name),
+            ("Left Training Steps", "training_left", "number", lambda: experiment.training_steps_to_do),
+            ("Learning Rate", "learning_rate", "number", lambda: experiment.learning_rate),
+            ("Batch Size", "batch_size", "number", lambda: experiment.batch_size),
+            ("Eval Frequency", "eval_frequency", "number", lambda: experiment.eval_full_to_train_steps_ratio),
+            ("Checkpoint Frequency", "checkpooint_frequency", "number", lambda: experiment.experiment_dump_to_train_steps_ratio),
+        }
+    )
 
     # Service server
     serve()

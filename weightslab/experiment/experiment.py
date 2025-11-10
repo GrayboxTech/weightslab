@@ -9,6 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from collections import defaultdict
 from threading import Lock, RLock
 
+from weightslab.experiment.board import Dash
 from weightslab.components.checkpoint import CheckpointManager
 from weightslab.data.data_samples_with_ops import \
     DataSampleTrackingWrapper
@@ -40,6 +41,7 @@ class Experiment:
             metrics=None,
             task_type="classification",
             training_steps_to_do: int = 256,
+            experiment_dump_to_train_steps_ratio: int = 1024,
             name: str = "baseline",
             root_log_dir: str = "root_experiment",
             logger=None,
@@ -76,7 +78,7 @@ class Experiment:
         self.architecture_guard = RLock()
 
         self.eval_full_to_train_steps_ratio = 64
-        self.experiment_dump_to_train_steps_ratio = 1024
+        self.experiment_dump_to_train_steps_ratio = experiment_dump_to_train_steps_ratio
         self.occured_train_steps = 0
         self.occured_eval__steps = 0
         self.train_loop_callbacks = []
@@ -86,7 +88,7 @@ class Experiment:
         if not self.root_log_dir.exists():
             self.root_log_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger = logger or SummaryWriter(root_log_dir)
+        self.logger = logger or Dash(root_log_dir)
         self.optimizer = self.optimizer_class(
             self.model.parameters(), lr=self.learning_rate)
 
@@ -539,7 +541,8 @@ class Experiment:
         Args:
             n (int): The number of steps to be performed.
         """
-        train_range = trange(n, desc='Training..', total=n) if tqdm else range(n)
+        train_range = trange(n, desc='Training..', total=n) if \
+            tqdm else range(n)
         try:
             for _ in train_range:
                 self.train_one_step()

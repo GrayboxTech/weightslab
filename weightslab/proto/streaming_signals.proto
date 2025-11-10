@@ -1,23 +1,43 @@
 syntax = "proto3";
+
 package sdk_streaming_signals;
 
 
-// Signals
-// -- Elements
+// --- Signals ---
+// Messages defined below represent the discrete data signals
+// that can be streamed from the SDK (e.g., a training script)
+// to a server/dashboard.
+
 message MetricsStatus {
+  // The name/tag of the specific metric being reported (e.g., "loss", "accuracy").
   string name = 1;
+  // The numerical value of the metric.
   float value = 2;
 }
 message AnnotationStatus {
+  // The name or identifier of the annotation (e.g., "BoundingBox", "ModelComment").
   string name = 1;
+  // A flexible key-value map for arbitrary contextual data related to the annotation.
+  // Example: {"confidence": 0.95, "area": 500.0}
   map<string, float> metadata = 2;
 }
-// -- Query / Answer
+
+
+// -- Query / Answer --
+// This is the main message structure used for the streaming signal.
+
 message W_TrainingStatusEx {
-  optional string timestamp = 1;
+  // Timestamp of the current experiment run.
+  optional string timestamp = 1; 
+  // The unique identifier for the current experiment run.
   optional string experiment_name = 2;
+  // The current progression of the model (e.g., current epoch number, step count).
   optional int32 model_age = 3;
 
+  // An optional nested message containing metrics data. 
   optional MetricsStatus metrics_status = 4;
+  
+  // An optional nested message containing annotation data.
+  // It is only included when an annotation event occurs.
   optional AnnotationStatus annotation_status = 5;
 }

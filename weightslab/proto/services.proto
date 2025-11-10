@@ -10,6 +10,9 @@ message Empty {}
 
 // Interface to communicate btw UI and SDK
 service ExperimentService {
+  // Watch Experiment Signals (e.g., metrics, losses, etc..)
   rpc WatchSignals (Empty) returns (stream sdk_streaming_signals.W_TrainingStatusEx);
-  rpc ExperimentCommand (sdk_experiment_command.TrainerCommand) returns (sdk_experiment_command.CommandResponse);
+
+  // Watch or Edit Experiment (hyperparameters, name, etc..)
+  rpc WatchOrEditExperiment (sdk_experiment_command.ExperimentCommand) returns (sdk_experiment_command.ExperimentResponse);
 }

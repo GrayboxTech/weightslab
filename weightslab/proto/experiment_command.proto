@@ -23,7 +23,7 @@ message HyperParameters {
   optional bool is_training = 7;
 }
 
-message TrainerCommand {
+message ExperimentCommand {
   bool get_hyper_parameters = 4;
   bool get_interactive_layers = 5;
   optional string get_data_records = 6;
@@ -112,7 +112,7 @@ message LayerRepresentation {
   repeated NeuronStatistics neurons_statistics = 10;
 }
 
-message CommandResponse {
+message ExperimentResponse {
   bool success = 1;
   string message = 2;
 
