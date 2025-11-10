@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 import grpc
 import sys
 import os
@@ -15,14 +16,6 @@ except ImportError:
     print("Please ensure you have run the protoc compiler successfully.")
     sys.exit(1)
 
-
-# --- Configuration ---
-SERVER_ADDRESS = 'localhost:50051'
-TIMEOUT_SECONDS = 5  # Timeout for connection and streaming response
-
-
-import tempfile
-
 from torch import optim
 from torchmetrics import Accuracy
 
@@ -33,6 +26,13 @@ from weightslab.experiment.experiment import Experiment
 from weightslab.tests.torch_models import FashionCNN
 
 from threading import Thread
+
+
+# --- Configuration ---
+SERVER_ADDRESS = 'localhost:50051'
+TIMEOUT_SECONDS = 5  # Timeout for connection and streaming response
+
+# clear && rm -r ./stubs && mkdir -p ./stubs && touch ./stubs/__init__.py && python -m grpc_tools.protoc -Iproto/ --python_out=./stubs/ --grpc_python_out=./stubs/ ./proto/*.proto
 
 
 # --- gRPC Client ---
@@ -206,6 +206,14 @@ class TestExperimentServiceIntegration(unittest.TestCase):
                         "The WatchSignals stream did not yield any response within the timeout.")
 
     def test_request_experiment_command(self):
+        """
+            Tests the streaming RPC RequestExperimentCommand to ensure a valid response is received.
+        """
+        if not self.server_ready:
+            # Skip the test if the setup failed to connect to the server
+            self.skipTest(self.server_error)
+            return
+
         # Get Initial state response for both train and eval commands.
         request_initial_state_train = pb2.experiment__command__pb2 \
             .ExperimentCommand(
@@ -261,15 +269,39 @@ class TestExperimentServiceIntegration(unittest.TestCase):
         # Reach
         print("Fetched initial state.")
 
-#  clear && rm -r ./stubs && mkdir -p ./stubs && touch ./stubs/__init__.py && python -m grpc_tools.protoc -Iproto/ --python_out=./stubs/ --grpc_python_out=./stubs/ ./proto/*.proto
+    def test_watch_or_edit_computational_graph(self):
+        """
+        Tests the RPC WatchOrEditComputationalGraph to ensure a valid response is received.
+        """
+        if not self.server_ready:
+            # Skip the test if the setup failed to connect to the server
+            self.skipTest(self.server_error)
+            return
+        # - Get layers (nodes): Request the layers of the graph to be plot.
+
+        # - Get dependencies (edges): Request the dependencies of the graph.
+
+        # - Get weights (node's data): Request the weights of a node.
+
+        # - Get activation (node's data): Request the activation map of a node.
+
+        # - ManipulateWeights: Operate on layer's weights.
+            # - Add neurons: Add a new neuron to a layer.
+
+            # - Prune neurons: Remove a neuron from a layer.
+
+            # - Freeze neurons: Freeze weights.
+
+            # - Reset neurons: Reset weights.
 
 
 # To run this test file directly:
 if __name__ == '__main__':
     # Create a test suite
     suite = unittest.TestSuite()
-    suite.addTest(TestExperimentServiceIntegration('test_request_experiment_command'))
-    suite.addTest(TestExperimentServiceIntegration('test_watch_signals'))
+    # suite.addTest(TestExperimentServiceIntegration('test_request_experiment_command'))
+    # suite.addTest(TestExperimentServiceIntegration('test_watch_signals'))
+    suite.addTest(TestExperimentServiceIntegration('test_watch_or_edit_computational_graph'))
 
     # Run ordered tests
     runner = unittest.TextTestRunner()

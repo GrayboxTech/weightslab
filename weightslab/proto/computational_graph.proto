@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package sdk_computational_graph;
+
+/*
+// Notes
+A graph is basicly an ensemble of nodes (layers), edges (dependencies), and learnable tensors (weights).
+So here:
+- LayerRepresentation: Represent a layer in the computational graph.
+- Dependencies: Represent the dependencies between layers.
+- Weights: Request the weights of the graph, i.e., the number of neurons.
+
+Idea:
+  Possible interaction from SDK to WEIGHTSLAB are:
+    - Get layers (nodes): Request the layers of the graph to be plot.
+    - Get dependencies (edges): Request the dependencies of the graph.
+    - Get weights (node's data): Request the weights of a node.
+    - Get activation (node's data): Request the activation map of a node.
+    - ManipulateWeights: Operate on layer's weights.
+      - Add neurons: Add a new neuron to a layer.
+      - Prune neurons: Remove a neuron from a layer.
+      - Freeze neurons: Freeze weights.
+      - Reset neurons: Reset weights.
+*/
+
+
+// Layer or Module
+message NeuronStatistics {
+  optional NeuronId neuron_id = 1;
+  optional int32 neuron_age = 2;
+  optional float train_trigger_rate = 3;
+  optional float eval_trigger_rate = 4;
+  optional float weight_difference = 5;
+  optional float bias_difference = 6;
+
+  optional float learning_rate = 7; 
+  map<int32, float> incoming_learning_rate = 8;
+}
+message LayerRepresentation {
+  optional int32 layer_id = 1;
+  optional string layer_name = 2;
+  optional string layer_type = 3;
+  
+  optional int32 neurons_count = 4;
+  optional int32 incoming_neurons_count = 5;
+  
+  map<int32, float> per_neuron_learning_rates = 8;
+  map<int32, float> per_incoming_neuron_learning_rates = 9;
+
+  repeated NeuronStatistics neurons_statistics = 10;
+}
+
+// Dependencies between layers
+message LayerDependencyType {
+  int8 INCOMING = 0;
+  int8 SAME = 1;
+  int8 REC = 2;  
+}
+message Dependencies {
+  // Maybe here can just replace LayerRepresentation with LayerId ?
+  LayerRepresentation src_mod;
+  LayerRepresentation dst_mod;
+  LayerDependencyType dependency_type;
+}
+
+// WeigthsRequest
+message WeigthsRequest{
+  NeuronId neuron_id = 1;
+  bool with_bias = 2;
+  bool with_learning_rate = 3;
+  bool with_incoming_learning_rates = 4;
+  bool include_gradients = 5;
+  optional int32 start_neuron_idx = 6; 
+  optional int32 end_neuron_idx = 7; 
+}
+
+// ActivationRequest
+// This is used to get the pre-activation or post-activation of a neuron.
+message ActivationRequest {
+  int32 layer_id = 1;
+  int32 sample_id = 2;
+  string origin = 3;
+  bool pre_activation = 4;
+}
+
+message ComputationalGraph {
+  // List of every interactive layers with WeightsLab, i.e., layer like unflatten are modified by WeightsLab but not visible by user.
+  optional repeated LayerRepresentation layer;  // Neurons statistics
+
+  // Get graph dependencies between layers; here each item is a list shape (src, dst, dep_type)
+  optional repeated Dependencies dependencies;
+
+  // Get graph weights and activations; here each item is a list shape (neuron_id, with_bias, with_learning_rate, with_incoming_learning_rates, ..etc)
+  optional repeated WeigthsRequest weights;  // The graph weights
+  optional repeated ActivationRequest activations;  // The graph activations
+}
+// -- Query / Answer
+message GraphCommand {
+  ComputationalGraph computationalGraph;
+}

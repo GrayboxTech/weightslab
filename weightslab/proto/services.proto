@@ -15,4 +15,7 @@ service ExperimentService {
 
   // Watch or Edit Experiment (hyperparameters, name, etc..)
   rpc WatchOrEditExperiment (sdk_experiment_command.ExperimentCommand) returns (sdk_experiment_command.ExperimentResponse);
+
+  // Watch or Edit Computational Graph (weights, biases, layers, parameters, etc..)
+  rpc WatchOrEditGraph (sdk_computational_graph.GraphCommand) returns (sdk_computational_graph.GraphResponse);
 }
