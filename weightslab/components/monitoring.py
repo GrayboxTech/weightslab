@@ -137,11 +137,15 @@ class NeuronStatsWithDifferencesMonitor(Monitor):
         return text
 
     def _compute_bias_relative_diff(self, neuron_id, layer, prev_exp_layer):
-        if prev_exp_layer is None or \
-                prev_exp_layer.bias.shape != layer.bias.shape:
+        if (
+            prev_exp_layer is None
+            or prev_exp_layer.bias is None
+            or layer.bias is None
+            or prev_exp_layer.bias.shape != layer.bias.shape
+        ):
             return 0
-        bias_diff = layer.bias.data[neuron_id] - \
-            prev_exp_layer.bias.data[neuron_id]
+
+        bias_diff = layer.bias.data[neuron_id] - prev_exp_layer.bias.data[neuron_id]
         return bias_diff / (prev_exp_layer.bias.data[neuron_id] + 0.001)
 
     def _compute_wght_relative_diff(self, neuron_id, layer, prev_exp_layer):
