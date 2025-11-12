@@ -113,10 +113,11 @@ class TriggersTracker(Tracker):
             computations.
             Defaults to None.
     """
-    def __init__(self, number_of_neurons: int, device: th.device = None):
+    def __init__(self, number_of_neurons: int, device: th.device = None, disabled: bool = False):
         super().__init__()
         self.device = device
         self.number_of_neurons = number_of_neurons
+        self.disabled = disabled
         self.triggrs_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
         self.updates_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
 
@@ -207,6 +208,8 @@ class TriggersTracker(Tracker):
                 layer.
         """
 
+        if self.disabled:
+            return
         # Assumes that triggers per neuron have been pre-processed already.
         # Shape is expected to be in the form [batch_size x neuron_count]
         if len(tensor.shape) > 2:
@@ -285,8 +288,15 @@ class TriggersTracker(Tracker):
         """ Get number of updates of the neuron with neuron_id."""
         return self.updates_by_neuron[neuron_id].item()
 
+    # def get_neuron_stats(self, neuron_id: int):
+    #     """ Get how often did this neuron trigger on average. """
+    #     return self.get_neuron_triggers(neuron_id) / \
+    #         max(self.get_neuron_age(neuron_id), 1)
+
     def get_neuron_stats(self, neuron_id: int):
         """ Get how often did this neuron trigger on average. """
+        if self.disabled:
+            return None 
         return self.get_neuron_triggers(neuron_id) / \
             max(self.get_neuron_age(neuron_id), 1)
 
