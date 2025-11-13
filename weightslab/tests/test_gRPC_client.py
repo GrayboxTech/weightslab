@@ -271,7 +271,8 @@ class TestExperimentServiceIntegration(unittest.TestCase):
 
     def test_watch_or_edit_computational_graph(self):
         """
-        Tests the RPC WatchOrEditComputationalGraph to ensure a valid response is received.
+        Tests the RPC WatchOrEditComputationalGraph to ensure a valid response
+        is received.
         """
         if not self.server_ready:
             # Skip the test if the setup failed to connect to the server

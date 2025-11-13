@@ -1,0 +1,93 @@
+syntax = "proto3";
+package sdk_computational_graph;
+
+// ----------------------------------------------------
+// 1. DATA STRUCTURES (Used for Inspection Details)
+// ----------------------------------------------------
+
+// Encodes the actual weight/bias tensor data efficiently
+message WeightData {
+  // Use bytes for binary serialization (e.g., NumPy array .tobytes())
+  bytes data_bytes = 1; 
+  // Shape of the tensor (e.g., [64, 3, 3, 3] for a convolution kernel)
+  repeated int64 shape = 2; 
+  // Data type (float32, int64, etc.) - useful for client deserialization
+  string dtype = 3; 
+}
+
+// Defines a single parameter/weight within a module
+message Parameter {
+  string name = 1; // e.g., "weight" or "bias"
+  WeightData weights = 2;
+  // Optional: Used if the client requests gradient data
+  optional WeightData gradients = 3; 
+}
+
+// Summarized view of a module (for initial graph inspection)
+message ModuleSummary {
+  string module_name = 1; // Unique identifier (e.g., "layer4.2.conv2")
+  string module_type = 2; // e.g., "nn.Conv2d" or "nn.Linear"
+  int32 param_count = 3; // Number of parameters in this module
+  repeated string dependency_names = 4; // Names of modules it connects to
+}
+
+// Detailed view of a module (including heavy weight data)
+message ModuleDetail {
+  string module_name = 1; 
+  repeated Parameter parameters = 2; // Full list of parameters with WeightData
+}
+
+// ----------------------------------------------------
+// 2. RPC COMMANDS (Client Requests & Server Responses)
+// ----------------------------------------------------
+
+// Commands the client sends to the server
+message GraphCommand {
+  enum CommandType {
+    // 0 must be the default/zero value
+    COMMAND_TYPE_UNSPECIFIED = 0; 
+    GET_SUMMARY = 1; // Request high-level list of modules
+    GET_DETAILS = 2; // Request full weight data for one module
+    EDIT_WEIGHTS = 3; // Command to send new weights to the server
+    // WATCH_LIVE_STREAM = 4; // Used for a hypothetical streaming RPC
+  }
+  
+  CommandType command_type = 1;
+  
+  // Filtering for GET_DETAILS or EDIT_WEIGHTS
+  optional string module_name = 2; 
+  
+  // Data for EDIT_WEIGHTS command
+  optional ModuleDetail new_module_data = 3; 
+}
+
+// Response the server sends back
+message GraphResponse {
+  // Use 'oneof' to ensure only one heavy payload is sent per response
+  oneof payload {
+    // Response for GET_SUMMARY
+    repeated ModuleSummary summary_view = 1; 
+    
+    // Response for GET_DETAILS
+    ModuleDetail detail_view = 2; 
+  }
+  
+  // General status information
+  Status status = 3; 
+}
+
+// Shared status message
+message Status {
+  bool success = 1;
+  string message = 2;
+}
+
+// ----------------------------------------------------
+// 3. SERVICE DEFINITION
+// ----------------------------------------------------
+
+service GraphService {
+  // WatchOrEditGraph remains a single RPC capable of fetching data 
+  // or sending new data based on the GraphCommand type.
+  rpc WatchOrEditGraph (GraphCommand) returns (GraphResponse);
+}

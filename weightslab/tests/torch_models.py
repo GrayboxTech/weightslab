@@ -1641,6 +1641,8 @@ class UNet3D(nn.Module):
 if __name__ == "__main__":
     from weightslab.backend.watcher_editor import WatcherEditor
     from weightslab.utils.logs import print, setup_logging
+    import time
+
 
     # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
     class MobileNet_v3(nn.Module):
@@ -1657,6 +1659,8 @@ if __name__ == "__main__":
 
         def forward(self, input):
             return self.model(input)
+
+
     class MobileNetV3Tiny(nn.Module):
         """
         Implémentation 'Toy' du MobileNetV3 encapsulée en une seule classe.
@@ -1808,12 +1812,171 @@ if __name__ == "__main__":
             x = self.classifier(x)
             return x
 
+    # --- 1. CORE BUILDING BLOCKS ---
+
+    class Conv(nn.Module):
+        """
+        Standard Convolution Block: Conv + BatchNorm + SiLU (Activation)
+        """
+        def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
+            super().__init__()
+            # Calculate padding (p) automatically if None
+            p = k // 2 if p is None else p
+            self.conv = nn.Conv2d(c1, c2, k, s, p, groups=g, bias=False)
+            self.bn = nn.BatchNorm2d(c2)
+            self.act = nn.SiLU() if act is True else (nn.Identity() if act is False else act)
+
+        def forward(self, x):
+            return self.act(self.bn(self.conv(x)))
+
+    class Bottleneck(nn.Module):
+        """
+        Standard Bottleneck block: Used within C3 blocks.
+        It performs a residual connection after a two-layer convolution.
+        """
+        def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
+            super().__init__()
+            c_ = int(c2 * e)  # hidden channels
+            self.cv1 = Conv(c1, c_, 1, 1)
+            self.cv2 = Conv(c_, c2, 3, 1, g=g)
+            self.add = shortcut and c1 == c2
+
+        def forward(self, x):
+            return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+    class C3(nn.Module):
+        """
+        C3 (Cross-Stage Partial) Block: Core component of YOLOv5/v8 backbone/neck.
+        It reduces the parameters while maintaining rich gradient information.
+        """
+        def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+            super().__init__()
+            c_ = int(c2 * e)  # hidden channels
+            self.cv1 = Conv(c1, c_, 1, 1)
+            self.cv2 = Conv(c1, c_, 1, 1)
+            self.cv3 = Conv(2 * c_, c2, 1, 1)  # Final concat fusion
+            self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
+
+        def forward(self, x):
+            # x is split, processed by n Bottlenecks, and concatenated back
+            return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+    # --- 2. THE COMPLETE YOLO ARCHITECTURE ---
+
+    class YoloV3LikeModel(nn.Module):
+        """
+        A simplified YOLO model (Backbone + Neck + Head) for training.
+        Outputs detections at 3 scales (P3, P4, P5).
+        """
+        def __init__(self, in_channels=3, num_classes=10, input_size=640):
+            super().__init__()
+            self.input_shape = (1, in_channels, input_size, input_size)
+            self.nc = num_classes
+            # Output channels for each detection box (4 coords + 1 obj confidence + N classes)
+            self.no = 5 + num_classes
+            
+            # --- 2.1 BACKBONE (Feature Extractor) ---
+            
+            # P1 (Output stride 2, 64 channels) - Not typically used for detection
+            self.b_cv1 = Conv(in_channels, 64, 6, 2) # 640 -> 320
+            self.b_cv2 = Conv(64, 128, 3, 2)       # 320 -> 160
+            self.b_c3_1 = C3(128, 128, n=3)
+            
+            # P3: Large-scale features (Output stride 8)
+            self.b_cv3 = Conv(128, 256, 3, 2)      # 160 -> 80
+            self.b_c3_2 = C3(256, 256, n=6)
+            
+            # P4: Medium-scale features (Output stride 16)
+            self.b_cv4 = Conv(256, 512, 3, 2)      # 80 -> 40
+            self.b_c3_3 = C3(512, 512, n=6)
+            
+            # P5: Small-scale features (Output stride 32)
+            self.b_cv5 = Conv(512, 1024, 3, 2)     # 40 -> 20
+            self.b_c3_4 = C3(1024, 1024, n=3)
+            self.b_sppf = Conv(1024, 1024, 3, 1)   # Simulated SPPF/SPP block
+            
+            # --- 2.2 NECK (Feature Pyramid Network - FPN/PANet) ---
+            
+            # FPN (Top-down path: P5 -> P4 -> P3)
+            self.n_cv1 = Conv(1024, 512, 1, 1)
+            self.n_c3_1 = C3(1024, 512, n=3, shortcut=False) # Concat P4 and Up-sampled P5
+            
+            self.n_cv2 = Conv(512, 256, 1, 1)
+            self.n_c3_2 = C3(512, 256, n=3, shortcut=False) # Concat P3 and Up-sampled P4 (Output P3-out)
+            
+            # PANet (Bottom-up path: P3 -> P4 -> P5)
+            self.n_cv3 = Conv(256, 256, 3, 2)
+            self.n_c3_3 = C3(512, 512, n=3, shortcut=False) # Concat P4-out and Down-sampled P3-out (Output P4-out)
+            
+            self.n_cv4 = Conv(512, 512, 3, 2)
+            self.n_c3_4 = C3(1024, 1024, n=3, shortcut=False) # Concat P5-out and Down-sampled P4-out (Output P5-out)
+
+            # --- 2.3 DETECTION HEADS ---
+            
+            # We need three heads, one for each scale (P3, P4, P5 outputs from the Neck)
+            self.head_p3 = nn.Conv2d(256, self.no * 3, 1, 1)  # *3 for 3 anchors per grid cell (simplified)
+            self.head_p4 = nn.Conv2d(512, self.no * 3, 1, 1)
+            self.head_p5 = nn.Conv2d(1024, self.no * 3, 1, 1)
+
+        def forward(self, x):
+            # 1. BACKBONE
+            x = self.b_cv1(x)
+            x = self.b_cv2(x)
+            x_p1 = self.b_c3_1(x)  # Not used in this simplified model, typically P2 in YOLOv8
+            
+            # Get P3 features (Large objects)
+            x = self.b_cv3(x_p1)
+            x_p3 = self.b_c3_2(x)  # 80x80 map (C3 block output)
+            
+            # Get P4 features (Medium objects)
+            x = self.b_cv4(x_p3)
+            x_p4 = self.b_c3_3(x)  # 40x40 map
+            
+            # Get P5 features (Small objects)
+            x = self.b_cv5(x_p4)
+            x_p5 = self.b_c3_4(x)
+            x_p5 = self.b_sppf(x_p5) # 20x20 map
+            
+            # --- 2. NECK (FPN/PANet) ---
+            
+            # FPN Top-Down Path
+            # P5 -> P4 fusion
+            p5_up = F.interpolate(self.n_cv1(x_p5), scale_factor=2, mode='nearest')
+            p4_cat = torch.cat([p5_up, x_p4], 1)
+            p4_out_fpn = self.n_c3_1(p4_cat)
+            
+            # P4 -> P3 fusion
+            p4_up = F.interpolate(self.n_cv2(p4_out_fpn), scale_factor=2, mode='nearest')
+            p3_cat = torch.cat([p4_up, x_p3], 1)
+            p3_out = self.n_c3_2(p3_cat) # Neck Output 1 (P3)
+            
+            # PANet Bottom-Up Path
+            # P3 -> P4 fusion
+            p3_down = self.n_cv3(p3_out)
+            p4_cat_pan = torch.cat([p3_down, p4_out_fpn], 1)
+            p4_out = self.n_c3_3(p4_cat_pan) # Neck Output 2 (P4)
+            
+            # P4 -> P5 fusion
+            p4_down = self.n_cv4(p4_out)
+            p5_cat_pan = torch.cat([p4_down, x_p5], 1)
+            p5_out = self.n_c3_4(p5_cat_pan) # Neck Output 3 (P5)
+            
+            # --- 3. DETECTION HEADS ---
+            
+            # Apply final 1x1 convolutions for prediction
+            out_p3 = self.head_p3(p3_out)
+            out_p4 = self.head_p4(p4_out)
+            out_p5 = self.head_p5(p5_out)
+            
+            # YOLO typically returns a list of outputs for loss calculation during training
+            return [out_p3, out_p4, out_p5]
+        
     # Setup prints
     setup_logging('DEBUG')
     print('Hello World')
 
     # 0. Get the model
-    model = ResNet18()
+    model = YoloV3LikeModel()
     print(model)
 
     # 2. Create a dummy input and transform it
