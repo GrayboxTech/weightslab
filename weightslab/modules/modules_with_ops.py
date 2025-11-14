@@ -75,7 +75,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         self.assign_id()  # assign ids
 
         # Tracking
-        self.regiser_trackers()
+        self.register_trackers()
 
         # Register hooks
         self.register_grad_hook()
@@ -170,11 +170,12 @@ class LayerWiseOperations(NeuronWiseOperations):
     # ==================
     # Trackers Functions
     # ==================
-    def regiser_trackers(self):
+    def register_trackers(self):
+        is_disabled = bool(getattr(self, "wl_same_flag", False))
         self.register_module('train_dataset_tracker', TriggersTracker(
-            self.get_neurons('out_neurons'), device=self.device))
+            self.get_neurons('out_neurons'), device=self.device, disabled=is_disabled))
         self.register_module('eval_dataset_tracker', TriggersTracker(
-            self.get_neurons('out_neurons'), device=self.device))
+            self.get_neurons('out_neurons'), device=self.device, disabled=is_disabled))
 
     def set_tracking_mode(self, tracking_mode: TrackingMode):
         """ Set what samples are the stats related to (train/eval/etc). """
