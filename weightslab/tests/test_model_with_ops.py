@@ -15,7 +15,7 @@ from torchvision import datasets as ds
 from torchvision import transforms as T
 
 from weightslab.components.tracking import TrackingMode
-from weightslab.backend.watcher_editor import WatcherEditor
+from weightslab.backend.watcher_editor import ModelInterface
 from weightslab.tests.torch_models import FashionCNN as Model
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
@@ -33,7 +33,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.test_dir = TMP_DIR
         os.makedirs(self.test_dir, exist_ok=True)
         self.model = Model()
-        self.dummy_network = WatcherEditor(
+        self.dummy_network = ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
             print_graph=False
@@ -74,7 +74,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             f"{time.time()-self.stamp}s ---\n")
 
     def _replicated_model(self):
-        return WatcherEditor(
+        return ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
             print_graph=False

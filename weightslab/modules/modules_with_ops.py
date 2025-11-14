@@ -1501,7 +1501,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
 
 if __name__ == "__main__":
-    from weightslab.backend.watcher_editor import WatcherEditor
+    from weightslab.backend.watcher_editor import ModelInterface
     from weightslab.tests.torch_models import FashionCNN as Model
 
     # Define the model & the input
@@ -1512,7 +1512,7 @@ if __name__ == "__main__":
     output = model(dummy_input)
 
     # Watcher
-    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
     model(dummy_input)
     print(model)
     nn_l = len(model.layers)-1

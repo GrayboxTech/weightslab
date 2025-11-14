@@ -16,7 +16,7 @@ from weightslab.components.tracking import TrackingMode
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
 from weightslab.components.monitoring import \
     NeuronStatsWithDifferencesMonitor
-from weightslab.backend.watcher_editor import WatcherEditor
+from weightslab.backend.watcher_editor import ModelInterface
 
 
 class Experiment:
@@ -86,10 +86,14 @@ class Experiment:
         if not self.root_log_dir.exists():
             self.root_log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Set logger for loss & metrics
         self.logger = logger or SummaryWriter(root_log_dir)
+
+        # Set optimizer
         self.optimizer = self.optimizer_class(
             self.model.parameters(), lr=self.learning_rate)
 
+        # Train Data Loader
         if self.train_dataset is not None:
             self.train_tracked_dataset = DataSampleTrackingWrapper(
                 self.train_dataset,
@@ -104,6 +108,8 @@ class Experiment:
                 self.get_train_data_loader()
             )
         self.train_iterator = iter(self.train_loader)
+
+        # Eval Data Loader
         if self.eval_dataset is not None:
             self.eval_tracked_dataset = DataSampleTrackingWrapper(
                 self.eval_dataset,
@@ -143,7 +149,7 @@ class Experiment:
             model.parameters(), lr=self.learning_rate)
 
     def interface_model(self):
-        self.model = WatcherEditor(
+        self.model = ModelInterface(
             self.model,
             dummy_input=th.randn(self.input_shape),
             device=self.device
@@ -172,14 +178,6 @@ class Experiment:
             This either enables or disables the callbacks.
         """
         self.train_loop_clbk_call = not self.train_loop_clbk_call
-
-    def set_train_loop_clbk_freq(self, freq: int):
-        """Set the frequency of the callback calls during training loop.
-
-        Args:
-            freq (int): the frequency of the callback calls
-        """
-        self.train_loop_clbk_freq = freq
 
     def performed_train_steps(self):
         """Return the number of training steps that have been performed.
@@ -253,6 +251,9 @@ class Experiment:
         """Display the checkpoints tree."""
         print(self.chkpt_manager.id_to_path)
 
+    # ========================================================================
+    # ========================================================================
+    # Data functions
     def reset_data_iterators(self):
         """Reset the data iterators. This is necessary when anything related to
         datasets or dataloaders changes."""
@@ -274,6 +275,17 @@ class Experiment:
             )
             self.eval_iterator = iter(self.eval_loader)
 
+    # ========================================================================
+    # ========================================================================
+    # Hyperparameters functions
+    def set_train_loop_clbk_freq(self, freq: int):
+        """Set the frequency of the callback calls during training loop.
+
+        Args:
+            freq (int): the frequency of the callback calls
+        """
+        self.train_loop_clbk_freq = freq
+
     def set_learning_rate(self, learning_rate: float):
         """Set the learning rate of the optimizer.
         Args:
@@ -292,7 +304,53 @@ class Experiment:
         with self.lock:
             self.batch_size = batch_size
             self.reset_data_iterators()
+    def toggle_training_status(self):
+        """Toggle the training status. If the model is training, it will stop.
+        """
+        with self.lock:
+            self.is_training = not self.is_training
 
+    def set_training_steps_to_do(self, steps: int):
+        """Set the number of training steps to be performed.
+        Args:
+            steps (int): the number of training steps to be performed
+        """
+        with self.lock:
+            self.training_steps_to_do = steps
+
+    def get_is_training(self) -> bool:
+        """Returns whether the model is training."""
+        with self.lock:
+            return self.is_training
+
+    def set_is_training(self, is_training: bool):
+        """Set whether the model is training."""
+        with self.lock:
+            self.is_training = is_training
+        print("[exp].set_is_training ", is_training)
+
+    def get_training_steps_to_do(self) -> int:
+        """"Get the number of training steps to be performed."""
+        with self.lock:
+            return self.training_steps_to_do
+
+    def get_train_records(self):
+        """"Get all the train samples are records."""
+        with self.lock:
+            return self.train_loader.dataset.as_records()
+
+    def get_eval_records(self):
+        """"Get all the train samples are records."""
+        with self.lock:
+            return self.eval_loader.dataset.as_records()
+
+    def set_name(self, name: str):
+        with self.lock:
+            self.name = name
+
+    # ========================================================================
+    # ========================================================================
+    # Training functions
     def _pass_one_batch(self, loader_iterator):
         # From the dataset we get: item, index, target
         try:
@@ -779,50 +837,6 @@ class Experiment:
         except KeyboardInterrupt:
             pass
 
-    def toggle_training_status(self):
-        """Toggle the training status. If the model is training, it will stop.
-        """
-        with self.lock:
-            self.is_training = not self.is_training
-
-    def set_training_steps_to_do(self, steps: int):
-        """Set the number of training steps to be performed.
-        Args:
-            steps (int): the number of training steps to be performed
-        """
-        with self.lock:
-            self.training_steps_to_do = steps
-
-    def get_is_training(self) -> bool:
-        """Returns whether the model is training."""
-        with self.lock:
-            return self.is_training
-
-    def set_is_training(self, is_training: bool):
-        """Set whether the model is training."""
-        with self.lock:
-            self.is_training = is_training
-        print("[exp].set_is_training ", is_training)
-
-    def get_training_steps_to_do(self) -> int:
-        """"Get the number of training steps to be performed."""
-        with self.lock:
-            return self.training_steps_to_do
-
-    def get_train_records(self):
-        """"Get all the train samples are records."""
-        with self.lock:
-            return self.train_loader.dataset.as_records()
-
-    def get_eval_records(self):
-        """"Get all the train samples are records."""
-        with self.lock:
-            return self.eval_loader.dataset.as_records()
-
-    def set_name(self, name: str):
-        with self.lock:
-            self.name = name
-
     def apply_architecture_op(self, op_type, **kwargs):
         # Operate
         with self.architecture_guard, self.model as model:
@@ -870,14 +884,23 @@ if __name__ == "__main__":
 
     # Init Experiment
     experiment = Experiment(
+        # Model
         model=model,
-        optimizer_class=optim.Adam,
+
+        # Datasets
         train_dataset=data_train,
+        eval_dataset=data_eval,
+
+        # Criterions
         metrics={
             'acc': Accuracy(task="multiclass", num_classes=10)
         },
-        input_shape=model.input_shape,
-        eval_dataset=data_eval,
+        criterion=th.nn.CrossEntropyLoss(reduction='none'),
+
+        # Optimizer
+        optimizer_class=optim.Adam,
+
+        # Hyper parameters
         device='cpu',
         learning_rate=1e-2,
         batch_size=128,

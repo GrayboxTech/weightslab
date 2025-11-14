@@ -12,7 +12,7 @@ import torch.nn as nn
 from typing import Type
 
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
-from weightslab.backend.watcher_editor import WatcherEditor
+from weightslab.backend.watcher_editor import ModelInterface
 from weightslab.utils.tools import model_op_neurons, \
     get_model_parameters_neuronwise
 from weightslab.utils.logs import print
@@ -117,7 +117,7 @@ def create_inference_test(ModelClass):
         # # Create dummy input tensor
         dummy_input = th.randn(model.input_shape).to(DEVICE)
         # # Interface the model
-        model = WatcherEditor(
+        model = ModelInterface(
             model,
             dummy_input=dummy_input,
             print_graph=False

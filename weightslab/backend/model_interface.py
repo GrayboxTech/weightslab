@@ -16,7 +16,7 @@ from weightslab.utils.computational_graph import \
     generate_graph_dependencies
 
 
-class WatcherEditor(NetworkWithOps):
+class ModelInterface(NetworkWithOps):
     def __init__(
             self,
             model: th.nn.Module,
@@ -46,7 +46,7 @@ class WatcherEditor(NetworkWithOps):
         Returns:
             None: This method initializes the object and does not return any value.
         """
-        super(WatcherEditor, self).__init__()
+        super(ModelInterface, self).__init__()
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
@@ -365,7 +365,7 @@ if __name__ == "__main__":
     model(dummy_input)
 
     # --- Example ---
-    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
     print(f'Inference results {model(dummy_input)}')  # infer
     print(model)
 

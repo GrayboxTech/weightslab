@@ -1639,7 +1639,7 @@ class UNet3D(nn.Module):
 
 
 if __name__ == "__main__":
-    from weightslab.backend.watcher_editor import WatcherEditor
+    from weightslab.backend.watcher_editor import ModelInterface
     from weightslab.utils.logs import print, setup_logging
 
     # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
@@ -1823,7 +1823,7 @@ if __name__ == "__main__":
     model(dummy_input)
 
     # --- Example ---
-    model = WatcherEditor(model, dummy_input=dummy_input, print_graph=False)
+    model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
     print(f'Inference results {model(dummy_input)}')  # infer
     print(model)
 
