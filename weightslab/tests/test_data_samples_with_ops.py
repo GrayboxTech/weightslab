@@ -1,19 +1,30 @@
+import os
+import time
+import tempfile
 import unittest
 import numpy as np
+import torch as th
+import warnings; warnings.filterwarnings("ignore")
 
 from torchvision import datasets as ds
 from torchvision import transforms as T
 
-from weightslab.data_samples_with_ops import DataSampleTrackingWrapper
-from weightslab.data_samples_with_ops import SampleStatsEx
+from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
+from weightslab.data.data_samples_with_ops import SampleStatsEx
+
+
+# Set Global Default Settings
+th.manual_seed(42)  # Set SEED
+TMP_DIR = tempfile.mkdtemp()
+DEVICE = th.device("cuda" if th.cuda.is_available() else "cpu")
 
 
 class DummyDataset:
     def __init__(self):
         self.elems = [
             (2, 2),
-            (3, 3), 
-            (5, 5), 
+            (3, 3),
+            (5, 5),
             (7, 7),
             (90, 90),
             (20, 20),
@@ -25,8 +36,6 @@ class DummyDataset:
     def __getitem__(self, index: int):
         return self.elems[index]
 
-
-_DUMMY_DATASET = DummyDataset()
 
 class DummySegmentationDataset:
     """
@@ -49,15 +58,49 @@ class DummySegmentationDataset:
     def __getitem__(self, idx):
         return self.images[idx], self.masks[idx]
 
+
+class _TinyDummyDataset:
+    """
+    Returns tuples (x, y) where x==y for simplicity.
+    """
+    def __init__(self, n=6):
+        self._n = n
+        self.elems = [(i, i) for i in range(n)]
+
+    def __len__(self):
+        return self._n
+
+    def __getitem__(self, idx):
+        return self.elems[idx]
+
+
+_DUMMY_DATASET = DummyDataset()
+_TINY_DUMMY_DATASET = _TinyDummyDataset(n=6)
 _DUMMY_SEG_DATASET = DummySegmentationDataset()
 
 
 class DataSampleTrackingWrapperTest(unittest.TestCase):
     def setUp(self):
-        self.wrapped_dataset = DataSampleTrackingWrapper(_DUMMY_DATASET, task_type="classification")
+        print(f"\n--- Start {self._testMethodName} ---\n")
+
+        # Init Variables
+        self.stamp = time.time()
+        self.wrapped_dataset = DataSampleTrackingWrapper(
+            _DUMMY_DATASET,
+            task_type="classification"
+        )
         self.ids_and_losses_1 = (np.array([5, 0, 2]), np.array([0, 1.4, 2.34]))
         self.ids_and_losses_2 = (np.array([1, 4, 3]), np.array([0.4, 0.2, 0]))
         self.ids_and_losses_3 = (np.array([3, 5, 4]), np.array([0.1, 0, 0]))
+
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
     def test_no_denylisting(self):
         self.assertEqual(len(self.wrapped_dataset), 6)
@@ -186,6 +229,7 @@ def sample_predicate_fn1(
         label):
     return pred_loss >= 0.25 and pred_loss <= 0.5
 
+
 def sample_predicate_fn2(
         sample_id, pred_age, pred_loss, exposure, is_denied, pred,
         label):
@@ -194,21 +238,37 @@ def sample_predicate_fn2(
 
 class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
     def setUp(self):
+        print(f"\n--- Start {self._testMethodName} ---\n")
 
+        # Init Variables
+        self.stamp = time.time()
         transform = T.Compose([T.ToTensor()])
         mnist_train = ds.MNIST(
-            "../data", train=True, transform=transform, download=True)
+            os.path.join(TMP_DIR, "data"),
+            train=True,
+            transform=transform,
+            download=True
+        )
         self.wrapped_dataset = DataSampleTrackingWrapper(mnist_train)
         self.losses = []
 
         for i in range(len(mnist_train)):
-            data, id, label = self.wrapped_dataset._getitem_raw(i)
+            _, id, label = self.wrapped_dataset._getitem_raw(i)
             loss = id / 60000  # artificial loss
             self.wrapped_dataset.update_batch_sample_stats(
                 model_age=0, ids_batch=[i],
                 losses_batch=[loss],
                 predct_batch=[label])
             self.losses.append(loss)
+
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
     def test_predicate(self):
         self.wrapped_dataset.apply_weighted_predicate(
@@ -237,7 +297,7 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
             accumulate=False, verbose=True)
 
         self.assertEqual(len(self.wrapped_dataset), 44999)
-    
+
     def test_predicate_with_accumulation(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=20000,
@@ -250,7 +310,6 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
             accumulate=True, verbose=True)
 
         self.assertEqual(len(self.wrapped_dataset), 40000)
-
 
 
 # class DataSampleTrackingWrapperTestSegmentation(unittest.TestCase):
@@ -322,24 +381,24 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
 #         ds2.load_state_dict(self.ds.state_dict())
 #         self.assertEqual(self.ds, ds2)
 
-class _TinyDummyDataset:
-    """
-    Returns tuples (x, y) where x==y for simplicity.
-    """
-    def __init__(self, n=6):
-        self._n = n
-        self.elems = [(i, i) for i in range(n)]
 
-    def __len__(self):
-        return self._n
-
-    def __getitem__(self, idx):
-        return self.elems[idx]
-    
 class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
     def setUp(self):
-        self.base_ds = _TinyDummyDataset(n=6)
+        print(f"\n--- Start {self._testMethodName} ---\n")
+
+        # Init Variables
+        self.stamp = time.time()
+        self.base_ds = _TINY_DUMMY_DATASET
         self.ds = DataSampleTrackingWrapper(self.base_ds, task_type="classification")
+
+    def tearDown(self):
+        """
+        Runs AFTER every single test method (test_...).
+        This is where you should place your final print('\n').
+        """
+        print(
+            f"\n--- FINISHED: {self._testMethodName} in " +
+            f"{time.time()-self.stamp}s ---\n")
 
     def test_update_sample_stats_ex_scalars(self):
         # set a few extended scalar stats for different samples
@@ -461,6 +520,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         self.assertAlmostEqual(df.loc[2, "loss/a"], 0.99, places=6)
         self.assertEqual(df.loc[0, "k"], 1)
         self.assertEqual(df.loc[2, "k"], 2)
+
 
 if __name__ == '__main__':
     unittest.main()
