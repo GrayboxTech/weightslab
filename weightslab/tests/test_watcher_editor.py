@@ -12,7 +12,11 @@ import torch.nn as nn
 from typing import Type
 
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
+<<<<<<< Updated upstream
 from weightslab.backend.watcher_editor import WatcherEditor
+=======
+from weightslab.weightslab.backend.model_interface import ModelInterface
+>>>>>>> Stashed changes
 from weightslab.utils.tools import model_op_neurons, \
     get_model_parameters_neuronwise
 from weightslab.utils.logs import print

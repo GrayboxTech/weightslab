@@ -62,17 +62,17 @@ class WatcherEditor(NetworkWithOps):
             self.dummy_input = th.randn(model.input_shape).to(device)
         self.print_graph = print_graph
         self.print_graph_filename = print_graph_filename
-        self.traced_model = symbolic_trace(model)
-        self.traced_model.name = "N.A."
+        self.traced_model = None  # symbolic_trace(model)
+        # self.traced_model.name = "N.A."
 
-        # Propagate the shape over the graph
-        self.shape_propagation()
+        # # Propagate the shape over the graph
+        # self.shape_propagation()
 
-        # Generate the graph vizualisation
-        self.generate_graph_vizu()
+        # # Generate the graph vizualisation
+        # self.generate_graph_vizu()
 
         # Patch the torch model with WeightsLab features
-        self.monkey_patch_model()
+        # self.monkey_patch_model()
 
         # Generate the graph dependencies
         self.define_deps()
@@ -219,12 +219,158 @@ class WatcherEditor(NetworkWithOps):
             None: This method modifies the instance's state by setting
             `self.dependencies_with_ops` and calling `self.register_dependencies`.
         """
+        # --- Step 1 & 2: FX Trace and Export to ONNX ---
+        print("PyTorch FX tracing complete.")
+
+        onnx_file_path = "onnx_traced_dependencies.onnx"
+        print(f"Exporting model to {onnx_file_path}...")
+        th.onnx.export(
+            self.model, self.dummy_input, onnx_file_path,
+            opset_version=14,
+            input_names=['input'], output_names=['output'],
+            do_constant_folding=False
+        )
+        print("ONNX export complete.")
+        self.monkey_patch_model()
+        import onnx
+        import onnx.shape_inference
+        from typing import Tuple, Dict, Optional
+        from weightslab.utils.computational_graph_onnx import \
+            generate_graph_dependencies_onnx_aware
+
+        def get_onnx_shapes_map(onnx_file_path: str) -> Dict[str, Optional[Tuple[int, ...]]]:
+            """
+            Loads the ONNX model, performs shape inference, and extracts a map of 
+            intermediate tensor names (which match FX Node names) to their inferred shapes.
+            """
+            try:
+                model = onnx.load(onnx_file_path)
+                # Perform static shape inference to populate the graph's value_info
+                inferred_model = onnx.shape_inference.infer_shapes(model)
+            except Exception as e:
+                # Fallback if shape inference fails (e.g., dynamic axes not handled)
+                print(f"Error during ONNX shape inference. Proceeding with limited shape info: {e}")
+                return {}
+            
+            # Map: tensor_name (FX Node Name) -> (shape_tuple)
+            shapes_map: Dict[str, Optional[Tuple[int, ...]]] = {}
+            
+            # Get shapes for graph inputs, outputs, and intermediate tensors
+            for tensor_info in list(inferred_model.graph.input) + \
+                                list(inferred_model.graph.output) + \
+                                list(inferred_model.graph.value_info):
+                
+                type_info = tensor_info.type.tensor_type
+                if type_info.shape:
+                    shape = tuple(d.dim_value for d in type_info.shape.dim)
+                    # Only record valid, fully determined shapes
+                    name = tensor_info.name
+                    if name.startswith("/"):
+                        # TODO (GP): here we do not handle several outputs shapes for same layers
+                        shapes_map[name.split('/')[1]] = shape if all(d > 0 for d in shape) else None
+                    else:
+                        shapes_map[name] = shape if all(d > 0 for d in shape) else None
+            return shapes_map
+        
+        from typing import Dict, Tuple, Optional, Any
+        import onnx 
+        # Note: You may need to install the 'onnx' Python package: pip install onnx
+
+        def get_intermediate_onnx_shapes(onnx_file_path: str) -> Dict[str, Tuple[int, ...]]:
+            """
+            Loads an ONNX model, infers all intermediate tensor shapes using the 
+            'onnx' library, and generates the dictionary mapping tensor names to shapes.
+
+            Args:
+                onnx_file_path: Path to the ONNX model file.
+
+            Returns:
+                A dictionary mapping ONNX tensor output paths (e.g., '/c1/Conv_output_0') 
+                to their inferred shape tuples.
+            """
+            try:
+                # 1. Load the ONNX model from the file
+                model = onnx.load(onnx_file_path)
+                
+                # 2. Run Shape Inference (The Critical Step)
+                # This calculates and populates the shapes for all intermediate tensors.
+                inferred_model = onnx.shape_inference.infer_shapes(model)
+                graph = inferred_model.graph
+                
+            except FileNotFoundError:
+                print(f"Error: ONNX file not found at {onnx_file_path}")
+                return {}
+            except Exception as e:
+                print(f"An error occurred during ONNX loading or shape inference: {e}")
+                return {}
+
+            shapes_map: Dict[str, Tuple[int, ...]] = {}
+
+            # 3. Collect all tensors whose shape we need (intermediate and final outputs)
+            # 'value_info' holds the metadata, including shapes, for most intermediate tensors.
+            all_value_infos = list(graph.value_info)
+            all_value_infos.extend(list(graph.output)) # Include the final outputs as well
+
+            # 4. Iterate and extract the shape data
+            for value_info in all_value_infos:
+                tensor_name = value_info.name
+                dims = []
+                
+                # Extract the shape from the tensor_type field
+                if value_info.type.tensor_type.HasField('shape'):
+                    for dim in value_info.type.tensor_type.shape.dim:
+                        if dim.HasField('dim_value'):
+                            # Static dimension (e.g., 4)
+                            dims.append(dim.dim_value)
+                        elif dim.HasField('dim_param'):
+                            # Dynamic dimension (e.g., 'batch_size'). Use -1 as a placeholder.
+                            dims.append(-1) 
+                        else:
+                            dims.append(-1) # Unknown
+                
+                if dims:
+                    shapes_map[tensor_name] = tuple(dims)
+                    
+            print(f"Successfully extracted shapes for {len(shapes_map)} tensors from the ONNX graph.")
+            return shapes_map
+
+        # --- The Pure ONNX Lookup Function (To use the generated dictionary) ---
+
+        def get_onnx_shape_by_alias(
+            alias_name: str,
+            onnx_shapes_map: Dict[str, Tuple[int, ...]]
+        ) -> Optional[Tuple[int, ...]]:
+            """
+            Queries the generated dictionary using the FX-derived alias (e.g., 'c1', 'fc4').
+            """
+            if not onnx_shapes_map:
+                return None
+
+            # We assume the alias is embedded in the ONNX tensor name as a prefix: /alias_name/
+            expected_prefix = f"/{alias_name}/"
+            
+            for key in onnx_shapes_map.keys():
+                # This finds the shape for the first tensor output by the node 'alias_name'.
+                if key.startswith(expected_prefix):
+                    return onnx_shapes_map[key]
+                    
+            return None
+        onnx_shapes_map = get_intermediate_onnx_shapes(onnx_file_path)
+
+        model_onnx = onnx.load(onnx_file_path)
+        graph = model_onnx.graph
+
+        self.dependencies_with_ops = generate_graph_dependencies(#_onnx_aware(
+            model=self.model,
+            graph=graph,
+            onnx_shapes_map=onnx_shapes_map
+        )
 
         # Generate the dependencies
-        self.dependencies_with_ops = generate_graph_dependencies(
-            self.model,
-            self.traced_model
-        )
+        # self.dependencies_with_ops = generate_graph_dependencies(
+        #     self.model,
+        #     self.traced_model
+        # )
 
         # Register the layers dependencies
         self.register_dependencies(self.dependencies_with_ops)

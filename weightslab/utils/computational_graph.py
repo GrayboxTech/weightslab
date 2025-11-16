@@ -1,9 +1,10 @@
 import collections
 import torch as th
 import torch.nn as nn
+import torch.fx as fx
 
 from copy import deepcopy
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 
 from torch.fx import GraphModule
 
@@ -192,14 +193,43 @@ def generate_mappings(
 
 def generate_graph_dependencies(
         model: nn.Module,
-        traced_graph: GraphModule,
-        indexing_neurons: bool = True
+        graph,
+        indexing_neurons: bool = True,
+        onnx_shapes_map: Dict[str, Optional[Tuple[int, ...]]] = None
 ) -> \
             List[Tuple[nn.Module, nn.Module, DepType]]:
     """
         Infers dependencies from the traced graph, explicitly marking
         structuralSAME and INCOMING constraints.
     """
+
+    def get_onnx_shape_by_alias(
+        alias_name: str,
+        onnx_shapes_map: Dict[str, Tuple[int, ...]]
+    ) -> Optional[Tuple[int, ...]]:
+        """
+        Queries the generated dictionary using the FX-derived alias (e.g., 'c1', 'fc4').
+        """
+        if not onnx_shapes_map:
+            return None
+
+        # We assume the alias is embedded in the ONNX tensor name as a prefix: /alias_name/
+        expected_prefix = f"/{alias_name}/"
+        
+        for key in onnx_shapes_map.keys():
+            # This finds the shape for the first tensor output by the node 'alias_name'.
+            if key.startswith(expected_prefix):
+                return onnx_shapes_map[key]
+                
+        return None
+    def get_feature_channel_size_from_onnx(node: fx.Node) -> Optional[int]:
+        """Looks up the channel dimension (index 1) from the ONNX shape map."""
+        if onnx_shapes_map is None:
+            return get_feature_channel_size(node)
+        shape = get_onnx_shape_by_alias(node.name, onnx_shapes_map)
+        # Assuming NCHW format, the channel size is at index 1 (C)
+        return shape[1] if shape and len(shape) >= 2 else None
+
     dependencies = []
 
     # Map to store the last *structural module* (instance) that produced the
@@ -210,7 +240,8 @@ def generate_graph_dependencies(
     bypass = []
 
     # Iterate over the nodes in the graph to find sources
-    for node in traced_graph.graph.nodes:
+    # for node in traced_graph.graph.nodes:
+    for node in graph.node:
         bypassed = False
         current_module = None
         if node.op == 'call_module':
@@ -247,10 +278,10 @@ def generate_graph_dependencies(
                         # 1.1. Determine Dependency Type based on Shape
                         # (for Pruning)
                         dep_type = DepType.INCOMING
-                        source_out_channels = get_feature_channel_size(
+                        source_out_channels = get_feature_channel_size_from_onnx(
                             source_node
                         )
-                        dst_out_channels = get_feature_channel_size(node)
+                        dst_out_channels = get_feature_channel_size_from_onnx(node)
 
                         # 1.2. Check if current module should be target SAME
                         # path. It's a specific case where current module has
@@ -364,7 +395,7 @@ def generate_graph_dependencies(
 
     # Generate mapping tensor btw deps
     if not indexing_neurons:
-        return dependencies 
+        return dependencies
     for edge in dependencies:
         # Get src and dst modules and type
         src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]

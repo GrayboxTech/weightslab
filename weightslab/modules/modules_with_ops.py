@@ -1502,7 +1502,11 @@ class LayerWiseOperations(NeuronWiseOperations):
 
 
 if __name__ == "__main__":
+<<<<<<< Updated upstream
     from weightslab.backend.watcher_editor import WatcherEditor
+=======
+    from weightslab.weightslab.backend.model_interface import ModelInterface
+>>>>>>> Stashed changes
     from weightslab.tests.torch_models import FashionCNN as Model
 
     # Define the model & the input
