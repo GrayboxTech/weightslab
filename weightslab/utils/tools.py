@@ -5,7 +5,7 @@ import torch as th
 import torch.nn as nn
 
 from copy import deepcopy
-from typing import Optional, List, Any, Type
+from typing import Optional, List, Any, Type, Callable, Dict
 
 from torch.fx import Node
 
@@ -484,3 +484,93 @@ def reversing_indices(n_neurons, indices_set):
             ) <= -1
         }
     )[::-1]
+
+
+def validate_kwargs(f: Callable, kwargs: Dict[str, Any]):
+    """
+    Validates a dictionary of keyword arguments (kwargs) against the signature
+    of a target function (f).
+
+    If the function f accepts a variadic keyword argument (**kwargs),
+    validation is skipped for extraneous parameters.
+
+    Args:
+        f: The function whose signature is used for validation.
+        kwargs: The dictionary of keyword arguments to check.
+
+    """
+    # 1. Get the signature of the target function
+    signature = inspect.signature(f)
+
+    # 2. Extract the names of all expected parameters
+    # This set contains argument names (e.g., 'a', 'b', 'debug').
+    expected_params = set(signature.parameters.keys())
+
+    # 3. Check for the presence of **kwargs (VAR_KEYWORD)
+    # If the function accepts **kwargs, we allow any extra arguments.
+    accepts_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in signature.parameters.values()
+    )
+
+    return kwargs if accepts_var_kwargs else \
+        set(kwargs.keys()) - expected_params
+
+
+def load_config_from_yaml(filepath: str) -> Dict:
+    """Loads configuration data from a YAML file."""
+    try:
+        with open(filepath, 'r') as f:
+            config_data = yaml.safe_load(f)
+        print(f"Successfully loaded configuration from {filepath}")
+        return config_data
+    except FileNotFoundError:
+        print(f"Error: YAML file not found at {filepath}. Using default parameters.")
+        return {}
+    except yaml.YAMLError as e:
+        print(f"Error loading YAML file: {e}. Using default parameters.")
+        return {}
+
+
+def update_hyperparameters(global_hparams: Dict, config_data: Dict) -> None:
+    """
+    Recursively updates the 'value' field of HyperParam namedtuples 
+    in the global_hparams dictionary based on the nested config_data.
+    """
+
+    def recursive_update(hparams_dict, config_dict):
+        for key, config_value in config_dict.items():
+            if key in hparams_dict:
+                current_item = hparams_dict[key]
+
+                if isinstance(config_value, dict) and isinstance(current_item, dict):
+                    # Recurse for nested dictionaries (e.g., 'data' or 'train_dataset')
+                    recursive_update(current_item, config_value)
+                elif isinstance(current_item, HyperParam):
+                    # Found a HyperParam at the leaf node, update its 'value'
+
+                    # NOTE: Since namedtuple instances are immutable, we must 
+                    # create a new HyperParam instance with the updated value.
+
+                    # 1. Get existing attributes (data_type, default_value, etc.)
+                    existing_attrs = current_item._asdict()
+
+                    # 2. Convert the YAML value to the expected data_type if necessary
+                    # In this example, YAML often handles type conversion correctly, 
+                    # but explicit casting based on current_item.data_type is safer 
+                    # for real-world scenarios. We'll skip complex casting here 
+                    # as YAML's safe_load generally preserves basic types (int, float, bool).
+
+                    # 3. Create the new HyperParam instance with the new value
+                    new_hparam = current_item._replace(value=config_value)
+
+                    # 4. Replace the old instance in the dictionary
+                    hparams_dict[key] = new_hparam
+                    print(f"Updated '{key}' to: {config_value} (Type: {current_item.data_type})")
+                else:
+                    # Should not happen if structures are identical, but good for safety
+                    print(f"Warning: Key '{key}' structure mismatch. Skipping update.")
+
+    print("\n--- Starting Hyperparameter Update from YAML ---")
+    recursive_update(global_hparams, config_data)
+    print("--- Hyperparameter Update Complete ---")

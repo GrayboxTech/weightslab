@@ -93,10 +93,12 @@ class _StateDictKeys(str, Enum):
 
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset, task_type: str = "classification"):
+    def __init__(self, wrapped_dataset: Dataset):
+        self.__name__ = wrapped_dataset.__name__ if hasattr(
+            wrapped_dataset,
+            "__name__"
+        ) else "dataset"
         self.wrapped_dataset = wrapped_dataset
-        self.task_type = task_type
-
         self._denied_samples_ids = set()
         self.denied_sample_cnt = 0
         self.idx_to_idx_remapp = dict()
@@ -197,11 +199,11 @@ class DataSampleTrackingWrapper(Dataset):
                              f"expected: {SampleStatsEx.ALL()}")
 
     def _update_index_to_index(self):
-        # import pdb; pdb.set_trace()
 
         if self._map_updates_hook_fns:
-            for map_update_hook_fn in self._map_updates_hook_fns:
-                map_update_hook_fn()
+            for (map_update_hook_fn, map_update_hook_fn_params) \
+                    in self._map_updates_hook_fns:
+                map_update_hook_fn(**map_update_hook_fn_params)
 
         self.idx_to_idx_remapp = {}
         sample_id_2_denied = self.sample_statistics[SampleStatsEx.DENY_LISTED]

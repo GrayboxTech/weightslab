@@ -2,159 +2,122 @@ import os
 import time
 import torch
 import tempfile
-import collections
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-
-from typing import Dict
 
 from torchvision import datasets, transforms
 
-from torch.utils.data import DataLoader
-
 from torchmetrics.classification import Accuracy
 
-from weightslab.experiment.next_gen_experiment import Experiment as wl_exp
+from weightslab.tests.torch_models import FashionCNN
+from weightslab.src import WeightsLab
 
 
 # --- Configuration Constants ---
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TMP_DIR = tempfile.mkdtemp()
-
-HyperParam = collections.namedtuple(
-    "HyperParam",
-    ["data_type", "default_value"]
-)
-
-# Using a standard Python Set for the global list of configuration schemas
-GLOBAL_HYPER_PARAMETERS: Dict[str, HyperParam] = {
-    "batch_size": HyperParam(data_type="int", default_value=64),
-    "learning_rate": HyperParam(data_type="float", default_value=0.001),
-    "optimizer": HyperParam(data_type="str", default_value="Adam"),
-    "epochs": HyperParam(data_type="int", default_value=10),
-}
-
-
-# --- 2. Model Definition (FashionCNN) ---
-class FashionCNN(nn.Module):
-    """
-    A simple Convolutional Neural Network (CNN) architecture for Fashion-MNIST.
-    Uses two convolutional layers followed by fully connected layers.
-    """
-    def __init__(self):
-        super(FashionCNN, self).__init__()
-
-        # First Convolutional Block: 1x28x28 -> 16x28x28 (Conv) ->
-        # 16x14x14 (MaxPool)
-        self.conv1 = nn.Conv2d(
-            in_channels=1,  # 1 for grayscale
-            out_channels=16,
-            kernel_size=5,
-            stride=1,
-            padding=2  # Padding keeps the height/width the same (28x28)
-        )
-        self.maxpool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Second Convolutional Block: 16x14x14 -> 32x14x14 (Conv) ->
-        # 32x7x7 (MaxPool)
-        self.conv2 = nn.Conv2d(
-            in_channels=16,
-            out_channels=32,
-            kernel_size=5,
-            stride=1,
-            padding=2
-        )
-        self.maxpool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Flattened feature size: 32 channels * 7 * 7 spatial dimensions
-        self.fc1 = nn.Linear(32 * 7 * 7, 128)
-        self.fc2 = nn.Linear(128, 10)
-
-    def forward(self, x):
-        # Pass through Conv Block 1
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.maxpool1(x)
-
-        # Pass through Conv Block 2
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = self.maxpool2(x)
-
-        # Flatten the output for the fully connected layers
-        # x.size(0) is the batch dimension
-        x = x.view(x.size(0), -1)
-
-        # Fully Connected Layers
-        x = F.relu(self.fc1(x))
-        # Output logits (no Softmax here, as CrossEntropyLoss will apply it)
-        x = self.fc2(x)
-        return x
 
 
 if __name__ == '__main__':
-    # --- 1. Data Loading and Preprocessing ---
-    # The images are 28x28 grayscale. We normalize them to the range [-1, 1].
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))  # Mean 0.5, Std Dev 0.5
-    ])
+    print('Hello world')
 
-    # Download and load the training data
+    # Run experiment
+    start_time = time.time()
+    device = DEVICE
+
+    # -1. Define global hyperparameters for the experiment
+    parameters = {
+        'data': {
+            'train_dataset': {
+                'train_shuffle': True,
+                'batch_size': 64
+            },
+            'test_dataset': {
+                'test_shuffle': False,
+                'batch_size': 1
+            }
+        },
+        'optimizer': {
+            'Adam': {
+                'learning_rate': 0.01
+            }
+        },
+        "epochs": 10,
+        "training_steps_to_do": 256,
+        "name": "MT_FashionCNN_Test",
+        "root_log_dir": os.path.join(TMP_DIR, 'logs'),
+        "tqdm_display": True,
+        "skip_loading": False,
+        "device": device
+    }
+
+    # =======================================
+    # 0. Initialize weightsLab and the model, move to device
+    wl_exp = WeightsLab(parameters)
+    model = wl_exp.watch_or_edit(FashionCNN().to(device), flag='model')
+
+    # =========================
+    # 1. Initialize the dataset
+    TMP_DIR = r'C:\Users\GUILLA~1\AppData\Local\Temp\tmp1eohr08t'
     train_dataset = datasets.FashionMNIST(
         root=os.path.join(TMP_DIR, 'data'),
-        train=True,
+        train=False,
         download=True,
-        transform=transform
-    )
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=GLOBAL_HYPER_PARAMETERS.get('batch_size').default_value,
-        shuffle=True,
-        num_workers=8
-    )
-
-    # Download and load the test data
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,), (0.5,))
+            ]
+        )
+    )  # Download and load the training data
     test_dataset = datasets.FashionMNIST(
         root=os.path.join(TMP_DIR, 'data'),
         train=False,
         download=True,
-        transform=transform
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,), (0.5,))
+            ]
+        )
+    )  # Download and load the test data
+    train_loader = wl_exp.watch_or_edit(
+        train_dataset,
+        obj_name='train_dataset',
+        flag='data'
     )
-    test_loader = DataLoader(
+    test_loader = wl_exp.watch_or_edit(
         test_dataset,
-        batch_size=GLOBAL_HYPER_PARAMETERS.get('batch_size').default_value,
-        shuffle=False,
-        num_workers=8
+        obj_name='test_dataset',
+        flag='data'
     )
 
-    # Run experiment
-    start_time = time.time()
+    # =======================
+    # 3. Define the optimizer
+    optimizer = wl_exp.watch_or_edit(
+        optim.Adam,
+        flag='optimizer'
+    )  # Watch or Edit optimizer
 
-    # 0. Initialize the model, move to device
-    model = FashionCNN().to(device)
-    wl_exp.watch_or_edit(model, flag='model')  # Watch or Edit model
+    # ====================
+    # 4. Define criterions
+    criterion_bin = wl_exp.watch(nn.CrossEntropyLoss(), flag='loss/bin_loss')
+    criterion_mlt = wl_exp.watch(nn.CrossEntropyLoss(), flag='loss/mlt_loss')
 
-    # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=GLOBAL_HYPER_PARAMETERS.get('learning_rate').default_value)
-    # wl_exp.watch_or_edit(optimizer, flag='optimizer')  # Watch or Edit optimizer
-
-    # Losses
-    criterion_mlt = nn.CrossEntropyLoss()
-    criterion_bin = nn.CrossEntropyLoss()  # Use binary cross-entropy loss for binary classification
-    # wl_exp.watch(criterion_mlt, flag='loss/mlt_loss')  # Watch loss
-    # wl_exp.watch(criterion_bin, flag='loss/bin_loss')  # Watch loss
-
-    # Metrics
+    # ==========
+    # 5. Metrics
     metric_mlt = Accuracy(task="multiclass", num_classes=10).to(device)
+    metric_mlt = wl_exp.watch(metric_mlt, flag='metric/mlt_metric')
     metric_bin = Accuracy(task="binary", num_classes=1).to(device)
-    # wl_exp.watch(metric_mlt, flag='metric/mlt_metric')  # Watch metric
-    # wl_exp.watch(metric_bin, flag='metric/bin_metric')  # Watch metric
+    metric_bin = wl_exp.watch(metric_bin, flag='metric/bin_metric')
 
-    # Training Loop
+    # ================
+    # 6. Training Loop
     print("\nStarting Training...")
-    for epoch in range(1, GLOBAL_HYPER_PARAMETERS.get('epochs').default_value + 1):
+    nb_epochs = wl_exp.get_global_hyperparam('epochs')
+    for epoch in range(
+        1, nb_epochs + 1
+    ):
         # Train for one ep
         model.train()  # Set the model to training mode
         running_loss = 0.0
