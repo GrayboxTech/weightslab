@@ -39,7 +39,7 @@ if __name__ == '__main__':
         },
         'optimizer': {
             'Adam': {
-                'learning_rate': 0.01
+                'lr': 0.01
             }
         },
         "epochs": 10,
@@ -101,15 +101,19 @@ if __name__ == '__main__':
 
     # ====================
     # 4. Define criterions
-    criterion_bin = wl_exp.watch(nn.CrossEntropyLoss(), flag='loss/bin_loss')
-    criterion_mlt = wl_exp.watch(nn.CrossEntropyLoss(), flag='loss/mlt_loss')
+    criterion_bin = wl_exp.watch(
+        nn.CrossEntropyLoss(reduction='none'),
+        flag='loss/bin_loss'
+    )
+    criterion_mlt = wl_exp.watch(
+        nn.CrossEntropyLoss(reduction='none'),
+        flag='loss/mlt_loss'
+    )
 
     # ==========
     # 5. Metrics
-    metric_mlt = Accuracy(task="multiclass", num_classes=10).to(device)
-    metric_mlt = wl_exp.watch(metric_mlt, flag='metric/mlt_metric')
-    metric_bin = Accuracy(task="binary", num_classes=1).to(device)
-    metric_bin = wl_exp.watch(metric_bin, flag='metric/bin_metric')
+    metric_mlt = wl_exp.watch(Accuracy(task="multiclass", num_classes=10).to(device), flag='metric/mlt_metric').to(device)
+    metric_bin = wl_exp.watch(Accuracy(task="binary", num_classes=1), flag='metric/bin_metric').to(device)
 
     # ================
     # 6. Training Loop
@@ -122,7 +126,7 @@ if __name__ == '__main__':
         model.train()  # Set the model to training mode
         running_loss = 0.0
 
-        for inputs, labels in train_loader:
+        for inputs, _, labels in train_loader:
             inputs = inputs.to(device)
             bin_labels = (labels == 0).float().to(device)
             mlt_labels = labels.to(device)
@@ -134,15 +138,28 @@ if __name__ == '__main__':
             outputs = model(inputs)
             loss_bin = criterion_bin(outputs[:, 0], bin_labels)
             loss_mlt = criterion_mlt(outputs, mlt_labels)
-            loss = loss_bin + loss_mlt
+            loss = torch.mean(loss_bin) + torch.mean(loss_mlt)
+
+            # Update metrics
+            metric_bin.update(outputs[:, 0], bin_labels)
+            metric_mlt.update(outputs, mlt_labels)
 
             # Backward pass and optimization
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item()
-
         train_loss = running_loss / len(train_loader)
+        train_acc_mlt = metric_mlt.compute() * 100
+        train_acc_bin = metric_bin.compute() * 100
+
+        print(
+            f"Epoch {epoch}/{nb_epochs}: " +
+            f"| Train Loss: {train_loss:.4f} " +
+            f"| Train Acc mlt: {train_acc_mlt:.2f}%"
+            f"| Train Acc bin: {train_acc_bin:.2f}%"
+        )
+
 
         # --------------------------------------------------------------------
         # --------------------------------------------------------------------
@@ -175,7 +192,7 @@ if __name__ == '__main__':
         test_acc_bin = metric_bin.compute() * 100
 
         print(
-            f"Epoch {epoch}/{GLOBAL_HYPER_PARAMETERS.get('epochs').default_value}: " +
+            f"Epoch {epoch}/{nb_epochs}: " +
             f"| Train Loss: {train_loss:.4f} " +
             f"| Test Loss: {avg_test_loss:.4f} " +
             f"| Test Acc mlt: {test_acc_mlt:.2f}%"

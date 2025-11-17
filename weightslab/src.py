@@ -18,7 +18,7 @@ from weightslab.data.data_samples_with_ops import \
 from weightslab.components.monitoring import \
     NeuronStatsWithDifferencesMonitor
 from weightslab.weightslab.backend.model_interface import ModelInterface
-from weightslab.utils.tools import validate_kwargs
+from weightslab.components.tracking import TrackingMode
 from weightslab.utils.logs import print
 
 
@@ -292,11 +292,10 @@ class WeightsLab:
         self.optimizer_class = obj
         self.optimizer = obj(
             self.model.parameters(),
-            learning_rate=self.get_global_hyperparam(
-                f'/optimizer/{obj.__name__}/learning_rate',
-                kwargs.get('learning_rate'),
-                1e-4
-            )
+            **(self.get_global_hyperparam(
+                f'/optimizer/{obj.__name__}/',
+                None
+            ) or kwargs)
         )
         return self.optimizer
 
@@ -360,11 +359,119 @@ class WeightsLab:
         # Apply the Monkey Patch
         print(
             "Successfully patched 'forward' method for object: " +
-            f"{obj.__class__.__name__} with flag '{flag}'"
+            f"{obj.__class__.__name__} with flag '{flag}'",
+            level='DEBUG'
         )
         obj.forward = new_forward_func
 
         return obj
+
+    # =========================================
+    # Training & Inference functions
+    def wait_for_training(self) -> None:
+        # WeightsLabs fcts
+        # ---> Fct to be called: wl_exp.wait()
+        with self.lock:
+            while not self.is_training:
+                time.sleep(0.01)  # Wait for the training to start
+                pass
+            self.occured_train_steps += 1
+
+    def train_one_step(self):
+        """Train the model for one step."""
+
+        # WeightsLabs fcts
+        # with wl_exp.architecture_guard:
+        #     model_age = wl_exp.set_train_mode()
+        #     user training loop here...
+        #     ...
+        with self.architecture_guard:
+            self.model.set_tracking_mode(TrackingMode.TRAIN)
+            self.model.train()
+            model_age = self.model.get_age()
+
+            # User stuffs ->
+            self.optimizer.zero_grad()
+            input, output = self._pass_one_batch(self.train_iterator)
+
+            # User stuffs ->
+            # Classification Results
+            # Compute losses here
+            loss = 0
+            for name, loss_fct in self.losses.items():
+                losses_batch = loss_fct(
+                    output,
+                    input.label_batch.long()
+                )  # loss per sample
+                loss = loss + th.mean(losses_batch)  # Average over samples
+            loss = loss / len(self.losses)  # Average over losses
+            loss.backward()
+            self.optimizer.step()
+            
+            # Generate predictions here
+            if output.ndim == 1:
+                pred = (output > 0.0).long()
+            else:
+                pred = output.argmax(dim=1, keepdim=True)
+
+            # Compute metrics here
+            # Logs metrics with multiple metrics
+            for name, metric in self.metrics.items():
+                # torchmetrics.Metric
+                if hasattr(metric, 'to'):
+                    metric = metric.to(self.device)
+                    metric_value = metric(
+                        output.argmax(dim=1).flatten(),
+                        input.label_batch.flatten()
+                    )
+                    if hasattr(metric, 'compute'):
+                        metric_value = metric.compute().item()
+                        metric.reset()
+                else:
+                    # custom metric
+                    metric_value = metric(
+                        output.argmax(dim=1).flatten(),
+                        input.label_batch
+                    )
+                    if hasattr(metric_value, 'item'):
+                        metric_value = metric_value.item()
+
+                self.logger.add_scalars(
+                    f'train-{name}',
+                    {self.name: metric_value},
+                    global_step=model_age
+                )
+
+            # WeightsLabs fcts
+            # wl_exp.log_scalar(...)
+            # Model age is include in the fct
+            self.logger.add_scalars(
+                'train-loss', {self.name: loss.detach().cpu().numpy()},
+                global_step=model_age
+            )
+
+        # Update data statistics
+        # wl_exp.
+        with self.lock:
+            self.train_loader.dataset.update_batch_sample_stats(
+                model_age,
+                input.in_id_batch.detach().cpu().numpy(),
+                losses_batch.detach().cpu().numpy(),
+                pred.detach().cpu().numpy())
+
+            ids_np = input.in_id_batch.detach().cpu().numpy()
+            per_sample_loss_np = losses_batch.detach().cpu().numpy()
+            pred_np = pred.detach().cpu().numpy()
+            self.train_loader.dataset.update_sample_stats_ex_batch(
+                ids_np,
+                {
+                    "loss/combined": per_sample_loss_np,
+                    "pred": pred_np
+                }
+            )
+
+            self.training_steps_to_do -= 1
+            self.is_training = self.training_steps_to_do > 0
 
     # ========================================================================
     # ========================================================================
