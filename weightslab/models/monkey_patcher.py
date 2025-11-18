@@ -9,10 +9,11 @@ from weightslab.utils.tools import \
     get_module_device, rename_with_ops
 
 
-def monkey_patch(module: nn.Module):
+def monkey_patch_modules(module: nn.Module):
     """
         Dynamically injects LayerWiseOperations methods, wraps forward, and
         renames the module's displayed class name.
+       
         Args:
             module (nn.Module): The module to be patched.
     """

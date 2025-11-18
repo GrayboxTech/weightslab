@@ -1,9 +1,12 @@
 import os
+import tqdm
 import time
 import torch
 import tempfile
 import torch.nn as nn
 import torch.optim as optim
+
+from collections import defaultdict
 
 from torchvision import datasets, transforms
 
@@ -30,11 +33,11 @@ if __name__ == '__main__':
         'data': {
             'train_dataset': {
                 'train_shuffle': True,
-                'batch_size': 64
+                'batch_size': 256
             },
             'test_dataset': {
                 'test_shuffle': False,
-                'batch_size': 1
+                'batch_size': 256
             }
         },
         'optimizer': {
@@ -58,10 +61,11 @@ if __name__ == '__main__':
 
     # =========================
     # 1. Initialize the dataset
-    TMP_DIR = r'C:\Users\GUILLA~1\AppData\Local\Temp\tmp1eohr08t'
+    TMP_DIR = r'C:\Users\GUILLA~1\Desktop\trash'
+    print(f'Using tmp dir {TMP_DIR}')
     train_dataset = datasets.FashionMNIST(
         root=os.path.join(TMP_DIR, 'data'),
-        train=False,
+        train=True,
         download=True,
         transform=transforms.Compose(
             [
@@ -102,101 +106,144 @@ if __name__ == '__main__':
     # ====================
     # 4. Define criterions
     criterion_bin = wl_exp.watch(
-        nn.CrossEntropyLoss(reduction='none'),
-        flag='loss/bin_loss'
+        nn.BCELoss(reduction='none'),
+        flag='train_loss/bin_loss',
+        log=True
     )
     criterion_mlt = wl_exp.watch(
         nn.CrossEntropyLoss(reduction='none'),
-        flag='loss/mlt_loss'
+        flag='train_loss/mlt_loss',
+        log=True
     )
 
-    # ==========
-    # 5. Metrics
-    metric_mlt = wl_exp.watch(Accuracy(task="multiclass", num_classes=10).to(device), flag='metric/mlt_metric').to(device)
-    metric_bin = wl_exp.watch(Accuracy(task="binary", num_classes=1), flag='metric/bin_metric').to(device)
+    # =================
+    # 5. Define metrics
+    metric_bin = wl_exp.watch(
+        Accuracy(task="binary", num_classes=1),
+        flag='train_metric/bin_metric',
+        log=True
+    ).to(device)
+    metric_mlt = wl_exp.watch(
+        Accuracy(task="multiclass", num_classes=10),
+        flag='train_metric/mlt_metric',
+        log=True
+    ).to(device)
 
     # ================
     # 6. Training Loop
     print("\nStarting Training...")
-    nb_epochs = wl_exp.get_global_hyperparam('epochs')
-    for epoch in range(
-        1, nb_epochs + 1
-    ):
-        # Train for one ep
-        model.train()  # Set the model to training mode
-        running_loss = 0.0
+    for train_step, (inputs, ids, labels) in enumerate(tqdm.tqdm(train_loader, desc='Training..')):
+        if train_step == 0:
+            model.pause_ctrl.resume()
+        elif train_step > 2:
+            model.pause_ctrl.pause()
+            # model.operate(0, 1, 1)  # ADD 1 neurons
+            # model.operate(4, 1, 1)  # ADD 1 neurons
+            model.pause_ctrl.resume()
+        elif train_step > 3:
+            model.pause_ctrl.pause()
+            # model.operate(0, 1, 2)  # ADD 1 neurons
+            model.pause_ctrl.resume()
 
-        for inputs, _, labels in train_loader:
-            inputs = inputs.to(device)
-            bin_labels = (labels == 0).float().to(device)
-            mlt_labels = labels.to(device)
+        # Process data
+        inputs = inputs.to(device)
+        bin_labels = (labels == 0).float().to(device)
+        mlt_labels = labels.to(device)
 
-            # Zero the parameter gradients
-            optimizer.zero_grad()
+        # WL_EXP: Go for training
+        with wl_exp.training_guard:
+            # WL_EXP: Get model age
+            model_age = wl_exp.model.get_age()
 
-            # Forward pass
-            outputs = model(inputs)
-            loss_bin = criterion_bin(outputs[:, 0], bin_labels)
-            loss_mlt = criterion_mlt(outputs, mlt_labels)
-            loss = torch.mean(loss_bin) + torch.mean(loss_mlt)
+            # Train one step
+            optimizer.zero_grad()  # Zero the parameter gradients
+            preds = model(inputs)
+
+            # Compute Losses
+            # # Compute Binary Loss & Log
+            losses_batch_bin = criterion_bin(preds[:, 0], bin_labels)
+            # # Compute Mlt Loss & Log
+            losses_batch_mlt = criterion_mlt(preds, mlt_labels)
+            # # Compute Final Loss
+            train_loss = torch.mean(losses_batch_bin) + torch.mean(losses_batch_mlt)
+
+            # Update dataset statistics
+            wl_exp.update_data_statistics(
+                model_age,
+                ids,
+                {'bin_cls': losses_batch_bin, 'bin_mlt': losses_batch_mlt},
+                preds
+            )  # save as (input_id, losses_batch[i]: (lossA, lossB))
 
             # Update metrics
-            metric_bin.update(outputs[:, 0], bin_labels)
-            metric_mlt.update(outputs, mlt_labels)
+            metric_bin.update(preds[:, 0], bin_labels)
+            metric_mlt.update(preds, mlt_labels)
+            train_acc_mlt = metric_mlt.compute() * 100
+            train_acc_bin = metric_bin.compute() * 100
 
             # Backward pass and optimization
-            loss.backward()
+            train_loss.backward()
             optimizer.step()
 
-            running_loss += loss.item()
-        train_loss = running_loss / len(train_loader)
-        train_acc_mlt = metric_mlt.compute() * 100
-        train_acc_bin = metric_bin.compute() * 100
-
         print(
-            f"Epoch {epoch}/{nb_epochs}: " +
+            f"Step {train_step}/{len(train_loader)}: " +
             f"| Train Loss: {train_loss:.4f} " +
             f"| Train Acc mlt: {train_acc_mlt:.2f}%"
             f"| Train Acc bin: {train_acc_bin:.2f}%"
         )
-
+        if train_step == 0 or train_step % 5 != 0:
+            continue
 
         # --------------------------------------------------------------------
         # --------------------------------------------------------------------
-        # Evaluate on the test set
-        model.eval()  # Set the model to evaluation mode
-        correct = 0
-        total = 0
-        total_loss = 0.0
-
+        # Test Loop
         with torch.no_grad():  # Disable gradient calculation for evaluation
-            for inputs, labels in test_loader:
-                inputs = inputs.to(device)
-                bin_labels = (labels == 0).float().to(device)
-                mlt_labels = labels.to(device)
+            with wl_exp.testing_guard:
+                losses = 0.0
+                metric_totals = defaultdict(float)
+                for test_step, (inputs, ids, labels) in enumerate(tqdm.tqdm(test_loader, desc='Testing..')):
+                    # Process data
+                    inputs = inputs.to(device)
+                    bin_labels = (labels == 0).float().to(device)
+                    mlt_labels = labels.to(device)
 
-                outputs = model(inputs)
-                loss_bin = criterion_bin(outputs[:, 0], bin_labels)
-                loss_mlt = criterion_mlt(outputs, mlt_labels)
-                loss = loss_bin + loss_mlt
-                total_loss += loss.item()
+                    # Infer
+                    preds = model(inputs)
 
-                # _, predicted = torch.max(outputs.data, 1)
-                # total += labels.size(0)
-                # correct += (predicted == labels).sum().item()
-                metric_bin.update(outputs[:, 0], bin_labels)
-                metric_mlt.update(outputs, mlt_labels)
+                    # Compute Losses
+                    # # Compute Binary Loss & Log - fwd
+                    losses_batch_bin = criterion_bin(preds[:, 0], bin_labels, flag='test_loss/bin_loss')
+                    # # Compute Mlt Loss & Log - fwd
+                    losses_batch_mlt = criterion_mlt(preds, mlt_labels, flag='test_loss/mlt_loss')
+                    # # Save Batch Statistics
+                    losses_batch = torch.cat([losses_batch_bin[..., None], losses_batch_mlt[..., None]], axis=1)
+                    # # Compute Final Loss
+                    test_loss = torch.mean(losses_batch_bin) + torch.mean(losses_batch_mlt)
 
-        avg_test_loss = total_loss / len(test_loader)
-        test_acc_mlt = metric_mlt.compute() * 100
-        test_acc_bin = metric_bin.compute() * 100
+                    # Update dataset statistics
+                    wl_exp.update_data_statistics(
+                        model_age,
+                        ids,
+                        {'bin_cls': losses_batch_bin, 'bin_mlt': losses_batch_mlt},
+                        preds,
+                        is_training=False
+                    )  # save as (input_id, losses_batch[i]: (lossA, lossB))
 
-        print(
-            f"Epoch {epoch}/{nb_epochs}: " +
-            f"| Train Loss: {train_loss:.4f} " +
-            f"| Test Loss: {avg_test_loss:.4f} " +
-            f"| Test Acc mlt: {test_acc_mlt:.2f}%"
-            f"| Test Acc bin: {test_acc_bin:.2f}%"
-        )
+                    # Update metrics
+                    metric_bin.update(preds[:, 0], bin_labels)
+                    metric_mlt.update(preds, mlt_labels)
+                    test_acc_bin = metric_bin.compute(flag='test_metric/bin_metric') * 100
+                    test_acc_mlt = metric_mlt.compute(flag='test_metric/mlt_metric') * 100
+            # step_loss, metric_results = self.eval_one_step()
+            losses += test_loss
+            metric_totals['bin'] += test_acc_bin
+            metric_totals['mlt'] += test_acc_mlt
+            print(
+                f"Step {test_step}/{len(test_loader)}: " +
+                f"| Train Loss: {train_loss:.4f} " +
+                f"| Test Loss: {test_loss:.4f} " +
+                f"| Test Acc mlt: {metric_totals['mlt']:.2f}%"
+                f"| Test Acc bin: {metric_totals['bin']:.2f}%"
+            )
 
     print("\n--- Training Finished ---")

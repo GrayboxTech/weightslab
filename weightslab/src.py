@@ -1,7 +1,6 @@
 """ The Experiment class is the main class of the graybox package.
 It is used to train and evaluate models. """
 
-import time
 import functools
 import torch as th
 
@@ -15,11 +14,9 @@ from threading import Lock, RLock
 from weightslab.components.checkpoint import CheckpointManager
 from weightslab.data.data_samples_with_ops import \
     DataSampleTrackingWrapper
-from weightslab.components.monitoring import \
-    NeuronStatsWithDifferencesMonitor
 from weightslab.weightslab.backend.model_interface import ModelInterface
-from weightslab.components.tracking import TrackingMode
 from weightslab.utils.logs import print
+from weightslab.weightslab.components.global_monitoring import GuardContext
 
 
 class WeightsLab:
@@ -58,53 +55,75 @@ class WeightsLab:
             config_data=config
         )
 
-        # Thread safeguards
-        self.lock = Lock()
-        self.architecture_guard = RLock()
-
-        # stamp = time.time()
-        # self.name = name if name is not None else \
-        #     f"Experiment_{stamp}"
-        # self.root_log_dir = Path(root_log_dir)
-        # self.model = model
-        # self.input_shape = input_shape
-        # self.device = device
-        # self.batch_size = batch_size
-        # self.criterion = criterion or th.nn.CrossEntropyLoss(reduction='none')
-        # self.metrics = metrics or {}
-        # self.task_type = task_type
-        # self.eval_dataset = eval_dataset
-        # self.tqdm_display = tqdm_display
-        # self.learning_rate = learning_rate
-        # self.train_dataset = train_dataset
-        # self.optimizer_class = optimizer_class
-        # self.train_shuffle = train_shuffle
-        # self.get_train_data_loader = get_train_data_loader
-        # self.get_eval_data_loader = get_eval_data_loader
-        # self.last_input = None
-        # self.is_training = False
-        # self.training_steps_to_do = training_steps_to_do
-        # self.tasks = tasks or []
-
-        # self.eval_full_to_train_steps_ratio = 64
-        # self.experiment_dump_to_train_steps_ratio = 1024
-        # self.occured_train_steps = 0
-        # self.occured_eval__steps = 0
-        # self.train_loop_callbacks = []
-        # self.train_loop_clbk_freq = 50
-        # self.train_loop_clbk_call = True
-
+        self.training_steps_to_do = 2048
+        self.eval_full_to_train_steps_ratio = 64
+        self.experiment_dump_to_train_steps_ratio = 1024
+        self.occured_train_steps = 0
+        self.occured_eval__steps = 0
+        self.train_loop_callbacks = []
+        self.train_loop_clbk_freq = 50
+        self.train_loop_clbk_call = True
+        self.learning_rate = 1e-2
         self.root_log_dir = Path(self.get_global_hyperparam('root_log_dir'))
         if not self.root_log_dir.exists():
             self.root_log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Init Logger, CheckpointManager, and NeuronStatsWithDifferencesMonitor
+        # Init Logger and CheckpointManager
         self.logger = SummaryWriter(self.root_log_dir)
-        self.stats_monitor = NeuronStatsWithDifferencesMonitor()
         self.chkpt_manager = CheckpointManager(self.root_log_dir)
         self.chkpt_manager.load(
             self.chkpt_manager.get_latest_experiment(), self
         ) if not self.get_global_hyperparam('skip_loading') else None
+
+        # Thread safeguards
+        self.lock = Lock()
+        self.architecture_guard = RLock()
+        self.training_guard = GuardContext(self, for_training=True)
+        self.testing_guard = GuardContext(self, for_training=False)
+
+    def logger_add_scalars(self, name: str, data: Dict, model_age: int):
+        self.logger.add_scalars(
+            name,
+            data,
+            global_step=model_age
+        )
+
+    def get_model_age(self):
+        return self.model.get_age()
+
+    def update_data_statistics(
+        self,
+        model_age: int,
+        batch_ids: th.Tensor,
+        losses_batch: th.Tensor,
+        preds: th.Tensor,
+        is_training: bool = True
+    ):
+        with self.lock:
+            # Get batch data
+            pred_np = preds.detach().cpu().numpy()
+            batch_ids_np = batch_ids.detach().cpu().numpy()
+            if not isinstance(losses_batch, dict):
+                per_sample_loss_np = losses_batch.detach().cpu().numpy()
+            else:
+                for k in losses_batch:
+                    losses_batch[k] = losses_batch[k].detach().cpu().numpy()
+                per_sample_loss_np = losses_batch
+
+            # Update batch sample stats
+            self.train_dataset_loader.dataset.update_batch_sample_stats(
+                model_age,
+                batch_ids_np,
+                per_sample_loss_np,
+                pred_np
+            )
+            self.train_dataset_loader.dataset.update_sample_stats_ex_batch(
+                batch_ids_np,
+                {
+                    "loss/combined": per_sample_loss_np,
+                    "pred": pred_np
+                }
+            )
 
     def set_global_hyperparam(self, config_data: Dict) -> None:
         self.GLOBAL_HYPER_PARAMETERS.update(config_data)
@@ -220,7 +239,7 @@ class WeightsLab:
                 DataLoader.
         """
 
-        # TODO (GP):
+        # TODO (GP): iter(loader) not working with n_workers > 0
         n_workers = self.get_global_hyperparam(
                 f'/data/{dataset.__name__}/num_workers',
                 kwargs.get('num_workers'),
@@ -299,7 +318,7 @@ class WeightsLab:
         )
         return self.optimizer
 
-    def watch(self, obj: Callable, flag: str = "default") -> None:
+    def watch(self, obj: Callable, flag: str = "default", log=False, **kwargs) -> None:
         """
         Monkey patches the 'forward' method of the input object (obj) to inject
         logging action after the original calculation.
@@ -311,6 +330,12 @@ class WeightsLab:
         Returns:
             The patched object.
         """
+        if 'loss' in flag.lower():
+            return self._watch_loss(obj, flag, log, **kwargs)
+        elif 'metric' in flag.lower():
+            return self._watch_metric(obj, flag, log, **kwargs)
+
+    def _watch_loss(self, obj: Callable, flag: str, log: bool, **kwargs): 
         # Ensure the object has a forward method to patch
         if not hasattr(obj, 'forward') \
                 or not callable(getattr(obj, 'forward')):
@@ -327,34 +352,39 @@ class WeightsLab:
         # and 'flag'.
         @functools.wraps(original_forward)
         def new_forward_func(*args, **kwargs):
+            _flag = None
+            if 'flag' in kwargs:
+                _flag = kwargs.pop('flag', None)
 
             # --- EXECUTE ORIGINAL LOGIC ---
             # Call the original method with all passed arguments.
             # This returns the raw loss tensor needed for backpropagation.
-            value = original_forward(*args, **kwargs)
+            losses_value = original_forward(*args, **kwargs)
 
             # --- INJECT CUSTOM LOGGING ACTION ---
             try:
+                tag = flag if _flag is None else _flag
+
                 # 1. Get logging context
-                model_age = self.get_global_step()
+                model_age = self.get_model_age()
 
                 # 2. Extract loss value and format for logger
                 # Detach, move to CPU, convert to numpy scalar (item())
-                loss_value = value.detach().cpu().numpy().item()
+                flat_losses_value = losses_value.flatten().mean()
 
-                # 3. Perform the user-requested logging
+                # Log results
                 self.logger.add_scalars(
-                    flag,
-                    {flag: loss_value},
+                    tag,
+                    {tag: flat_losses_value},
                     global_step=model_age
-                )
+                ) if log else None
 
             except Exception as e:
-                print(f"Logging Warning: Failed to log value for flag '{flag}': {e}")
+                print(f"Logging Warning: Failed to log value for flag '{tag}': {e}")
 
             # --- RETURN ORIGINAL RESULT ---
             # This MUST return the raw tensor for the optimizer's backward pass.
-            return value
+            return losses_value
 
         # Apply the Monkey Patch
         print(
@@ -366,112 +396,71 @@ class WeightsLab:
 
         return obj
 
+    def _watch_metric(self, obj: Callable, flag: str, log: bool, **kwargs): 
+        # Ensure the object has a compute method to patch
+        if not hasattr(obj, 'compute') \
+                or not callable(getattr(obj, 'compute')):
+            raise ValueError(
+                f"Object {obj} does not have a callable 'compute' method \
+                to patch."
+            )
+
+        # Capture the original compute method.
+        original_compute = obj.compute
+
+        # Define the new wrapper function (closure).
+        # It captures 'self' (ExperimentLogger instance), 'original_compute',
+        # and 'flag'.
+        @functools.wraps(original_compute)
+        def new_compute_func(*args, **kwargs):
+            _flag = None
+            if 'flag' in kwargs:
+                _flag = kwargs.pop('flag', None)
+
+            # --- EXECUTE ORIGINAL LOGIC ---
+            # Call the original method with all passed arguments.
+            # This returns the raw loss tensor needed for backpropagation.
+            value = original_compute(*args, **kwargs)
+
+            # --- INJECT CUSTOM LOGGING ACTION ---
+            try:
+                tag = flag if _flag is None else _flag
+
+                # 1. Get logging context
+                model_age = self.get_model_age()
+
+                # 2. Extract loss value and format for logger
+                # Detach, move to CPU, convert to numpy scalar (item())
+                metric_value = value.detach().cpu().numpy().item()
+
+                # Log results
+                self.logger.add_scalars(
+                    tag,
+                    {tag: metric_value},
+                    global_step=model_age
+                ) if log else None
+
+            except Exception as e:
+                print(f"Logging Warning: Failed to log value for flag '{tag}': {e}")
+
+            # --- RETURN ORIGINAL RESULT ---
+            # This MUST return the raw tensor for the optimizer's backward pass.
+            return value
+
+        # Apply the Monkey Patch
+        print(
+            "Successfully patched 'compute' method for object: " +
+            f"{obj.__class__.__name__} with flag '{flag}'",
+            level='DEBUG'
+        )
+        obj.compute = new_compute_func
+
+        return obj
+
     # =========================================
     # Training & Inference functions
-    def wait_for_training(self) -> None:
-        # WeightsLabs fcts
-        # ---> Fct to be called: wl_exp.wait()
-        with self.lock:
-            while not self.is_training:
-                time.sleep(0.01)  # Wait for the training to start
-                pass
-            self.occured_train_steps += 1
+    # Model state
 
-    def train_one_step(self):
-        """Train the model for one step."""
-
-        # WeightsLabs fcts
-        # with wl_exp.architecture_guard:
-        #     model_age = wl_exp.set_train_mode()
-        #     user training loop here...
-        #     ...
-        with self.architecture_guard:
-            self.model.set_tracking_mode(TrackingMode.TRAIN)
-            self.model.train()
-            model_age = self.model.get_age()
-
-            # User stuffs ->
-            self.optimizer.zero_grad()
-            input, output = self._pass_one_batch(self.train_iterator)
-
-            # User stuffs ->
-            # Classification Results
-            # Compute losses here
-            loss = 0
-            for name, loss_fct in self.losses.items():
-                losses_batch = loss_fct(
-                    output,
-                    input.label_batch.long()
-                )  # loss per sample
-                loss = loss + th.mean(losses_batch)  # Average over samples
-            loss = loss / len(self.losses)  # Average over losses
-            loss.backward()
-            self.optimizer.step()
-            
-            # Generate predictions here
-            if output.ndim == 1:
-                pred = (output > 0.0).long()
-            else:
-                pred = output.argmax(dim=1, keepdim=True)
-
-            # Compute metrics here
-            # Logs metrics with multiple metrics
-            for name, metric in self.metrics.items():
-                # torchmetrics.Metric
-                if hasattr(metric, 'to'):
-                    metric = metric.to(self.device)
-                    metric_value = metric(
-                        output.argmax(dim=1).flatten(),
-                        input.label_batch.flatten()
-                    )
-                    if hasattr(metric, 'compute'):
-                        metric_value = metric.compute().item()
-                        metric.reset()
-                else:
-                    # custom metric
-                    metric_value = metric(
-                        output.argmax(dim=1).flatten(),
-                        input.label_batch
-                    )
-                    if hasattr(metric_value, 'item'):
-                        metric_value = metric_value.item()
-
-                self.logger.add_scalars(
-                    f'train-{name}',
-                    {self.name: metric_value},
-                    global_step=model_age
-                )
-
-            # WeightsLabs fcts
-            # wl_exp.log_scalar(...)
-            # Model age is include in the fct
-            self.logger.add_scalars(
-                'train-loss', {self.name: loss.detach().cpu().numpy()},
-                global_step=model_age
-            )
-
-        # Update data statistics
-        # wl_exp.
-        with self.lock:
-            self.train_loader.dataset.update_batch_sample_stats(
-                model_age,
-                input.in_id_batch.detach().cpu().numpy(),
-                losses_batch.detach().cpu().numpy(),
-                pred.detach().cpu().numpy())
-
-            ids_np = input.in_id_batch.detach().cpu().numpy()
-            per_sample_loss_np = losses_batch.detach().cpu().numpy()
-            pred_np = pred.detach().cpu().numpy()
-            self.train_loader.dataset.update_sample_stats_ex_batch(
-                ids_np,
-                {
-                    "loss/combined": per_sample_loss_np,
-                    "pred": pred_np
-                }
-            )
-
-            self.training_steps_to_do -= 1
-            self.is_training = self.training_steps_to_do > 0
 
     # ========================================================================
     # ========================================================================
@@ -484,7 +473,9 @@ class WeightsLab:
 
     def _update_optimizer(self, model):
         self.optimizer = self.optimizer_class(
-            model.parameters(), lr=self.learning_rate)
+            model.parameters(),
+            lr=self.learning_rate
+        )
 
     def _pick_legacy_dense_pred(self, preds, x):
         HxW = None
@@ -543,6 +534,15 @@ class WeightsLab:
         """
         self.train_loop_clbk_call = not self.train_loop_clbk_call
 
+    def toggle_is_training(self):
+        """Toggle the calling of the callbacks during training loop
+            This either enables or disables the callbacks.
+        """
+        if not self.pause_controller.is_paused():
+            self.pause_controller.pause()
+        else:
+            self.pause_controller.resume()
+
     def performed_train_steps(self):
         """Return the number of training steps that have been performed.
 
@@ -558,11 +558,6 @@ class WeightsLab:
             int: the number of evaluation steps that have been performed
         """
         return self.occured_eval__steps
-
-    def display_stats(self):
-        """Display the statistics of the model. This is done in the command
-        line prompt. """
-        self.stats_monitor.display_stats(self)
 
     def dump(self):
         """Dump the experiment into a checkpoint. Marks the checkpoint on the
@@ -600,7 +595,7 @@ class WeightsLab:
 
         # Train
         dataset = self.train_dataset_tracker
-        self.train_loader = th.utils.data.DataLoader(
+        self.train_dataset_loader = th.utils.data.DataLoader(
             dataset,
             batch_size=self.get_global_hyperparam(
                 f'/data/{dataset.__name__}/batch_size',
@@ -633,11 +628,11 @@ class WeightsLab:
                 {}
             ),
         )
-        self.train_iterator = iter(self.train_loader)
+        self.train_dataset_iterator = iter(self.train_dataset_loader)
 
         # Eval
         dataset = self.test_dataset_tracker
-        self.test_loader = th.utils.data.DataLoader(
+        self.test_dataset_loader = th.utils.data.DataLoader(
             dataset,
             batch_size=self.get_global_hyperparam(
                 f'/data/{dataset.__name__}/batch_size',
@@ -670,17 +665,17 @@ class WeightsLab:
                 {}
             ),
         )
-        self.test_iterator = iter(self.test_loader)
+        self.test_dataset_iterator = iter(self.test_dataset_loader)
 
     def get_train_records(self):
         """"Get all the train samples are records."""
         with self.lock:
-            return self.train_loader.dataset.as_records()
+            return self.train_dataset_loader.dataset.as_records()
 
     def get_eval_records(self):
         """"Get all the train samples are records."""
         with self.lock:
-            return self.test_loader.dataset.as_records()
+            return self.test_dataset_loader.dataset.as_records()
 
     # ========================================================================
     # ========================================================================

@@ -14,7 +14,7 @@ from weightslab.data.data_samples_with_ops import \
     DataSampleTrackingWrapper
 from weightslab.components.tracking import TrackingMode
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
-from weightslab.components.monitoring import \
+from weightslab.weightslab.components.global_monitoring import \
     NeuronStatsWithDifferencesMonitor
 from weightslab.backend.watcher_editor import ModelInterface
 
@@ -403,7 +403,7 @@ class Experiment:
                 'train-loss', {self.name: loss.detach().cpu().numpy()},
                 global_step=model_age
             )
-
+    
         # Update data statistics
         with self.lock:
             self.train_loader.dataset.update_batch_sample_stats(

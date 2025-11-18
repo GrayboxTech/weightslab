@@ -1,7 +1,8 @@
+import functools
+import types
 import torch as th
 
 from torch.fx.passes.shape_prop import ShapeProp
-# from weightslab.utils.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
 
 from weightslab.components.tracking import TrackingMode
@@ -9,11 +10,12 @@ from weightslab.models.model_with_ops import NetworkWithOps
 from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
+from weightslab.models.monkey_patcher import monkey_patch_modules
 from weightslab.utils.logs import print, setup_logging
-from weightslab.models.monkey_patcher import monkey_patch
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
+from weightslab.weightslab.components.global_monitoring import pause_controller
 
 
 class ModelInterface(NetworkWithOps):
@@ -64,6 +66,7 @@ class ModelInterface(NetworkWithOps):
         self.print_graph_filename = print_graph_filename
         self.traced_model = symbolic_trace(model)
         self.traced_model.name = "N.A."
+        self.pause_ctrl = pause_controller
 
         # Propagate the shape over the graph
         self.shape_propagation()
@@ -72,7 +75,7 @@ class ModelInterface(NetworkWithOps):
         self.generate_graph_vizu()
 
         # Patch the torch model with WeightsLab features
-        self.monkey_patch_model()
+        self.monkey_patching()
 
         # Generate the graph dependencies
         self.define_deps()
@@ -121,8 +124,9 @@ class ModelInterface(NetworkWithOps):
             return False
         return False
 
-    def monkey_patch_model(self):
-        """Applies monkey patching to the model's modules.
+    def monkey_patching(self):
+        """
+        Applies monkey patching to the model's modules.
 
         This method iterates through all submodules of the `self.model` and applies
         a monkey patch. The purpose of this patching is to inject additional
@@ -136,7 +140,9 @@ class ModelInterface(NetworkWithOps):
             None: This method modifies the `self.model` in-place and does not
             return any value.
         """
-        self.model.apply(monkey_patch)
+
+        # Monkey patch every nn.Module of the model
+        self.model.apply(monkey_patch_modules)
 
     def shape_propagation(self):
         """Propagates shapes through the traced model.
@@ -244,6 +250,9 @@ class ModelInterface(NetworkWithOps):
         Returns:
             th.Tensor: The output tensor from the model's forward pass.
         """
+
+        self.pause_ctrl.wait_if_paused()  # Wait until resume
+        
         self.maybe_update_age(x)
         out = self.model(x)
 
