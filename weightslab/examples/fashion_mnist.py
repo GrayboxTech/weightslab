@@ -134,16 +134,19 @@ if __name__ == '__main__':
     print("\nStarting Training...")
     for train_step, (inputs, ids, labels) in enumerate(tqdm.tqdm(train_loader, desc='Training..')):
         if train_step == 0:
+            model.operate(0, 1, 1)  # ADD 1 neurons
             model.pause_ctrl.resume()
-        elif train_step > 2:
+        elif train_step == 1:
             model.pause_ctrl.pause()
-            # model.operate(0, 1, 1)  # ADD 1 neurons
+            model.operate(0, 1, 1)  # ADD 1 neurons
             # model.operate(4, 1, 1)  # ADD 1 neurons
             model.pause_ctrl.resume()
-        elif train_step > 3:
+        elif train_step == 2:
             model.pause_ctrl.pause()
-            # model.operate(0, 1, 2)  # ADD 1 neurons
+            model.operate(0, 1, 2)  # ADD 1 neurons
             model.pause_ctrl.resume()
+
+        optimizer = wl_exp.optimizer
 
         # Process data
         inputs = inputs.to(device)
