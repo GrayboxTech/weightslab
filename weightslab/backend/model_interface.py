@@ -15,7 +15,7 @@ from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
-from weightslab.weightslab.components.global_monitoring import pause_controller
+from weightslab.components.global_monitoring import pause_controller
 
 
 class ModelInterface(NetworkWithOps):

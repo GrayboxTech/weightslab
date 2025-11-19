@@ -10,13 +10,16 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import Dict, Any, Callable, List
 from collections import namedtuple
 from threading import Lock, RLock
+from types import SimpleNamespace
+from typing import Any, Dict
 
+from weightslab.utils.logs import print
+from weightslab.utils.board import Dash
+from weightslab.backend.model_interface import ModelInterface
 from weightslab.components.checkpoint import CheckpointManager
+from weightslab.components.global_monitoring import GuardContext
 from weightslab.data.data_samples_with_ops import \
     DataSampleTrackingWrapper
-from weightslab.weightslab.backend.model_interface import ModelInterface
-from weightslab.utils.logs import print
-from weightslab.weightslab.components.global_monitoring import GuardContext
 
 
 class WeightsLab:
@@ -50,11 +53,19 @@ class WeightsLab:
             config: Dict[str, Any] = None
     ):
 
+        # Thread safeguards
+        self.lock = Lock()
+        self.architecture_guard = RLock()
+        self.training_guard = GuardContext(self, for_training=True)
+        self.testing_guard = GuardContext(self, for_training=False)
+
         # Read hyperparameters from the config
         self.set_global_hyperparam(
             config_data=config
         )
 
+        # Variables
+        self.is_training = True
         self.training_steps_to_do = 2048
         self.eval_full_to_train_steps_ratio = 64
         self.experiment_dump_to_train_steps_ratio = 1024
@@ -69,17 +80,11 @@ class WeightsLab:
             self.root_log_dir.mkdir(parents=True, exist_ok=True)
 
         # Init Logger and CheckpointManager
-        self.logger = SummaryWriter(self.root_log_dir)
+        self.logger = Dash(self.root_log_dir)  # SummaryWriter(self.root_log_dir)
         self.chkpt_manager = CheckpointManager(self.root_log_dir)
         self.chkpt_manager.load(
             self.chkpt_manager.get_latest_experiment(), self
         ) if not self.get_global_hyperparam('skip_loading') else None
-
-        # Thread safeguards
-        self.lock = Lock()
-        self.architecture_guard = RLock()
-        self.training_guard = GuardContext(self, for_training=True)
-        self.testing_guard = GuardContext(self, for_training=False)
 
     def logger_add_scalars(self, name: str, data: Dict, model_age: int):
         self.logger.add_scalars(
@@ -90,6 +95,14 @@ class WeightsLab:
 
     def get_model_age(self):
         return self.model.get_age()
+    
+    def set_is_training(self, is_training: bool):
+        if is_training and not self.model.pause_ctrl.is_paused():
+            self.is_training = is_training
+            self.model.pause_ctrl.pause()
+        else:
+            self.is_training = is_training
+            self.model.pause_ctrl.resume()
 
     def update_data_statistics(
         self,
@@ -125,8 +138,65 @@ class WeightsLab:
                 }
             )
 
+    def apply_dict_namespace(self, cfg: Dict[str, Any]) -> None:
+        """
+        Recursively set attributes on self. For nested dicts, create a
+        SimpleNamespace on the instance, so nested keys are available as attributes.
+
+        Example:
+            cfg = {'a': {'b': 1}}
+            -> self.a is a SimpleNamespace and self.a.b == 1
+        """
+        def _apply(target, mapping: Dict[str, Any], path=None):
+            if path is None:
+                path = []
+
+            for k, v in mapping.items():
+                keys = path + [k]
+                if isinstance(v, dict):
+                    # ensure namespace exists on the current target
+                    ns = getattr(target, k, None)
+                    if not isinstance(ns, SimpleNamespace):
+                        ns = SimpleNamespace()
+                        setattr(target, k, ns)
+                    _apply(ns, v, keys)
+                else:
+                    # set the value on the target (could be self or a SimpleNamespace)
+                    setattr(target, k, v)
+
+                    # create readable method suffix from the key path
+                    name_suffix = "_".join(keys)
+                    getter_name = f"get_{name_suffix}"
+                    setter_name = f"set_{name_suffix}"
+
+                    # factories to capture current keys (avoid late-binding closure issue)
+                    def make_getter(captured_keys):
+                        def getter():
+                            with self.lock:
+                                obj = self
+                                for part in captured_keys:
+                                    obj = getattr(obj, part)
+                                return obj
+                        return getter
+
+                    def make_setter(captured_keys):
+                        def setter(new_value):
+                            with self.lock:
+                                obj = self
+                                for part in captured_keys[:-1]:
+                                    obj = getattr(obj, part)
+                                setattr(obj, captured_keys[-1], new_value)
+                        return setter
+
+                    # attach methods to the instance
+                    setattr(self, getter_name, make_getter(keys))
+                    setattr(self, setter_name, make_setter(keys))
+
+        _apply(self, cfg)
+        
     def set_global_hyperparam(self, config_data: Dict) -> None:
         self.GLOBAL_HYPER_PARAMETERS.update(config_data)
+        self.apply_dict_namespace(config_data)
 
     def get_global_hyperparam(
         self,
@@ -538,10 +608,10 @@ class WeightsLab:
         """Toggle the calling of the callbacks during training loop
             This either enables or disables the callbacks.
         """
-        if not self.pause_controller.is_paused():
-            self.pause_controller.pause()
+        if not self.pause_ctrl.is_paused():
+            self.pause_ctrl.pause()
         else:
-            self.pause_controller.resume()
+            self.pause_ctrl.resume()
 
     def performed_train_steps(self):
         """Return the number of training steps that have been performed.
@@ -676,56 +746,6 @@ class WeightsLab:
         """"Get all the train samples are records."""
         with self.lock:
             return self.test_dataset_loader.dataset.as_records()
-
-    # ========================================================================
-    # ========================================================================
-    # Hyperparameters functions
-    def set_parameter(
-            self,
-            parameter_name,
-            parameter_value,
-            fct2call: Callable = None,
-            related_functions: List[Callable] = []
-    ):
-        """Set a parameter value in the global hyperparameters.
-
-        Args:
-            parameter_name (str): the name of the parameter
-            parameter_value (any): the new value of the parameter
-            fct2call (Callable): a function that will be called when the
-            parameter is set.
-            related_functions (List[Callable]): a list of functions that will be
-            called when the parameter is set.
-        """
-        with self.lock:
-            self.global_hyper_parameters[parameter_name] = HyperParam(
-                data_type=type(parameter_value),
-                value=parameter_value,
-                default_value=parameter_value,
-                fct2call=fct2call,
-                related_functions=related_functions
-            )
-
-        # 2. Dynamic Method Generation
-        def getter(instance: 'Experiment'):
-            """Dynamically generated getter for {parameter_name}."""
-            with instance.lock:
-                return instance.global_hyper_parameters[parameter_name].value
-
-        # Define the Setter function template
-        def setter(instance: 'Experiment', new_value: Any):
-            """Dynamically generated setter for {parameter_name}."""
-            with instance.lock:
-                # Update the value attribute of the HyperParam object
-                instance.global_hyper_parameters[parameter_name].value = new_value
-                # Update related object parameters with the new value, e.g.,
-                # optimizer and learning_rate.
-                setattr(instance.global_hyper_parameters[parameter_name].related_functions, parameter_name, new_value)
-                instance.global_hyper_parameters[parameter_name].fct2call()
-
-        # Assign the functions as new methods to the instance using setattr()
-        setattr(self, f"get_{parameter_name}", getter)
-        setattr(self, f"set_{parameter_name}", setter)
 
     # ========================================================================
     # ========================================================================
