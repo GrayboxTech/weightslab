@@ -1,0 +1,246 @@
+"""Global Ledgers for sharing objects across threads.
+
+Provide a simple, thread-safe registry for models, dataloaders and
+optimizers so different threads can access and update the same objects by
+name. The ledger supports returning placeholder proxies for objects that are
+not yet registered; those proxies can be updated in-place when the real
+object is registered later, which enables the "import placeholder then
+update" workflow described by the user.
+"""
+
+from __future__ import annotations
+
+import threading
+import weakref
+from typing import Any, Dict, List, Optional
+
+
+class Proxy:
+    """A small forwarding proxy that holds a mutable reference to an object.
+
+    Attribute access is forwarded to the underlying object once set. Until
+    then, attempting to access attributes raises AttributeError.
+    """
+
+    def __init__(self, obj: Any = None):
+        self._lock = threading.RLock()
+        self._obj = obj
+
+    def set(self, obj: Any) -> None:
+        with self._lock:
+            self._obj = obj
+
+    def get(self) -> Any:
+        with self._lock:
+            return self._obj
+
+    def __getattr__(self, item):
+        with self._lock:
+            if self._obj is None:
+                raise AttributeError("Proxy target not set")
+            return getattr(self._obj, item)
+
+    def __repr__(self):
+        with self._lock:
+            return f"Proxy({repr(self._obj)})"
+
+
+class Ledger:
+    """Thread-safe ledger storing named registries for different object types.
+
+    The ledger stores strong references by default and also supports weak
+    registrations. If an object is requested via `get_*` and not present a
+    `Proxy` placeholder is created, stored, and returned; calling
+    `register_*` with the same name will update the proxy in-place.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        # strong refs
+        self._models: Dict[str, Any] = {}
+        self._dataloaders: Dict[str, Any] = {}
+        self._optimizers: Dict[str, Any] = {}
+        # weak refs
+        self._models_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
+        self._dataloaders_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
+        self._optimizers_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
+        # proxies mapping name -> Proxy for placeholders
+        self._proxies_models: Dict[str, Proxy] = {}
+        self._proxies_dataloaders: Dict[str, Proxy] = {}
+        self._proxies_optimizers: Dict[str, Proxy] = {}
+
+    # Generic helpers
+    def _register(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: str, obj: Any, weak: bool = False) -> None:
+        with self._lock:
+            if weak:
+                registry.pop(name, None)
+                registry_weak[name] = obj
+            else:
+                proxy = proxies.get(name)
+                if proxy is not None:
+                    # update proxy in-place and keep the proxy as the public handle
+                    proxy.set(obj)
+                    registry[name] = proxy
+                else:
+                    registry[name] = obj
+                if name in registry_weak:
+                    try:
+                        del registry_weak[name]
+                    except KeyError:
+                        pass
+
+    def _get(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: Optional[str] = None) -> Any:
+        with self._lock:
+            if name is not None:
+                if name in registry:
+                    return registry[name]
+                if name in registry_weak:
+                    return registry_weak[name]
+                # create a placeholder proxy, store it strongly and return it
+                proxy = Proxy(None)
+                registry[name] = proxy
+                proxies[name] = proxy
+                return proxy
+
+            # if name is None and exactly one total item exists, return it
+            keys = set(registry.keys()) | set(registry_weak.keys())
+            if len(keys) == 1:
+                k = next(iter(keys))
+                return registry.get(k, registry_weak.get(k))
+            raise KeyError("multiple entries present, specify a name")
+
+    def _list(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary) -> List[str]:
+        with self._lock:
+            # combine keys from strong and weak registries
+            keys = list(dict.fromkeys(list(registry.keys()) + list(registry_weak.keys())))
+            return keys
+
+    def _unregister(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: str) -> None:
+        with self._lock:
+            registry.pop(name, None)
+            try:
+                del registry_weak[name]
+            except KeyError:
+                pass
+            proxies.pop(name, None)
+
+    # Models
+    def register_model(self, name: str, model: Any, weak: bool = False) -> None:
+        self._register(self._models, self._models_weak, self._proxies_models, name, model, weak=weak)
+
+    def get_model(self, name: Optional[str] = None) -> Any:
+        return self._get(self._models, self._models_weak, self._proxies_models, name)
+
+    def list_models(self) -> List[str]:
+        return self._list(self._models, self._models_weak)
+
+    def unregister_model(self, name: str) -> None:
+        self._unregister(self._models, self._models_weak, self._proxies_models, name)
+
+    # Dataloaders
+    def register_dataloader(self, name: str, dataloader: Any, weak: bool = False) -> None:
+        self._register(self._dataloaders, self._dataloaders_weak, self._proxies_dataloaders, name, dataloader, weak=weak)
+
+    def get_dataloader(self, name: Optional[str] = None) -> Any:
+        return self._get(self._dataloaders, self._dataloaders_weak, self._proxies_dataloaders, name)
+
+    def list_dataloaders(self) -> List[str]:
+        return self._list(self._dataloaders, self._dataloaders_weak)
+
+    def unregister_dataloader(self, name: str) -> None:
+        self._unregister(self._dataloaders, self._dataloaders_weak, self._proxies_dataloaders, name)
+
+    # Optimizers
+    def register_optimizer(self, name: str, optimizer: Any, weak: bool = False) -> None:
+        self._register(self._optimizers, self._optimizers_weak, self._proxies_optimizers, name, optimizer, weak=weak)
+
+    def get_optimizer(self, name: Optional[str] = None) -> Any:
+        return self._get(self._optimizers, self._optimizers_weak, self._proxies_optimizers, name)
+
+    def list_optimizers(self) -> List[str]:
+        return self._list(self._optimizers, self._optimizers_weak)
+
+    def unregister_optimizer(self, name: str) -> None:
+        self._unregister(self._optimizers, self._optimizers_weak, self._proxies_optimizers, name)
+
+    # Convenience
+    def clear(self) -> None:
+        """Clear all registries."""
+        with self._lock:
+            self._models.clear()
+            self._dataloaders.clear()
+            self._optimizers.clear()
+            self._models_weak.clear()
+            self._dataloaders_weak.clear()
+            self._optimizers_weak.clear()
+            self._proxies_models.clear()
+            self._proxies_dataloaders.clear()
+            self._proxies_optimizers.clear()
+
+    def snapshot(self) -> Dict[str, List[str]]:
+        """Return the current keys for all registries (a lightweight snapshot)."""
+        with self._lock:
+            return {
+                "models": list(self._models.keys()),
+                "dataloaders": list(self._dataloaders.keys()),
+                "optimizers": list(self._optimizers.keys()),
+            }
+
+    def __repr__(self) -> str:
+        s = self.snapshot()
+        return f"Ledger(models={s['models']}, dataloaders={s['dataloaders']}, optimizers={s['optimizers']})"
+
+
+# Module-level singleton
+GLOBAL_LEDGER = Ledger()
+
+# Convenience top-level wrappers (preserve optional weak param)
+def register_model(name: str, model: Any, weak: bool = False) -> None:
+    GLOBAL_LEDGER.register_model(name, model, weak=weak)
+
+
+def get_model(name: Optional[str] = None) -> Any:
+    return GLOBAL_LEDGER.get_model(name)
+
+def get_models() -> List[str]:
+    return GLOBAL_LEDGER.list_models()
+
+def register_dataloader(name: str, dataloader: Any, weak: bool = False) -> None:
+    GLOBAL_LEDGER.register_dataloader(name, dataloader, weak=weak)
+
+def get_dataloader(name: Optional[str] = None) -> Any:
+    return GLOBAL_LEDGER.get_dataloader(name)
+
+def get_dataloaders() -> List[str]:
+    return GLOBAL_LEDGER.list_dataloaders()
+
+def register_optimizer(name: str, optimizer: Any, weak: bool = False) -> None:
+    GLOBAL_LEDGER.register_optimizer(name, optimizer, weak=weak)
+
+def get_optimizer(name: Optional[str] = None) -> Any:
+    return GLOBAL_LEDGER.get_optimizer(name)
+
+def get_optimizers() -> List[str]:
+    return GLOBAL_LEDGER.list_optimizers()
+
+
+if __name__ == "__main__":
+    # Quick demonstration
+    import torch
+    import torch.nn as nn
+
+    class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(4, 2)
+
+        def forward(self, x):
+            return self.lin(x)
+
+    m = DummyModel()
+    opt = torch.optim.SGD(m.parameters(), lr=0.1)
+
+    GLOBAL_LEDGER.register_model("demo_model", m)
+    GLOBAL_LEDGER.register_optimizer("_optimizer", opt)
+
+    print(GLOBAL_LEDGER)

@@ -1,6 +1,7 @@
 """ The Experiment class is the main class of the graybox package.
 It is used to train and evaluate models. """
 
+import time
 import functools
 import torch as th
 
@@ -14,9 +15,67 @@ from threading import Lock, RLock
 from weightslab.components.checkpoint import CheckpointManager
 from weightslab.data.data_samples_with_ops import \
     DataSampleTrackingWrapper
-from weightslab.weightslab.backend.model_interface import ModelInterface
+from weightslab.backend.model_interface import ModelInterface
+from weightslab.backend.data_loader_interface import DataLoaderInterface
+from weightslab.backend.optimizer_interface import OptimizerInterface
+from weightslab.ledgers import get_model, get_dataloader, get_optimizer
 from weightslab.utils.logs import print
-from weightslab.weightslab.components.global_monitoring import GuardContext
+from weightslab.components.global_monitoring import GuardContext
+
+
+def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
+    """
+    Watch or edit the given object.
+
+    Args:
+        obj (Callable): The object to watch or edit.
+        flag (str): The flag specifying the type of object to watch or
+        edit.
+        kwargs (Any): Additional keyword arguments to pass.
+    """
+
+    # Sanity check
+    if not hasattr(obj, '__name__'):
+        if obj_name is None:
+            try:
+                obj.__name__ = type(obj).__name__
+            except Exception:
+                obj.__name__ = str(time.time())
+            print(
+                "Warning: Watching or editing anonymous object '" +
+                f"{obj.__name__}'."
+            )
+            print(
+                "Please add a 'name' attribute to the object."
+            )
+        else:
+            obj.__name__ = obj_name
+
+    # Related functions
+    if flag.lower() == 'model' or 'model' in obj.__name__.lower():
+        wrapper = ModelInterface(obj, **kwargs)
+        # Try to return the ledger-registered object (may be a Proxy)
+        try:
+            reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or obj.__class__.__name__
+            return get_model(reg_name)
+        except Exception:
+            return wrapper
+    elif flag.lower() == 'data' or 'data' in obj.__name__.lower():
+        wrapper = DataLoaderInterface(obj, **kwargs)
+        try:
+            reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
+            return get_dataloader(reg_name)
+        except Exception:
+            return wrapper
+    elif flag.lower() == 'optimizer' or 'opt' in obj.__name__.lower():
+        wrapper = OptimizerInterface(obj, **kwargs)
+        try:
+            reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj, '__class__', type(obj)).__name__ or '_optimizer'
+            return get_optimizer(reg_name)
+        except Exception:
+            return wrapper
+    else:
+        raise ValueError("Obj name should contains at least 'model', 'data' or 'optimizer'.")
 
 
 class WeightsLab:

@@ -1,6 +1,7 @@
 import functools
 import types
 import torch as th
+import weightslab as wl
 
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
@@ -15,7 +16,8 @@ from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
-from weightslab.weightslab.components.global_monitoring import pause_controller
+from weightslab.components.global_monitoring import pause_controller
+from weightslab.ledgers import get_optimizer, get_optimizers, register_model, register_optimizer
 
 
 class ModelInterface(NetworkWithOps):
@@ -25,7 +27,10 @@ class ModelInterface(NetworkWithOps):
             dummy_input: th.Tensor = None,
             device: str = 'cpu',
             print_graph: bool = False,
-            print_graph_filename: str = None):
+            print_graph_filename: str = None,
+            name: str = None,
+            register: bool = True,
+            weak: bool = False):
         """
         Initializes the WatcherEditor instance.
 
@@ -81,7 +86,21 @@ class ModelInterface(NetworkWithOps):
         self.define_deps()
 
         # Clean
+        # Optionally register wrapper in global ledger
+        if register:
+            try:
+                reg_name = name or getattr(model, '__name__', None) or model.__class__.__name__ or 'model'
+                register_model(reg_name, self, weak=weak)
+                self._ledger_name = reg_name
+            except Exception:
+                pass
+
         del self.traced_model
+        
+        # Hook optimizer update on architecture change 
+        self.register_hook_fn_for_architecture_change(
+            lambda model: self._update_optimizer(model)
+        )
 
     def __enter__(self):
         """
@@ -123,6 +142,18 @@ class ModelInterface(NetworkWithOps):
                     {exc_type.__name__} with {exc_val} and {exc_tb}.")
             return False
         return False
+
+    def _update_optimizer(self, model):
+        for opt_name in get_optimizers():
+            # Overwrite the optimizer with the same class and lr, updated
+            opt = get_optimizer(opt_name)
+            lr = opt.get_lr()[0]
+            optimizer_class = type(opt.optimizer)
+            _optimizer = optimizer_class(
+                model.parameters(),
+                lr=lr
+            )
+            self.optimizer = wl.watch_or_edit(_optimizer, flag='optimizer')
 
     def monkey_patching(self):
         """

@@ -146,7 +146,7 @@ if __name__ == '__main__':
             model.operate(0, 1, 2)  # ADD 1 neurons
             model.pause_ctrl.resume()
 
-        optimizer = wl_exp.optimizer
+        # optimizer = wl_exp.optimizer  # This line should not exist with ledger approach!
 
         # Process data
         inputs = inputs.to(device)
