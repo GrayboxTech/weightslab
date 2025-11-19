@@ -231,6 +231,39 @@ class WatcherEditor(NetworkWithOps):
             do_constant_folding=False
         )
         print("ONNX export complete.")
+
+        import builtins
+        def debug_print_onnx_nodes(onnx_file_path: str):
+            import onnx
+
+            model = onnx.load(onnx_file_path)
+            graph = model.graph
+
+            builtins.print("\n[DEBUG] ONNX NODES:")
+            for i, node in enumerate(graph.node):
+                builtins.print(f"Node {i}: op_type={node.op_type}")
+                builtins.print(f"  inputs : {list(node.input)}")
+                builtins.print(f"  outputs: {list(node.output)}")
+
+            builtins.print("\n[DEBUG] ONNX VALUE_INFOS (tensor names + shapes if available):")
+            for v in list(graph.input) + list(graph.value_info) + list(graph.output):
+                t = v.type.tensor_type
+                if t.HasField("shape"):
+                    dims = []
+                    for d in t.shape.dim:
+                        if d.HasField("dim_value"):
+                            dims.append(d.dim_value)
+                        elif d.HasField("dim_param"):
+                            dims.append(f"{d.dim_param}")
+                        else:
+                            dims.append("?")
+                    builtins.print(f"  {v.name}: {dims}")
+                else:
+                    builtins.print(f"  {v.name}: <no shape>")
+
+        builtins.print("=== ONNX GRAPH ===")
+        debug_print_onnx_nodes(onnx_file_path)
+
         self.monkey_patch_model()
         import onnx
         import onnx.shape_inference

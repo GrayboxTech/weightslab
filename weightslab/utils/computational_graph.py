@@ -1,23 +1,25 @@
-import collections
-import torch as th
 import torch.nn as nn
-import torch.fx as fx
-
+import onnx
+import onnx.shape_inference
+from onnx import GraphProto
+from typing import Iterable, List, Tuple, Dict, Optional
 from copy import deepcopy
-from typing import Tuple, List, Dict
+import collections
 
-from torch.fx import GraphModule
 
 from weightslab.utils.modules_dependencies import DepType
-from weightslab.utils.tools import *
-
+from weightslab.utils.tools import (
+    is_feature_producer,
+    is_module_learnable,
+    normalize_dicts,
+)
 
 def generate_mappings(
-    src_channels: int,
-    dst_channels: int,
-    dst_groups: int = 1,
-    src_groups: int = 1
-) -> Tuple[list]:
+    src_channels: Iterable[int],
+    dst_channels: Iterable[int],
+    dst_groups: Optional[int] = None,
+    src_groups: Optional[int] = None,
+) -> Tuple[Dict[int, List[int]], Dict[int, List[int]]]:
     """
     Generates index mappings between a source and destination layer.
 
@@ -191,303 +193,355 @@ def generate_mappings(
     return src_to_dst_mapping, dst_to_src_mapping
 
 
-def generate_graph_dependencies(
-        model: nn.Module,
-        graph,
-        indexing_neurons: bool = True,
-        onnx_shapes_map: Dict[str, Optional[Tuple[int, ...]]] = None
-) -> \
-            List[Tuple[nn.Module, nn.Module, DepType]]:
+def _alias_from_tensor_name(tensor_name: str) -> Optional[str]:
     """
-        Infers dependencies from the traced graph, explicitly marking
-        structuralSAME and INCOMING constraints.
+    Given an ONNX tensor name like '/c1/Conv_output_0', return 'c1'.
+
+    If there's no leading '/', fall back to using the full name as alias.
+    """
+    if tensor_name.startswith("/"):
+        parts = tensor_name.split("/")
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
+        return None
+    # fallback: treat the whole name as alias
+    return tensor_name
+
+
+def get_onnx_shapes_map(onnx_file_path: str) -> Dict[str, Optional[Tuple[int, ...]]]:
+    """
+    ONNX shape inference → tensor_name -> shape.
+    """
+    try:
+        model = onnx.load(onnx_file_path)
+        inferred_model = onnx.shape_inference.infer_shapes(model)
+    except Exception as e:
+        print(f"Error during ONNX shape inference. Proceeding with limited shape info: {e}")
+        return {}
+
+    shapes_map: Dict[str, Optional[Tuple[int, ...]]] = {}
+    graph = inferred_model.graph
+    all_value_infos = list(graph.input) + list(graph.output) + list(graph.value_info)
+
+    for tensor_info in all_value_infos:
+        type_info = tensor_info.type.tensor_type
+        if not type_info.HasField("shape"):
+            continue
+
+        dims = []
+        for d in type_info.shape.dim:
+            if d.HasField("dim_value"):
+                dims.append(d.dim_value)
+            elif d.HasField("dim_param"):
+                dims.append(-1)
+            else:
+                dims.append(-1)
+
+        shape = tuple(dims)
+        shapes_map[tensor_info.name] = shape if any(x > 0 for x in shape) else None
+
+    return shapes_map
+
+
+def generate_graph_dependencies(
+    model: nn.Module,
+    graph: GraphProto,
+    indexing_neurons: bool = True,
+    onnx_shapes_map: Dict[str, Optional[Tuple[int, ...]]] = None,
+) -> List[Tuple[nn.Module, nn.Module, DepType]]:
+    """
+    Pure ONNX version that:
+    1) Traverses ONNX graph to produce raw (src_mod, dst_mod, DepType) edges for ALL modules.
+    2) Bridges over non-ID modules (e.g. MaxPool, ReLU) so that final deps only connect
+       neuron-aware modules (modules with get_module_id).
+    3) Optionally (if indexing_neurons=True) builds neuron-level mappings
+       between neuron-aware modules (i.e., modules that implement `get_neurons`).
     """
 
-    def get_onnx_shape_by_alias(
-        alias_name: str,
-        onnx_shapes_map: Dict[str, Tuple[int, ...]]
-    ) -> Optional[Tuple[int, ...]]:
+    name_to_module: Dict[str, nn.Module] = dict(model.named_modules())
+
+    # Map tensor -> producing ONNX node
+    producer_for_tensor: Dict[str, onnx.NodeProto] = {}
+    tensor_to_mod: Dict[str, nn.Module] = {}
+
+    for node in graph.node:
+        for out_name in node.output:
+            producer_for_tensor[out_name] = node
+
+            # Try to see if this tensor belongs directly to a module
+            alias = _alias_from_tensor_name(out_name)
+            if alias is not None and alias in name_to_module:
+                tensor_to_mod[out_name] = name_to_module[alias]
+
+    
+    mod_cache: Dict[str, Optional[nn.Module]] = {}
+
+    def module_for_tensor_name(tname: str) -> Optional[nn.Module]:
         """
-        Queries the generated dictionary using the FX-derived alias (e.g., 'c1', 'fc4').
+        Given any tensor name in the ONNX graph, walk backwards through its producers
+        until we find the nearest nn.Module that produced something in that chain.
         """
-        if not onnx_shapes_map:
+        if tname in mod_cache:
+            return mod_cache[tname]
+
+        # Direct hit: this tensor is an output we've already associated to a module
+        if tname in tensor_to_mod:
+            mod_cache[tname] = tensor_to_mod[tname]
+            return tensor_to_mod[tname]
+
+        # Otherwise, see which node produced this tensor
+        prod = producer_for_tensor.get(tname)
+        if prod is None:
+            mod_cache[tname] = None
             return None
 
-        # We assume the alias is embedded in the ONNX tensor name as a prefix: /alias_name/
-        expected_prefix = f"/{alias_name}/"
-        
-        for key in onnx_shapes_map.keys():
-            # This finds the shape for the first tensor output by the node 'alias_name'.
-            if key.startswith(expected_prefix):
-                return onnx_shapes_map[key]
-                
+        # Recursively walk through the producer's inputs
+        for inp in prod.input:
+            up_mod = module_for_tensor_name(inp)
+            if up_mod is not None:
+                mod_cache[tname] = up_mod
+                return up_mod
+
+        mod_cache[tname] = None
         return None
-    def get_feature_channel_size_from_onnx(node: fx.Node) -> Optional[int]:
-        """Looks up the channel dimension (index 1) from the ONNX shape map."""
+
+
+    def module_for_alias(alias: Optional[str]) -> Optional[nn.Module]:
+        if alias is None:
+            return None
+        return name_to_module.get(alias, None)
+
+    
+
+    def chan_for_tensor(tname: str) -> Optional[int]:
         if onnx_shapes_map is None:
-            return get_feature_channel_size(node)
-        shape = get_onnx_shape_by_alias(node.name, onnx_shapes_map)
-        # Assuming NCHW format, the channel size is at index 1 (C)
-        return shape[1] if shape and len(shape) >= 2 else None
+            return None
+        shape = onnx_shapes_map.get(tname)
+        if shape and len(shape) >= 2:
+            # assume NCHW, C is dim 1
+            return shape[1]
+        return None
 
-    dependencies = []
 
-    # Map to store the last *structural module* (instance) that produced the
-    # output for a given node.
-    # This map is crucial for implementing the "pass-through" logic for
-    # non-structural layers.
-    node_to_module = {}
-    bypass = []
+    raw_edges: List[Tuple[nn.Module, nn.Module, DepType]] = []      # ALL module edges (for bridging)
+    filtered_edges: List[Tuple[nn.Module, nn.Module, DepType]] = [] # only structural/learnable dst (optional)
 
-    # Iterate over the nodes in the graph to find sources
-    # for node in traced_graph.graph.nodes:
+
     for node in graph.node:
-        bypassed = False
-        current_module = None
-        if node.op == 'call_module':
-            # Get current module from node
-            current_module = get_module_by_name(model, node.target)
-            current_layer_type = current_module.layer_type if hasattr(current_module, 'layer_type') else -1
+        # ---- STEP 1: Find source modules from node.inputs ----
+        src_modules: List[nn.Module] = []
+        src_tensors_for_shape: List[str] = []
 
-            # If the current module is a multi-input layer, flag as bypass
-            if node.name in bypass:
-                # bypass strategy for recursive update dependencies,
-                # like bypass = true for __add__ but false for cat;
-                # and cnt for neurons mapping src / dst
-                current_module.bypass = 0
+        for inp in node.input:
+            src_mod = module_for_tensor_name(inp)  # <--- NEW: deep mapping
+            if src_mod is not None:
+                src_modules.append(src_mod)
+                src_tensors_for_shape.append(inp)
 
-            # Find the input source node that came from a tracked module
-            source_node = next(
-                (arg for arg in node.args if isinstance(arg, th.fx.Node)),
-                None
-            )
-            source_modules = node_to_module.get(source_node) if source_node \
-                else None
+        # If no source modules, nothing to do for this node
+        if not src_modules:
+            continue
 
-            # --- 1. Dependency Creation (from last Structural Module to
-            # current Structural Module) ---
-            # A dependency edge (A -> B) is only created if B (current_module)
-            # is a structural layer.
-            is_dst_structural = is_feature_producer(current_module)
-            is_learnable = is_module_learnable(current_module)
-            has_layer_type = hasattr(current_module, 'layer_type')
-            if source_modules:
-                for source_module in source_modules:
-                    if source_module is not None and \
-                            (has_layer_type or is_dst_structural or is_learnable):
-                        # 1.1. Determine Dependency Type based on Shape
-                        # (for Pruning)
-                        dep_type = DepType.INCOMING
-                        source_out_channels = get_feature_channel_size_from_onnx(
-                            source_node
-                        )
-                        dst_out_channels = get_feature_channel_size_from_onnx(node)
+        # ---- STEP 2: Handle merge ops (REC) purely based on src_modules ----
+        op_type = node.op_type
+        is_merge = op_type in ("Add", "Sum", "Concat")
+        if is_merge and len(src_modules) >= 2:
+            for i in range(len(src_modules)):
+                for j in range(i + 1, len(src_modules)):
+                    mod_a = src_modules[i]
+                    mod_b = src_modules[j]
+                    raw_edges.append((mod_a, mod_b, DepType.REC))
+                    filtered_edges.append((mod_a, mod_b, DepType.REC))
 
-                        # 1.2. Check if current module should be target SAME
-                        # path. It's a specific case where current module has
-                        # in==out shapes
-                        # Check for SAME constraint (requires source to be a
-                        # producer)
-                        if current_layer_type == 1 and \
-                            source_out_channels is not None and \
-                                dst_out_channels is not None:
-                            if hasattr(current_module, 'wl_same_flag'):
-                                dep_type = DepType.SAME
-                        else:
-                            dep_type = DepType.SAME
-                            # current_module.bypass = 1
+        # ---- STEP 3: Try to find destination module from node.outputs ----
+        dst_alias = None
+        dst_tensor_for_shape = None
+        for out_name in node.output:
+            a = _alias_from_tensor_name(out_name)
+            if a is not None and a in name_to_module:
+                dst_alias = a
+                dst_tensor_for_shape = out_name
+                break
 
-                        # 1.3. Append the dependency
-                        # (Structural Source -> Structural dstination)
-                        dependencies.append(
-                            (
-                                source_module,
-                                current_module,
-                                dep_type
-                            )
-                        )
-                        if hasattr(current_module, 'bypass'):
-                            source_module.src_bypass = 1
+        dst_mod = module_for_alias(dst_alias)
+        if dst_mod is None:
+            # e.g. Add/Concat/Relu that isn't directly tied to a module.
+            # We have already captured REC edges above if this is a merge op.
+            continue
 
-            # --- 2. Update Tracking Map (Only track Structural Modules
-            # or pass through) ---
-            # Structural Modules are producers (Conv, Linear) or
-            # size-constrainers (BN)
-            if current_layer_type >= 1 or is_learnable:
-                node_to_module[node] = make_safelist(current_module)
-            elif source_node and source_node in node_to_module:
-                # Pass through: For stateless layers (ReLU, MaxPool), point
-                # back to their actual source
-                node_to_module[node] = make_safelist(
-                    node_to_module[source_node]
-                )
-            else:
-                # Fallback (e.g., first node)
-                node_to_module[node] = make_safelist(
-                    current_module
-                )  # Fallback to current module if source isn't tracked
+        dst_is_structural = is_feature_producer(dst_mod)
+        dst_is_learnable = is_module_learnable(dst_mod)
 
-        # --- Handle General Merge Operations (Any call_function with multiple
-        # module inputs) ---
-        elif node.op == 'call_function' or node.op == "call_method":
-            # add next steps bypass if op. change next input dimension
-            # (e.g., cat)
-            if 'cat' in node.name or 'cat_' in node.name:
-                bypass.append(str(node.next))
-                # bypassed = True
+        dst_c = chan_for_tensor(dst_tensor_for_shape) if dst_tensor_for_shape else None
 
-            # 1. Identify all source modules that feed into this function node
-            # TODO (GP): Find recursive approach to do that, if there are
-            # TODO (GP): cat of cat of cat, should be nested list also ?
-            # TODO (GP): e.g., cat([conv1, conv2, cat([conv3, cat([conv4,
-            # TODO (GP): conv5])])])])
-            source_modules_ = []  # Collect modules to check for single input
-            source_nodes = []  # Collect nodes to check for single input
-            for arg in node.args:
-                if not isinstance(arg, list):
-                    arg = make_safelist(arg)
-                for _arg in arg:
-                    if isinstance(_arg, th.fx.Node):
-                        source_nodes.append(_arg)
-                        source_modules = node_to_module.get(_arg)
-                        if source_modules is not None:
-                            for ind in range(len(source_modules)):
-                                source_modules_.append(source_modules[ind])
-                    elif isinstance(_arg, (tuple, set, list)):
-                        for __arg in _arg:
-                            if isinstance(__arg, th.fx.Node):
-                                source_nodes.append(__arg)
-                                source_modules = node_to_module.get(__arg)
-                                if source_modules is not None:
-                                    for ind in range(len(source_modules)):
-                                        source_modules_.append(source_modules[ind])
+        # ---- STEP 4: SAME / INCOMING edges as before ----
+        for src_mod, src_tname in zip(src_modules, src_tensors_for_shape):
+            dep_type = DepType.INCOMING
+            src_c = chan_for_tensor(src_tname) if src_tname else None
 
-            # Remove duplicates while preserving the order/identity
-            distinct_source_modules = source_modules_
+            if src_c is not None and dst_c is not None and src_c == dst_c:
+                dep_type = DepType.SAME
 
-            # 2. Check for multi-branch constraint
-            # (e.g., residual merge, element-wise merge)
-            # If two or more *different* modules feed into the function,
-            # they impose a SAME constraint.
-            if len(distinct_source_modules) >= 2:
-                # Apply bidirectional SAME constraint between all pairs
-                # of modules that merge at this function node.
-                # This covers th.add, th.mul, etc.
-                for i in range(len(distinct_source_modules)):
-                    for j in range(i + 1, len(distinct_source_modules)):
-                        mod_a = distinct_source_modules[i]
-                        mod_b = distinct_source_modules[j]
-                        if not bypassed:
-                            dependencies.append((mod_a, mod_b, DepType.REC))
+            raw_edges.append((src_mod, dst_mod, dep_type))
 
-            # 3. Update the module map for the function node's output
-            # (i.e., intelligent pass-through)
-            if len(distinct_source_modules) == 1:
-                # Single-input stateless function (e.g., th.sigmoid, view):
-                # pass through the source
-                node_to_module[node] = distinct_source_modules
-            elif len(distinct_source_modules) >= 2:
-                # Multi-input merge: The function output should be tracked as
-                # dependent on the first module in the merge
-                node_to_module[node] = distinct_source_modules
-            else:
-                node_to_module[node] = None  # Placeholder or constant input
+            if dst_is_structural or dst_is_learnable:
+                filtered_edges.append((src_mod, dst_mod, dep_type))
 
-    # Generate mapping tensor btw deps
+
+        # ---- REC edges between branches for merge ops ----
+        op_type = node.op_type
+        is_merge = op_type in ("Add", "Sum", "Concat")
+        if is_merge and len(src_modules) >= 2:
+            for i in range(len(src_modules)):
+                for j in range(i + 1, len(src_modules)):
+                    mod_a = src_modules[i]
+                    mod_b = src_modules[j]
+                    raw_edges.append((mod_a, mod_b, DepType.REC))
+                    filtered_edges.append((mod_a, mod_b, DepType.REC))
+
+        # DEBUG: print raw connectivity before bridging
+    module_to_name = {m: n for n, m in name_to_module.items()}
+
+    print("\n[DEBUG] RAW EDGES FROM ONNX:")
+    for src_mod, dst_mod, dep_type in raw_edges:
+        sname = module_to_name.get(src_mod, f"<?{type(src_mod).__name__}>")
+        dname = module_to_name.get(dst_mod, f"<?{type(dst_mod).__name__}>")
+        print(f"  {dep_type.name:8} {sname:15} -> {dname:15}")
+
+    # ---- 1.5 BRIDGING over non-ID modules (use RAW edges) ----
+
+    def is_id_module(m: nn.Module) -> bool:
+        # Modules that are monkey-patched / neuron-aware and have IDs
+        return hasattr(m, "get_module_id")
+
+    out_edges: Dict[nn.Module, List[Tuple[nn.Module, DepType]]] = collections.defaultdict(list)
+    for src_mod, dst_mod, dep_type in raw_edges:
+        out_edges[src_mod].append((dst_mod, dep_type))
+
+    bridged_deps: List[Tuple[nn.Module, nn.Module, DepType]] = []
+    seen_edges = set()
+
+    for src_mod in name_to_module.values():
+        if not is_id_module(src_mod):
+            continue
+
+        # BFS from src_mod through non-ID modules
+        queue = [src_mod]
+        visited: set[nn.Module] = set()
+
+        while queue:
+            cur = queue.pop(0)
+            if cur in visited:
+                continue
+            visited.add(cur)
+
+            for nxt, dep_type in out_edges.get(cur, []):
+                if nxt is src_mod:
+                    continue
+
+                if is_id_module(nxt):
+                    key = (id(src_mod), id(nxt), dep_type)
+                    if key not in seen_edges:
+                        seen_edges.add(key)
+                        bridged_deps.append((src_mod, nxt, dep_type))
+                else:
+                    # Non-ID module (e.g., MaxPool, ReLU): keep walking
+                    queue.append(nxt)
+
+    # ---- 2. NEURON-LEVEL MAPPING (optional) ----
+
     if not indexing_neurons:
-        return dependencies
-    for edge in dependencies:
-        # Get src and dst modules and type
-        src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]
-        recursive_dep = edge_label == DepType.REC  # A recursive dependency ?
+        return bridged_deps
 
-        # 1.1. Determine the number of neurons in each direction
-        source_out_channels = range(
-            src_mod.get_neurons(attr_name='out_neurons') if
-            not hasattr(src_mod, 'wl_transposed')
-            else src_mod.get_neurons(attr_name='in_neurons')
-        )
-        dst_in_channels = range(
-            dst_mod.get_neurons(attr_name='in_neurons') if not recursive_dep
-            and not hasattr(dst_mod, 'wl_transposed')
-            else dst_mod.get_neurons(attr_name='out_neurons')
-        )
-        # # For multi-input / one output layers (e.g., Cat)
-        if hasattr(dst_mod, 'bypass'):
+    for (src_mod, dst_mod, edge_label) in bridged_deps:
+        recursive_dep = edge_label == DepType.REC  # residual / multi-branch
+
+        # Only build neuron mappings if BOTH modules are neuron-aware.
+        if not hasattr(src_mod, "get_neurons") or not hasattr(dst_mod, "get_neurons"):
+            continue
+
+        # 2.1 Determine number of neurons for each side
+        if not hasattr(src_mod, "wl_transposed"):
+            src_n = src_mod.get_neurons(attr_name="out_neurons")
+        else:
+            src_n = src_mod.get_neurons(attr_name="in_neurons")
+
+        if (not recursive_dep) and (not hasattr(dst_mod, "wl_transposed")):
+            dst_n = dst_mod.get_neurons(attr_name="in_neurons")
+        else:
+            dst_n = dst_mod.get_neurons(attr_name="out_neurons")
+
+        source_out_channels = range(src_n)
+        dst_in_channels = range(dst_n)
+
+        # Multi-input bypass (e.g. cat) handling if you still use dst_mod.bypass
+        if hasattr(dst_mod, "bypass"):
             dst_in_channels = range(
                 dst_mod.bypass,
-                len(source_out_channels) + dst_mod.bypass
+                dst_mod.bypass + len(source_out_channels)
             )
             dst_mod.bypass += len(source_out_channels)
 
-        # 1.2. Generate mappings tnsr for src and dst layers
-        groups = dst_mod.groups if hasattr(dst_mod, 'groups') else (
-            src_mod.groups
-        ) if hasattr(src_mod, 'groups') else None
-        src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = \
-            generate_mappings(
-                source_out_channels,
-                dst_in_channels,
-                dst_groups=(len(dst_in_channels) // groups) if groups is
-                not None else None,
-                src_groups=len(source_out_channels) // groups if groups is
-                not None else None
-            )
+        # 2.2 Generate mappings, taking groups into account if present
+        groups = None
+        if hasattr(dst_mod, "groups"):
+            groups = dst_mod.groups
+        elif hasattr(src_mod, "groups"):
+            groups = src_mod.groups
 
-        # 1.3 Update neurons mapping tensors
-        # # Update edge dst node with neurons mapping tensor
-        if not recursive_dep:
-            # should be_ reverse mapping
-            dst_mod.dst_to_src_mapping_tnsrs.update(
-                {
-                    src_mod.get_name_wi_id():
-                        dst_to_src_mapping_tnsr
-                }
-            )
-            # # Update edge child and parent node with neurons mapping tensor
-            dst_mod.related_src_to_dst_mapping_tnsrs.update(
-                {
-                    dst_mod.get_name_wi_id():
-                        deepcopy(src_to_dst_mapping_tnsr)
-                } if not hasattr(dst_mod, 'bypass') else {}
-            )
-            dst_mod.dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.dst_to_src_mapping_tnsrs)
-            dst_mod.related_src_to_dst_mapping_tnsrs = normalize_dicts(dst_mod.related_src_to_dst_mapping_tnsrs)
-
+        if groups is not None:
+            dst_groups = len(dst_in_channels) // groups
+            src_groups = len(source_out_channels) // groups
         else:
-            # Recursive dependency: src & dst are reversed
-            # here for mapping logic
-            dst_mod.src_to_dst_mapping_tnsrs.update(
-                {
-                    src_mod.get_name_wi_id():
-                        dst_to_src_mapping_tnsr
-                }
+            dst_groups = None
+            src_groups = None
 
+        src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = generate_mappings(
+            source_out_channels,
+            dst_in_channels,
+            dst_groups=dst_groups,
+            src_groups=src_groups,
+        )
+
+        # 2.3 Register mappings on dst_mod and src_mod
+        if not recursive_dep:
+            # dst: child, src: parent
+            dst_mod.dst_to_src_mapping_tnsrs.update(
+                {src_mod.get_name_wi_id(): dst_to_src_mapping_tnsr}
             )
-            # # Update edge child and parent node with neurons mapping tensor
-            dst_mod.related_dst_to_src_mapping_tnsrs.update(
-                {
-                    dst_mod.get_name_wi_id():
-                        deepcopy(src_to_dst_mapping_tnsr)
-                } if not hasattr(dst_mod, 'bypass') else {}
-            )  # Child equivalent here
+            if not hasattr(dst_mod, "bypass"):
+                dst_mod.related_src_to_dst_mapping_tnsrs.update(
+                    {dst_mod.get_name_wi_id(): deepcopy(src_to_dst_mapping_tnsr)}
+                )
+            dst_mod.dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.dst_to_src_mapping_tnsrs)
+            dst_mod.related_src_to_dst_mapping_tnsrs = normalize_dicts(
+                dst_mod.related_src_to_dst_mapping_tnsrs
+            )
+        else:
+            # recursive: roles are swapped logically
+            dst_mod.src_to_dst_mapping_tnsrs.update(
+                {src_mod.get_name_wi_id(): dst_to_src_mapping_tnsr}
+            )
+            if not hasattr(dst_mod, "bypass"):
+                dst_mod.related_dst_to_src_mapping_tnsrs.update(
+                    {dst_mod.get_name_wi_id(): deepcopy(src_to_dst_mapping_tnsr)}
+                )
             dst_mod.src_to_dst_mapping_tnsrs = normalize_dicts(dst_mod.src_to_dst_mapping_tnsrs)
-            dst_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.related_dst_to_src_mapping_tnsrs)
+            dst_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(
+                dst_mod.related_dst_to_src_mapping_tnsrs
+            )
 
-        # # Update edge src node with neurons mapping tensor
+        # src_mod side (always)
         src_mod.src_to_dst_mapping_tnsrs.update(
-            {
-                dst_mod.get_name_wi_id():
-                    src_to_dst_mapping_tnsr
-            }
+            {dst_mod.get_name_wi_id(): src_to_dst_mapping_tnsr}
         )
-        src_mod.related_dst_to_src_mapping_tnsrs.update(
-            {
-                src_mod.get_name_wi_id():
-                    deepcopy(dst_to_src_mapping_tnsr)
-            } if not hasattr(src_mod, 'bypass') else {}
-        )
+        if not hasattr(src_mod, "bypass"):
+            src_mod.related_dst_to_src_mapping_tnsrs.update(
+                {src_mod.get_name_wi_id(): deepcopy(dst_to_src_mapping_tnsr)}
+            )
         src_mod.src_to_dst_mapping_tnsrs = normalize_dicts(src_mod.src_to_dst_mapping_tnsrs)
-        src_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(src_mod.related_dst_to_src_mapping_tnsrs)
+        src_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(
+            src_mod.related_dst_to_src_mapping_tnsrs
+        )
 
-    return dependencies
+    return bridged_deps

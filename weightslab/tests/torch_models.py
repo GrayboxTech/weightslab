@@ -1639,11 +1639,7 @@ class UNet3D(nn.Module):
 
 
 if __name__ == "__main__":
-<<<<<<< Updated upstream
     from weightslab.backend.watcher_editor import WatcherEditor
-=======
-    from weightslab.weightslab.backend.model_interface import ModelInterface
->>>>>>> Stashed changes
     from weightslab.utils.logs import print, setup_logging
 
     # TODO (GP): MobileNet not working; Inverted Residual Connexion I think

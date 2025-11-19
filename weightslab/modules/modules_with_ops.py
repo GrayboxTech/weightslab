@@ -392,68 +392,96 @@ class LayerWiseOperations(NeuronWiseOperations):
             **_
     ) -> Tuple[List[int], List[int]]:
         """
-            Intelligently processes high-level logical indices (like channels
-            or neurons) into the flat, absolute tensor indices required for
-            pruning.
+        Intelligently processes high-level logical indices (like channels
+        or neurons) into the flat, absolute tensor indices required for
+        pruning.
 
-            This function handles:
-            1. 1-to-1 Mappings (Linear -> Linear, Conv -> Conv)
-            2. N-to-1 Mappings (Conv(N) -> Flatten -> Linear(N*H*W))
-            3. 1-to-N Mappings (Linear(N*H*W) -> Unflatten -> Conv(N))
+        This function handles:
+        1. 1-to-1 Mappings (Linear -> Linear, Conv -> Conv)
+        2. N-to-1 Mappings (Conv(N) -> Flatten -> Linear(N*H*W))
+        3. 1-to-N Mappings (Linear(N*H*W) -> Unflatten -> Conv(N))
 
-            Args:
-                neuron_indices (Set[int] | int): The neuron indices to process.
-                is_incoming (bool): Whether the indices are incoming.
-                current_child_name (str): The name of the current child.
-                current_parent_name (str): The name of the current parent.
+        Args:
+            neuron_indices (Set[int] | int): The neuron indices to process.
+            is_incoming (bool): Whether the indices are incoming.
+            current_child_name (str): The name of the current child.
+            current_parent_name (str): The name of the current parent.
 
-            Returns:
-                Tuple[List[int], List[int]]: The absolute tensor indices and
-                the orignal indices.
+        Returns:
+            Tuple[List[int], List[int]]: The absolute tensor indices and
+            the original indices.
         """
-        # Sanity checks
-        if not isinstance(neuron_indices, set):
-            neuron_indices = {neuron_indices}
-        if not len(neuron_indices) or neuron_indices is None:
+        # --- Normalize neuron_indices to a non-empty set ---
+        if neuron_indices is None:
+            neuron_indices = {-1}
+        elif not isinstance(neuron_indices, set):
+            # If it's a single int, wrap; if it's iterable, cast to set
+            try:
+                neuron_indices = set(neuron_indices)  # type: ignore[arg-type]
+            except TypeError:
+                neuron_indices = {neuron_indices}
+
+        if not neuron_indices:
             neuron_indices = {-1}
 
-        # Get the corresponding indexs mapping dictionary
-        if current_parent_name is not None and current_parent_name in \
-                self.dst_to_src_mapping_tnsrs and is_incoming:
-            mapped_indexs = normalize_dicts(
-                {'normed': self.dst_to_src_mapping_tnsrs[current_parent_name]}
-            )['normed']  # TODO (GP): Improve this function
-        elif len(list(self.src_to_dst_mapping_tnsrs.keys())):
-            mapped_indexs = normalize_dicts(
-                {'test': self.src_to_dst_mapping_tnsrs[
-                    current_child_name if current_child_name is not None else
-                    list(self.src_to_dst_mapping_tnsrs.keys())[0]
-                ]}
-            )['test']  # TODO (GP): Improve this function
-        else:
-            mapped_indexs = self.get_neurons(attr_name='out_neurons') \
-                if not is_incoming else \
-                self.get_neurons(attr_name='in_neurons')
-            mapped_indexs = {i: [i] for i in range(mapped_indexs)}
+        # --- Select the appropriate mapping dict (if any) ---
 
-        # Reverse index to last first, i.e., -1, -3, -5, ..etc
+        mapped_indices_dict = None
+
+        # INCOMING: use dst_to_src_mapping_tnsrs[parent] if available
+        if (
+            is_incoming
+            and current_parent_name is not None
+            and current_parent_name in self.dst_to_src_mapping_tnsrs
+        ):
+            mapped_indices_dict = self.dst_to_src_mapping_tnsrs[current_parent_name]
+
+        # OUTGOING or fallback: use src_to_dst_mapping_tnsrs[child] if available
+        elif len(self.src_to_dst_mapping_tnsrs):
+            # Prefer an explicit child name if it's present
+            key = None
+            if current_child_name is not None and current_child_name in self.src_to_dst_mapping_tnsrs:
+                key = current_child_name
+            else:
+                # Fallback: just take the first available mapping
+                key = next(iter(self.src_to_dst_mapping_tnsrs.keys()))
+
+            mapped_indices_dict = self.src_to_dst_mapping_tnsrs.get(key, None)
+
+        # If we found a mapping dict, normalize it
+        if mapped_indices_dict is not None:
+            mapped_indexs = normalize_dicts(
+                {"mapped": mapped_indices_dict}
+            )["mapped"]  # TODO (GP): Improve this function
+        else:
+            # No mapping tensors available: fall back to identity mapping
+            n_neurons = self.get_neurons(
+                attr_name="in_neurons" if is_incoming else "out_neurons"
+            )
+            mapped_indexs = {i: [i] for i in range(n_neurons)}
+
+        # --- Map logical indices to original indices (reversed order) ---
+
         original_indexs = reversing_indices(
             len(mapped_indexs),
-            neuron_indices  # Ensure it's a set
+            neuron_indices
         )
 
-        # If there's a bypass flag, we need to adjust the flat indices to the
-        # index of the input tensor, i.e.,
-        # if incoming = th.cat([th.randn(8),]*4), we set the offset
-        # from the min. value of the tensor, which are continuous.
-        offset = min(list(mapped_indexs.keys()))
-        flat_indexs = list(
-            mapped_indexs[len(mapped_indexs)+i+offset][::-1]
-            for i in original_indexs
-        )
+        # --- Compute flat indices, taking into account possible offset ---
 
-        # Return the final set of flat indices, sorted last-to-first as in
-        # your original
+        # If there's a bypass / shifted index base, we need to adjust
+        offset = min(mapped_indexs.keys()) if len(mapped_indexs) else 0
+
+        flat_indexs: List[List[int]] = []
+        for i in original_indexs:
+            key = len(mapped_indexs) + i + offset
+            # Be robust to missing keys: fall back to identity when needed
+            if key in mapped_indexs:
+                flat_indexs.append(mapped_indexs[key][::-1])
+            else:
+                # Identity fallback for this index
+                flat_indexs.append([key])
+
         return flat_indexs, original_indexs
 
     # ---------------
@@ -1502,12 +1530,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
 
 if __name__ == "__main__":
-<<<<<<< Updated upstream
     from weightslab.backend.watcher_editor import WatcherEditor
-=======
-    from weightslab.weightslab.backend.model_interface import ModelInterface
->>>>>>> Stashed changes
-    from weightslab.tests.torch_models import FashionCNN as Model
 
     # Define the model & the input
     model = Model()
