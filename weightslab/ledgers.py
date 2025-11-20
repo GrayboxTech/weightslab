@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import threading
 import weakref
+import os
+import time
+import yaml
 from typing import Any, Dict, List, Optional
 
 
@@ -177,6 +180,11 @@ class Ledger:
         self._proxies_models: Dict[str, Proxy] = {}
         self._proxies_dataloaders: Dict[str, Proxy] = {}
         self._proxies_optimizers: Dict[str, Proxy] = {}
+        # hyperparameters registry (name -> dict)
+        self._hyperparams: Dict[str, Dict[str, Any]] = {}
+        self._proxies_hyperparams: Dict[str, Proxy] = {}
+        # hyperparam file watchers: name -> dict(path, thread, stop_event)
+        self._hp_watchers: Dict[str, Dict[str, Any]] = {}
 
     # Generic helpers
     def _register(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: str, obj: Any, weak: bool = False) -> None:
@@ -232,6 +240,126 @@ class Ledger:
             except KeyError:
                 pass
             proxies.pop(name, None)
+
+    # Hyperparameters
+    def register_hyperparams(self, name: str, params: Dict[str, Any], weak: bool = False) -> None:
+        """Register a dict of hyperparameters under `name`. Overwrites any
+        existing entry. If a Proxy placeholder exists for this name it is
+        updated in-place (so external references continue to work).
+        """
+        with self._lock:
+            proxy = self._proxies_hyperparams.get(name)
+            if proxy is not None:
+                proxy.set(params)
+                self._hyperparams[name] = proxy
+            else:
+                self._hyperparams[name] = params
+
+    def get_hyperparams(self, name: Optional[str] = None) -> Any:
+        """Get hyperparams by name. If name is None and exactly one set is
+        registered, return it. Otherwise raise KeyError.
+        """
+        with self._lock:
+            if name is not None:
+                if name in self._hyperparams:
+                    return self._hyperparams[name]
+                # create placeholder proxy
+                proxy = Proxy(None)
+                self._hyperparams[name] = proxy
+                self._proxies_hyperparams[name] = proxy
+                return proxy
+
+            keys = set(self._hyperparams.keys())
+            if len(keys) == 1:
+                k = next(iter(keys))
+                return self._hyperparams[k]
+            raise KeyError('multiple hyperparam sets present, specify a name')
+
+    def list_hyperparams(self) -> List[str]:
+        with self._lock:
+            return list(self._hyperparams.keys())
+
+    def set_hyperparam(self, name: str, key_path: str, value: Any) -> None:
+        """Set a nested hyperparameter using dot-separated `key_path`.
+        Example: set_hyperparam('exp', 'data.train.batch_size', 128)
+        """
+        with self._lock:
+            if name not in self._hyperparams:
+                raise KeyError(f'no hyperparams registered under {name}')
+            hp = self._hyperparams[name]
+            # if proxy, get underlying dict
+            if isinstance(hp, Proxy):
+                hp = hp.get()
+            parts = key_path.split('.') if key_path else []
+            cur = hp
+            for p in parts[:-1]:
+                if p not in cur or not isinstance(cur[p], dict):
+                    cur[p] = {}
+                cur = cur[p]
+            cur[parts[-1]] = value
+
+    # Hyperparam file watcher
+    def watch_hyperparams_file(self, name: str, path: str, poll_interval: float = 1.0) -> None:
+        """Start (or restart) a background watcher that loads the YAML at
+        `path` into the hyperparams registry under `name`. The file is polled
+        every `poll_interval` seconds. If a watcher already exists for `name`
+        it will be stopped and replaced.
+        """
+        with self._lock:
+            # stop existing watcher if present
+            existing = self._hp_watchers.get(name)
+            if existing is not None:
+                try:
+                    existing['stop_event'].set()
+                    existing['thread'].join(timeout=1.0)
+                except Exception:
+                    pass
+
+            stop_event = threading.Event()
+
+            def _watcher():
+                last_mtime = None
+                # initial load if present
+                while not stop_event.is_set():
+                    try:
+                        if os.path.exists(path):
+                            mtime = os.path.getmtime(path)
+                            if last_mtime is None or mtime != last_mtime:
+                                with open(path, 'r', encoding='utf-8') as f:
+                                    data = yaml.safe_load(f)
+                                if data is None:
+                                    data = {}
+                                if not isinstance(data, dict):
+                                    # ignore invalid top-level content
+                                    last_mtime = mtime
+                                else:
+                                    self.register_hyperparams(name, data)
+                                    last_mtime = mtime
+                        # sleep with small increments to be responsive to stop_event
+                        for _ in range(int(max(1, poll_interval * 10))):
+                            if stop_event.is_set():
+                                break
+                            time.sleep(poll_interval / 10.0)
+                    except Exception:
+                        # swallow errors to keep watcher alive; user can inspect file
+                        time.sleep(poll_interval)
+
+            th = threading.Thread(target=_watcher, name=f"hp-watcher-{name}", daemon=True)
+            self._hp_watchers[name] = {'path': path, 'thread': th, 'stop_event': stop_event}
+            th.start()
+
+    def unwatch_hyperparams_file(self, name: str) -> None:
+        """Stop a running hyperparams file watcher for `name` if present."""
+        with self._lock:
+            existing = self._hp_watchers.pop(name, None)
+            if existing is None:
+                return
+            try:
+                existing['stop_event'].set()
+                existing['thread'].join(timeout=1.0)
+            except Exception:
+                pass
+
 
     # Models
     def register_model(self, name: str, model: Any, weak: bool = False) -> None:
@@ -293,6 +421,7 @@ class Ledger:
                 "models": list(self._models.keys()),
                 "dataloaders": list(self._dataloaders.keys()),
                 "optimizers": list(self._optimizers.keys()),
+                "hyperparams": list(self._hyperparams.keys()),
             }
 
     def __repr__(self) -> str:
@@ -330,6 +459,30 @@ def get_optimizer(name: Optional[str] = None) -> Any:
 
 def get_optimizers() -> List[str]:
     return GLOBAL_LEDGER.list_optimizers()
+
+
+def register_hyperparams(name: str, params: Dict[str, Any], weak: bool = False) -> None:
+    GLOBAL_LEDGER.register_hyperparams(name, params, weak=weak)
+
+
+def get_hyperparams(name: Optional[str] = None) -> Any:
+    return GLOBAL_LEDGER.get_hyperparams(name)
+
+
+def list_hyperparams() -> List[str]:
+    return GLOBAL_LEDGER.list_hyperparams()
+
+
+def set_hyperparam(name: str, key_path: str, value: Any) -> None:
+    return GLOBAL_LEDGER.set_hyperparam(name, key_path, value)
+
+
+def watch_hyperparams_file(name: str, path: str, poll_interval: float = 1.0) -> None:
+    return GLOBAL_LEDGER.watch_hyperparams_file(name, path, poll_interval=poll_interval)
+
+
+def unwatch_hyperparams_file(name: str) -> None:
+    return GLOBAL_LEDGER.unwatch_hyperparams_file(name)
 
 
 if __name__ == "__main__":

@@ -72,7 +72,7 @@ class ModelInterface(NetworkWithOps):
         self.traced_model = symbolic_trace(model)
         self.traced_model.name = "N.A."
         self.guard_training_context = guard_training_context
-        self.pause_controller = pause_controller
+        self.pause_ctrl = pause_controller
 
         # Propagate the shape over the graph
         self.shape_propagation()
@@ -286,7 +286,7 @@ class ModelInterface(NetworkWithOps):
         Returns:
             th.Tensor: The output tensor from the model's forward pass.
         """
-        self.pause_controller.wait_if_paused()
+        self.pause_ctrl.wait_if_paused()
         
         self.maybe_update_age(x)
         out = self.model(x)

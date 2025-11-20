@@ -8,15 +8,24 @@ Expose commonly used helpers at package level so users can do::
 This file re-exports selected symbols from `weightslab.src`.
 """
 from .src import watch_or_edit
+from .art import _BANNER
+
+try:
+	print(_BANNER)
+except Exception:
+	pass
 
 __version__ = "0.0.0"
-__author__ = 'Alexandru-Andrei Rotaru'
-__maintainer__ = 'Alexandru-Andrei Rotaru'
+__author__ = 'Alexandru-Andrei ROTARY'
+__maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBox'
 __license__ = 'BSD 2-clause'
 
 __all__ = [
 	"watch_or_edit",
-	"WeightsLab",
 	"__version__",
+	"__license__",
+    "__author__",
+    "__maintainer__",
+    "__credits__"
 ]

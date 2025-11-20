@@ -18,7 +18,7 @@ from weightslab.data.data_samples_with_ops import \
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.data_loader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.ledgers import get_model, get_dataloader, get_optimizer
+from weightslab.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams
 from weightslab.utils.logs import print
 from weightslab.components.global_monitoring import GuardContext
 
@@ -36,7 +36,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
     # Sanity check
     if not hasattr(obj, '__name__'):
-        if obj_name is None:
+        if obj_name is None and 'name' not in kwargs:
             try:
                 obj.__name__ = type(obj).__name__
             except Exception:
@@ -49,10 +49,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 "Please add a 'name' attribute to the object."
             )
         else:
-            obj.__name__ = obj_name
+            if hasattr(obj, '__name__'):
+                obj.__name__ = obj_name
 
     # Related functions
-    if flag.lower() == 'model' or 'model' in obj.__name__.lower():
+    if flag.lower() == 'model' or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or obj.__class__.__name__
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
@@ -70,7 +71,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
-    elif flag.lower() == 'data' or 'data' in obj.__name__.lower():
+    elif flag.lower() == 'data' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
@@ -88,7 +89,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
-    elif flag.lower() == 'optimizer' or 'opt' in obj.__name__.lower():
+    elif flag.lower() == 'optimizer' or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
         # Determine registration name first
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj, '__class__', type(obj)).__name__ or '_optimizer'
         # Ensure ledger has a placeholder (Proxy) for this name so callers
@@ -108,4 +109,38 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
     else:
+        # Support hyperparameters/watchable parameter dicts or YAML paths.
+        if flag is None:
+            raise ValueError("Obj name should contains at least 'model', 'data', 'optimizer' or 'hp'.")
+
+        fl = flag.lower()
+        if fl in ('hp', 'hyperparams', 'params', 'parameters'):
+            # obj may be a dict of parameters or a path to a YAML file
+            name = kwargs.get('name') or getattr(obj, '__name__', None) or 'hyperparams'
+            # If obj is a string, treat as a file path and start watcher
+            try:
+                if isinstance(obj, str):
+                    path = obj
+                    # register empty/defaults if provided in kwargs
+                    defaults = kwargs.get('defaults', None)
+                    if defaults:
+                        register_hyperparams(name, defaults)
+                    # start ledger-managed watcher
+                    watch_hyperparams_file(name, path, poll_interval=kwargs.get('poll_interval', 1.0))
+                    # return the ledger handle (proxy or dict)
+                    return get_hyperparams(name)
+                elif isinstance(obj, dict):
+                    register_hyperparams(name, obj)
+                    return get_hyperparams(name)
+                else:
+                    # unsupported type for hp; attempt best-effort registration
+                    try:
+                        register_hyperparams(name, dict(obj))
+                        return get_hyperparams(name)
+                    except Exception:
+                        raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
+            except Exception:
+                # bubble up original error
+                raise
+
         raise ValueError("Obj name should contains at least 'model', 'data' or 'optimizer'.")

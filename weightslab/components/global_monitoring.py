@@ -49,7 +49,6 @@ class PauseController:
     """
     def __init__(self):
         self._event = Event()
-        self._event.set()  # start in 'running' state
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.

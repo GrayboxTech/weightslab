@@ -1,0 +1,20 @@
+# Configuration for mnist training example
+name: CNN_Test
+device: auto
+root_log_dir: ''
+tqdm_display: true
+skip_loading: false
+epochs: 10
+training_steps_to_do: 150
+
+data:
+  train_dataset:
+    train_shuffle: true
+    batch_size: 16
+  test_dataset:
+    test_shuffle: false
+    batch_size: 16
+
+optimizer:
+  Adam:
+    lr: 0.01
