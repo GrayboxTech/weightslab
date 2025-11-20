@@ -4,19 +4,25 @@ import time
 import torch
 import tempfile
 import torch.nn as nn
+import weightslab as wl
 import torch.optim as optim
+
 from collections import defaultdict
+from weightslab.examples.training_tools import train, test    
+
 from torchvision import datasets, transforms
+
 from torchmetrics.classification import Accuracy
+
 from weightslab.tests.torch_models import FashionCNN
 from weightslab.ledgers import get_optimizer, get_model, get_dataloader, register_optimizer
-import weightslab as wl
+from weightslab.components.global_monitoring import pause_controller, guard_training_context
 
 
 # --- Configuration Constants ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TMP_DIR = tempfile.mkdtemp()
-
+TMP_DIR = rf'C:\Users\GUILLA~1\Desktop\trash\1763569624.0058134'  # str(time.time())
 
 if __name__ == '__main__':
     print('Hello world')
@@ -26,11 +32,11 @@ if __name__ == '__main__':
         'data': {
             'train_dataset': {
                 'train_shuffle': True,
-                'batch_size': 256
+                'batch_size': 16
             },
             'test_dataset': {
                 'test_shuffle': False,
-                'batch_size': 256
+                'batch_size': 16
             }
         },
         'optimizer': {
@@ -39,7 +45,7 @@ if __name__ == '__main__':
             }
         },
         "epochs": 10,
-        "training_steps_to_do": 256,
+        "training_steps_to_do": 16,
         "name": "MT_FashionCNN_Test",
         "root_log_dir": os.path.join(TMP_DIR, 'logs'),
         "tqdm_display": True,
@@ -47,14 +53,17 @@ if __name__ == '__main__':
         "device": device
     }
 
-    # 1. Register model, dataloaders, optimizer in ledger
+    # Model
     _model = FashionCNN()
     model = wl.watch_or_edit(_model, flag='model', device=device)
-    model.pause_ctrl.resume()
 
+    # Optimizer
     _optimizer = optim.Adam(_model.parameters(), lr=0.01 )
     optimizer = wl.watch_or_edit(_optimizer, flag='optimizer')
+    optimizer_updated = hasattr(optimizer, '_updated')
+    registered_optimizer = hasattr(get_optimizer('Adam'), '_updated')
 
+    # Data
     _train_dataset = datasets.FashionMNIST(
         root=os.path.join(TMP_DIR, 'data'),
         train=True,
@@ -73,111 +82,71 @@ if __name__ == '__main__':
             transforms.Normalize((0.5,), (0.5,))
         ])
     )
-    # register_optimizer('train_loader', train_dataset)
-    # register_optimizer('test_loader', test_dataset)
-    train_loader = wl.watch_or_edit(_train_dataset, flag='data', batch_size=256, shuffle=True)
-    test_loader = wl.watch_or_edit(_test_dataset, flag='data', batch_size=256, shuffle=True)
+    train_loader = wl.watch_or_edit(_train_dataset, flag='data', batch_size=16, shuffle=True)
+    test_loader = wl.watch_or_edit(_test_dataset, flag='data', batch_size=16, shuffle=True)
 
-    # optimizer = get_optimizer('_optimizer')
-    # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=256, shuffle=True)
-    # test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=256, shuffle=False)
-    
+    # Criterion
     criterion_bin = nn.BCELoss(reduction='none')
     criterion_mlt = nn.CrossEntropyLoss(reduction='none')
-    metric_bin = Accuracy(task="binary", num_classes=1).to(device)
-    metric_mlt = Accuracy(task="multiclass", num_classes=10).to(device)
 
+    # Metrics
+    metric_bin = Accuracy(task='binary').to(device)
+    metric_mlt = Accuracy(task='multiclass', num_classes=10).to(device)
 
-    def update_model(train_step, model):
-        def new_opt():  #
-            _optimizer = optim.Adam(_model.parameters(), lr=0.01 )
-            return wl.watch_or_edit(_optimizer, flag='optimizer')
-        optimizer = get_optimizer('Adam')
-        if train_step == 0:
-            pass
-        elif train_step == 1:
-            model.pause_ctrl.pause()
-            model.operate(0, 1, 1)  # ADD 1 neurons
-            # model.operate(4, 1, 1)  # ADD 1 neurons
-            model.pause_ctrl.resume()
-            optimizer = new_opt()
-        elif train_step == 2:
-            model.pause_ctrl.pause()
-            model.operate(0, 1, 2)  # ADD 1 neurons
-            model.pause_ctrl.resume()
-            optimizer = new_opt()
-        return model, optimizer
+    # ================
+    # 6. Training Loop
+    def control_loop():
+        """
+        Example: simple stdin loop:
+        - type 'p' to pause
+        - type 'r' to resume
+        - type 'operate <op_type> <layer_id> <nb_neurons>' to perform an operation, e.g.:
+            'operate 1 2 1' to add 1 neurons to layer with ID 2
+            'operate 2 2 5' to prune indexed neuron 5 to layer with ID 2
+        TODO (GP): implement a better CLI or GUI for this; not working wi. list of indexs now.
+        """
+        def extract_op_info(s: str):
+            parts = s.strip().split()
+            if len(parts) < 3:
+                return None
+            try:
+                op_type = int(parts[1])
+                layer_id = int(parts[2])
+                nb_neurons = int(parts[3]) if len(parts) > 3 else None
+                return (op_type, layer_id, nb_neurons)
+            except Exception:
+                return None
+        while True:
+            cmd = input("[control] enter p=pause, r=resume: ").strip().lower()
+            if cmd.startswith("p"):
+                print("[control] pausing…")
+                pause_controller.pause()
+            elif cmd.startswith("r"):
+                print("[control] resuming…")
+                pause_controller.resume()
+            elif cmd.startswith("operate"):
+                op_type, layer_id, nb_neurons = extract_op_info(cmd)
+                print(f'[control] performing operation {op_type} on layer {layer_id} with {nb_neurons} neurons…')
+                with model as m:
+                    m.operate(layer_id, nb_neurons, op_type)
+                    print(f'New model architecture {layer_id} info: {m}')
+                print("[control] quitting control loop…")
+                # Option 1: Manually clearing the gradient for each parameter
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad = None  # Reset gradient to None
+            else:
+                print("[control] unknown command.")
+
+    # start control thread
+    from threading import Thread
+    t = Thread(target=control_loop, daemon=True)
+    t.start()
 
     print("\nStarting Training...")
-    for train_step, (inputs, ids, labels) in enumerate(tqdm.tqdm(train_loader, desc='Training..')):
-        model, optimizer = update_model(train_step, model)
-        inputs = inputs.to(device)
-        bin_labels = (labels == 0).float().to(device)
-        mlt_labels = labels.to(device)
-        optimizer.zero_grad()
-        preds = model(inputs)
-        losses_batch_bin = criterion_bin(preds[:, 0], bin_labels)
-        losses_batch_mlt = criterion_mlt(preds, mlt_labels)
-        train_loss = torch.mean(losses_batch_bin) + torch.mean(losses_batch_mlt)
-        metric_bin.update(preds[:, 0], bin_labels)
-        metric_mlt.update(preds, mlt_labels)
-        train_acc_mlt = metric_mlt.compute() * 100
-        train_acc_bin = metric_bin.compute() * 100
-        train_loss.backward()
-        """
-            File "c:\Users\GuillaumePelluet\.vscode\extensions\ms-python.debugpy-2025.16.0-win32-x64\bundled\libs\debugpy\_vendored\pydevd\_pydevd_bundle\pydevd_runpy.py", line 310, in run_path
-                return _run_module_code(code, init_globals, run_name, pkg_name=pkg_name, script_name=fname)
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            File "c:\Users\GuillaumePelluet\.vscode\extensions\ms-python.debugpy-2025.16.0-win32-x64\bundled\libs\debugpy\_vendored\pydevd\_pydevd_bundle\pydevd_runpy.py", line 127, in _run_module_code
-                _run_code(code, mod_globals, init_globals, mod_name, mod_spec, pkg_name, script_name)
-            File "c:\Users\GuillaumePelluet\.vscode\extensions\ms-python.debugpy-2025.16.0-win32-x64\bundled\libs\debugpy\_vendored\pydevd\_pydevd_bundle\pydevd_runpy.py", line 118, in _run_code
-                exec(code, run_globals)
-            File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\examples\fashion_mnist_global.py", line 126, in <module>
-                train_loss.backward()
-            File "c:\Users\GuillaumePelluet\Documents\Codes\grayBox\python_env\weightslab\Lib\site-packages\torch\_tensor.py", line 492, in backward
-                torch.autograd.backward(
-            File "c:\Users\GuillaumePelluet\Documents\Codes\grayBox\python_env\weightslab\Lib\site-packages\torch\autograd\__init__.py", line 251, in backward
-                Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
-            RuntimeError: Function ConvolutionBackward0 returned an invalid gradient at index 1 - got [4, 5, 3, 3] but expected shape compatible with [4, 4, 3, 3]
-        """
-        optimizer.step()
-        print(
-            f"Step {train_step}/{len(train_loader)}: " +
-            f"| Train Loss: {train_loss:.4f} " +
-            f"| Train Acc mlt: {train_acc_mlt:.2f}%"
-            f"| Train Acc bin: {train_acc_bin:.2f}%"
-        )
-        if train_step == 0 or train_step % 5 != 0:
-            continue
-        with torch.no_grad():
-            losses = 0.0
-            metric_totals = defaultdict(float)
-            for test_step, (inputs, ids, labels) in enumerate(tqdm.tqdm(test_loader, desc='Testing..')):
-                inputs = inputs.to(device)
-                bin_labels = (labels == 0).float().to(device)
-                mlt_labels = labels.to(device)
-                preds = model(inputs)
-                losses_batch_bin = criterion_bin(preds[:, 0], bin_labels)
-                losses_batch_mlt = criterion_mlt(preds, mlt_labels)
-                losses_batch = torch.cat([losses_batch_bin[..., None], losses_batch_mlt[..., None]], axis=1)
-                test_loss = torch.mean(losses_batch_bin) + torch.mean(losses_batch_mlt)
-                metric_bin.update(preds[:, 0], bin_labels)
-                metric_mlt.update(preds, mlt_labels)
-                test_acc_bin = metric_bin.compute() * 100
-                test_acc_mlt = metric_mlt.compute() * 100
-            losses += test_loss
-            metric_totals['bin'] += test_acc_bin
-            metric_totals['mlt'] += test_acc_mlt
-            print(
-                f"Step {test_step}/{len(test_loader)}: " +
-                f"| Train Loss: {train_loss:.4f} " +
-                f"| Test Loss: {test_loss:.4f} " +
-                f"| Test Acc mlt: {metric_totals['mlt']:.2f}%"
-                f"| Test Acc bin: {metric_totals['bin']:.2f}%"
-            )
-    print("\n--- Training Finished ---")
+    for train_step in tqdm.trange(150):
+        # Train
+        train(train_loader, model, optimizer, criterion_mlt)
 
-    # Test: update optimizer globally and verify main loop uses new optimizer
-    print('Updating global optimizer...')
-    register_optimizer('_optimizer', get_optimizer('new_optimizer'))
-    print('Global optimizer updated! Main loop will use new optimizer automatically.')
+        # Test
+        test(test_loader, model, criterion_bin, criterion_mlt, metric_bin, metric_mlt, device) if train_step > 0 and train_step % 125 == 0 else None

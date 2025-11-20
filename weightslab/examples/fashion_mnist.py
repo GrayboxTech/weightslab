@@ -132,10 +132,12 @@ if __name__ == '__main__':
     # ================
     # 6. Training Loop
     print("\nStarting Training...")
+    model.pause_ctrl.resume()
     for train_step, (inputs, ids, labels) in enumerate(tqdm.tqdm(train_loader, desc='Training..')):
         if train_step == 0:
-            model.operate(0, 1, 1)  # ADD 1 neurons
-            model.pause_ctrl.resume()
+            # model.operate(0, 1, 1)  # ADD 1 neurons
+            # model.pause_ctrl.resume()
+            pass
         elif train_step == 1:
             model.pause_ctrl.pause()
             model.operate(0, 1, 1)  # ADD 1 neurons

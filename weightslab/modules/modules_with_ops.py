@@ -754,11 +754,19 @@ class LayerWiseOperations(NeuronWiseOperations):
                 added_weights = th.zeros(
                     tensors + (*self.kernel_size,)
                 ).to(self.device)
-
+                added_grad = None
+                if self.weight.grad is not None:
+                    added_grad = th.zeros(
+                        tensors + (*self.kernel_size,)
+                    ).to(self.device)
+                    
             # # Handle 1-dims cases like batchnorm without in out mapping
             elif len(self.weight.data.shape) == 1:
                 norm = True
                 added_weights = th.ones(tensors[0], ).to(self.device)
+                added_grad = None
+                if self.weight.grad is not None:
+                    added_grad = th.zeros(tensors[0], ).to(self.device)
 
             # # Handle 1-dims cases like linear, where we have a in out mapping
             # # (similar to conv1d wo. kernel)
@@ -766,10 +774,16 @@ class LayerWiseOperations(NeuronWiseOperations):
                 added_weights = th.zeros(
                     tensors
                 ).to(self.device)
+                added_grad = None
+                if self.weight.grad is not None:
+                    added_grad = th.zeros(tensors).to(self.device)
 
             # Biases
             if not is_incoming:
                 added_bias = th.zeros(nb_neurons).to(self.device)
+                added_bias_grad = None
+                if self.bias.grad is not None:
+                    added_bias_grad = th.zeros(nb_neurons).to(self.device)
 
             if not norm:
                 # Initialization
@@ -793,34 +807,69 @@ class LayerWiseOperations(NeuronWiseOperations):
                             )
                         )
                     )
-
+                    if added_grad is not None:
+                        self.weight.grad = th.cat(
+                            (
+                                self.weight.grad.to(self.device),
+                                added_grad
+                            ),
+                            dim=(transposed ^ is_incoming) & int(
+                                len(
+                                    self.weight.grad.flatten()
+                                ) > 1
+                            )
+                        )
                     if hasattr(self, 'bias') and self.bias is not None and \
                             not is_incoming:
                         self.bias.data = nn.Parameter(
                             th.cat((self.bias.data.to(self.device), added_bias))
                         ).to(self.device)
+                        if added_bias_grad is not None:
+                            self.bias.grad = th.cat(
+                                (self.bias.grad.to(self.device),
+                                 added_bias_grad)
+                            ).to(self.device)
             else:
                 # Update
                 with th.no_grad():
                     self.weight.data = nn.Parameter(
                         th.cat((self.weight.data.to(self.device), added_weights))
                     )
+                    if added_grad is not None:
+                        self.weight.grad = th.cat(
+                            (self.weight.grad.to(self.device), added_grad)
+                        )
+
                     if hasattr(self, 'bias') and self.bias is not None:
                         self.bias.data = nn.Parameter(
                             th.cat((self.bias.data.to(self.device), added_bias))
                         )
+                        if added_bias_grad is not None:
+                            self.bias.grad = th.cat(
+                                (self.bias.grad.to(self.device),
+                                 added_bias_grad)
+                            )
 
                     if hasattr(self, 'running_mean') and \
                             self.running_mean is not None:
                         self.running_mean = th.cat((
                             self.running_mean.to(self.device),
                             th.zeros(nb_neurons).to(self.device)))
+                        if self.running_mean.grad is not None:
+                            self.running_mean.grad = th.cat((
+                                self.running_mean.grad.to(self.device),
+                                th.zeros(nb_neurons).to(self.device)))
                     if hasattr(self, 'running_var') and \
                             self.running_var is not None:
                         self.running_var = th.cat((
                             self.running_var.to(self.device),
                             th.ones(nb_neurons).to(self.device))
                         )
+                        if self.running_var.grad is not None:
+                            self.running_var.grad = th.cat((
+                                self.running_var.grad.to(self.device),
+                                th.ones(nb_neurons).to(self.device))
+                            )
 
         # ----------------------------------
         # ----- Neurons Mapping Update -----
@@ -1107,6 +1156,12 @@ class LayerWiseOperations(NeuronWiseOperations):
                         dim=(transposed ^ is_incoming),
                         index=idx_tnsr
                     )).to(self.device)
+                if self.weight.grad is not None:
+                    self.weight.grad = th.index_select(
+                        self.weight.grad,
+                        dim=(transposed ^ is_incoming),
+                        index=idx_tnsr
+                    ).to(self.device)
 
                 if hasattr(self, 'bias') and self.bias is not None:
                     self.bias.data = nn.Parameter(
@@ -1116,16 +1171,35 @@ class LayerWiseOperations(NeuronWiseOperations):
                             index=idx_tnsr
                         )).to(self.device) if not is_incoming else \
                             self.bias.data
+                    if self.bias.grad is not None and not is_incoming:
+                        self.bias.grad = th.index_select(
+                            self.bias.grad,
+                            dim=0,
+                            index=idx_tnsr
+                        ).to(self.device)
+
                 if hasattr(self, 'running_mean'):
                     self.running_mean = th.index_select(
                         self.running_mean, dim=0, index=idx_tnsr).to(
                             self.device
                         )
+                    if self.running_mean.grad is not None:
+                        self.running_mean.grad = th.index_select(
+                            self.running_mean.grad,
+                            dim=0,
+                            index=idx_tnsr
+                        ).to(self.device)
                 if hasattr(self, 'running_var'):
                     self.running_var = th.index_select(
                         self.running_var, dim=0, index=idx_tnsr).to(
                             self.device
                         )
+                    if self.running_var.grad is not None:
+                        self.running_var.grad = th.index_select(
+                            self.running_var.grad,
+                            dim=0,
+                            index=idx_tnsr
+                        ).to(self.device)
                 
         # Sort indices to prune from last to first to maintain
         # the original order

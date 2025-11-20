@@ -29,6 +29,12 @@ class Proxy:
     def set(self, obj: Any) -> None:
         with self._lock:
             self._obj = obj
+            # invalidate any cached iterator when target changes
+            if hasattr(self, '_iterator'):
+                try:
+                    del self._iterator
+                except Exception:
+                    pass
 
     def get(self) -> Any:
         with self._lock:
@@ -40,10 +46,113 @@ class Proxy:
                 raise AttributeError("Proxy target not set")
             return getattr(self._obj, item)
 
+    # Special method forwarding for common container/iterable operations.
+    # CPython looks up special methods on the type, so we must implement
+    # them here to allow `for x in proxy` and `len(proxy)` to work.
+    def __iter__(self):
+        # Return a small iterator wrapper that delegates to the underlying
+        # object's iterator. We return a fresh wrapper each call so multiple
+        # concurrent iterations can proceed independently.
+        with self._lock:
+            if self._obj is None:
+                raise TypeError("Proxy target not set")
+            underlying_iter = iter(self._obj)
+
+        class _ProxyIterator:
+            def __init__(self, it):
+                self._it = it
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._it)
+
+        return _ProxyIterator(underlying_iter)
+
+    def __len__(self):
+        with self._lock:
+            if self._obj is None:
+                raise TypeError("Proxy target not set")
+            return len(self._obj)
+
+    def __getitem__(self, idx):
+        with self._lock:
+            if self._obj is None:
+                raise TypeError("Proxy target not set")
+            return self._obj[idx]
+
+    def __call__(self, *args, **kwargs):
+        """Forward callable invocation to the wrapped object.
+
+        This allows code that receives a ledger Proxy for a callable
+        (e.g., a model or function) to call it directly: `proxy(x)`.
+        """
+        with self._lock:
+            if self._obj is None:
+                raise TypeError("Proxy target not set")
+            target = self._obj
+
+        # Perform call outside lock to avoid deadlocks if target itself
+        # acquires locks and calls back into ledger.
+        return target(*args, **kwargs)
+
     def __repr__(self):
         with self._lock:
             return f"Proxy({repr(self._obj)})"
+    def __next__(self):
+        """Allow the Proxy itself to act as an iterator when `next(proxy)` is
+        called. We cache an internal iterator per-proxy so successive calls to
+        `next(proxy)` advance through the wrapped object. The iterator is
+        invalidated when `set()` is called.
+        """
+        with self._lock:
+            if self._obj is None:
+                raise TypeError("Proxy target not set")
+            it = getattr(self, '_iterator', None)
+            if it is None:
+                it = iter(self._obj)
+                self._iterator = it
 
+        try:
+            return next(it)
+        except Exception:
+            # clear cached iterator so future next(proxy) restarts
+            with self._lock:
+                try:
+                    delattr(self, '_iterator')
+                except Exception:
+                    pass
+            raise StopIteration
+
+    # Context manager support so `with proxy as x:` works when the proxy
+    # wraps an object that implements the context manager protocol. If the
+    # wrapped object does not implement __enter__/__exit__, the proxy will
+    # simply return the wrapped object from __enter__ and do nothing on exit.
+    def __enter__(self):
+        with self._lock:
+            if self._obj is None:
+                raise TypeError("Proxy target not set")
+            target = self._obj
+
+        enter = getattr(target, '__enter__', None)
+        if callable(enter):
+            # call __enter__ on the underlying object
+            return enter()
+        # fallback: return the underlying object itself
+        return target
+
+    def __exit__(self, exc_type, exc, tb):
+        with self._lock:
+            if self._obj is None:
+                raise TypeError("Proxy target not set")
+            target = self._obj
+
+        exit_fn = getattr(target, '__exit__', None)
+        if callable(exit_fn):
+            return exit_fn(exc_type, exc, tb)
+        # if underlying object had no __exit__, just return False
+        return False
 
 class Ledger:
     """Thread-safe ledger storing named registries for different object types.
@@ -197,7 +306,6 @@ GLOBAL_LEDGER = Ledger()
 # Convenience top-level wrappers (preserve optional weak param)
 def register_model(name: str, model: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_model(name, model, weak=weak)
-
 
 def get_model(name: Optional[str] = None) -> Any:
     return GLOBAL_LEDGER.get_model(name)

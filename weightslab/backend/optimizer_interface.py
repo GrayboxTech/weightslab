@@ -10,13 +10,14 @@ from weightslab.ledgers import register_optimizer
 
 
 class OptimizerInterface:
-    def __init__(self, optimizer_or_cls, params=None, name: str = None, register: bool = True, weak: bool = False, **kwargs):
+    def __init__(self, optimizer_or_cls, params=None, name: str = None, register: bool = True, weak: bool = False, _kill: bool = False, **kwargs):
         """Wrap a torch optimizer instance or instantiate one from a class.
 
         If `optimizer_or_cls` is an instance of `torch.optim.Optimizer` it is
         used directly. Otherwise it is expected to be a callable (optimizer
         class/factory) and `params` must be provided.
         """
+
         if isinstance(optimizer_or_cls, torch.optim.Optimizer):
             self.optimizer = optimizer_or_cls
             self._constructed = False

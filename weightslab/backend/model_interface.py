@@ -16,7 +16,7 @@ from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
-from weightslab.components.global_monitoring import pause_controller
+from weightslab.components.global_monitoring import guard_training_context, pause_controller
 from weightslab.ledgers import get_optimizer, get_optimizers, register_model, register_optimizer
 
 
@@ -71,7 +71,8 @@ class ModelInterface(NetworkWithOps):
         self.print_graph_filename = print_graph_filename
         self.traced_model = symbolic_trace(model)
         self.traced_model.name = "N.A."
-        self.pause_ctrl = pause_controller
+        self.guard_training_context = guard_training_context
+        self.pause_controller = pause_controller
 
         # Propagate the shape over the graph
         self.shape_propagation()
@@ -101,6 +102,9 @@ class ModelInterface(NetworkWithOps):
         self.register_hook_fn_for_architecture_change(
             lambda model: self._update_optimizer(model)
         )
+
+        # Set Model Training Guard
+        self.guard_training_context.model = self
 
     def __enter__(self):
         """
@@ -154,6 +158,7 @@ class ModelInterface(NetworkWithOps):
                 lr=lr
             )
             self.optimizer = wl.watch_or_edit(_optimizer, flag='optimizer')
+            self.optimizer._updated = True
 
     def monkey_patching(self):
         """
@@ -281,8 +286,7 @@ class ModelInterface(NetworkWithOps):
         Returns:
             th.Tensor: The output tensor from the model's forward pass.
         """
-
-        self.pause_ctrl.wait_if_paused()  # Wait until resume
+        self.pause_controller.wait_if_paused()
         
         self.maybe_update_age(x)
         out = self.model(x)

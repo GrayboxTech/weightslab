@@ -7,7 +7,7 @@ Expose commonly used helpers at package level so users can do::
 
 This file re-exports selected symbols from `weightslab.src`.
 """
-from .src import watch_or_edit, WeightsLab
+from .src import watch_or_edit
 
 __version__ = "0.0.0"
 __author__ = 'Alexandru-Andrei Rotaru'
