@@ -195,17 +195,53 @@ def generate_mappings(
 
 def _alias_from_tensor_name(tensor_name: str) -> Optional[str]:
     """
-    Given an ONNX tensor name like '/c1/Conv_output_0', return 'c1'.
-
-    If there's no leading '/', fall back to using the full name as alias.
+    Extract the PyTorch module name from an ONNX tensor name.
+    
+    ONNX tensor names follow the pattern:
+    - Simple: '/module_name/Operation_output_0' -> 'module_name'
+    - Nested: '/parent/child/Operation_output_0' -> 'parent.child'
+    - Redundant: '/model/layer1/layer1.0/conv1/...' -> 'model.layer1.0.conv1'
+      (ONNX adds redundant parent names in the path)
+    
+    Examples:
+        '/conv1/Conv_output_0' -> 'conv1'
+        '/block1/conv1/Conv_output_0' -> 'block1.conv1'
+        '/model/conv1/Conv_output_0' -> 'model.conv1'
+        '/model/layer1/layer1.0/conv1/Conv_output_0' -> 'model.layer1.0.conv1'
+          (not 'model.layer1.layer1.0.conv1' - removes redundant 'layer1')
+    
+    The ONNX path structure is: /module1/module2/.../Operation_output_N
+    We need to reconstruct: module1.module2... while removing redundancies
     """
-    if tensor_name.startswith("/"):
-        parts = tensor_name.split("/")
-        if len(parts) >= 2 and parts[1]:
-            return parts[1]
+    if not tensor_name.startswith("/"):
+        # fallback: treat the whole name as alias
+        return tensor_name
+    
+    # Remove leading '/' and split by '/'
+    parts = tensor_name[1:].split("/")
+    
+    if len(parts) < 2:
         return None
-    # fallback: treat the whole name as alias
-    return tensor_name
+    
+    # The last part is always the operation (e.g., 'Conv_output_0', 'BatchNormalization_output_0')
+    # Everything before that is the module path
+    module_parts = parts[:-1]
+    
+    # Handle ONNX redundancy: /model/layer1/layer1.0/conv1/...
+    # Here 'layer1' is redundant because 'layer1.0' already contains it
+    # We need to skip parts that are prefixes of the next part
+    deduplicated = []
+    for i, part in enumerate(module_parts):
+        # Check if this part is a redundant prefix of the next part
+        if i + 1 < len(module_parts):
+            next_part = module_parts[i + 1]
+            # If next part starts with current part + '.', it's redundant
+            if next_part.startswith(part + '.'):
+                continue  # Skip this redundant part
+        deduplicated.append(part)
+    
+    return '.'.join(deduplicated)
+
 
 
 def get_onnx_shapes_map(onnx_file_path: str) -> Dict[str, Optional[Tuple[int, ...]]]:
@@ -264,7 +300,7 @@ def generate_graph_dependencies(
     producer_for_tensor: Dict[str, onnx.NodeProto] = {}
     tensor_to_mod: Dict[str, nn.Module] = {}
 
-    for node in graph.node:
+    for node in graph.node: 
         for out_name in node.output:
             producer_for_tensor[out_name] = node
 
@@ -272,6 +308,34 @@ def generate_graph_dependencies(
             alias = _alias_from_tensor_name(out_name)
             if alias is not None and alias in name_to_module:
                 tensor_to_mod[out_name] = name_to_module[alias]
+            else:
+                # Fallback: try to extract module name from node name or weight parameters
+                # This handles cases where output tensor has no proper name (e.g., '13' for fc layer)
+                module_name = None
+                
+                # Try node.name first (e.g., '/fc/Gemm' -> 'fc')
+                if node.name and node.name.startswith('/'):
+                    parts = node.name[1:].split('/')
+                    if len(parts) >= 1:
+                        # For '/fc/Gemm', parts = ['fc', 'Gemm']
+                        # Join all parts except the last (operation name)
+                        if len(parts) > 1:
+                            module_name = '.'.join(parts[:-1])
+                        else:
+                            module_name = parts[0]
+                
+                # If that didn't work, try extracting from weight parameter names
+                if not module_name or module_name not in name_to_module:
+                    for inp in node.input:
+                        # Look for patterns like 'fc.weight', 'fc.bias', 'block1.conv1.weight'
+                        if '.weight' in inp or '.bias' in inp:
+                            module_name = inp.rsplit('.', 1)[0]  # Remove '.weight' or '.bias'
+                            break
+                
+                # If we found a valid module name, map it
+                if module_name and module_name in name_to_module:
+                    tensor_to_mod[out_name] = name_to_module[module_name]
+
 
     
     mod_cache: Dict[str, Optional[nn.Module]] = {}
@@ -312,20 +376,80 @@ def generate_graph_dependencies(
         return name_to_module.get(alias, None)
 
     
+    def get_channels_from_node_attributes(node: onnx.NodeProto) -> Optional[int]:
+        """
+        Extract output channel count from ONNX node attributes.
+        Works for Conv, Gemm (Linear), and BatchNormalization nodes.
+        
+        Returns:
+            Number of output channels/features, or None if cannot be determined
+        """
+        try:
+            if node.op_type == 'Conv':
+                # Conv weight shape: [out_channels, in_channels, kernel_h, kernel_w]
+                # Weight is usually the second input
+                if len(node.input) >= 2:
+                    weight_name = node.input[1]
+                    # Look for weight in graph initializers
+                    for init in graph.initializer:
+                        if init.name == weight_name:
+                            if len(init.dims) >= 1:
+                                return init.dims[0]  # out_channels
+            
+            elif node.op_type == 'Gemm':
+                # Gemm (Linear) weight shape: [out_features, in_features]
+                # Weight is usually the second input
+                if len(node.input) >= 2:
+                    weight_name = node.input[1]
+                    for init in graph.initializer:
+                        if init.name == weight_name:
+                            if len(init.dims) >= 1:
+                                return init.dims[0]  # out_features
+            
+            elif node.op_type == 'BatchNormalization':
+                # BatchNorm weight/bias shape: [num_features]
+                # Weight is usually the second input (scale parameter)
+                if len(node.input) >= 2:
+                    weight_name = node.input[1]
+                    for init in graph.initializer:
+                        if init.name == weight_name:
+                            if len(init.dims) >= 1:
+                                return init.dims[0]  # num_features
+        
+        except Exception:
+            pass
+        
+        return None
 
     def chan_for_tensor(tname: str) -> Optional[int]:
-        if onnx_shapes_map is None:
-            return None
-        shape = onnx_shapes_map.get(tname)
-        if shape and len(shape) >= 2:
-            # assume NCHW, C is dim 1
-            return shape[1]
+        """
+        Get channel count for a tensor using hybrid approach:
+        1. Try ONNX shape inference (from onnx_shapes_map)
+        2. Fallback: extract from node attributes if this is a node output
+        """
+        # Method 1: Try shape inference
+        if onnx_shapes_map is not None:
+            shape = onnx_shapes_map.get(tname)
+            if shape and len(shape) >= 2:
+                # assume NCHW, C is dim 1
+                return shape[1]
+        
+        # Method 2: Fallback - extract from node that produces this tensor
+        producer_node = producer_for_tensor.get(tname)
+        if producer_node is not None:
+            channels = get_channels_from_node_attributes(producer_node)
+            if channels is not None:
+                return channels
+        
         return None
+
 
 
     raw_edges: List[Tuple[nn.Module, nn.Module, DepType]] = []      # ALL module edges (for bridging)
     filtered_edges: List[Tuple[nn.Module, nn.Module, DepType]] = [] # only structural/learnable dst (optional)
 
+    # Create module_to_name mapping for REC filtering
+    module_to_name = {m: n for n, m in name_to_module.items()}
 
     for node in graph.node:
         # ---- STEP 1: Find source modules from node.inputs ----
@@ -346,12 +470,36 @@ def generate_graph_dependencies(
         op_type = node.op_type
         is_merge = op_type in ("Add", "Sum", "Concat")
         if is_merge and len(src_modules) >= 2:
+            # Helper to get top-level block name (e.g., "layer1" from "model.layer1.0.bn1")
+            def get_top_level_block(module_name: str) -> str:
+                parts = module_name.split('.')
+                # Skip "model" prefix if present, return next part
+                if len(parts) > 1 and parts[0] == 'model':
+                    return parts[1] if len(parts) > 1 else ""
+                return parts[0] if parts else ""
+            
             for i in range(len(src_modules)):
                 for j in range(i + 1, len(src_modules)):
                     mod_a = src_modules[i]
                     mod_b = src_modules[j]
-                    raw_edges.append((mod_a, mod_b, DepType.REC))
-                    filtered_edges.append((mod_a, mod_b, DepType.REC))
+                    
+                    # Get module names
+                    name_a = module_to_name.get(mod_a, "")
+                    name_b = module_to_name.get(mod_b, "")
+                    
+                    # Only create REC if modules are in the same top-level block
+                    # This prevents layer1.bn1 from being connected to layer2.downsample.bn
+                    block_a = get_top_level_block(name_a)
+                    block_b = get_top_level_block(name_b)
+                    
+                    print(f"[DEBUG REC FILTER] Merge op {op_type}: {name_a} (block={block_a}) vs {name_b} (block={block_b})")
+                    
+                    if block_a and block_b and block_a == block_b:
+                        print(f"[DEBUG REC FILTER] ✓ Creating REC dependency (same block)")
+                        raw_edges.append((mod_a, mod_b, DepType.REC))
+                        filtered_edges.append((mod_a, mod_b, DepType.REC))
+                    else:
+                        print(f"[DEBUG REC FILTER] ✗ Skipping REC dependency (different blocks or empty)")
 
         # ---- STEP 3: Try to find destination module from node.outputs ----
         dst_alias = None
@@ -392,16 +540,36 @@ def generate_graph_dependencies(
         op_type = node.op_type
         is_merge = op_type in ("Add", "Sum", "Concat")
         if is_merge and len(src_modules) >= 2:
+            # Helper to get top-level block name (same as above)
+            def get_top_level_block(module_name: str) -> str:
+                parts = module_name.split('.')
+                if len(parts) > 1 and parts[0] == 'model':
+                    return parts[1] if len(parts) > 1 else ""
+                return parts[0] if parts else ""
+            
             for i in range(len(src_modules)):
                 for j in range(i + 1, len(src_modules)):
                     mod_a = src_modules[i]
                     mod_b = src_modules[j]
-                    raw_edges.append((mod_a, mod_b, DepType.REC))
-                    filtered_edges.append((mod_a, mod_b, DepType.REC))
+                    
+                    # Get module names
+                    name_a = module_to_name.get(mod_a, "")
+                    name_b = module_to_name.get(mod_b, "")
+                    
+                    # Only create REC if modules are in the same top-level block
+                    block_a = get_top_level_block(name_a)
+                    block_b = get_top_level_block(name_b)
+                    
+                    print(f"[DEBUG REC FILTER 2] Merge op {op_type}: {name_a} (block={block_a}) vs {name_b} (block={block_b})")
+                    
+                    if block_a and block_b and block_a == block_b:
+                        print(f"[DEBUG REC FILTER 2] ✓ Creating REC dependency (same block)")
+                        raw_edges.append((mod_a, mod_b, DepType.REC))
+                        filtered_edges.append((mod_a, mod_b, DepType.REC))
+                    else:
+                        print(f"[DEBUG REC FILTER 2] ✗ Skipping REC dependency (different blocks or empty)")
 
         # DEBUG: print raw connectivity before bridging
-    module_to_name = {m: n for n, m in name_to_module.items()}
-
     print("\n[DEBUG] RAW EDGES FROM ONNX:")
     for src_mod, dst_mod, dep_type in raw_edges:
         sname = module_to_name.get(src_mod, f"<?{type(src_mod).__name__}>")

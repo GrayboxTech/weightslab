@@ -311,7 +311,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                         neuron_grad = weight_grad[neuron_id]
                         neuron_grad *= neuron_lr
                         weight_grad[neuron_id] = neuron_grad
-                if tensor_name in self.incoming_neuron_2_lr:
+                if tensor_name in self.incoming_neuron_2_lr and weight_grad.ndim > 1:
                     for in_neuron_id, neuron_lr in \
                             self.incoming_neuron_2_lr[tensor_name].items():
                         if in_neuron_id >= weight_grad.shape[1]:
@@ -1133,7 +1133,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                 self.weight.data = nn.Parameter(
                     th.index_select(
                         self.weight.data,
-                        dim=(transposed ^ is_incoming),
+                        dim=(transposed ^ is_incoming) if self.weight.data.ndim > 1 else 0,
                         index=idx_tnsr
                     )).to(self.device)
 
@@ -1143,18 +1143,22 @@ class LayerWiseOperations(NeuronWiseOperations):
                             self.bias.data,
                             dim=0,
                             index=idx_tnsr
-                        )).to(self.device) if not is_incoming else \
+                        )).to(self.device) if (not is_incoming or self.weight.data.ndim == 1) else \
                             self.bias.data
                 if hasattr(self, 'running_mean'):
+                    print(f"[DEBUG] {self.get_name()} updating running_mean. Old shape: {self.running_mean.shape}")
                     self.running_mean = th.index_select(
                         self.running_mean, dim=0, index=idx_tnsr).to(
                             self.device
                         )
+                    print(f"[DEBUG] {self.get_name()} updated running_mean. New shape: {self.running_mean.shape}")
                 if hasattr(self, 'running_var'):
+                    print(f"[DEBUG] {self.get_name()} updating running_var. Old shape: {self.running_var.shape}")
                     self.running_var = th.index_select(
                         self.running_var, dim=0, index=idx_tnsr).to(
                             self.device
                         )
+                    print(f"[DEBUG] {self.get_name()} updated running_var. New shape: {self.running_var.shape}")
                 
         # Sort indices to prune from last to first to maintain
         # the original order

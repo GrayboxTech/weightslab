@@ -181,7 +181,9 @@ class NetworkWithOps(nn.Module):
                 f"{neuron_operation} has not been defined.")
         
         # Convert to index from back
+        print(f"[DEBUG OPERATE] Called with layer_id={layer_id}")
         layer_id = self._reverse_indexing(layer_id, len(self.layers))
+        print(f"[DEBUG OPERATE] After _reverse_indexing, layer_id={layer_id}")
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.operate] No module with id {layer_id}")
@@ -224,6 +226,7 @@ class NetworkWithOps(nn.Module):
         # # Go through child nodes
         for rec_dep_id in self._dep_manager.get_child_ids(
                 layer_id, DepType.REC):
+            print(f"[DEBUG REC] Layer {layer_id} has REC child {rec_dep_id}")
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
             if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
@@ -250,6 +253,7 @@ class NetworkWithOps(nn.Module):
         # # Go through parents nodes
         for same_dep_id in self._dep_manager.get_parent_ids(
                 layer_id, DepType.SAME):
+            print(f"[DEBUG SAME PARENT] Layer {layer_id} has SAME parent {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
             if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
@@ -271,6 +275,7 @@ class NetworkWithOps(nn.Module):
         # # Go through child nodes
         for same_dep_id in self._dep_manager.get_child_ids(
                 layer_id, DepType.SAME):
+            print(f"[DEBUG SAME CHILD] Layer {layer_id} has SAME child {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
             if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
@@ -297,8 +302,14 @@ class NetworkWithOps(nn.Module):
         # Go through childs
         incoming_module = None
         updated_incoming_children: List[int] = []
-        for incoming_id in self._dep_manager.get_child_ids(
-                layer_id, DepType.INCOMING):
+        
+        incoming_ids = self._dep_manager.get_child_ids(layer_id, DepType.INCOMING)
+        if incoming_ids:
+            print(f"[DEBUG] {module.get_name_wi_id()} (ID: {layer_id}) has INCOMING children IDs: {incoming_ids}")
+            print(f"[DEBUG] Current visited_nodes: {self.visited_nodes}")
+            print(f"[DEBUG] Current _suppress_incoming_ids: {_suppress_incoming_ids}")
+
+        for incoming_id in incoming_ids:
             # Get module with id incoming_id
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
 
@@ -309,25 +320,44 @@ class NetworkWithOps(nn.Module):
 
             # to avoid double expansion except for bypass nodes
             if incoming_id in self.visited_nodes and not bypass:
+                print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in visited_nodes")
                 continue
             if _suppress_incoming_ids and incoming_id \
                     in _suppress_incoming_ids:
+                print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in _suppress_incoming_ids")
                 continue
 
             # # Operate on module incoming neurons
             kwargs['current_parent_name'] = module.get_name_wi_id()
-            incoming_module.operate(
-                neuron_indices=neuron_indices,
-                is_incoming=True,
-                neuron_operation=neuron_operation,
-                skip_initialization=False,
-                dependency=DepType.INCOMING,
-                **kwargs
-            )
-
-            # Keep visited node in mem. if it's a bypass node,
-            # i.e., it's incoming from a cat layer for instance.
-            self.visited_nodes.add(incoming_id) if not bypass else None
+            
+            # Check if we should recurse (for coupled layers like BatchNorm)
+            # or just do a leaf update (for decoupled layers like Conv/Linear)
+            is_coupled = isinstance(incoming_module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+            
+            if is_coupled:
+                print(f"[DEBUG] Recursing on coupled INCOMING child {incoming_module.get_name_wi_id()}")
+                self.operate(
+                    incoming_id,
+                    neuron_indices,
+                    neuron_operation=neuron_operation,
+                    skip_initialization=False,
+                    dependency=DepType.INCOMING,
+                    **kwargs
+                )
+                # self.operate handles visited_nodes internally
+            else:
+                print(f"[DEBUG] Leaf update on INCOMING child {incoming_module.get_name_wi_id()}")
+                incoming_module.operate(
+                    neuron_indices=neuron_indices,
+                    is_incoming=True,
+                    neuron_operation=neuron_operation,
+                    skip_initialization=False,
+                    dependency=DepType.INCOMING,
+                    **kwargs
+                )
+                # Keep visited node in mem. if it's a bypass node,
+                # i.e., it's incoming from a cat layer for instance.
+                self.visited_nodes.add(incoming_id) if not bypass else None
 
             # Save incoming children from layer_id
             updated_incoming_children.append(incoming_id)

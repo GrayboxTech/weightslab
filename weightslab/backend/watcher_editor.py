@@ -407,6 +407,60 @@ class WatcherEditor(NetworkWithOps):
 
         # Register the layers dependencies
         self.register_dependencies(self.dependencies_with_ops)
+        
+        # Print the dependency list for debugging
+        self._print_dependency_list()
+
+    def _print_dependency_list(self):
+        """Print the registered dependencies for debugging purposes."""
+        import builtins
+        
+        builtins.print("\n" + "="*80)
+        builtins.print("WEIGHTSLAB DEPENDENCY GRAPH")
+        builtins.print("="*80)
+        
+        if not hasattr(self, 'dependencies_with_ops') or not self.dependencies_with_ops:
+            builtins.print("No dependencies found!")
+            return
+        
+        # Create a mapping from module to name for readable output
+        module_to_name = {}
+        for name, module in self.model.named_modules():
+            module_to_name[id(module)] = name if name else '<root>'
+        
+        builtins.print(f"\nTotal dependencies: {len(self.dependencies_with_ops)}\n")
+        
+        # Group by dependency type
+        from collections import defaultdict
+        deps_by_type = defaultdict(list)
+        
+        for src_mod, dst_mod, dep_type in self.dependencies_with_ops:
+            deps_by_type[dep_type].append((src_mod, dst_mod))
+        
+        # Print dependencies grouped by type
+        for dep_type, deps in deps_by_type.items():
+            builtins.print(f"\n{dep_type.name} Dependencies ({len(deps)}):")
+            builtins.print("-" * 80)
+            
+            for src_mod, dst_mod in deps:
+                src_name = module_to_name.get(id(src_mod), f"<unknown {type(src_mod).__name__}>")
+                dst_name = module_to_name.get(id(dst_mod), f"<unknown {type(dst_mod).__name__}>")
+                
+                # Get module IDs if available
+                src_id = src_mod.get_module_id() if hasattr(src_mod, 'get_module_id') else 'N/A'
+                dst_id = dst_mod.get_module_id() if hasattr(dst_mod, 'get_module_id') else 'N/A'
+                
+                builtins.print(f"  [{src_id:3}] {src_name:40} -> [{dst_id:3}] {dst_name:40}")
+                
+                # Show neuron mappings if available
+                if hasattr(dst_mod, 'dst_to_src_mapping_tnsrs') and dst_mod.dst_to_src_mapping_tnsrs:
+                    src_key = src_mod.get_name_wi_id() if hasattr(src_mod, 'get_name_wi_id') else None
+                    if src_key and src_key in dst_mod.dst_to_src_mapping_tnsrs:
+                        mapping = dst_mod.dst_to_src_mapping_tnsrs[src_key]
+                        builtins.print(f"      └─ Neuron mapping: {len(mapping)} connections")
+        
+        builtins.print("\n" + "="*80 + "\n")
+
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         """
