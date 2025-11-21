@@ -15,6 +15,7 @@ import weakref
 import os
 import time
 import yaml
+
 from typing import Any, Dict, List, Optional
 
 
@@ -185,6 +186,12 @@ class Ledger:
         self._proxies_hyperparams: Dict[str, Proxy] = {}
         # hyperparam file watchers: name -> dict(path, thread, stop_event)
         self._hp_watchers: Dict[str, Dict[str, Any]] = {}
+        # loggers registry
+        self._loggers: Dict[str, Any] = {}
+        self._proxies_loggers: Dict[str, Proxy] = {}
+        # signals registry (metrics, losses, etc.)
+        self._signals: Dict[str, Any] = {}
+        self._proxies_signals: Dict[str, Proxy] = {}
 
     # Generic helpers
     def _register(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: str, obj: Any, weak: bool = False) -> None:
@@ -284,6 +291,8 @@ class Ledger:
         Example: set_hyperparam('exp', 'data.train.batch_size', 128)
         """
         with self._lock:
+            if name is None:
+                name = list(self._hyperparams.keys())[0]
             if name not in self._hyperparams:
                 raise KeyError(f'no hyperparams registered under {name}')
             hp = self._hyperparams[name]
@@ -360,6 +369,76 @@ class Ledger:
             except Exception:
                 pass
 
+    # Loggers
+    def register_logger(self, name: str, logger: Any) -> None:
+        with self._lock:
+            proxy = self._proxies_loggers.get(name)
+            if proxy is not None:
+                proxy.set(logger)
+                self._loggers[name] = proxy
+            else:
+                self._loggers[name] = logger
+
+    def get_logger(self, name: Optional[str] = None) -> Any:
+        with self._lock:
+            if name is not None:
+                if name in self._loggers:
+                    return self._loggers[name]
+                proxy = Proxy(None)
+                self._loggers[name] = proxy
+                self._proxies_loggers[name] = proxy
+                return proxy
+
+            keys = set(self._loggers.keys())
+            if len(keys) == 1:
+                k = next(iter(keys))
+                return self._loggers[k]
+            raise KeyError('multiple loggers present, specify a name')
+
+    def list_loggers(self) -> List[str]:
+        with self._lock:
+            return list(self._loggers.keys())
+
+    def unregister_logger(self, name: str) -> None:
+        with self._lock:
+            self._loggers.pop(name, None)
+            self._proxies_loggers.pop(name, None)
+
+    # Signals (metrics, loss functions, monitors)
+    def register_signal(self, name: str, signal: Any, weak: bool = False) -> None:
+        with self._lock:
+            proxy = self._proxies_signals.get(name)
+            if proxy is not None:
+                proxy.set(signal)
+                self._signals[name] = proxy
+            else:
+                self._signals[name] = signal
+
+    def get_signal(self, name: Optional[str] = None) -> Any:
+        with self._lock:
+            if name is not None:
+                if name in self._signals:
+                    return self._signals[name]
+                proxy = Proxy(None)
+                self._signals[name] = proxy
+                self._proxies_signals[name] = proxy
+                return proxy
+
+            keys = set(self._signals.keys())
+            if len(keys) == 1:
+                k = next(iter(keys))
+                return self._signals[k]
+            raise KeyError('multiple signals present, specify a name')
+
+    def list_signals(self) -> List[str]:
+        with self._lock:
+            return list(self._signals.keys())
+
+    def unregister_signal(self, name: str) -> None:
+        with self._lock:
+            self._signals.pop(name, None)
+            self._proxies_signals.pop(name, None)
+
 
     # Models
     def register_model(self, name: str, model: Any, weak: bool = False) -> None:
@@ -422,6 +501,7 @@ class Ledger:
                 "dataloaders": list(self._dataloaders.keys()),
                 "optimizers": list(self._optimizers.keys()),
                 "hyperparams": list(self._hyperparams.keys()),
+                "loggers": list(self._loggers.keys()),
             }
 
     def __repr__(self) -> str:
@@ -433,6 +513,9 @@ class Ledger:
 GLOBAL_LEDGER = Ledger()
 
 # Convenience top-level wrappers (preserve optional weak param)
+def list_models() -> List[str]:
+    return GLOBAL_LEDGER.list_models()
+
 def register_model(name: str, model: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_model(name, model, weak=weak)
 
@@ -442,6 +525,10 @@ def get_model(name: Optional[str] = None) -> Any:
 def get_models() -> List[str]:
     return GLOBAL_LEDGER.list_models()
 
+
+def list_dataloaders() -> List[str]:
+    return GLOBAL_LEDGER.list_dataloaders()
+
 def register_dataloader(name: str, dataloader: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_dataloader(name, dataloader, weak=weak)
 
@@ -450,6 +537,10 @@ def get_dataloader(name: Optional[str] = None) -> Any:
 
 def get_dataloaders() -> List[str]:
     return GLOBAL_LEDGER.list_dataloaders()
+
+
+def list_optimizers() -> List[str]:
+    return GLOBAL_LEDGER.list_optimizers()
 
 def register_optimizer(name: str, optimizer: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_optimizer(name, optimizer, weak=weak)
@@ -464,25 +555,46 @@ def get_optimizers() -> List[str]:
 def register_hyperparams(name: str, params: Dict[str, Any], weak: bool = False) -> None:
     GLOBAL_LEDGER.register_hyperparams(name, params, weak=weak)
 
-
 def get_hyperparams(name: Optional[str] = None) -> Any:
     return GLOBAL_LEDGER.get_hyperparams(name)
-
 
 def list_hyperparams() -> List[str]:
     return GLOBAL_LEDGER.list_hyperparams()
 
-
 def set_hyperparam(name: str, key_path: str, value: Any) -> None:
     return GLOBAL_LEDGER.set_hyperparam(name, key_path, value)
-
 
 def watch_hyperparams_file(name: str, path: str, poll_interval: float = 1.0) -> None:
     return GLOBAL_LEDGER.watch_hyperparams_file(name, path, poll_interval=poll_interval)
 
-
 def unwatch_hyperparams_file(name: str) -> None:
     return GLOBAL_LEDGER.unwatch_hyperparams_file(name)
+
+
+def register_logger(name: str, logger: Any) -> None:
+    GLOBAL_LEDGER.register_logger(name, logger)
+
+def get_logger(name: Optional[str] = None) -> Any:
+    return GLOBAL_LEDGER.get_logger(name)
+
+def list_loggers() -> List[str]:
+    return GLOBAL_LEDGER.list_loggers()
+
+def unregister_logger(name: str) -> None:
+    return GLOBAL_LEDGER.unregister_logger(name)
+
+
+def register_signal(name: str, signal: Any) -> None:
+    GLOBAL_LEDGER.register_signal(name, signal)
+
+def get_signal(name: Optional[str] = None) -> Any:
+    return GLOBAL_LEDGER.get_signal(name)
+
+def list_signals() -> List[str]:
+    return GLOBAL_LEDGER.list_signals()
+
+def unregister_signal(name: str) -> None:
+    return GLOBAL_LEDGER.unregister_signal(name)
 
 
 if __name__ == "__main__":

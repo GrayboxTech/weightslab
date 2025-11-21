@@ -1,0 +1,159 @@
+// Modules/Architecture facing functions:
+// lets define a minimalistic, flexible way to interact, query, visualize, etc
+
+// Interface to communicate btw UI and SDK
+service ExperimentService {
+  // ----------------------------
+  // ----------- READ -----------
+  // ----------------------------
+  // Experiment Signals (metrics and losses) during the exp.
+  rpc WatchSignals (Empty) returns (stream W_TrainingStatusEx);
+
+
+  // ----------------------------
+  // ------ READ/WRITE ------
+  // ----------------------------
+  // Experiment Management
+  // --------------------------
+  // Edit experiments hyper parameters, e.g., learning rate, batch size, etc.
+  rpc EditExperiment (E_ExperimentRequest) returns (E_ExperimentResponse);
+  // Watch experiments hyper parameters, e.g., learning rate, batch size, etc.
+  rpc WatchExperiment (W_ExperimentRequest) returns (W_ExperimentResponse);
+
+  // Graph Interactions
+  // --------------------------
+  // Graph Editor: Edit weights, maybe parameters one day.
+  rpc GraphEditor(E_GraphRequest) returns (E_GraphResponse);
+  // Graph Watcher: Watch graph modules dependencies (so graph architecture here, recursive or not, ..etc), weights, activations, signals from the graph, neurons status for instance.
+  rpc GraphWatcher(W_GraphRequest) returns (W_GraphResponse);
+
+  // Data Interactions
+  // --------------------------
+  // Remove x data from their IDs in the trainset for instance.
+  rpc DataEditor (E_DataRequest) returns (E_DataResponse);
+  // Data: Get samples, related metrics, or whatever else you need related to data.
+  rpc DataWatcher (W_DataRequest) returns (W_DataResponse);
+}
+
+// Watchers
+// --------
+// Signals
+// -- Elements
+message MetricsStatus {
+  string name = 1;
+  float value = 2;
+}
+message AnnotatStatus {
+  string name = 1;
+  map<string, float> metadata = 2;
+}
+// -- Query / Answer
+message W_TrainingStatusEx {
+  optional string timestamp = 1;
+  optional string experiment_name = 2;
+  optional int32 model_age = 3;
+
+  optional MetricsStatus metrics_status = 4;
+  optional AnnotatStatus annotat_status = 5;
+}
+
+// Experiment Management
+// -- Elements
+message HyperParameterCommand {
+  optional HyperParameters hyper_parameters = 1;
+}
+message HyperParameterDesc {
+  string label = 1;
+  string name = 2;
+  string type = 3;
+  optional float numerical_value = 4;
+  optional string string_value = 5;
+}
+// -- Query / Answer
+message W_ExperimentRequest {
+  bool get_hyper_parameters = 4;
+  bool get_interactive_layers = 5;
+  optional string get_data_records = 6;
+  optional int32 get_single_layer_info_id = 8;
+  optional HyperParameterCommand hyper_parameter_change = 1
+}
+message W_ExperimentResponse {
+  bool success = 1;
+  string message = 2;
+  repeated HyperParameterDesc hyper_parameters_descs = 3;
+}
+// GraphWatcher
+// -- Query / Answer
+message LayerRepresentation {
+  optional int32 layer_id = 1;
+  optional string layer_name = 2;
+  optional string layer_type = 3;
+  
+  optional int32 neurons_count = 4;
+  optional int32 incoming_neurons_count = 5;
+  
+  optional int32 kernel_size = 6;
+  optional int32 stride = 7;
+
+  map<int32, float> per_neuron_learning_rates = 8;
+  map<int32, float> per_incoming_neuron_learning_rates = 9;
+
+  repeated NeuronStatistics neurons_statistics = 10;
+}
+message LayerDependencyType {
+  int8 INCOMING = 0;
+  int8 SAME = 1;
+  int8 REC = 2;  
+}
+message Dependencies {
+  // Maybe here can just replace LayerRepresentation with LayerId ?
+  LayerRepresentation src_mod;
+  LayerRepresentation dst_mod;
+  LayerDependencyType dependency_type;
+}
+message WeigthsRequest{
+  NeuronId neuron_id = 1;
+  bool with_bias = 2;
+  bool with_learning_rate = 3;
+  bool with_incoming_learning_rates = 4;
+  bool include_gradients = 5;
+  optional int32 start_neuron_idx = 6; 
+  optional int32 end_neuron_idx = 7; 
+}
+message ActivationRequest {
+  int32 layer_id = 1;
+  int32 sample_id = 2;   
+  string origin = 3;    
+  bool pre_activation = 4; 
+}
+
+message ActivationMap {
+  int32 neuron_id = 1;
+  repeated float values = 2; 
+  int32 H = 3;               
+  int32 W = 4;               
+}
+message ActivationResponse {
+  string layer_type = 1;       
+  int32 neurons_count = 2;
+  repeated ActivationMap activations = 3;
+}
+message MetricsStatus {
+  string name = 1;
+  float value = 2;
+}
+message ComputationalGraph {
+  optional repeated Dependencies dependencies;  // Get graph dependencies
+  optional repeated LayerRepresentation layer;  // Neurons statistics
+  optional repeated WeigthsRequest weights;  // The graph weights
+  optional repeated ActivationRequest activations;  // The graph activations
+}
+// -- Query / Answer
+message W_GraphRequest {
+  ComputationalGraph computationalGraph;
+}
+message W_GraphResponse {
+  bool success = 1;
+  string message = 2;
+  optional ComputationalGraph computational_graph = 3;
+}

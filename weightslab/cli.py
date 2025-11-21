@@ -305,8 +305,9 @@ def _handle_command(cmd: str) -> Any:
                 pass
 
             try:
-                ascii_tree = _format_model_tree(m)
-                return {'ok': True, 'model': model_name, 'plot': ascii_tree}
+                # Simplified plot: return only the model's printed representation
+                print(m)
+                return {'ok': True, 'model': model_name, 'plot': True}
             except Exception as e:
                 return {'ok': False, 'error': str(e)}
 

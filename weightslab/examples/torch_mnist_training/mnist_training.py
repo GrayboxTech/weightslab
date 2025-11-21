@@ -15,15 +15,14 @@ from torchmetrics.classification import Accuracy
 
 from weightslab.tests.torch_models import FashionCNN as CNN
 from weightslab.components.global_monitoring import guard_training_context
+from weightslab.trainer.trainer_services import serve
 
 
 # Initialize WeightsLab CLI
 cli.initialize(launch_client=True)
 
-# --- Configuration Constants ---
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TMP_DIR = tempfile.mkdtemp()
-
+# Initialize WeightsLab Serving
+serve(threading=True)
 
 # --- Define functions ---
 def train(loader, model, optimizer, criterion_mlt):
@@ -35,12 +34,25 @@ def train(loader, model, optimizer, criterion_mlt):
 
         # Inference
         optimizer.zero_grad()
-        preds = model(input)
-        loss = criterion_mlt(preds.float(), label.long()).mean()
+        output = model(input)
+        loss_batch = criterion_mlt(output.float(), label.long())
+        loss = loss_batch.mean()
+        if output.ndim == 1:
+            preds = (output > 0.0).long()
+        else:
+            preds = output.argmax(dim=1, keepdim=True)
 
         # Propagate
         loss.backward()
         optimizer.step()
+
+        # Data update
+        wl.update_train_test_data_statistics(
+            model_age=model.get_age(),
+            batch_ids=ids,
+            losses_batch=loss_batch,
+            preds=preds
+        )
     
     # Returned signals detach from the computational graph
     return loss.detach().cpu().item()
@@ -55,14 +67,26 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
             labels = labels.to(device)
 
             # Inference
-            preds = model(inputs)
-            losses_batch_mlt = criterion_mlt(preds, labels)
-            
+            output = model(inputs)
+            losses_batch_mlt = criterion_mlt(output, labels)
             test_loss = torch.mean(losses_batch_mlt)
-            metric_mlt.update(preds, labels)
+            metric_mlt.update(output, labels)
+            if output.ndim == 1:
+                preds = (output > 0.0).long()
+            else:
+                preds = output.argmax(dim=1, keepdim=True)
 
             # Compute signals
             losses = losses + test_loss
+
+            # Data update
+            wl.update_train_test_data_statistics(
+                model_age=model.get_age(),
+                batch_ids=ids,
+                losses_batch=losses_batch_mlt,
+                preds=preds
+            )
+
         loss = losses / len(loader)    
         metric_total = metric_mlt.compute() * 100
 
@@ -79,8 +103,6 @@ if __name__ == '__main__':
     print('Hello world')
     
     start_time = time.time()
-    device = DEVICE
-
 
     # Load YAML hyperparameters (fallback to defaults if missing)
     parameters = {}
@@ -92,16 +114,24 @@ if __name__ == '__main__':
 
     # Normalize device entry
     if parameters.get('device', 'auto') == 'auto':
-        parameters['device'] = device
+        parameters['device'] = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = parameters['device']
 
     # Ensure root_log_dir default
     if not parameters.get('root_log_dir'):
+        TMP_DIR = tempfile.mkdtemp()
         parameters['root_log_dir'] = os.path.join(TMP_DIR, 'logs')
+    os.makedirs(parameters['root_log_dir'], exist_ok=True)
 
     # Wire more parameters
     epochs = parameters.get('epochs', 10)
-    log_dir = parameters.get('root_log_dir', os.path.join(TMP_DIR, 'logs'))
+    log_dir = parameters.get('root_log_dir')
     tqdm_display = parameters.get('tqdm_display', True)
+
+    # Logger
+    from weightslab.utils.board import Dash as Logger
+    logger = Logger()
+    wl.watch_or_edit(logger, flag='logger', name=exp_name, log_dir=log_dir)
 
     # Hyper Parameters
     wl.watch_or_edit(parameters, flag='parameters', name=exp_name, defaults=parameters, poll_interval=1.0)
@@ -117,7 +147,7 @@ if __name__ == '__main__':
 
     # Data
     _train_dataset = datasets.MNIST(
-        root=os.path.join(TMP_DIR, 'data'),
+        root=os.path.join(parameters.get('root_log_dir'), 'data'),
         train=True,
         download=True,
         transform=transforms.Compose([
@@ -126,7 +156,7 @@ if __name__ == '__main__':
         ])
     )
     _test_dataset = datasets.MNIST(
-        root=os.path.join(TMP_DIR, 'data'),
+        root=os.path.join(parameters.get('root_log_dir'), 'data'),
         train=False,
         download=True,
         transform=transforms.Compose([
@@ -139,21 +169,32 @@ if __name__ == '__main__':
     train_shuffle = parameters.get('data', {}).get('train_dataset', {}).get('train_shuffle', True)
     test_shuffle = parameters.get('data', {}).get('test_dataset', {}).get('test_shuffle', False)
 
-    train_loader = wl.watch_or_edit(_train_dataset, flag='data', batch_size=train_bs, shuffle=train_shuffle)
-    test_loader = wl.watch_or_edit(_test_dataset, flag='data', batch_size=test_bs, shuffle=test_shuffle)
+    train_loader = wl.watch_or_edit(_train_dataset, flag='data', name='train_loader', batch_size=train_bs, shuffle=train_shuffle)
+    test_loader = wl.watch_or_edit(_test_dataset, flag='data', name='test_loader', batch_size=test_bs, shuffle=test_shuffle)
 
-    # Criterion
-    criterion_bin = nn.BCELoss(reduction='none')
-    criterion_mlt = nn.CrossEntropyLoss(reduction='none')
+    # ====================
+    # 4. Define criterions
+    criterion_mlt = wl.watch_or_edit(
+        nn.CrossEntropyLoss(reduction='none'),
+        flag='train_loss/mlt_loss',
+        log=True
+    )
 
-    # Metrics
-    metric_bin = Accuracy(task='binary').to(device)
-    metric_mlt = Accuracy(task='multiclass', num_classes=10).to(device)
+    test_criterion_mlt = wl.watch_or_edit(
+        nn.BCELoss(reduction='none'),
+        flag='test_loss/mlt_loss',
+        log=True
+    )
+    test_metric_mlt = wl.watch_or_edit(
+        Accuracy(task='multiclass', num_classes=10).to(device),
+        flag='test_metric/mlt_metric',
+        log=True
+    )
 
     # ================
     # 6. Training Loop
     print("\nStarting Training...")
-    max_steps = parameters.get('training_steps_to_do', 150)
+    max_steps = parameters.get('training_steps_to_do', 1500)
     train_range = range(max_steps)
     if tqdm_display:
         train_range = tqdm.trange(max_steps)
@@ -163,8 +204,8 @@ if __name__ == '__main__':
 
         # Test
         test_loss, test_metric = None, None
-        if train_step > 0 and train_step % 125 == 0:
-            test_loss, test_metric = test(test_loader, model, criterion_mlt, metric_mlt, device)
+        if train_step > 0 and train_step % parameters.get('eval_steps', 50) == 0:
+            test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device)
 
         # Verbose
         print(
@@ -175,4 +216,3 @@ if __name__ == '__main__':
         )
     print(f"--- Training completed in {time.time() - start_time:.2f} seconds ---")
     print(f"Log directory: {log_dir}")
-    print(f"Epochs: {epochs}")

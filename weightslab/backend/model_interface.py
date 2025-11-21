@@ -90,7 +90,21 @@ class ModelInterface(NetworkWithOps):
         # Optionally register wrapper in global ledger
         if register:
             try:
-                reg_name = name or getattr(model, '__name__', None) or model.__class__.__name__ or 'model'
+                # Prefer an explicit name. Otherwise prefer a meaningful
+                # candidate (function __name__ when informative, then
+                # the class name). Avoid using the generic literal
+                # 'model' which can be produced by wrappers/patching and
+                # lead to duplicate registrations.
+                if name:
+                    reg_name = name
+                else:
+                    candidate = getattr(model, '__name__', None)
+                    if candidate and candidate.lower() != 'model':
+                        reg_name = candidate
+                    else:
+                        clsname = getattr(model.__class__, '__name__', None)
+                        reg_name = clsname if clsname and clsname.lower() != 'model' else (name or 'model')
+
                 register_model(reg_name, self, weak=weak)
                 self._ledger_name = reg_name
             except Exception:
@@ -292,6 +306,10 @@ class ModelInterface(NetworkWithOps):
         out = self.model(x)
 
         return out
+    
+    def apply_architecture_op(self, op_type, layer_id, neuron_indices=None):
+        with self as m:
+            m.operate(layer_id=layer_id, op_type=op_type, neuron_indices=neuron_indices)
 
     def state_dict(self):
         """

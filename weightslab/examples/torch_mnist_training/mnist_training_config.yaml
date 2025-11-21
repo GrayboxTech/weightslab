@@ -1,16 +1,16 @@
 # Configuration for mnist training example
 name: CNN_Test
-device: auto
-root_log_dir: ''
+device: cuda
+root_log_dir: "C:\\Users\\GUILLA~1\\AppData\\Local\\Temp\\tmpx71e1085"
 tqdm_display: true
 skip_loading: false
-epochs: 10
-training_steps_to_do: 150
+training_steps_to_do: 1500
+eval_steps: 50
 
 data:
   train_dataset:
     train_shuffle: true
-    batch_size: 16
+    batch_size: 64
   test_dataset:
     test_shuffle: false
     batch_size: 16
