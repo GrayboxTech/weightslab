@@ -650,8 +650,54 @@ def cli_client_main(host: str, port: int):
 
 
 if __name__ == '__main__':
-    # allow running a client directly for debugging
-    if len(sys.argv) >= 3:
-        cli_client_main(sys.argv[1], int(sys.argv[2]))
-    else:
-        print('weightslab.cli: run initialize() from your experiment to launch server')
+    #!/usr/bin/env python3
+    """Simple launcher that restarts the weightslab CLI when it exits.
+
+    Usage:
+    python restart_cli.py
+
+    Behavior:
+    - Starts the CLI as `python -m weightslab.cli` using the same interpreter.
+    - Creates a new process-group/session for the child so Ctrl+C in the
+    CLI window typically does not kill the launcher.
+    - If the CLI process exits, the launcher waits `restart_delay` seconds and
+    restarts it. If you Ctrl+C the launcher itself, it will terminate.
+    """
+
+    import sys
+    import time
+    import subprocess
+    import os
+
+    cmd = [sys.executable, '-m', 'weightslab.cli']
+    restart_delay = 1.0
+
+    print('Launcher: starting CLI (module weightslab.cli).')
+    while True:
+        try:
+            if os.name == 'nt':
+                # Windows: create a new process group so console signals are isolated
+                creationflags = 0
+                try:
+                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                except Exception:
+                    creationflags = 0
+                p = subprocess.Popen(cmd, creationflags=creationflags)
+            else:
+                # POSIX: start child in new session/process group
+                p = subprocess.Popen(cmd, preexec_fn=os.setsid)
+
+            rc = p.wait()
+            print(f'CLI exited with code {rc}. Restarting in {restart_delay}s...')
+            time.sleep(restart_delay)
+
+        except KeyboardInterrupt:
+            print('Launcher received Ctrl+C; exiting launcher.')
+            try:
+                p.terminate()
+            except Exception:
+                pass
+            sys.exit(0)
+        except Exception as e:
+            print('Launcher error:', e)
+            time.sleep(restart_delay)
