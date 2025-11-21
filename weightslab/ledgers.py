@@ -110,16 +110,16 @@ class Proxy:
         `next(proxy)` advance through the wrapped object. The iterator is
         invalidated when `set()` is called.
         """
-        with self._lock:
-            if self._obj is None:
-                raise TypeError("Proxy target not set")
-            it = getattr(self, '_iterator', None)
-            if it is None:
-                it = iter(self._obj)
-                self._iterator = it
+        # with self._lock:
+        #     if self._obj is None:
+        #         raise TypeError("Proxy target not set")
+            # it = getattr(self, '_iterator', None)
+            # if it is None:
+            #     it = iter(self._obj)
+            #     self._iterator = it
 
         try:
-            return next(it)
+            return next(self._obj)
         except Exception:
             # clear cached iterator so future next(proxy) restarts
             with self._lock:
@@ -506,7 +506,7 @@ class Ledger:
 
     def __repr__(self) -> str:
         s = self.snapshot()
-        return f"Ledger(models={s['models']}, dataloaders={s['dataloaders']}, optimizers={s['optimizers']})"
+        return str(s)
 
 
 # Module-level singleton

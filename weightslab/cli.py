@@ -27,7 +27,8 @@ from typing import Optional, Any
 from .art import _BANNER
 
 from weightslab.ledgers import GLOBAL_LEDGER
-from weightslab.ledgers import list_hyperparams, get_hyperparams, Proxy
+from weightslab.ledgers import Proxy
+from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 
 
 def _sanitize_for_json(obj):
@@ -210,9 +211,26 @@ def _handle_command(cmd: str) -> Any:
                     except Exception:
                         pass
                 return {'ok': True, 'action': 'paused', 'model': name}
-
-            # fallback: try to get single model from ledger
+            # fallback: pick the first registered model name (if any)
             try:
+                names = GLOBAL_LEDGER.list_models()
+                if names:
+                    first_name = names[0]
+                    try:
+                        tgt = GLOBAL_LEDGER.get_model(first_name)
+                    except Exception:
+                        tgt = None
+                    if tgt is not None:
+                        try:
+                            tgt.pause_ctrl.pause()
+                        except Exception:
+                            try:
+                                tgt.pause()
+                            except Exception:
+                                pass
+                        return {'ok': True, 'action': 'paused', 'model': first_name}
+
+                # if no models registered or get_model failed, attempt generic get_model()
                 tgt = GLOBAL_LEDGER.get_model()
                 try:
                     tgt.pause_ctrl.pause()
@@ -243,9 +261,26 @@ def _handle_command(cmd: str) -> Any:
                     except Exception:
                         pass
                 return {'ok': True, 'action': 'resumed', 'model': name}
-
-            # fallback: try to get single model from ledger
+            # fallback: pick the first registered model name (if any)
             try:
+                names = GLOBAL_LEDGER.list_models()
+                if names:
+                    first_name = names[0]
+                    try:
+                        tgt = GLOBAL_LEDGER.get_model(first_name)
+                    except Exception:
+                        tgt = None
+                    if tgt is not None:
+                        try:
+                            tgt.pause_ctrl.resume()
+                        except Exception:
+                            try:
+                                tgt.resume()
+                            except Exception:
+                                pass
+                        return {'ok': True, 'action': 'resumed', 'model': first_name}
+
+                # if no models registered or get_model failed, attempt generic get_model()
                 tgt = GLOBAL_LEDGER.get_model()
                 try:
                     tgt.pause_ctrl.resume()
@@ -305,9 +340,8 @@ def _handle_command(cmd: str) -> Any:
                 pass
 
             try:
-                # Simplified plot: return only the model's printed representation
-                print(m)
-                return {'ok': True, 'model': model_name, 'plot': True}
+                # Simplified plot: return only the model's printed representatio
+                return {'ok': True, 'model': model_name, 'plot': repr(m)}
             except Exception as e:
                 return {'ok': False, 'error': str(e)}
 
@@ -415,7 +449,7 @@ def _handle_command(cmd: str) -> Any:
                 except Exception:
                     return {'ok': False, 'error': 'no_model_registered'}
                 try:
-                    with m as mm:
+                    with m as mm, guard_training_context, guard_testing_context:
                         mm.operate(layer_id, nb, op_type)
                     print(f'[cli] operated on model via context manager')
                     print(f'[cli] new model info: {m}')

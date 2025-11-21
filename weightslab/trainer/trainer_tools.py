@@ -169,7 +169,41 @@ def _labels_from_mask_path_histogram(path, num_classes=None, ignore_index=255):
 
 def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     sample_stats = pb2.SampleStatistics()
-    sample_stats.sample_count = len(dataset.wrapped_dataset)
+    # Robustly obtain a dataset length even when 'dataset' may be a ledger Proxy
+    def _safe_dataset_length(ds):
+        # Try len(ds) first (Proxy implements __len__ when underlying set)
+        try:
+            return len(ds)
+        except Exception:
+            pass
+
+        # Try common wrapped attributes but guard against Proxy AttributeError
+        for attr in ('wrapped_dataset', 'dataset', 'wrapped'):
+            try:
+                wrapped = getattr(ds, attr)
+            except Exception:
+                wrapped = None
+            if wrapped is not None:
+                try:
+                    return len(wrapped)
+                except Exception:
+                    # try inspect records
+                    try:
+                        return len(list(getattr(wrapped, 'as_records')()))
+                    except Exception:
+                        try:
+                            return len(list(getattr(ds, 'as_records')()))
+                        except Exception:
+                            pass
+
+        # Last resort: try to iterate as_records on ds
+        try:
+            recs = ds.as_records()
+            return len(list(recs))
+        except Exception:
+            return 0
+
+    sample_stats.sample_count = _safe_dataset_length(dataset)
 
     tasks = getattr(experiment, "tasks", None)
     is_multi_task = bool(tasks) and len(tasks) > 1
@@ -180,7 +214,14 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     ignore_index = getattr(dataset, "ignore_index", 255)
     num_classes  = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))
 
-    for sample_id, row in enumerate(dataset.as_records()):
+    # Safely iterate dataset records; if as_records isn't available or dataset is a placeholder
+    # fall back to an empty iterator.
+    try:
+        records_iter = dataset.as_records()
+    except Exception:
+        records_iter = []
+
+    for sample_id, row in enumerate(records_iter):
         loss = row.get('prediction_loss', -1)
         if not isinstance(loss, dict):
             loss = {'loss': loss} 

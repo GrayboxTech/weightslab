@@ -1,20 +1,25 @@
 # Configuration for mnist training example
-name: CNN_Test
+# Every parameter wrote at level 0 has as parent experiment_name
 device: cuda
-root_log_dir: "C:\\Users\\GUILLA~1\\AppData\\Local\\Temp\\tmpx71e1085"
+root_log_dir: "C:\\Users\\GUILLA~1\\Desktop\\trash\\tmpx71e1085"
 tqdm_display: true
-skip_loading: false
-training_steps_to_do: 1500
+skip_loading: true
 eval_steps: 50
+
+experiment_name: Exp_CNN_Test
+training_steps_to_do: 150000
+eval_full_to_train_steps_ratio: 555
+experiment_dump_to_train_steps_ratio: 67
+skip_checkpoint_load: false
 
 data:
   train_dataset:
     train_shuffle: true
-    batch_size: 64
+    batch_size: 256
   test_dataset:
     test_shuffle: false
-    batch_size: 16
+    batch_size: 256
+    drop_last: false
 
 optimizer:
-  Adam:
-    lr: 0.01
+  lr: 0.01

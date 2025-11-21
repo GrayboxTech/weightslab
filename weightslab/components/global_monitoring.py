@@ -47,6 +47,10 @@ class GuardContext:
         self.for_training = for_training
         self.architecture_guard = RLock()
         self.model = None
+        # pending updates collected while this guard is active
+        self._pending_updates = []
+        # flag to indicate guard is currently active
+        self.active = False
         self.op_context = op_context
 
     def __enter__(self):
@@ -63,6 +67,9 @@ class GuardContext:
         else:
             self.model.set_tracking_mode(TrackingMode.EVAL)
             self.model.eval()
+        # mark as active so other modules (e.g. src.update_train_test_data_statistics)
+        # can detect and stash updates until __exit__.
+        self.active = True
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         """
@@ -120,7 +127,26 @@ class GuardContext:
                         pass
             except Exception:
                 pass
+        # Flush any pending updates that were collected while the guard was active.
+        # Import lazily to avoid circular imports at module load time.
+        try:
+            import weightslab.src as wl_src
+            for upd in list(getattr(self, '_pending_updates', []) or []):
+                try:
+                    wl_src._apply_update(*upd)
+                except Exception:
+                    # swallow to avoid breaking user code
+                    pass
+            # clear pending list
+            try:
+                self._pending_updates.clear()
+            except Exception:
+                self._pending_updates = []
+        except Exception:
+            pass
 
+        # mark as inactive
+        self.active = False
         # If exc_type is not None, an exception occurred in the block.
         # Returning False (default) allows the exception to propagate.
         return False 
@@ -152,6 +178,7 @@ class PauseController:
 # Define Global Object here
 op_context = OpContext()
 guard_training_context = GuardContext(for_training=True)
+guard_testing_context = GuardContext(for_training=False)
 pause_controller = PauseController()
 
 

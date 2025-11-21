@@ -42,22 +42,25 @@ class DataLoaderInterface:
         name: Optional[str] = None,
         register: bool = True,
         weak: bool = False,
+        is_training: bool = False,
         **kwargs,
     ) -> None:
         
         # Normalize inputs
+        self.dataset: Dataset | DataLoader = data_loader_or_dataset
         if isinstance(data_loader_or_dataset, DataLoader):
             self.dataloader: DataLoader = data_loader_or_dataset
-            self.dataset = DataSampleTrackingWrapper(
-                data_loader_or_dataset
+            self.tracked_dataset = DataSampleTrackingWrapper(
+                self.dataloader
             )  # Track the dataset
-            self.dataset: Dataset = self.dataloader.dataset
+            self.tracked_dataset._map_updates_hook_fns.append(
+                self.reset_iterator)
         else:
-            self.dataset = DataSampleTrackingWrapper(
+            self.tracked_dataset = DataSampleTrackingWrapper(
                 data_loader_or_dataset
             )  # Track the dataset
             self.dataloader = DataLoader(
-                self.dataset,
+                self.tracked_dataset,
                 batch_size=batch_size,
                 shuffle=shuffle,
                 num_workers=num_workers,
@@ -66,6 +69,7 @@ class DataLoaderInterface:
                 collate_fn=collate_fn,
                 **kwargs,
             )
+        self.is_training = is_training
 
         # Internal iterator used by `next_batch`
         self._iterator: Iterator = iter(self.dataloader)
@@ -95,18 +99,22 @@ class DataLoaderInterface:
         """Return the number of batches (delegates to the wrapped dataloader)."""
         return len(self.dataloader)
     
-    def __next__(self):
+    def __next__(self) -> Any:
         return self.next_batch()
 
-    def next_batch(self):
+    def next_batch(self) -> Any:
         """Return the next batch from the dataloader. If the iterator is
         exhausted it is automatically reset and iteration resumes.
         """
         try:
             batch = next(self._iterator)
         except StopIteration:
-            self._iterator = iter(self.dataloader)
+            if not self.is_training:
+                raise StopIteration("End of dataloader reached.")
+            self.reset_iterator()
             batch = next(self._iterator)
+        # Record last batch in thread-local store so other components (model/loss wrappers)
+        # can access it for automatic dataset-statistics updates when inside a guard.
         return batch
 
     def reset_iterator(self) -> None:

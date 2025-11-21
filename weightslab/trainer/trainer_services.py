@@ -120,6 +120,12 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             def _g():
                 try:
                     hp = self._components.get('hyperparams')
+                    if '.' in key:
+                        parts = key.split('.') if key else []
+                        cur = hp
+                        for p in parts:
+                            cur = cur[p]
+                        return cur
                     if isinstance(hp, dict):
                         return hp.get(key, default)
                     elif hasattr(hp, 'get'):
@@ -130,12 +136,13 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             return _g
 
         self.hyper_parameters = {
-            ("Experiment Name", "experiment_name", "text", lambda: _hp_getter('experiment_name', self._exp_name)()),
-            ("Left Training Steps", "training_left", "number", _hp_getter('training_steps_to_do', 0)),
-            ("Learning Rate", "learning_rate", "number", _hp_getter('learning_rate', 0.0)),
-            ("Batch Size", "batch_size", "number", _hp_getter('batch_size', 1)),
-            ("Eval Frequency", "eval_frequency", "number", _hp_getter('eval_full_to_train_steps_ratio', 1)),
-            ("Checkpoint Frequency", "checkpooint_frequency", "number", _hp_getter('experiment_dump_to_train_steps_ratio', 1)),
+            ("Experiment Name", "experiment_name", "text", lambda: _hp_getter('experiment_name', 'Anonymous')()),
+            ("Left Training Steps", "training_left", "number", _hp_getter('training_steps_to_do', 999)),
+            ("Eval Frequency", "eval_frequency", "number", _hp_getter('eval_full_to_train_steps_ratio', 100)),
+            ("Checkpoint Frequency", "checkpooint_frequency", "number", _hp_getter('experiment_dump_to_train_steps_ratio', 100)),
+
+            ("Learning Rate", "learning_rate", "number", _hp_getter('optimizer.lr', 1e-4)),
+            ("Batch Size", "batch_size", "number", _hp_getter('data.train_dataset.batch_size', 8))
         }
 
     def StreamStatus(self, request_iterator, context):
@@ -211,17 +218,23 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 if hyper_parameters.HasField('is_training'):
                     set_hyperparam(hp_name, 'is_training', hyper_parameters.is_training)
 
-                if hyper_parameters.HasField('learning_rate'):
-                    set_hyperparam(hp_name, 'learning_rate', hyper_parameters.learning_rate)
-
-                if hyper_parameters.HasField('batch_size'):
-                    set_hyperparam(hp_name, 'batch_size', hyper_parameters.batch_size)
-
                 if hyper_parameters.HasField('training_steps_to_do'):
                     set_hyperparam(hp_name, 'training_steps_to_do', hyper_parameters.training_steps_to_do)
 
-                if hyper_parameters.HasField('experiment_name'):
-                    set_hyperparam(hp_name, 'experiment_name', hyper_parameters.experiment_name)
+                if hyper_parameters.HasField('learning_rate'):
+                    set_hyperparam(hp_name, 'optimizer.lr', hyper_parameters.learning_rate)
+
+                if hyper_parameters.HasField('batch_size'):
+                    set_hyperparam(hp_name, 'data.train_dataset.batch_size', hyper_parameters.batch_size)
+
+                # full_eval_frequency
+                if hyper_parameters.HasField('full_eval_frequency'):
+                    set_hyperparam(hp_name, 'eval_full_to_train_steps_ratio', hyper_parameters.full_eval_frequency)
+
+                # checkpoint_frequency
+                if hyper_parameters.HasField('checkpont_frequency'):
+                    set_hyperparam(hp_name, 'experiment_dump_to_train_steps_ratio', hyper_parameters.checkpont_frequency)
+
             except Exception as e:
                 return pb2.CommandResponse(success=False, message=f'Failed to set hyperparameters: {e}')
 

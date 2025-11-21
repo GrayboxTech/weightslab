@@ -1,5 +1,6 @@
 import functools
 import types
+import os
 import torch as th
 import weightslab as wl
 
@@ -16,8 +17,9 @@ from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
-from weightslab.components.global_monitoring import guard_training_context, pause_controller
+from weightslab.components.global_monitoring import guard_training_context, guard_testing_context, pause_controller
 from weightslab.ledgers import get_optimizer, get_optimizers, register_model, register_optimizer
+from weightslab.components.checkpoint import CheckpointManager
 
 
 class ModelInterface(NetworkWithOps):
@@ -30,7 +32,8 @@ class ModelInterface(NetworkWithOps):
             print_graph_filename: str = None,
             name: str = None,
             register: bool = True,
-            weak: bool = False):
+            weak: bool = False
+    ):
         """
         Initializes the WatcherEditor instance.
 
@@ -72,6 +75,7 @@ class ModelInterface(NetworkWithOps):
         self.traced_model = symbolic_trace(model)
         self.traced_model.name = "N.A."
         self.guard_training_context = guard_training_context
+        self.guard_testing_context = guard_testing_context
         self.pause_ctrl = pause_controller
 
         # Propagate the shape over the graph
@@ -119,6 +123,63 @@ class ModelInterface(NetworkWithOps):
 
         # Set Model Training Guard
         self.guard_training_context.model = self
+        self.guard_testing_context.model = self
+
+        # Checkpoint manager (optional)
+        # skip_checkpoint_load: bool = False,
+        # auto_dump_every_steps: int = 0
+        # self._checkpoint_manager = None
+        # self._checkpoint_auto_every_steps = int(auto_dump_every_steps or 0)
+
+        # If checkpoint_dir not provided, try to read `root_log_dir` from
+        # ledger hyperparams, otherwise fallback to './root_log_dir/checkpoints'
+        try:
+            from weightslab.ledgers import list_hyperparams, get_hyperparams
+            names = list_hyperparams()
+            chosen = None
+            if 'main' in names:
+                chosen = 'main'
+            elif 'experiment' in names:
+                chosen = 'experiment'
+            elif len(names) == 1:
+                chosen = names[0]
+
+            if chosen:
+                hp = get_hyperparams(chosen)
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    try:
+                        hp = hp.get()
+                    except Exception:
+                        hp = None
+                if isinstance(hp, dict):
+                    # Root dir for checkpoints
+                    root = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
+                    _checkpoint_dir = os.path.join(str(root), 'checkpoints') if root else None
+                    # Auto dump every N steps
+                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
+                    # Skip loading at init
+                    _skip_checkpoint_load = hp.get('skip_checkpoint_load') or hp.get('skip-checkpoint-load') or False
+        except Exception:
+            _checkpoint_dir = None
+            _checkpoint_manager = None
+            _checkpoint_auto_every_steps = 0
+            _skip_checkpoint_load = False
+        self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
+
+        # if _checkpoint_dir:
+        #     try:
+        #         self._checkpoint_manager = CheckpointManager(_checkpoint_dir)
+        #         # attempt to load latest checkpoint unless skipped
+        #         if not _skip_checkpoint_load:
+        #             try:
+        #                 latest = self._checkpoint_manager.get_latest_checkpoint_path()
+        #                 if latest:
+        #                     # best-effort load into ledger-registered objects
+        #                     self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
+        #             except Exception:
+        #                 pass
+        #     except Exception:
+        #         self._checkpoint_manager = None
 
     def __enter__(self):
         """
@@ -171,8 +232,39 @@ class ModelInterface(NetworkWithOps):
                 model.parameters(),
                 lr=lr
             )
-            self.optimizer = wl.watch_or_edit(_optimizer, flag='optimizer')
-            self.optimizer._updated = True
+            # Derive an experiment name to register the optimizer under.
+            # Prefer an explicit hyperparams set called 'experiment' or 'main',
+            # otherwise fall back to the model's ledger name if available.
+            try:
+                from weightslab.ledgers import list_hyperparams
+                hp_names = list_hyperparams()
+                if 'experiment' in hp_names:
+                    exp_name = 'experiment'
+                elif 'main' in hp_names:
+                    exp_name = 'main'
+                elif len(hp_names) == 1:
+                    exp_name = hp_names[0]
+                else:
+                    exp_name = getattr(self, '_ledger_name', None)
+            except Exception:
+                exp_name = getattr(self, '_ledger_name', None)
+
+            wl.watch_or_edit(_optimizer, flag='optimizer', name=exp_name)
+
+    def _maybe_auto_dump(self):
+        # Called from base class hook after seen_samples updates.
+        try:
+            if self._checkpoint_manager is None or self._checkpoint_auto_every_steps <= 0:
+                return
+            batched_age = int(self.get_batched_age())
+            if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
+                try:
+                    # best-effort managed dump using ledger names
+                    self._checkpoint_manager.dump(model_name=getattr(self, '_ledger_name', None))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def monkey_patching(self):
         """
@@ -308,7 +400,7 @@ class ModelInterface(NetworkWithOps):
         return out
     
     def apply_architecture_op(self, op_type, layer_id, neuron_indices=None):
-        with self as m:
+        with self as m, self.guard_training_context, self.guard_testing_context:
             m.operate(layer_id=layer_id, op_type=op_type, neuron_indices=neuron_indices)
 
     def state_dict(self):

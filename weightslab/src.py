@@ -20,7 +20,6 @@ from weightslab.backend.data_loader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
 from weightslab.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.utils.logs import print
-from weightslab.components.global_monitoring import GuardContext
 
 
 def update_train_test_data_statistics(
@@ -42,13 +41,13 @@ def update_train_test_data_statistics(
             per_sample_loss_np = losses_batch
 
         # Update batch sample stats
-        get_dataloader('train_loader').dataset.update_batch_sample_stats(
+        get_dataloader('train_loader').tracked_dataset.update_batch_sample_stats(
             model_age,
             batch_ids_np,
             per_sample_loss_np,
             pred_np
         )
-        get_dataloader('test_loader').dataset.update_sample_stats_ex_batch(
+        get_dataloader('test_loader').tracked_dataset.update_sample_stats_ex_batch(
             batch_ids_np,
             {
                 "loss/combined": per_sample_loss_np,

@@ -6,3 +6,14 @@ tests/__pycache__/*
 __pycache__/*
 pkg_main.py
 
+*.onnx
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.log
+*.csv
+*.sqlite
+*.db
+*.ipynb_checkpoints
+.vscode/
