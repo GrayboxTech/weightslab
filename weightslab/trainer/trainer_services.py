@@ -7,6 +7,8 @@ import time
 import torch
 import traceback
 import numpy as np
+import pandas as pd
+import logging
 import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
@@ -16,6 +18,8 @@ from collections import defaultdict
 from weightslab.trainer.trainer_tools import *
 from weightslab.trainer.trainer_tools import _get_input_tensor_for_sample
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
@@ -30,6 +34,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         # hyperparams, logger). We keep explicit experiment for backwards
         # compatibility if provided, otherwise we resolve parts lazily.
         self._components = {}
+        
+        # Data service components (initialized lazily on first use)
+        self._all_datasets_df = None
+        self._agent = None
 
     def _ensure_components(self):
         """Ensure ledger-backed components are resolved and available on
@@ -708,6 +716,344 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
         return empty_resp
     
+    # ========================================================================
+    # Data Service Methods (for weights_studio UI integration)
+    # ========================================================================
+    
+    def _initialize_data_service(self):
+        """Initialize data service components using ledger-resolved dataloaders."""
+        try:
+            self._ensure_components()
+            
+            train_loader = self._components.get('train_loader')
+            test_loader = self._components.get('test_loader')
+            
+            if train_loader is None or test_loader is None:
+                _LOGGER.warning("Cannot initialize data service: dataloaders not in ledger")
+                return
+            
+            # Generate combined dataframe
+            train_dataset = getattr(train_loader, 'dataset', train_loader)
+            test_dataset = getattr(test_loader, 'dataset', test_loader)
+                        
+            def _dataset_to_df(dataset, origin):
+                """
+                Convert a torch/torchvision dataset into a pandas DataFrame that the UI can consume.
+                The DataFrame will contain:
+                    - sample_id (int)
+                    - label      (int)
+                    - image      (np.ndarray)   <-- pixel data, shape (28,28) for MNIST
+                    - origin     (str)
+                """
+                # Fast path for torchvision MNIST‑like datasets that expose .data and .targets
+                if hasattr(dataset, "data") and hasattr(dataset, "targets"):
+                    # `dataset.data` is a torch Tensor of shape (N, 28, 28)
+                    # `dataset.targets` is a torch Tensor of shape (N,)
+                    images = dataset.data.numpy()          # shape (N, 28, 28)
+                    labels = dataset.targets.numpy()       # shape (N,)
+                    records = [
+                        {
+                            "sample_id": i,
+                            "label": int(labels[i]),
+                            "image": images[i],   # keep as NumPy array – protobuf conversion will flatten it
+                            "origin": origin,
+                        }
+                        for i in range(len(dataset))
+                    ]
+                else:
+                    # Generic fallback – iterate over the dataset items
+                    records = []
+                    for i in range(len(dataset)):
+                        try:
+                            item = dataset[i]               # usually (image, label)
+                            if isinstance(item, (tuple, list)):
+                                img, lbl = item[0], item[-1]
+                            else:
+                                img, lbl = item, None
+                            # Convert the image to a NumPy array (torch Tensor → np.ndarray)
+                            if hasattr(img, "numpy"):
+                                img_arr = img.numpy()
+                            else:
+                                img_arr = np.array(img)
+                            records.append(
+                                {
+                                    "sample_id": i,
+                                    "label": int(lbl) if lbl is not None else None,
+                                    "image": img_arr,
+                                    "origin": origin,
+                                }
+                            )
+                        except Exception as e:
+                            _LOGGER.warning(f"Failed to convert sample {i}: {e}")
+                            continue
+
+                df = pd.DataFrame(records)
+                return df
+
+                
+            train_df = _dataset_to_df(train_dataset, 'train')
+            eval_df = _dataset_to_df(test_dataset, 'eval')
+            
+            self._all_datasets_df = pd.concat([train_df, eval_df], ignore_index=True)
+            _LOGGER.info(f"Created combined DataFrame with {len(self._all_datasets_df)} samples")
+            _LOGGER.info(f"DataFrame columns: {list(self._all_datasets_df.columns)}")
+            _LOGGER.info(f"DataFrame dtypes: {self._all_datasets_df.dtypes.to_dict()}")
+            
+            # Initialize agent (import from weights_studio if available)
+            try:
+                import sys
+                sys.path.append('/Users/marcziegler/projects/work/graybox/v5/weights_studio')
+                from agent import DataManipulationAgent
+                self._agent = DataManipulationAgent(self._all_datasets_df)
+                _LOGGER.info("Data service initialized successfully with agent")
+            except ImportError as e:
+                _LOGGER.warning(f"DataManipulationAgent not available: {e}")
+                self._agent = None
+                
+        except Exception as e:
+            _LOGGER.error(f"Data service initialization failed: {e}")
+            self._agent = None
+    
+    def _get_stat_from_row(self, row, stat_name):
+        """Extract stat from dataframe row and convert to DataStat message."""
+        # Use try-except to safely get the value, avoiding 'in' operator issues with numpy arrays
+        try:
+            value = row[stat_name]
+        except (KeyError, IndexError):
+            return None
+        
+        # Check if value is None
+        if value is None:
+            return None
+        
+        # For scalar values, check if NaN
+        if isinstance(value, (int, float)):
+            if pd.isna(value):
+                return None
+            return pb2.DataStat(
+                name=stat_name, type='scalar', shape=[1], value=[float(value)]
+            )
+        elif isinstance(value, str):
+            return pb2.DataStat(
+                name=stat_name, type='string', shape=[1], value_string=value
+            )
+        elif isinstance(value, (list, np.ndarray)):
+            flat_value = np.array(value).flatten()
+            return pb2.DataStat(
+                name=stat_name, type='array',
+                shape=list(np.array(value).shape),
+                value=flat_value.tolist()
+            )
+        return None
+    
+    def ApplyDataQuery(self, request, context):
+        """Apply query to filter/sort/manipulate dataset."""
+        if self._agent is None:
+            self._initialize_data_service()
+        
+        # If query is empty, just return current dataframe info
+        if request.query == "":
+            if self._all_datasets_df is None:
+                self._initialize_data_service()
+            
+            if self._all_datasets_df is None:
+                return pb2.DataQueryResponse(
+                    success=False,
+                    message="Data service not available"
+                )
+            
+            total_count = len(self._all_datasets_df)
+            discarded_count = len(self._all_datasets_df[
+                self._all_datasets_df.get('deny_listed', False) == True
+            ]) if 'deny_listed' in self._all_datasets_df.columns else 0
+            in_loop_count = total_count - discarded_count
+            
+            return pb2.DataQueryResponse(
+                success=True,
+                message=f"Current dataframe has {total_count} samples",
+                number_of_all_samples=total_count,
+                number_of_samples_in_the_loop=in_loop_count,
+                number_of_discarded_samples=discarded_count
+            )
+        
+        if not request.accumulate:
+            self._initialize_data_service()
+        
+        if self._all_datasets_df is None:
+            return pb2.DataQueryResponse(
+                success=False,
+                message="Data service not initialized"
+            )
+        
+        try:
+            if request.is_natural_language:
+                if self._agent is None:
+                    return pb2.DataQueryResponse(
+                        success=False,
+                        message="Natural language queries require Ollama agent (not available)"
+                    )
+                
+                operation = self._agent.query(request.query)
+                self._all_datasets_df = self._agent.apply_operation(self._all_datasets_df, operation)
+                message = f"Applied operation: {operation['function']}"
+            else:
+                self._all_datasets_df = self._all_datasets_df.query(request.query)
+                message = f"Query [{request.query}] applied"
+            
+            total_count = len(self._all_datasets_df)
+            discarded_count = len(self._all_datasets_df[
+                self._all_datasets_df.get('deny_listed', False) == True
+            ]) if 'deny_listed' in self._all_datasets_df.columns else 0
+            in_loop_count = total_count - discarded_count
+            
+            return pb2.DataQueryResponse(
+                success=True,
+                message=message,
+                number_of_all_samples=total_count,
+                number_of_samples_in_the_loop=in_loop_count,
+                number_of_discarded_samples=discarded_count
+            )
+        except Exception as e:
+            _LOGGER.error(f"Failed to apply query: {e}", exc_info=True)
+            return pb2.DataQueryResponse(
+                success=False,
+                message=f"Failed to apply query: {str(e)}"
+            )
+    
+    def GetDataSamples(self, request, context):
+        """Retrieve samples with their data statistics."""
+        print(f"DEBUG: GetDataSamples called with start_index={request.start_index}, count={request.records_cnt}")
+        if self._all_datasets_df is None:
+            self._initialize_data_service()
+        
+        if self._all_datasets_df is None:
+            return pb2.DataSamplesResponse(
+                success=False,
+                message="Data service not available",
+                data_records=[]
+            )
+        
+        try:
+            if request.start_index < 0 or request.records_cnt <= 0:
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message="Invalid start_index or records_cnt",
+                    data_records=[]
+                )
+            
+            end_index = request.start_index + request.records_cnt
+            df_slice = self._all_datasets_df.iloc[request.start_index:end_index]
+            
+            if df_slice.empty:
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message=f"No samples found at index {request.start_index}",
+                    data_records=[]
+                )
+            
+            self._ensure_components()
+            train_loader = self._components.get('train_loader')
+            test_loader = self._components.get('test_loader')
+            
+            data_records = []
+            for _, row in df_slice.iterrows():
+                origin = row.get('origin', 'unknown')
+                sample_id = int(row.get('sample_id', 0))
+                
+                # Get dataset based on origin
+                if origin == 'train':
+                    dataset = getattr(train_loader, 'dataset', train_loader) if train_loader else None
+                elif origin == 'eval':
+                    dataset = getattr(test_loader, 'dataset', test_loader) if test_loader else None
+                else:
+                    continue
+                
+                if dataset is None:
+                    continue
+                
+                # Build data stats from DataFrame columns
+                data_stats = []
+                
+                # Get stats to retrieve - if empty, get ALL columns
+                stats_to_retrieve = request.stats_to_retrieve
+                if not stats_to_retrieve:
+                    # Get all columns except sample_id
+                    stats_to_retrieve = [col for col in df_slice.columns if col != 'sample_id']
+                
+                for stat_name in stats_to_retrieve:
+                    stat = self._get_stat_from_row(row, stat_name)
+                    if stat:
+                        data_stats.append(stat)
+                
+                data_records.append(pb2.DataRecord(
+                    sample_id=sample_id,
+                    data_stats=data_stats
+                ))
+            
+            return pb2.DataSamplesResponse(
+                success=True,
+                message=f"Retrieved {len(data_records)} data records",
+                data_records=data_records
+            )
+        except Exception as e:
+            _LOGGER.error(f"Failed to retrieve samples: {e}", exc_info=True)
+            return pb2.DataSamplesResponse(
+                success=False,
+                message=f"Failed to retrieve samples: {str(e)}",
+                data_records=[]
+            )
+    
+    def EditDataSample(self, request, context):
+        """Edit sample metadata (tags, deny_listed, etc.)."""
+        self._ensure_components()
+        
+        if request.stat_name not in ["tags", "deny_listed"]:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="Only 'tags' and 'deny_listed' stat editing is supported"
+            )
+        
+        if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="Accumulate tagging not supported"
+            )
+        
+        train_loader = self._components.get('train_loader')
+        test_loader = self._components.get('test_loader')
+        
+        for sid, origin in zip(request.samples_ids, request.sample_origins):
+            dataset = None
+            if origin == 'train':
+                dataset = getattr(train_loader, 'dataset', train_loader) if train_loader else None
+            elif origin == 'eval':
+                dataset = getattr(test_loader, 'dataset', test_loader) if test_loader else None
+            
+            if dataset is None:
+                continue
+            
+            try:
+                if request.stat_name == "tags":
+                    dataset.set(sid, "tags", request.string_value)
+                elif request.stat_name == "deny_listed":
+                    dataset.set(sid, "deny_listed", request.bool_value)
+            except Exception as e:
+                _LOGGER.warning(f"Could not edit sample {sid}: {e}")
+        
+        # Update dataframe if it exists
+        if self._all_datasets_df is not None:
+            for sid, origin in zip(request.samples_ids, request.sample_origins):
+                mask = (self._all_datasets_df['sample_id'] == sid) & (self._all_datasets_df['origin'] == origin)
+                value = request.string_value if request.stat_name == "tags" else request.bool_value
+                self._all_datasets_df.loc[mask, request.stat_name] = value
+        
+        return pb2.DataEditsResponse(
+            success=True,
+            message=f"Edited {len(request.samples_ids)} samples"
+        )
+
+
+
 
 def serve(threading=True):
     def serving_thread_callback():

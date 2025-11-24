@@ -17,22 +17,24 @@ from weightslab.tests.torch_models import FashionCNN as CNN
 from weightslab.components.global_monitoring import \
     guard_training_context, \
     guard_testing_context
+import logging
+logging.basicConfig(level=logging.INFO)
 from weightslab.trainer.trainer_services import serve
 
 
-# Initialize W<eightsLab CLI
-cli.initialize(launch_client=True)
+# Initialize WeightsLab CLI
+cli.initialize(launch_client=False)
 
 # Initialize WeightsLab Serving
-serve(threading=True)
+# serve(threading=True)  <-- Moved down to ensure dataloaders are ready
 
 # --- Define functions ---
-def train(loader, model, optimizer, criterion_mlt):
+def train(loader, model, optimizer, criterion_mlt, device='cpu'):
     with guard_training_context:
         # Get next batch
         (input, ids, label) = next(loader)
-        input = input.to('cuda')
-        label = label.to('cuda')
+        input = input.to(device)
+        label = label.to(device)
 
         # Inference
         optimizer.zero_grad()
@@ -164,8 +166,19 @@ if __name__ == '__main__':
     test_bs = parameters.get('data', {}).get('test_dataset', {}).get('batch_size', 16)
     train_shuffle = parameters.get('data', {}).get('train_dataset', {}).get('train_shuffle', True)
     test_shuffle = parameters.get('data', {}).get('test_dataset', {}).get('test_shuffle', False)
-    train_loader = wl.watch_or_edit(_train_dataset, flag='data', name='train_loader', batch_size=train_bs, shuffle=train_shuffle, is_training=True)
-    test_loader = wl.watch_or_edit(_test_dataset, flag='data', name='test_loader', batch_size=test_bs, shuffle=test_shuffle)
+    train_loader = wl.watch_or_edit(_train_dataset, flag='data', name='train', batch_size=train_bs, shuffle=train_shuffle, is_training=True)
+    test_loader = wl.watch_or_edit(_test_dataset, flag='data', name='test', batch_size=test_bs, shuffle=test_shuffle)
+
+    # Start serving NOW that dataloaders are registered
+    serve(threading=True)
+    print("=" * 60)
+    print("✅ Server started successfully!")
+    print("📊 Data is available at: http://localhost:3001")
+    print("=" * 60)
+    
+    # Optional: Uncomment the next 2 lines to pause for data inspection
+    # print("Pausing for data inspection... (Press Ctrl+C to stop)")
+    # time.sleep(999999)
 
     # ====================
     # 4. Define criterions
@@ -187,26 +200,43 @@ if __name__ == '__main__':
 
     # ================
     # 6. Training Loop
-    print("\nStarting Training...")
     max_steps = parameters.get('training_steps_to_do', 6666)
+    
+    print("\n" + "=" * 60)
+    print("🚀 STARTING TRAINING")
+    print(f"📈 Total steps: {max_steps}")
+    print(f"🔄 Evaluation every {parameters.get('eval_full_to_train_steps_ratio', 50)} steps")
+    print(f"💾 Logs will be saved to: {log_dir}")
+    print("=" * 60 + "\n")
+    
+    # Resume training automatically (bypasses default paused state)
+    try:
+        model.pause_ctrl.resume()
+        print("✅ Training resumed automatically")
+    except Exception as e:
+        print(f"⚠️  Could not auto-resume: {e}")
+    
     train_range = range(max_steps)
     if tqdm_display:
         train_range = tqdm.trange(max_steps, dynamic_ncols=True)
+    
     for train_step in train_range:
         # Train
-        train_loss = train(train_loader, model, optimizer, train_criterion_mlt)
+        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Test
         test_loss, test_metric = None, None
         if train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
             test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device)
 
-        # Verbose
-        print(
-            f"Step {train_step}/{max_steps}: " +
-            f"| Train Loss: {train_loss:.4f} " +
-            (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
-            (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
-        )
-    print(f"--- Training completed in {time.time() - start_time:.2f} seconds ---")
-    print(f"Log directory: {log_dir}")
+        # Verbose - print every 10 steps or when evaluating
+        if train_step % 10 == 0 or test_loss is not None:
+            status = f"[Step {train_step:5d}/{max_steps}] Train Loss: {train_loss:.4f}"
+            if test_loss is not None:
+                status += f" | Test Loss: {test_loss:.4f} | Test Acc: {test_metric:.2f}%"
+            print(status)
+    
+    print("\n" + "=" * 60)
+    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
+    print(f"💾 Logs saved to: {log_dir}")
+    print("=" * 60)
