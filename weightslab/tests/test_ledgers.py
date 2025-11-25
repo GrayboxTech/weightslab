@@ -1,7 +1,7 @@
 import gc
 import unittest
 
-from weightslab.ledgers import GLOBAL_LEDGER
+from weightslab.backend.ledgers import GLOBAL_LEDGER
 
 
 class Dummy:

@@ -86,8 +86,7 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
         # Init Variables
         self.stamp = time.time()
         self.wrapped_dataset = DataSampleTrackingWrapper(
-            _DUMMY_DATASET,
-            task_type="classification"
+            _DUMMY_DATASET
         )
         self.ids_and_losses_1 = (np.array([5, 0, 2]), np.array([0, 1.4, 2.34]))
         self.ids_and_losses_2 = (np.array([1, 4, 3]), np.array([0.4, 0.2, 0]))
@@ -389,7 +388,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         # Init Variables
         self.stamp = time.time()
         self.base_ds = _TINY_DUMMY_DATASET
-        self.ds = DataSampleTrackingWrapper(self.base_ds, task_type="classification")
+        self.ds = DataSampleTrackingWrapper(self.base_ds)
 
     def tearDown(self):
         """
@@ -484,7 +483,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         state = self.ds.state_dict()
 
         # load into a fresh wrapper
-        ds2 = DataSampleTrackingWrapper(self.base_ds, task_type="classification")
+        ds2 = DataSampleTrackingWrapper(self.base_ds)
         ds2.load_state_dict(state)
 
         # check scalar ex

@@ -1639,7 +1639,7 @@ class UNet3D(nn.Module):
 
 
 if __name__ == "__main__":
-    from weightslab.backend.watcher_editor import ModelInterface
+    from weightslab.backend.model_interface import ModelInterface
     from weightslab.utils.logs import print, setup_logging
 
     # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
@@ -1833,18 +1833,18 @@ if __name__ == "__main__":
     # model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
     # model_op_neurons(model, op=)
     with model as m:
-        m.operate(1, {-1}, neuron_operation=1)
+        m.operate(1, {-1}, op_type=1)
     model(dummy_input)  # Inference test
     with model as m:
-        m.operate(1, {-14, -2}, neuron_operation=2)
+        m.operate(1, {-14, -2}, op_type=2)
     model(dummy_input)  # Inference test
     with model as m:
-        m.operate(1, {-14, -2}, neuron_operation=3)
+        m.operate(1, {-14, -2}, op_type=3)
     model(dummy_input)  # Inference test
     with model as m:
-        m.operate(1, {-14, -2}, neuron_operation=4)
+        m.operate(1, {-14, -2}, op_type=4)
     model(dummy_input)  # Inference test
     # with model as m:
-    #     m.operate(3, {-1}, neuron_operation=1)
+    #     m.operate(3, {-1}, op_type=1)
     # model(dummy_input)  # Inference test
     print(f'Inference test of the modified model is:\n{model(dummy_input)}')

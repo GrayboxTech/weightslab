@@ -15,7 +15,7 @@ from torchvision import datasets as ds
 from torchvision import transforms as T
 
 from weightslab.components.tracking import TrackingMode
-from weightslab.backend.watcher_editor import ModelInterface
+from weightslab.backend.model_interface import ModelInterface
 from weightslab.tests.torch_models import FashionCNN as Model
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
@@ -142,12 +142,12 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.dummy_network.operate(
             self.dummy_network.layers[0].get_module_id(),
             neuron_indices=2,
-            neuron_operation=ArchitectureNeuronsOpType.ADD
+            op_type=ArchitectureNeuronsOpType.ADD
         )
         self.dummy_network.operate(
             -1,
             neuron_indices=set([0, 1, 2]),
-            neuron_operation=ArchitectureNeuronsOpType.PRUNE
+            op_type=ArchitectureNeuronsOpType.PRUNE
         )
 
         # Store
@@ -172,7 +172,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             model.operate(
                 0,
                 -1,
-                neuron_operation=ArchitectureNeuronsOpType.ADD
+                op_type=ArchitectureNeuronsOpType.ADD
             )
 
         # Train for another 10 epochs
@@ -209,7 +209,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             model.operate(
                 0,
                 to_remove_ids,
-                neuron_operation=ArchitectureNeuronsOpType.PRUNE
+                op_type=ArchitectureNeuronsOpType.PRUNE
             )
 
         # Evaluate
@@ -235,7 +235,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             model.operate(
                 0,
                 to_freeze_ids,
-                neuron_operation=ArchitectureNeuronsOpType.FREEZE
+                op_type=ArchitectureNeuronsOpType.FREEZE
             )
 
         # Get weights sum
@@ -300,7 +300,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             model.operate(
                 0,
                 to_freeze_ids,
-                neuron_operation=ArchitectureNeuronsOpType.RESET
+                op_type=ArchitectureNeuronsOpType.RESET
             )
 
         after_reset_weights_sum_value = th.sum(

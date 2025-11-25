@@ -12,7 +12,7 @@ import torch.nn as nn
 from typing import Type
 
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
-from weightslab.backend.watcher_editor import ModelInterface
+from weightslab.backend.model_interface import ModelInterface
 from weightslab.utils.tools import model_op_neurons, \
     get_model_parameters_neuronwise
 from weightslab.utils.logs import print
@@ -237,12 +237,16 @@ def create_inference_test(ModelClass):
 
 
 # Add dynamic tests to TestAllModelInference
-for ModelClass in ALL_MODEL_CLASSES:
-    if len(sys.argv) == 1 or len(sys.argv) >= 2 \
-            and sys.argv[1] != "" \
-            and sys.argv[1].lower() in ModelClass.__name__.lower():
+if ALL_MODEL_CLASSES:
+    for ModelClass in ALL_MODEL_CLASSES:
         test_method = create_inference_test(ModelClass)
         setattr(TestAllModelInference, test_method.__name__, test_method)
+else:
+    # If no model classes were found at import time, add a skipped test
+    def test_no_models_found(self):
+        self.skipTest(f"No nn.Module classes found in {MODEL_FILE_PATH}")
+
+    setattr(TestAllModelInference, 'test_no_models_found', test_no_models_found)
 
 
 # --- Execution ---

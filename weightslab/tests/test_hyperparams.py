@@ -3,14 +3,13 @@ import tempfile
 import yaml
 import unittest
 
-from weightslab import ledgers
-from weightslab.ledgers import register_hyperparams, get_hyperparams, set_hyperparam
+from weightslab.backend.ledgers import GLOBAL_LEDGER, register_hyperparams, get_hyperparams, set_hyperparam
 
 
 class HyperparamsTests(unittest.TestCase):
     def setUp(self):
         # clear global ledger to ensure isolation between tests
-        ledgers.GLOBAL_LEDGER.clear()
+        GLOBAL_LEDGER.clear()
 
     def test_register_and_get_hyperparams(self):
         params = {
