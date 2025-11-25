@@ -67,7 +67,7 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
             learning_rate=neuron_lr,
         )
         for incoming_id, incoming_lr in layer.incoming_neuron_2_lr[tensor_name].items():
-            neuron_representation.incoming_neurons_lr[incoming_id] = incoming_lr
+            neuron_representation.incoming_lr[incoming_id] = incoming_lr
 
         neuron_representations.append(neuron_representation)
 

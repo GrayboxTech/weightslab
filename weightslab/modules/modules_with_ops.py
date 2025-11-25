@@ -410,6 +410,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                 Tuple[List[int], List[int]]: The absolute tensor indices and
                 the orignal indices.
         """
+        
         # Sanity checks
         if not isinstance(neuron_indices, set):
             neuron_indices = {neuron_indices}
@@ -445,7 +446,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         # index of the input tensor, i.e.,
         # if incoming = th.cat([th.randn(8),]*4), we set the offset
         # from the min. value of the tensor, which are continuous.
-        offset = min(list(mapped_indexs.keys()))
+        offset = min(list(mapped_indexs.keys())) if len(list(mapped_indexs.keys())) else 0
         flat_indexs = list(
             mapped_indexs[len(mapped_indexs)+i+offset][::-1]
             for i in original_indexs
@@ -586,7 +587,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         neuron_indices: int | Set[int],
         is_incoming: bool = False,
         skip_initialization: bool = False,
-        neuron_operation: Enum = ArchitectureNeuronsOpType.ADD,
+        op_type: Enum = ArchitectureNeuronsOpType.ADD,
         **kwargs
     ):
         """
@@ -605,18 +606,21 @@ class LayerWiseOperations(NeuronWiseOperations):
             neuron_indices (int | Set[int]): The indices of the neurons to operate on.
             is_incoming (bool): Whether the operation is on the incoming side.
             skip_initialization (bool): Whether to skip the initialization step.
-            neuron_operation (Enum): The operation to perform on the neurons.
+            op_type (Enum): The operation to perform on the neurons.
             kwargs: Additional keyword arguments for the operation.
         """
 
         # Get Operation
-        neuron_operation = ArchitectureNeuronsOpType(neuron_operation)
-        op = self.get_operation(neuron_operation)
-
+        op_type = ArchitectureNeuronsOpType(op_type)
+        op = self.get_operation(op_type)
+        
+        # Convert generators/ranges to set first
+        if hasattr(neuron_indices, '__iter__') and not isinstance(neuron_indices, (set, int, str)):
+            neuron_indices = set(neuron_indices)
+        
         # Ensure set of neurons index
         if not isinstance(neuron_indices, set) and \
-                isinstance(neuron_indices, int) and \
-                neuron_operation != ArchitectureNeuronsOpType.ADD:
+                isinstance(neuron_indices, int):
             neuron_indices = {neuron_indices}
 
         # Get Neurons Indexs Formatted for Pruning, Reset, or Frozen only.
@@ -624,8 +628,8 @@ class LayerWiseOperations(NeuronWiseOperations):
         # neurons.
         # Both neuron indices and original exists because sometime with bypass
         # flag, both can be different.
-        if isinstance(neuron_indices, int) or isinstance(neuron_indices, set) \
-                and len(neuron_indices) > 0:
+        if (isinstance(neuron_indices, int) or isinstance(neuron_indices, set) \
+                and len(neuron_indices) > 0) and op_type != ArchitectureNeuronsOpType.ADD:
             neuron_indices, original_neuron_indices = \
                 self._process_neurons_indices(
                     neuron_indices,
@@ -638,11 +642,10 @@ class LayerWiseOperations(NeuronWiseOperations):
         # Sanity check if neuron_indices is correctly defined
         if not len(neuron_indices) and \
                 (
-                    neuron_operation == ArchitectureNeuronsOpType.ADD or
-                    neuron_operation == ArchitectureNeuronsOpType.PRUNE
+                    op_type == ArchitectureNeuronsOpType.ADD or
+                    op_type == ArchitectureNeuronsOpType.PRUNE
                 ):
-            raise IndexError(
-                "[LayerWiseOperations.operate] Neurons index were not found.")
+            neuron_indices, original_neuron_indices = set([-1]), set([-1])
         if not len(neuron_indices):
             neuron_indices, original_neuron_indices = [None], [None]
 
@@ -1148,59 +1151,83 @@ class LayerWiseOperations(NeuronWiseOperations):
         # TODO (GP): maybe with a one way upgrade from learnable tensors.
         # Operate on learnable tensor
         if hasattr(self, 'weight') and self.weight is not None:
-            # Tensors modification
+            # Safe tensor manipulation (in-place keep residual grad trace in cache - C-level)
             with th.no_grad():
-                self.weight.data = nn.Parameter(
-                    th.index_select(
+                tmp_tsnr = th.index_select(
                         self.weight.data,
                         dim=(transposed ^ is_incoming),
                         index=idx_tnsr
-                    )).to(self.device)
-                if self.weight.grad is not None:
-                    self.weight.grad = th.index_select(
+                    )
+            self.weight = nn.Parameter(
+                tmp_tsnr.clone().detach()
+            ).to(self.device)  # Safe approach
+
+            if self.weight.grad is not None:
+                with th.no_grad():
+                    tmp_tsnr = th.index_select(
                         self.weight.grad,
                         dim=(transposed ^ is_incoming),
                         index=idx_tnsr
-                    ).to(self.device)
+                    )
+                self.weight.grad = nn.Parameter(
+                    tmp_tsnr.clone().detach()
+                ).to(self.device)  # Safe approach
 
-                if hasattr(self, 'bias') and self.bias is not None:
-                    self.bias.data = nn.Parameter(
-                        th.index_select(
+            if hasattr(self, 'bias') and self.bias is not None and \
+                    not is_incoming:
+                with th.no_grad():
+                    tmp_tsnr = th.index_select(
                             self.bias.data,
                             dim=0,
                             index=idx_tnsr
-                        )).to(self.device) if not is_incoming else \
-                            self.bias.data
-                    if self.bias.grad is not None and not is_incoming:
-                        self.bias.grad = th.index_select(
+                        )
+                self.bias.data = nn.Parameter(
+                    tmp_tsnr.clone().detach()
+                ).to(self.device)  # Safe approach
+                
+                if self.bias.grad is not None:
+                    with th.no_grad():
+                        tmp_tsnr = th.index_select(
                             self.bias.grad,
                             dim=0,
                             index=idx_tnsr
-                        ).to(self.device)
+                        )
+                    self.bias.grad = nn.Parameter(
+                        tmp_tsnr.clone().detach()
+                    ).to(self.device)  # Safe approach
 
-                if hasattr(self, 'running_mean'):
-                    self.running_mean = th.index_select(
-                        self.running_mean, dim=0, index=idx_tnsr).to(
-                            self.device
-                        )
-                    if self.running_mean.grad is not None:
-                        self.running_mean.grad = th.index_select(
-                            self.running_mean.grad,
-                            dim=0,
-                            index=idx_tnsr
-                        ).to(self.device)
-                if hasattr(self, 'running_var'):
-                    self.running_var = th.index_select(
-                        self.running_var, dim=0, index=idx_tnsr).to(
-                            self.device
-                        )
-                    if self.running_var.grad is not None:
-                        self.running_var.grad = th.index_select(
-                            self.running_var.grad,
-                            dim=0,
-                            index=idx_tnsr
-                        ).to(self.device)
-                
+            if hasattr(self, 'running_mean'):
+                tmp_tsnr = th.index_select(
+                    self.running_mean,
+                    dim=0,
+                    index=idx_tnsr
+                )
+                self.running_mean = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+
+                if self.running_mean.grad is not None:
+                    tmp_tsnr = th.index_select(
+                        self.running_mean.grad,
+                        dim=0,
+                        index=idx_tnsr
+                    )
+                    self.running_mean.grad = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+
+            if hasattr(self, 'running_var'):
+                tmp_tsnr = th.index_select(
+                    self.running_var,
+                    dim=0,
+                    index=idx_tnsr
+                )
+                self.running_var = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+
+                if self.running_var.grad is not None:
+                    tmp_tsnr = th.index_select(
+                        self.running_var.grad,
+                        dim=0,
+                        index=idx_tnsr
+                    )
+                    self.running_var.grad = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+            
         # Sort indices to prune from last to first to maintain
         # the original order
         neuron_indices = sorted(neuron_indices)[::-1]
@@ -1400,7 +1427,12 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # Neurons not specified - freeze everything
         if neuron_indices is None or not len(neuron_indices):
-            neuron_indices = list(range(self.get_neurons(attr_name='out_neurons')))
+            neuron_indices = list(
+                range(
+                    self.get_neurons(attr_name='out_neurons') if not is_incoming else \
+                    self.get_neurons(attr_name='in_neurons')
+                )
+            )
 
         # Get group size & reformat neuron indices
         group_size = self.groups if hasattr(self, 'groups') and is_incoming \
@@ -1575,7 +1607,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
 
 if __name__ == "__main__":
-    from weightslab.backend.watcher_editor import ModelInterface
+    from weightslab.backend.model_interface import ModelInterface
     from weightslab.tests.torch_models import FashionCNN as Model
 
     # Define the model & the input
@@ -1594,12 +1626,12 @@ if __name__ == "__main__":
     # Neurons Operation
     # FREEZE
     with model as m:
-        m.operate(0, 2, neuron_operation=ArchitectureNeuronsOpType.FREEZE)
+        m.operate(0, 2, op_type=ArchitectureNeuronsOpType.FREEZE)
         m(dummy_input)
     with model as m:
         m.operate(
             layer_id=3,
-            neuron_operation=ArchitectureNeuronsOpType.FREEZE
+            op_type=ArchitectureNeuronsOpType.FREEZE
         )
         m(dummy_input)
     # - To test on The TinyUnet3p example
@@ -1610,21 +1642,21 @@ if __name__ == "__main__":
     with model as m:
         m.operate(
             layer_id=3,
-            neuron_operation=ArchitectureNeuronsOpType.FREEZE
+            op_type=ArchitectureNeuronsOpType.FREEZE
         )
         m(dummy_input)
     with model as m:
-        m.operate(3, 4, neuron_operation=ArchitectureNeuronsOpType.FREEZE)
+        m.operate(3, 4, op_type=ArchitectureNeuronsOpType.FREEZE)
         m(dummy_input)
     # ADD 2 neurons
     with model as m:
-        m.operate(1, {-1, -2}, neuron_operation=1)
+        m.operate(1, {-1, -2}, op_type=1)
         m(dummy_input)
     # PRUNE 1 neurons
     with model as m:
-        m.operate(1, 2, neuron_operation=2)
+        m.operate(1, 2, op_type=2)
         m(dummy_input)
     # PRUNE 3 neurons
     with model as m:
-        m.operate(3, {-1, -2, 1}, neuron_operation=2)
+        m.operate(3, {-1, -2, 1}, op_type=2)
         m(dummy_input)

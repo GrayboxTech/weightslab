@@ -5,24 +5,19 @@ import time
 import functools
 import torch as th
 
-from tqdm import trange
-from pathlib import Path
-from torch.utils.tensorboard import SummaryWriter
-from typing import Dict, Any, Callable, List
-from collections import namedtuple
-from threading import Lock, RLock
+from typing import Callable
+from threading import Lock
 
-from weightslab.components.checkpoint import CheckpointManager
-from weightslab.data.data_samples_with_ops import \
-    DataSampleTrackingWrapper
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.data_loader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
 from weightslab.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.utils.logs import print
+from weightslab.cli import cli_serve
+from weightslab.trainer.trainer_services import grpc_serve
 
 
-def update_train_test_data_statistics(
+def _save_data_statistics(
     model_age: int,
     batch_ids: th.Tensor,
     losses_batch: th.Tensor,
@@ -54,7 +49,6 @@ def update_train_test_data_statistics(
                 "pred": pred_np
             }
         )
-
 
 
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
@@ -117,6 +111,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
+    
     elif flag.lower() == 'data' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
         # Ensure ledger has a placeholder (Proxy) for this name so callers
@@ -135,6 +130,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
+    
     elif flag.lower() == 'optimizer' or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
         # Determine registration name first
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj, '__class__', type(obj)).__name__ or '_optimizer'
@@ -154,6 +150,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
+    
     elif flag.lower() == 'logger' or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
         # Determine registration name for the logger (prefer explicit name)
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj.__class__, '__name__', None) or 'main'
@@ -168,9 +165,106 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Return a stable handle (proxy) when available, otherwise the registered logger
         return proxy if proxy is not None else get_logger(reg_name)
+    
     # Signals: metrics / losses / custom monitors
-    # Flags commonly look like 'train_loss/bin_loss' or 'train_metric/acc'
-    elif '/' in flag or 'loss' in flag.lower() or 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
+    elif 'loss' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
+        # derive registration name from second part of flag if provided
+        reg_name = kwargs.get('name') or flag
+
+        # decide how to wrap: loss-like (forward) or metric-like (compute)
+        # wrap forward
+        try:
+            if hasattr(obj, 'forward') and callable(getattr(obj, 'forward')):
+                original_forward = obj.forward
+
+                # New forward with logging and save stats
+                @functools.wraps(original_forward)
+                def new_forward(*a, **kw):
+                    # Remove parameters
+                    _ = kw.pop('flag', None)
+                    ids = kw.pop('batch_ids', None)
+                    model_age = kw.pop('model_age', None)
+                    preds = kw.pop('preds', None)
+
+                    # Original forward
+                    out = original_forward(*a, **kw)
+
+                    # extract scalar 
+                    batch_scalar = None
+                    scalar = None
+                    try:
+                        # Assume loss returns per-sample losses - mean by default
+                        if isinstance(out, th.Tensor):
+                            batch_scalar = out.detach().cpu()
+                            scalar = float(batch_scalar.mean().item())
+                        else:
+                            try:
+                                import numpy as _np
+                                batch_scalar = _np.array(out)
+                                scalar = float(batch_scalar.mean())
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    
+                    # log if requested and logger present
+                    if kwargs.get('log', False) and scalar is not None:
+                        try:
+                            # try to get a ledger-registered logger
+                            logger = None
+                            try:
+                                logger = get_logger()
+                            except Exception:
+                                try:
+                                    logger = get_logger('main')
+                                except Exception:
+                                    logger = None
+
+                            if logger is not None and hasattr(logger, 'add_scalars'):
+                                # attempt to get a sensible global_step
+                                step = 0
+                                try:
+                                    m = get_model()
+                                    step = int(m.get_age())
+                                except Exception:
+                                    step = 0
+                                logger.add_scalars(
+                                    reg_name,
+                                    {reg_name: scalar},
+                                    global_step=step
+                                )
+                        except Exception:
+                            pass
+                    
+                    # Save statistics if requested and applicable
+                    if batch_scalar is not None and ids is not None and model_age is not None:
+                        _save_data_statistics(
+                            model_age=model_age,
+                            batch_ids=ids,
+                            losses_batch=batch_scalar,
+                            preds=preds
+                        )
+                    return out
+
+                obj.forward = new_forward
+
+            # register wrapped signal in ledger
+            try:
+                register_signal(reg_name, obj)
+            except Exception:
+                pass
+
+            # return proxy if exists else the object
+            try:
+                return get_signal(reg_name)
+            except Exception:
+                return obj
+        except Exception:
+            # fall back to hyperparams branch if something unexpected
+            pass
+
+
+    elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
         reg_name = kwargs.get('name') or flag
 
@@ -290,13 +384,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         except Exception:
             # fall back to hyperparams branch if something unexpected
             pass
+
     else:
         # Support hyperparameters/watchable parameter dicts or YAML paths.
         if flag is None:
             raise ValueError("Obj name should contains at least 'model', 'data', 'optimizer' or 'hp'.")
 
         fl = flag.lower()
-        if fl in ('hp', 'hyperparams', 'params', 'parameters'):
+        if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters'):
             # obj may be a dict of parameters or a path to a YAML file
             name = kwargs.get('name') or getattr(obj, '__name__', None) or 'hyperparams'
             # If obj is a string, treat as a file path and start watcher
@@ -325,4 +420,20 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # bubble up original error
                 raise
 
-        raise ValueError("Obj name should contains at least 'model', 'data' or 'optimizer'.")
+        raise ValueError(f"Obj name {obj} should contains at least 'model', 'data' or 'optimizer'.")
+
+
+def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
+    """ Serve the trainer services.
+
+    Args:
+        serving_cli (bool): Whether to use the CLI.
+        serving_grpc (bool): Whether to serve gRPC.
+    """
+
+    if serving_grpc:
+        grpc_serve(**kwargs)
+        
+    if serving_cli:
+        cli_serve(**kwargs)
+    

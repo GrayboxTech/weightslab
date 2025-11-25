@@ -9,13 +9,41 @@ from weightslab.ledgers import list_hyperparams, get_hyperparams, set_hyperparam
 from weightslab.components.tracking import TrackingMode
 
 
+weightslab_rlock = RLock()
+weightslab_lock = Lock()
+
+
+class PauseController:
+    """
+        Shared between model (reader: wait) and control thread (writer: pause/resume).
+    """
+    def __init__(self):
+        self._event = Event()
+
+    def wait_if_paused(self):
+        # Called from main thread / model forward. Blocks if paused.
+        self._event.wait()   # releases GIL while waiting
+
+    def pause(self):
+        self._event.clear()
+        set_hyperparam(None, 'is_training', False)
+    
+    def resume(self):
+        self._event.set()
+        set_hyperparam(None, 'is_training', True)
+
+    def is_paused(self):
+        return not self._event.is_set()
+
+pause_controller = PauseController()
+
 class OpContext:
     """
     The actual context manager class that handles __enter__ and __exit__.
     It holds a reference to the outer WeightsLab instance.
     """
     def __init__(self):
-        self.op_guard = Lock()
+        self.op_guard = weightslab_lock
         self.model = None
 
     def __enter__(self):
@@ -37,29 +65,28 @@ class OpContext:
         # Returning False (default) allows the exception to propagate.
         return False 
 
+op_context = OpContext()
+
 
 class GuardContext:
     """
     The actual context manager class that handles __enter__ and __exit__.
     It holds a reference to the outer WeightsLab instance.
     """
-    def __init__(self, for_training: bool, op_context: OpContext = None):
+    def __init__(self, for_training: bool):
         self.for_training = for_training
-        self.architecture_guard = RLock()
+        self.architecture_guard = weightslab_rlock
         self.model = None
         # pending updates collected while this guard is active
         self._pending_updates = []
-        # flag to indicate guard is currently active
-        self.active = False
-        self.op_context = op_context
 
     def __enter__(self):
         """
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
-
+        pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
-
+        
         # The exact logic requested by the user:
         if self.for_training:
             self.model.set_tracking_mode(TrackingMode.TRAIN)
@@ -67,20 +94,22 @@ class GuardContext:
         else:
             self.model.set_tracking_mode(TrackingMode.EVAL)
             self.model.eval()
-        # mark as active so other modules (e.g. src.update_train_test_data_statistics)
-        # can detect and stash updates until __exit__.
-        self.active = True
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         """
         Executed upon exiting the 'with' block (after user code runs). 
         Reverts the model state.
         """
-
+        
+        if exc_type is RuntimeError:
+            print(f"Suppressing exception: {exc_value} in GuardContext.__exit__")
+            self.architecture_guard.__exit__(exc_type, exc_value, traceback)
+            return True  # suppress the exception
+        
         self.architecture_guard.__exit__(exc_type, exc_value, traceback)
 
         # Use provided op_context if present, otherwise fall back to module-level
-        ctx = self.op_context if getattr(self, 'op_context', None) is not None else op_context
+        ctx = op_context if getattr(self, 'op_context', None) is not None else op_context
         with ctx:
             # decrement training steps and store result in ledgered hyperparams
             try:
@@ -127,59 +156,13 @@ class GuardContext:
                         pass
             except Exception:
                 pass
-        # Flush any pending updates that were collected while the guard was active.
-        # Import lazily to avoid circular imports at module load time.
-        try:
-            import weightslab.src as wl_src
-            for upd in list(getattr(self, '_pending_updates', []) or []):
-                try:
-                    wl_src._apply_update(*upd)
-                except Exception:
-                    # swallow to avoid breaking user code
-                    pass
-            # clear pending list
-            try:
-                self._pending_updates.clear()
-            except Exception:
-                self._pending_updates = []
-        except Exception:
-            pass
 
-        # mark as inactive
-        self.active = False
-        # If exc_type is not None, an exception occurred in the block.
-        # Returning False (default) allows the exception to propagate.
         return False 
 
 
-class PauseController:
-    """
-        Shared between model (reader: wait) and control thread (writer: pause/resume).
-    """
-    def __init__(self):
-        self._event = Event()
-
-    def wait_if_paused(self):
-        # Called from main thread / model forward. Blocks if paused.
-        self._event.wait()   # releases GIL while waiting
-
-    def pause(self):
-        self._event.clear()
-        set_hyperparam(None, 'is_training', False)
-
-    def resume(self):
-        self._event.set()
-        set_hyperparam(None, 'is_training', True)
-
-    def is_paused(self):
-        return not self._event.is_set()
-
-
 # Define Global Object here
-op_context = OpContext()
 guard_training_context = GuardContext(for_training=True)
 guard_testing_context = GuardContext(for_training=False)
-pause_controller = PauseController()
 
 
 # Background sync: keep ledger hyperparam `is_training` and pause_controller in sync.
@@ -235,12 +218,10 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
 
             # Drive controller from ledger when ledger explicitly sets the flag
             if isinstance(hp_is_training, bool):
-                if hp_is_training and controller_paused:
-                    pause_controller.resume()
-                    controller_running = True
-                elif not hp_is_training and controller_running:
-                    pause_controller.pause()
+                if controller_paused and hp_is_training:
                     controller_running = False
+                elif controller_running and not hp_is_training:
+                    controller_running = True
 
             # Propagate controller state back to ledger if it differs
             if not isinstance(hp_is_training, bool) or hp_is_training != controller_running:

@@ -2,7 +2,7 @@
 
 Usage (from user experiment):
     import weightslab.cli as cli
-    cli.initialize(launch_client=True)
+    cli.initialize(launch_cli_client=True)
 
 This will start a small TCP command server bound to localhost and (optionally)
 open a new terminal window running a REPL client connected to that server.
@@ -24,11 +24,11 @@ import os
 import time
 from typing import Optional, Any
 
-from .art import _BANNER
+from weightslab.art import _BANNER
 
 from weightslab.ledgers import GLOBAL_LEDGER
 from weightslab.ledgers import Proxy
-from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
+from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
 
 
 def _sanitize_for_json(obj):
@@ -67,63 +67,6 @@ def _sanitize_for_json(obj):
         return str(obj)
 
 
-def _format_model_tree(model, max_depth: int = 6) -> str:
-    """Return a simple ASCII tree of `model` using named_children().
-
-    This is intentionally light-weight (no shapes) and is safe for typical
-    torch.nn.Module subclasses. If the object is not a module, fallback to
-    repr().
-    """
-    try:
-        import torch.nn as nn
-    except Exception:
-        nn = None
-
-    def _rec(m, prefix='', depth=0, visited=None):
-        if visited is None:
-            visited = set()
-        lines = []
-        if depth > max_depth:
-            lines.append(prefix + '...')
-            return lines
-        try:
-            cls_name = m.__class__.__name__
-        except Exception:
-            cls_name = repr(m)
-        # avoid recursion cycles
-        if id(m) in visited:
-            lines.append(prefix + f'{cls_name} (recursed)')
-            return lines
-        visited.add(id(m))
-
-        lines.append(prefix + cls_name)
-        # iterate named children if available
-        try:
-            children = list(getattr(m, 'named_children')() ) if hasattr(m, 'named_children') else []
-        except Exception:
-            children = []
-
-        for i, (n, child) in enumerate(children):
-            is_last = (i == len(children) - 1)
-            branch = '└─ ' if is_last else '├─ '
-            sub_prefix = '   ' if is_last else '│  '
-            lines.extend(_rec(child, prefix + branch, depth + 1, visited))
-            # adjust subsequent sibling prefixes
-            if i < len(children) - 1:
-                # insert connector for next siblings
-                pass
-        return lines
-
-    try:
-        # If it's a torch module, traverse; otherwise return repr
-        if nn is not None and isinstance(model, nn.Module):
-            tree_lines = _rec(model)
-            return '\n'.join(tree_lines)
-        else:
-            return repr(model)
-    except Exception:
-        return repr(model)
-
 # Globals for the running server
 _server_thread: Optional[threading.Thread] = None
 _server_sock: Optional[socket.socket] = None
@@ -140,31 +83,9 @@ def _handle_command(cmd: str) -> Any:
     parts = cmd.split()
     verb = parts[0].lower()
 
-    def _auto_pause_for_cli_interaction():
-        # Pause all registered models to avoid concurrent training changes
-        try:
-            names = GLOBAL_LEDGER.list_models()
-            for n in names:
-                try:
-                    m = GLOBAL_LEDGER.get_model(n)
-                    try:
-                        m.pause_ctrl.pause()
-                    except Exception:
-                        try:
-                            m.pause()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-        except Exception:
-            # best-effort; ignore failures
-            pass
-
     try:
         # Any CLI interaction other than help/? should pause training to
         # avoid race conditions while a user inspects or edits state.
-        if verb not in ('help', '?'):
-            _auto_pause_for_cli_interaction()
         if verb in ('help', '?'):
             # Provide a structured, machine-friendly help payload so the client
             # can pretty-print it and users can discover hyperparam commands.
@@ -187,111 +108,18 @@ def _handle_command(cmd: str) -> Any:
                 'hyperparams_examples': {
                     'list': 'hp',
                     'show': 'hp fashion_mnist',
-                    'set_number': "set_hp fashion_mnist data.train_dataset.batch_size 32",
-                    'set_list': "set_hp fashion_mnist optimizer.Adam.lr 0.001",
+                    'set': "set_hp <hp_name?> <key.path> <value>  # e.g. set_hp fashion_mnist data.train_loader.batch_size 32",
                 }
             }
 
         if verb == 'pause' or verb == 'p':
-            # syntax: pause [model_name]
-            target_model = None
-            if len(parts) > 1:
-                name = parts[1]
-                try:
-                    target_model = GLOBAL_LEDGER.get_model(name)
-                except Exception:
-                    target_model = None
-            if target_model is not None:
-                try:
-                    target_model.pause_ctrl.pause()
-                except Exception:
-                    # try attribute on object itself
-                    try:
-                        target_model.pause()
-                    except Exception:
-                        pass
-                return {'ok': True, 'action': 'paused', 'model': name}
-            # fallback: pick the first registered model name (if any)
-            try:
-                names = GLOBAL_LEDGER.list_models()
-                if names:
-                    first_name = names[0]
-                    try:
-                        tgt = GLOBAL_LEDGER.get_model(first_name)
-                    except Exception:
-                        tgt = None
-                    if tgt is not None:
-                        try:
-                            tgt.pause_ctrl.pause()
-                        except Exception:
-                            try:
-                                tgt.pause()
-                            except Exception:
-                                pass
-                        return {'ok': True, 'action': 'paused', 'model': first_name}
-
-                # if no models registered or get_model failed, attempt generic get_model()
-                tgt = GLOBAL_LEDGER.get_model()
-                try:
-                    tgt.pause_ctrl.pause()
-                except Exception:
-                    try:
-                        tgt.pause()
-                    except Exception:
-                        pass
-                return {'ok': True, 'action': 'paused', 'model': None}
-            except Exception:
-                return {'ok': False, 'error': 'no_model_registered'}
+            pause_controller.pause()
+            return {'ok': True, 'action': 'paused'}
+            
 
         if verb == 'resume' or verb == 'r':
-            # syntax: resume [model_name]
-            target_model = None
-            if len(parts) > 1:
-                name = parts[1]
-                try:
-                    target_model = GLOBAL_LEDGER.get_model(name)
-                except Exception:
-                    target_model = None
-            if target_model is not None:
-                try:
-                    target_model.pause_ctrl.resume()
-                except Exception:
-                    try:
-                        target_model.resume()
-                    except Exception:
-                        pass
-                return {'ok': True, 'action': 'resumed', 'model': name}
-            # fallback: pick the first registered model name (if any)
-            try:
-                names = GLOBAL_LEDGER.list_models()
-                if names:
-                    first_name = names[0]
-                    try:
-                        tgt = GLOBAL_LEDGER.get_model(first_name)
-                    except Exception:
-                        tgt = None
-                    if tgt is not None:
-                        try:
-                            tgt.pause_ctrl.resume()
-                        except Exception:
-                            try:
-                                tgt.resume()
-                            except Exception:
-                                pass
-                        return {'ok': True, 'action': 'resumed', 'model': first_name}
-
-                # if no models registered or get_model failed, attempt generic get_model()
-                tgt = GLOBAL_LEDGER.get_model()
-                try:
-                    tgt.pause_ctrl.resume()
-                except Exception:
-                    try:
-                        tgt.resume()
-                    except Exception:
-                        pass
-                return {'ok': True, 'action': 'resumed', 'model': None}
-            except Exception:
-                return {'ok': False, 'error': 'no_model_registered'}
+            pause_controller.resume()
+            return {'ok': True, 'action': 'resumed'}
 
         if verb == 'status':
             # Provide a compact ledger snapshot in status: models, dataloaders,
@@ -429,64 +257,60 @@ def _handle_command(cmd: str) -> Any:
                 return {'ok': False, 'error': 'usage: operate [<model_name>] <op_type> <layer_id> <nb|[list]>'}
 
             # detect whether second token is model name or op_type
-            try:
-                possible_op = int(parts[1])
-                # form: operate <op_type> <layer_id> <nb>
-
-                # no wl_exp: operate on single ledger model
-                op_type = int(parts[1])
-                layer_id = int(parts[2])
-                raw = ' '.join(parts[3:])
+            with weightslab_rlock:
                 try:
-                    nb = eval(raw, {}, {})
-                except Exception:
+                    op_type = int(parts[1])
+                    layer_id = int(parts[2])
+                    raw = ' '.join(parts[3:])
                     try:
-                        nb = int(parts[3])
+                        nb = eval(raw, {}, {})
                     except Exception:
-                        nb = raw
-                try:
-                    m = GLOBAL_LEDGER.get_model()
-                except Exception:
-                    return {'ok': False, 'error': 'no_model_registered'}
-                try:
-                    with m as mm, guard_training_context, guard_testing_context:
+                        try:
+                            nb = int(parts[3])
+                        except Exception:
+                            nb = raw
+                    try:
+                        m = GLOBAL_LEDGER.get_model()
+                    except Exception:
+                        return {'ok': False, 'error': 'no_model_registered'}
+
+                    # Operate
+                    with m as mm:
                         mm.operate(layer_id, nb, op_type)
                     print(f'[cli] operated on model via context manager')
                     print(f'[cli] new model info: {m}')
-                except Exception:
-                    # try direct call
-                    m.operate(layer_id, nb, op_type)
-                return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': None}
-            except ValueError:
-                # parts[1] is not an int => treat as model name
-                model_name = parts[1]
-                if len(parts) < 5:
-                    return {'ok': False, 'error': 'usage: operate <model_name> <op_type> <layer_id> <nb|[list]>'}
-                try:
-                    op_type = int(parts[2])
-                    layer_id = int(parts[3])
-                except Exception:
-                    return {'ok': False, 'error': 'op_type and layer_id must be ints'}
-                raw = ' '.join(parts[4:])
-                try:
-                    nb = eval(raw, {}, {})
-                except Exception:
+
+                    return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': None}
+                except ValueError:
+                    # parts[1] is not an int => treat as model name
+                    model_name = parts[1]
+                    if len(parts) < 5:
+                        return {'ok': False, 'error': 'usage: operate <model_name> <op_type> <layer_id> <nb|[list]>'}
                     try:
-                        nb = int(parts[4])
+                        op_type = int(parts[2])
+                        layer_id = int(parts[3])
                     except Exception:
-                        nb = raw
-                try:
-                    m = GLOBAL_LEDGER.get_model(model_name)
-                except Exception:
-                    return {'ok': False, 'error': f'model_not_found: {model_name}'}
-                try:
+                        return {'ok': False, 'error': 'op_type and layer_id must be ints'}
+                    raw = ' '.join(parts[4:])
+                    try:
+                        nb = eval(raw, {}, {})
+                    except Exception:
+                        try:
+                            nb = int(parts[4])
+                        except Exception:
+                            nb = raw
+                    try:
+                        m = GLOBAL_LEDGER.get_model(model_name)
+                    except Exception:
+                        return {'ok': False, 'error': f'model_not_found: {model_name}'}
+
+                    # Operate
                     with m as mm:
                         mm.operate(layer_id, nb, op_type)
-                except Exception:
-                    m.operate(layer_id, nb, op_type)
-                return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': model_name}
 
-        # Hyperparameters: list / show / set
+                    return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': model_name}
+
+        # Hyperparameters: list / show details and set
         if verb in ('hp', 'hyperparams'):
             # hp -> list
             names = GLOBAL_LEDGER.list_hyperparams() if hasattr(GLOBAL_LEDGER, 'list_hyperparams') else []
@@ -502,6 +326,58 @@ def _handle_command(cmd: str) -> Any:
             try:
                 hp = GLOBAL_LEDGER.get_hyperparams(name)
                 return {'ok': True, 'name': name, 'hyperparams': hp}
+            except Exception as e:
+                return {'ok': False, 'error': str(e)}
+
+        if verb in ('set_hp', 'sethp', 'set-hp'):
+            # syntax: set_hp [hp_name] <key.path> <value>
+            try:
+                from weightslab.ledgers import list_hyperparams, set_hyperparam
+                names = list_hyperparams()
+                # decide whether hp_name was supplied
+                if len(parts) < 3:
+                    return {'ok': False, 'error': 'usage: set_hp [hp_name] <key.path> <value>'}
+
+                # If multiple hyperparam sets exist, require explicit name
+                candidate = parts[1]
+                if candidate in names and len(parts) >= 4:
+                    hp_name = candidate
+                    key = parts[2]
+                    raw_value = ' '.join(parts[3:])
+                else:
+                    # no explicit hp_name provided
+                    if len(names) == 1:
+                        hp_name = names[0]
+                        key = parts[1]
+                        raw_value = ' '.join(parts[2:])
+                    else:
+                        return {'ok': False, 'error': 'Multiple hyperparam sets present; provide hp_name explicitly'}
+
+                # Try to coerce value: JSON first, then common literals
+                value = None
+                try:
+                    import json as _json
+                    value = _json.loads(raw_value)
+                except Exception:
+                    # fallback: try booleans / numbers
+                    lv = raw_value.strip()
+                    if lv.lower() in ('true', 'false'):
+                        value = True if lv.lower() == 'true' else False
+                    else:
+                        try:
+                            if '.' in lv:
+                                value = float(lv)
+                            else:
+                                value = int(lv)
+                        except Exception:
+                            value = lv
+
+                # apply change
+                try:
+                    set_hyperparam(hp_name, key, value)
+                    return {'ok': True, 'hp_name': hp_name, 'key': key, 'value': value}
+                except Exception as e:
+                    return {'ok': False, 'error': str(e)}
             except Exception as e:
                 return {'ok': False, 'error': str(e)}
 
@@ -566,10 +442,16 @@ def _server_loop(host: str, port: int):
             pass
 
 
-def initialize(host: str = '127.0.0.1', port: int = 0, launch_client: bool = True):
-    """Start the CLI server and optionally open a client in a new console.
+def cli_serve(host_cli: str = '127.0.0.1', port_cli: int = 10051, launch_cli: bool = True, **_):
+    """
+        Start the CLI server and optionally open a client in a new console.
+        This CLI now operates on objects registered in the global ledger only.
 
-    This CLI now operates on objects registered in the global ledger only.
+        Args:
+            host_cli: Host to bind the server to (default: localhost).
+            port_cli: Port to bind the server to (default: 0 = random free port).
+            launch_cli: Whether to launch a new console window running the
+                client REPL connected to the server.
     """
     global _server_thread, _server_port, _server_host
 
@@ -579,12 +461,12 @@ def initialize(host: str = '127.0.0.1', port: int = 0, launch_client: bool = Tru
     # start server thread
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((host, port))
+    sock.bind((host_cli, port_cli))
     sock.listen(1)
     actual_port = sock.getsockname()[1]
     sock.close()
 
-    _server_thread = threading.Thread(target=_server_loop, args=(host, actual_port), daemon=True)
+    _server_thread = threading.Thread(target=_server_loop, args=(host_cli, actual_port), daemon=True)
     _server_thread.start()
     # wait briefly for server to come up
     time.sleep(0.05)
@@ -594,18 +476,18 @@ def initialize(host: str = '127.0.0.1', port: int = 0, launch_client: bool = Tru
     except Exception:
         pass
 
-    if launch_client:
+    if launch_cli:
         # spawn a new console running the client REPL
         import subprocess
         cmd = [sys.executable, '-u', '-c',
-               "import weightslab.cli as _cli; _cli.cli_client_main('%s', %d)" % (host, actual_port)]
+               "import weightslab.cli as _cli; _cli.cli_client_main('%s', %d)" % (host_cli, actual_port)]
         kwargs = {}
         if os.name == 'nt':
             # CREATE_NEW_CONSOLE causes a new terminal window on Windows
             kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
         subprocess.Popen(cmd, cwd=os.getcwd(), **kwargs)
 
-    return {'ok': True, 'host': host, 'port': actual_port}
+    return {'ok': True, 'host': host_cli, 'port': actual_port}
 
 
 def cli_client_main(host: str, port: int):

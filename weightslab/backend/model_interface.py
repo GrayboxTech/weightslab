@@ -7,6 +7,7 @@ import weightslab as wl
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
 
+from weightslab.components.checkpoint import CheckpointManager
 from weightslab.components.tracking import TrackingMode
 from weightslab.models.model_with_ops import NetworkWithOps
 from weightslab.modules.neuron_ops import NeuronWiseOperations
@@ -17,9 +18,8 @@ from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
-from weightslab.components.global_monitoring import guard_training_context, guard_testing_context, pause_controller
+from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.ledgers import get_optimizer, get_optimizers, register_model, register_optimizer
-from weightslab.components.checkpoint import CheckpointManager
 
 
 class ModelInterface(NetworkWithOps):
@@ -65,6 +65,7 @@ class ModelInterface(NetworkWithOps):
         # # Disable tracking for implementation
         self.tracking_mode = TrackingMode.DISABLED
         self.name = "Test Architecture Model"
+        self.device = device
         self.model = model.to(device)
         if dummy_input is not None:
             self.dummy_input = dummy_input.to(device)
@@ -76,8 +77,7 @@ class ModelInterface(NetworkWithOps):
         self.traced_model.name = "N.A."
         self.guard_training_context = guard_training_context
         self.guard_testing_context = guard_testing_context
-        self.pause_ctrl = pause_controller
-
+        
         # Propagate the shape over the graph
         self.shape_propagation()
 
@@ -128,9 +128,11 @@ class ModelInterface(NetworkWithOps):
         # Checkpoint manager (optional)
         # skip_checkpoint_load: bool = False,
         # auto_dump_every_steps: int = 0
-        # self._checkpoint_manager = None
+        self._checkpoint_manager = None
         # self._checkpoint_auto_every_steps = int(auto_dump_every_steps or 0)
-
+        _checkpoint_auto_every_steps = 0
+        _checkpoint_dir = None
+        _skip_checkpoint_load = False
         # If checkpoint_dir not provided, try to read `root_log_dir` from
         # ledger hyperparams, otherwise fallback to './root_log_dir/checkpoints'
         try:
@@ -166,20 +168,48 @@ class ModelInterface(NetworkWithOps):
             _skip_checkpoint_load = False
         self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
 
-        # if _checkpoint_dir:
-        #     try:
-        #         self._checkpoint_manager = CheckpointManager(_checkpoint_dir)
-        #         # attempt to load latest checkpoint unless skipped
-        #         if not _skip_checkpoint_load:
-        #             try:
-        #                 latest = self._checkpoint_manager.get_latest_checkpoint_path()
-        #                 if latest:
-        #                     # best-effort load into ledger-registered objects
-        #                     self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
-        #             except Exception:
-        #                 pass
-        #     except Exception:
-        #         self._checkpoint_manager = None
+        if _checkpoint_dir:
+            try:
+                self._checkpoint_manager = CheckpointManager(_checkpoint_dir)
+                # attempt to load latest checkpoint unless skipped
+                # TODO (GP): 
+                # """
+                #     Traceback (most recent call last):
+                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\components\checkpoint.py", line 323, in load
+                #         model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL])
+                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\backend\model_interface.py", line 438, in load_state_dict
+                #         return super().load_state_dict(state_dict, strict, assign)
+                #             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\models\model_with_ops.py", line 432, in load_state_dict
+                #         super().load_state_dict(
+                #     File "c:\Users\GuillaumePelluet\Documents\Codes\grayBox\python_env\weightslab\Lib\site-packages\torch\nn\modules\module.py", line 2152, in load_state_dict
+                #         raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
+                #     RuntimeError: Error(s) in loading state_dict for ModelInterface:
+                #             Unexpected key(s) in state_dict: "seen_samples", "tracking_mode", "model.c1.train_dataset_tracker.number_of_neurons", "model.c1.train_dataset_tracker.triggrs_by_neuron", "model.c1.train_dataset_tracker.updates_by_neuron", "model.c1.eval_dataset_tracker.number_of_neurons", "model.c1.eval_dataset_tracker.triggrs_by_neuron", "model.c1.eval_dataset_tracker.updates_by_neuron", "model.b1.train_dataset_tracker.number_of_neurons", "model.b1.train_dataset_tracker.triggrs_by_neuron", "model.b1.train_dataset_tracker.updates_by_neuron", "model.b1.eval_dataset_tracker.number_of_neurons", "model.b1.eval_dataset_tracker.triggrs_by_neuron", "model.b1.eval_dataset_tracker.updates_by_neuron", "model.c2.train_dataset_tracker.number_of_neurons", "model.c2.train_dataset_tracker.triggrs_by_neuron", "model.c2.train_dataset_tracker.updates_by_neuron", "model.c2.eval_dataset_tracker.number_of_neurons", "model.c2.eval_dataset_tracker.triggrs_by_neuron", "model.c2.eval_dataset_tracker.updates_by_neuron", "model.b2.train_dataset_tracker.number_of_neurons", "model.b2.train_dataset_tracker.triggrs_by_neuron", "model.b2.train_dataset_tracker.updates_by_neuron", "model.b2.eval_dataset_tracker.number_of_neurons", "model.b2.eval_dataset_tracker.triggrs_by_neuron", "model.b2.eval_dataset_tracker.updates_by_neuron", "model.fc3.train_dataset_tracker.number_of_neurons", "model.fc3.train_dataset_tracker.triggrs_by_neuron", "model.fc3.train_dataset_tracker.updates_by_neuron", "model.fc3.eval_dataset_tracker.number_of_neurons", "model.fc3.eval_dataset_tracker.triggrs_by_neuron", "model.fc3.eval_dataset_tracker.updates_by_neuron", "model.fc4.train_dataset_tracker.number_of_neurons", "model.fc4.train_dataset_tracker.triggrs_by_neuron", "model.fc4.train_dataset_tracker.updates_by_neuron", "model.fc4.eval_dataset_tracker.number_of_neurons", "model.fc4.eval_dataset_tracker.triggrs_by_neuron", "model.fc4.eval_dataset_tracker.updates_by_neuron".
+                #             size mismatch for model.c1.weight: copying a param with shape torch.Size([10, 1, 3, 3]) from checkpoint, the shape in current model is torch.Size([4, 1, 3, 3]).
+                #             size mismatch for model.c1.bias: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.weight: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.bias: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.running_mean: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.running_var: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.c2.weight: copying a param with shape torch.Size([5, 10, 3, 3]) from checkpoint, the shape in current model is torch.Size([4, 4, 3, 3]).
+                #             size mismatch for model.c2.bias: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.weight: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.bias: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.running_mean: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.running_var: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.fc3.weight: copying a param with shape torch.Size([64, 180]) from checkpoint, the shape in current model is torch.Size([64, 144]).
+                # """
+                # if not _skip_checkpoint_load:
+                #     try:
+                #         latest = self._checkpoint_manager.get_latest_checkpoint_path()
+                #         if latest:
+                #             # best-effort load into ledger-registered objects
+                #             self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
+                #     except Exception:
+                #         pass
+            except Exception:
+                self._checkpoint_manager = None
 
     def __enter__(self):
         """
@@ -232,24 +262,8 @@ class ModelInterface(NetworkWithOps):
                 model.parameters(),
                 lr=lr
             )
-            # Derive an experiment name to register the optimizer under.
-            # Prefer an explicit hyperparams set called 'experiment' or 'main',
-            # otherwise fall back to the model's ledger name if available.
-            try:
-                from weightslab.ledgers import list_hyperparams
-                hp_names = list_hyperparams()
-                if 'experiment' in hp_names:
-                    exp_name = 'experiment'
-                elif 'main' in hp_names:
-                    exp_name = 'main'
-                elif len(hp_names) == 1:
-                    exp_name = hp_names[0]
-                else:
-                    exp_name = getattr(self, '_ledger_name', None)
-            except Exception:
-                exp_name = getattr(self, '_ledger_name', None)
 
-            wl.watch_or_edit(_optimizer, flag='optimizer', name=exp_name)
+            wl.watch_or_edit(_optimizer, flag='optimizer', name=opt_name)
 
     def _maybe_auto_dump(self):
         # Called from base class hook after seen_samples updates.
@@ -392,15 +406,21 @@ class ModelInterface(NetworkWithOps):
         Returns:
             th.Tensor: The output tensor from the model's forward pass.
         """
-        self.pause_ctrl.wait_if_paused()
         
+        # Check device
+        if x.device != self.device:
+            x = x.to(self.device)
+
         self.maybe_update_age(x)
         out = self.model(x)
 
         return out
     
     def apply_architecture_op(self, op_type, layer_id, neuron_indices=None):
-        with self as m, self.guard_training_context, self.guard_testing_context:
+        """
+            Applies an architecture operation to the model within a managed context.
+        """
+        with self as m:
             m.operate(layer_id=layer_id, op_type=op_type, neuron_indices=neuron_indices)
 
     def state_dict(self):
@@ -416,6 +436,12 @@ class ModelInterface(NetworkWithOps):
             dict: A dictionary containing a whole state of the module.
         """
         return super().state_dict()
+
+    def parameters(self):
+        """
+            Returns an iterator over the model's parameters.
+        """
+        return super().parameters()
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         """
@@ -502,7 +528,7 @@ class ModelInterface(NetworkWithOps):
 
 if __name__ == "__main__":
     from weightslab.tests.torch_models import \
-        UNet as Model
+        FashionCNN as Model
 
     # Setup prints
     setup_logging('DEBUG')
@@ -522,6 +548,17 @@ if __name__ == "__main__":
     model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
     print(f'Inference results {model(dummy_input)}')  # infer
     print(model)
+
+    # --- DEBUG ---
+    with model as m:
+        print(f'Model before operation:\n{m}')
+        # Apply operation
+        m.operate(
+            op_type=1,
+            layer_id=3,
+            neuron_indices=range(5)
+        )
+        print(f'Model after operation:\n{m}')
 
     # Model Operations
     # # Test: add neurons

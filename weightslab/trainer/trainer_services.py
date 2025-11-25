@@ -13,12 +13,21 @@ import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 from concurrent import futures
 from collections import defaultdict
 
+from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
 from weightslab.trainer.trainer_tools import *
 from weightslab.trainer.trainer_tools import _get_input_tensor_for_sample
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 
 class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
+    """
+        gRPC servicer for experiment-related services.
+        This class provides implementations for streaming training status,
+        handling experiment commands, retrieving samples, manipulating weights,
+        and getting weights and activations.
+        It resolves components (model, dataloaders, optimizer, hyperparams, logger)
+        from the WeightsLab GLOBAL_LEDGER as needed.
+    """
     def __init__(self, exp_name: str = None):
         # Accept an explicit experiment object or attempt to resolve one
         # from the global ledger to avoid depending on a single global
@@ -59,11 +68,15 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             dnames = list_dataloaders()
             if 'train' in dnames:
                 train_loader = get_dataloader('train')
+            elif 'train_loader' in dnames:
+                train_loader = get_dataloader('train_loader')
             elif len(dnames) == 1:
                 train_loader = get_dataloader()
 
             if 'eval' in dnames:
                 test_loader = get_dataloader('eval')
+            elif 'test_loader' in dnames:
+                test_loader = get_dataloader('test_loader')
             elif 'test' in dnames:
                 test_loader = get_dataloader('test')
             elif len(dnames) == 1 and train_loader is not None:
@@ -142,7 +155,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             ("Checkpoint Frequency", "checkpooint_frequency", "number", _hp_getter('experiment_dump_to_train_steps_ratio', 100)),
 
             ("Learning Rate", "learning_rate", "number", _hp_getter('optimizer.lr', 1e-4)),
-            ("Batch Size", "batch_size", "number", _hp_getter('data.train_dataset.batch_size', 8))
+            ("Batch Size", "batch_size", "number", _hp_getter('data.train_loader.batch_size', 8))
         }
 
     def StreamStatus(self, request_iterator, context):
@@ -192,151 +205,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                     pass
 
             yield training_status
-
-    def ExperimentCommand(self, request, context):
-        # print("ExperimentServiceServicer.ExperimentCommand", request)
-        # ensure ledger-backed components are available
-        self._ensure_components()
-        if request.HasField('hyper_parameter_change'):
-            # apply hyperparameter changes via the ledger
-            hyper_parameters = request.hyper_parameter_change.hyper_parameters
-            from weightslab.ledgers import set_hyperparam, list_hyperparams
-
-            # resolve hp name: prefer explicit exp_name, else single set
-            hp_name = None
-            if self._exp_name:
-                hp_name = self._exp_name
-            else:
-                hps = list_hyperparams()
-                if len(hps) == 1:
-                    hp_name = hps[0]
-
-            if hp_name is None:
-                return pb2.CommandResponse(success=False, message='Cannot resolve hyperparams name')
-
-            try:
-                if hyper_parameters.HasField('is_training'):
-                    set_hyperparam(hp_name, 'is_training', hyper_parameters.is_training)
-
-                if hyper_parameters.HasField('training_steps_to_do'):
-                    set_hyperparam(hp_name, 'training_steps_to_do', hyper_parameters.training_steps_to_do)
-
-                if hyper_parameters.HasField('learning_rate'):
-                    set_hyperparam(hp_name, 'optimizer.lr', hyper_parameters.learning_rate)
-
-                if hyper_parameters.HasField('batch_size'):
-                    set_hyperparam(hp_name, 'data.train_dataset.batch_size', hyper_parameters.batch_size)
-
-                # full_eval_frequency
-                if hyper_parameters.HasField('full_eval_frequency'):
-                    set_hyperparam(hp_name, 'eval_full_to_train_steps_ratio', hyper_parameters.full_eval_frequency)
-
-                # checkpoint_frequency
-                if hyper_parameters.HasField('checkpont_frequency'):
-                    set_hyperparam(hp_name, 'experiment_dump_to_train_steps_ratio', hyper_parameters.checkpont_frequency)
-
-            except Exception as e:
-                return pb2.CommandResponse(success=False, message=f'Failed to set hyperparameters: {e}')
-
-            return pb2.CommandResponse(success=True, message="Hyper parameter changed")
-        if request.HasField('deny_samples_operation'):
-            denied_cnt = len(request.deny_samples_operation.sample_ids)
-            ds = self._components.get('train_loader')
-            if ds is None:
-                return pb2.CommandResponse(success=False, message='No train dataloader registered')
-            dataset = getattr(ds, 'dataset', ds)
-            dataset.denylist_samples(
-                set(request.deny_samples_operation.sample_ids),
-                accumulate = request.deny_samples_operation.accumulate
-            )
-            return pb2.CommandResponse(success=True, message=f"Denied {denied_cnt} train samples")
-        if request.HasField('deny_eval_samples_operation'):
-            denied_cnt = len(request.deny_eval_samples_operation.sample_ids)
-            ds = self._components.get('test_loader')
-            if ds is None:
-                return pb2.CommandResponse(success=False, message='No eval dataloader registered')
-            dataset = getattr(ds, 'dataset', ds)
-            dataset.denylist_samples(
-                set(request.deny_eval_samples_operation.sample_ids),
-                accumulate = request.deny_eval_samples_operation.accumulate
-            )
-            return pb2.CommandResponse(success=True, message=f"Denied {denied_cnt} eval samples")
-
-        if request.HasField('remove_from_denylist_operation'):
-            allowed = set(request.remove_from_denylist_operation.sample_ids)
-            ds = self._components.get('train_loader')
-            if ds is None:
-                return pb2.CommandResponse(success=False, message='No train dataloader registered')
-            dataset = getattr(ds, 'dataset', ds)
-            dataset.allowlist_samples(allowed)
-            return pb2.CommandResponse(success=True, message=f"Un-denied {len(allowed)} train samples")
-
-        if request.HasField('remove_eval_from_denylist_operation'):
-            allowed = set(request.remove_eval_from_denylist_operation.sample_ids)
-            ds = self._components.get('test_loader')
-            if ds is None:
-                return pb2.CommandResponse(success=False, message='No eval dataloader registered')
-            dataset = getattr(ds, 'dataset', ds)
-            dataset.allowlist_samples(allowed)
-            return pb2.CommandResponse(success=True, message=f"Un-denied {len(allowed)} eval samples")
-
-        if request.HasField('load_checkpoint_operation'):
-            checkpoint_id = request.load_checkpoint_operation.checkpoint_id
-            model = self._components.get('model')
-            if model is None:
-                return pb2.CommandResponse(success=False, message='No model registered to load checkpoint')
-            if hasattr(model, 'load'):
-                try:
-                    model.load(checkpoint_id)
-                except Exception as e:
-                    return pb2.CommandResponse(success=False, message=str(e))
-
-        response = pb2.CommandResponse(success=True, message="")
-        if request.get_hyper_parameters:
-            response.hyper_parameters_descs.extend(
-                get_hyper_parameters_pb(self.hyper_parameters))
-        if request.get_interactive_layers:
-            model = self._components.get('model')
-            if model is not None:
-                if request.HasField('get_single_layer_info_id'):
-                    response.layer_representations.extend([
-                        get_layer_representation(
-                            model.get_layer_by_id(request.get_single_layer_info_id))])
-                else:
-                    response.layer_representations.extend(get_layer_representations(model))
-        if request.get_data_records:
-            if request.get_data_records == "train":
-                ds = self._components.get('train_loader')
-                if ds is not None:
-                    dataset = getattr(ds, 'dataset', ds)
-                    response.sample_statistics.CopyFrom(
-                        get_data_set_representation(
-                            dataset,
-                            types.SimpleNamespace(**{
-                                'tasks': getattr(self._components.get('model'), 'tasks', None),
-                                'task_type': getattr(self._components.get('model'), 'task_type', getattr(dataset, 'task_type', 'classification')),
-                                'num_classes': getattr(self._components.get('model'), 'num_classes', None)
-                            })
-                        )
-                    )
-                    response.sample_statistics.origin = "train"
-            elif request.get_data_records == "eval":
-                ds = self._components.get('test_loader')
-                if ds is not None:
-                    dataset = getattr(ds, 'dataset', ds)
-                    response.sample_statistics.CopyFrom(
-                        get_data_set_representation(
-                            dataset,
-                            types.SimpleNamespace(**{
-                                'tasks': getattr(self._components.get('model'), 'tasks', None),
-                                'task_type': getattr(self._components.get('model'), 'task_type', getattr(dataset, 'task_type', 'classification')),
-                                'num_classes': getattr(self._components.get('model'), 'num_classes', None)
-                            })
-                        )
-                    )
-                    response.sample_statistics.origin = "eval"
-
-        return response
 
     def GetSample(self, request, context):
         # print(f"ExperimentServiceServicer.GetSample({request})")
@@ -400,7 +268,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return response
 
     def GetSamples(self, request, context):
-        print(f"ExperimentServiceServicer.GetSamples({request})")
+        # print(f"ExperimentServiceServicer.GetSamples({request})")
 
         import concurrent.futures
         # ensure ledger-backed components are available
@@ -467,141 +335,8 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
         return response
 
-    def _apply_zerofy(self, layer, from_ids, to_ids):
-        in_max = int(layer.in_neurons)
-        out_max = int(layer.out_neurons)
-
-        from_set = {i for i in set(from_ids) if 0 <= i < in_max}
-        to_set   = {i for i in set(to_ids)   if 0 <= i < out_max}
-        if from_set and to_set and hasattr(layer, "zerofy_connections_from"):
-            layer.zerofy_connections_from(from_set, to_set)
-        else:
-            print("ZEROFY skipped (empty sets or no method)")
-
-    def ManipulateWeights(self, request, context):
-        # (f"ExperimentServiceServicer.ManipulateWeights({request})")
-        # ensure ledger-backed components are available
-        self._ensure_components()
-        answer = pb2.WeightsOperationResponse(
-            success=False, message="Unknown error")
-        weight_operations = request.weight_operation
-
-        if weight_operations.op_type == pb2.WeightOperationType.REMOVE_NEURONS:
-            layer_id_to_neuron_ids_list = defaultdict(list)
-            for neuron_id in weight_operations.neuron_ids:
-                layer_id = neuron_id.layer_id
-                layer_id_to_neuron_ids_list[layer_id].append(
-                    neuron_id.neuron_id)
-
-            model = self._components.get('model')
-            if model is None or not hasattr(model, 'apply_architecture_op'):
-                return pb2.WeightsOperationResponse(success=False, message='Model does not support architecture operations')
-            for layer_id, neuron_ids in layer_id_to_neuron_ids_list.items():
-                model.apply_architecture_op(
-                    op_type=ArchitectureNeuronsOpType.PRUNE,
-                    layer_id=layer_id,
-                    neuron_indices=set(neuron_ids))
-
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Pruned {str(dict(layer_id_to_neuron_ids_list))}")
-        elif weight_operations.op_type == pb2.WeightOperationType.ADD_NEURONS:
-            model = self._components.get('model')
-            if model is None or not hasattr(model, 'apply_architecture_op'):
-                return pb2.WeightsOperationResponse(success=False, message='Model does not support architecture operations')
-            model.apply_architecture_op(
-                op_type=ArchitectureNeuronsOpType.ADD,
-                layer_id=weight_operations.layer_id,
-                neuron_indices=weight_operations.neurons_to_add)
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=\
-                    f"Added {weight_operations.neurons_to_add} "
-                    f"neurons to layer {weight_operations.layer_id}")
-        elif weight_operations.op_type == pb2.WeightOperationType.FREEZE:
-            layer_id_to_neuron_ids_list = defaultdict(list)
-            for neuron_id in weight_operations.neuron_ids:
-                layer_id = neuron_id.layer_id
-                layer_id_to_neuron_ids_list[layer_id].append(
-                    neuron_id.neuron_id)
-            model = self._components.get('model')
-            if model is None or not hasattr(model, 'apply_architecture_op'):
-                return pb2.WeightsOperationResponse(success=False, message='Model does not support architecture operations')
-            for layer_id, neuron_ids in layer_id_to_neuron_ids_list.items():
-                model.apply_architecture_op(
-                    op_type=ArchitectureNeuronsOpType.FREEZE,
-                    layer_id=layer_id,
-                    neuron_indices=neuron_ids)
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Frozen {str(dict(layer_id_to_neuron_ids_list))}")
-        elif weight_operations.op_type == pb2.WeightOperationType.REINITIALIZE:
-            model = self._components.get('model')
-            if model is None or not hasattr(model, 'apply_architecture_op'):
-                return pb2.WeightsOperationResponse(success=False, message='Model does not support architecture operations')
-            for neuron_id in weight_operations.neuron_ids:
-                model.apply_architecture_op(
-                    op_type=ArchitectureNeuronsOpType.RESET,
-                    layer_id=neuron_id.layer_id,
-                    neuron_indices={neuron_id.neuron_id})
-
-            answer = pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Reinitialized {weight_operations.neuron_ids}")
-
-        elif weight_operations.op_type == pb2.WeightOperationType.ZEROFY:
-            layer_id = weight_operations.layer_id
-            model = self._components.get('model')
-            if model is None:
-                return pb2.WeightsOperationResponse(success=False, message='No model registered')
-            layer = model.get_layer_by_id(layer_id)
-
-            from_ids = list(weight_operations.zerofy_from_incoming_ids)
-            to_ids   = list(weight_operations.zerofy_to_neuron_ids)
-
-            if len(weight_operations.zerofy_predicates) > 0:
-                frozen = set()
-                try:
-                    for nid in range(getattr(layer, "out_neurons", 0)):
-                        if layer.get_per_neuron_learning_rate(
-                            nid,
-                            is_incoming=False,
-                            tensor_name='weight'
-                        ) == 0.0:
-                            frozen.add(nid)
-                except Exception:
-                    pass
-
-                older = set()
-                try:
-                    td_tracker = getattr(layer, "train_dataset_tracker", None)
-                    if td_tracker is not None:
-                        for nid in range(getattr(layer, "out_neurons", 0)):
-                            age = int(td_tracker.get_neuron_age(nid))
-                            if age > 0:
-                                older.add(nid)
-                except Exception:
-                    older = set()
-
-                expanded = set(to_ids)
-                for p in weight_operations.zerofy_predicates:
-                    if p == pb2.ZerofyPredicate.ZEROFY_PREDICATE_WITH_FROZEN:
-                        expanded |= frozen
-                    elif p == pb2.ZerofyPredicate.ZEROFY_PREDICATE_WITH_OLDER:
-                        expanded |= older
-                to_ids = list(expanded)
-
-            self._apply_zerofy(layer, from_ids, to_ids)
-
-            return pb2.WeightsOperationResponse(
-                success=True,
-                message=f"Zerofied L{layer_id} from={sorted(set(from_ids))} to={sorted(set(to_ids))}"
-            )
-
-        return answer
-
     def GetWeights(self, request, context):
-        print(f"ExperimentServiceServicer.GetWeights({request})")
+        # print(f"ExperimentServiceServicer.GetWeights({request})")
         answer = pb2.WeightsResponse(success=True, error_message="")
 
         neuron_id = request.neuron_id
@@ -648,7 +383,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return answer
 
     def GetActivations(self, request, context):
-        print(f"ExperimentServiceServicer.GetActivations({request})")
+        # print(f"ExperimentServiceServicer.GetActivations({request})")
         empty_resp = pb2.ActivationResponse(layer_type="", neurons_count=0)
 
         try:
@@ -674,8 +409,59 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             x = _get_input_tensor_for_sample(ds, request.sample_id, getattr(model, 'device', 'cpu'))
 
             with torch.no_grad():
-                intermediaries = {request.layer_id: None}
-                model.forward(x, intermediary_outputs=intermediaries)
+                # Populate `intermediaries` by hooking the model's layers.
+                # We register forward hooks on each layer, run a single
+                # inference to let hooks capture outputs, then remove hooks.
+                intermediaries = {}
+                handles = []
+                try:
+                    def make_hook(module):
+                        def hook(mod, inp, out):
+                            try:
+                                mid = None
+                                if hasattr(mod, 'get_module_id'):
+                                    try:
+                                        mid = mod.get_module_id()
+                                    except Exception:
+                                        mid = None
+                                # normalize key to str for stable lookup
+                                if mid is None:
+                                    return
+                                key = mid
+                                # attempt to detach and move to cpu
+                                try:
+                                    intermediaries[key] = out.detach().cpu()
+                                except Exception:
+                                    # sometimes out may be a tuple/list
+                                    try:
+                                        intermediaries[key] = out[0].detach().cpu()
+                                    except Exception:
+                                        intermediaries[key] = None
+                            except Exception:
+                                pass
+                        return hook
+
+                    for layer in model.layers:
+                        try:
+                            h = layer.register_forward_hook(make_hook(layer))
+                            handles.append(h)
+                        except Exception:
+                            # best-effort: skip layers that don't support hooks
+                            pass
+
+                    # run one forward pass to trigger hooks
+                    try:
+                        _ = model(x)
+                    except Exception:
+                        # If model(x) raises, we still want to remove hooks
+                        pass
+                finally:
+                    # remove hooks
+                    for h in handles:
+                        try:
+                            h.remove()
+                        except Exception:
+                            pass
 
             if intermediaries[request.layer_id] is None:
                 raise ValueError(f"No intermediary layer {request.layer_id}")
@@ -691,7 +477,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             if amap.ndim == 3:  # Conv2d output (C, H, W)
                 C, H, W = amap.shape
             elif amap.ndim == 1:  # Linear output (C, ), will use C as features
-                C = amap.shape
+                C = amap.shape[0]
 
             resp.neurons_count = C
             for c in range(C):
@@ -708,13 +494,226 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
         return empty_resp
     
+    def ExperimentCommand(self, request, context):
+        # ensure ledger-backed components are available
+        self._ensure_components()
 
-def serve(threading=True):
+        # Write requests
+        if request.HasField('hyper_parameter_change'):
+            # be sure that we lock is available to modify shared components
+            with weightslab_rlock:
+                # apply hyperparameter changes via the ledger
+                hyper_parameters = request.hyper_parameter_change.hyper_parameters
+                from weightslab.ledgers import set_hyperparam, list_hyperparams
+
+                # resolve hp name: prefer explicit exp_name, else single set
+                hp_name = None
+                if self._exp_name:
+                    hp_name = self._exp_name
+                else:
+                    hps = list_hyperparams()
+                    if len(hps) == 1:
+                        hp_name = hps[0]
+
+                if hp_name is None:
+                    return pb2.CommandResponse(success=False, message='Cannot resolve hyperparams name')
+
+                try:
+                    if hyper_parameters.HasField('is_training'):
+                        if hyper_parameters.is_training:
+                            pause_controller.resume()
+                        else:
+                            pause_controller.pause()
+                        set_hyperparam(hp_name, 'is_training', hyper_parameters.is_training)
+
+                    if hyper_parameters.HasField('training_steps_to_do'):
+                        set_hyperparam(hp_name, 'training_steps_to_do', hyper_parameters.training_steps_to_do)
+
+                    if hyper_parameters.HasField('learning_rate'):
+                        set_hyperparam(hp_name, 'optimizer.lr', hyper_parameters.learning_rate)
+
+                    if hyper_parameters.HasField('batch_size'):
+                        set_hyperparam(hp_name, 'data.train_loader.batch_size', hyper_parameters.batch_size)
+
+                    # full_eval_frequency
+                    if hyper_parameters.HasField('full_eval_frequency'):
+                        set_hyperparam(hp_name, 'eval_full_to_train_steps_ratio', hyper_parameters.full_eval_frequency)
+
+                    # checkpoint_frequency
+                    if hyper_parameters.HasField('checkpont_frequency'):
+                        set_hyperparam(hp_name, 'experiment_dump_to_train_steps_ratio', hyper_parameters.checkpont_frequency)
+
+                except Exception as e:
+                    return pb2.CommandResponse(success=False, message=f'Failed to set hyperparameters: {e}')
+
+                return pb2.CommandResponse(success=True, message="Hyper parameter changed")
+        if request.HasField('deny_samples_operation'):
+            # be sure that we lock is available to modify shared components
+            with weightslab_rlock:
+                denied_cnt = len(request.deny_samples_operation.sample_ids)
+                ds = self._components.get('train_loader')
+                if ds is None:
+                    return pb2.CommandResponse(success=False, message='No train dataloader registered')
+                dataset = getattr(ds, 'dataset', ds)
+                dataset.denylist_samples(
+                    set(request.deny_samples_operation.sample_ids),
+                    accumulate = request.deny_samples_operation.accumulate
+                )
+                return pb2.CommandResponse(success=True, message=f"Denied {denied_cnt} train samples")
+        if request.HasField('deny_eval_samples_operation'):
+            # be sure that we lock is available to modify shared components
+            with weightslab_rlock:
+                denied_cnt = len(request.deny_eval_samples_operation.sample_ids)
+                ds = self._components.get('test_loader')
+                if ds is None:
+                    return pb2.CommandResponse(success=False, message='No eval dataloader registered')
+                dataset = getattr(ds, 'dataset', ds)
+                dataset.denylist_samples(
+                    set(request.deny_eval_samples_operation.sample_ids),
+                    accumulate = request.deny_eval_samples_operation.accumulate
+            )
+            return pb2.CommandResponse(success=True, message=f"Denied {denied_cnt} eval samples")
+        if request.HasField('remove_from_denylist_operation'):
+            # be sure that we lock is available to modify shared components
+            with weightslab_rlock:
+                allowed = set(request.remove_from_denylist_operation.sample_ids)
+                ds = self._components.get('train_loader')
+                if ds is None:
+                    return pb2.CommandResponse(success=False, message='No train dataloader registered')
+                dataset = getattr(ds, 'dataset', ds)
+                dataset.allowlist_samples(allowed)
+                return pb2.CommandResponse(success=True, message=f"Un-denied {len(allowed)} train samples")
+        if request.HasField('remove_eval_from_denylist_operation'):
+            # be sure that we lock is available to modify shared components
+            with weightslab_rlock:
+                allowed = set(request.remove_eval_from_denylist_operation.sample_ids)
+                ds = self._components.get('test_loader')
+                if ds is None:
+                    return pb2.CommandResponse(success=False, message='No eval dataloader registered')
+                dataset = getattr(ds, 'dataset', ds)
+                dataset.allowlist_samples(allowed)
+                return pb2.CommandResponse(success=True, message=f"Un-denied {len(allowed)} eval samples")
+        if request.HasField('load_checkpoint_operation'):
+            # be sure that we lock is available to modify shared components
+            with weightslab_rlock:
+                checkpoint_id = request.load_checkpoint_operation.checkpoint_id
+                model = self._components.get('model')
+                if model is None:
+                    return pb2.CommandResponse(success=False, message='No model registered to load checkpoint')
+                if hasattr(model, 'load'):
+                    try:
+                        model.load(checkpoint_id)
+                    except Exception as e:
+                        return pb2.CommandResponse(success=False, message=str(e))
+
+        # Read requests
+        response = pb2.CommandResponse(success=True, message="")
+        if request.get_hyper_parameters:
+            response.hyper_parameters_descs.extend(
+                get_hyper_parameters_pb(self.hyper_parameters))
+        if request.get_interactive_layers:
+            model = self._components.get('model')
+            if model is not None:
+                if request.HasField('get_single_layer_info_id'):
+                    response.layer_representations.extend([
+                        get_layer_representation(
+                            model.get_layer_by_id(request.get_single_layer_info_id))])
+                else:
+                    response.layer_representations.extend(get_layer_representations(model))
+        if request.get_data_records:
+            if request.get_data_records == "train":
+                ds = self._components.get('train_loader')
+                if ds is not None:
+                    dataset = getattr(ds, 'dataset', ds)
+                    response.sample_statistics.CopyFrom(
+                        get_data_set_representation(
+                            dataset,
+                            types.SimpleNamespace(**{
+                                'tasks': getattr(self._components.get('model'), 'tasks', None),
+                                'task_type': getattr(self._components.get('model'), 'task_type', getattr(dataset, 'task_type', 'classification')),
+                                'num_classes': getattr(self._components.get('model'), 'num_classes', None)
+                            })
+                        )
+                    )
+                    response.sample_statistics.origin = "train"
+            elif request.get_data_records == "eval":
+                ds = self._components.get('test_loader')
+                if ds is not None:
+                    dataset = getattr(ds, 'dataset', ds)
+                    response.sample_statistics.CopyFrom(
+                        get_data_set_representation(
+                            dataset,
+                            types.SimpleNamespace(**{
+                                'tasks': getattr(self._components.get('model'), 'tasks', None),
+                                'task_type': getattr(self._components.get('model'), 'task_type', getattr(dataset, 'task_type', 'classification')),
+                                'num_classes': getattr(self._components.get('model'), 'num_classes', None)
+                            })
+                        )
+                    )
+                    response.sample_statistics.origin = "eval"
+
+        return response
+
+    def ManipulateWeights(self, request, context):
+        # print(f"ExperimentServiceServicer.ManipulateWeights({request})")
+        # ensure ledger-backed components are available
+        self._ensure_components()
+        answer = pb2.WeightsOperationResponse(
+            success=False, message="Unknown error")
+        weight_operations = request.weight_operation
+
+        # Get op type
+        if weight_operations.op_type == pb2.WeightOperationType.ADD_NEURONS:
+            op_type = ArchitectureNeuronsOpType.ADD
+        elif weight_operations.op_type == pb2.WeightOperationType.REMOVE_NEURONS:
+            op_type = ArchitectureNeuronsOpType.PRUNE
+        elif weight_operations.op_type == pb2.WeightOperationType.FREEZE:
+            op_type = ArchitectureNeuronsOpType.FREEZE
+        elif weight_operations.op_type == pb2.WeightOperationType.REINITIALIZE:
+            op_type = ArchitectureNeuronsOpType.RESET
+        
+        # Layer id
+        layer_id = weight_operations.layer_id
+
+        # Get neurons ids
+        if len(weight_operations.neuron_ids) > 0:
+            layer_id = weight_operations.neuron_ids[0].layer_id
+            neuron_id = [weight_operations.neuron_ids[0].neuron_id]
+        else:
+            neuron_id = []
+
+        # Operate
+        model = self._components.get('model')
+        with weightslab_rlock:
+            model.apply_architecture_op(
+                op_type=op_type,
+                layer_id=layer_id,
+                neuron_indices=neuron_id
+            )
+
+        answer = pb2.WeightsOperationResponse(
+            success=True,
+            message=f"{weight_operations.op_type} - {weight_operations.neuron_ids}")
+
+        return answer
+
+
+# Serving gRPC communication
+def grpc_serve(n_workers_grpc: int = 6, port_grpc: int = 50051, **_):
+    """ Configure trainer services such as gRPC server.
+
+    Args:
+        n_workers_grpc (int): Number of threads for the gRPC server.
+        port_grpc (int): Port number for the gRPC server.
+    """
+    import weightslab.trainer.trainer_services as trainer
+    from weightslab.trainer.trainer_tools import force_kill_all_python_processes
+
     def serving_thread_callback():
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=6))
-        servicer = ExperimentServiceServicer()
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=n_workers_grpc))
+        servicer = trainer.ExperimentServiceServicer()
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-        server.add_insecure_port('[::]:50051')
+        server.add_insecure_port(f'[::]:{port_grpc}')
         try:
             server.start()
             print("Server started. Press Ctrl+C to stop.")
@@ -722,11 +721,11 @@ def serve(threading=True):
         except KeyboardInterrupt:
             # Brut force kill this service
             force_kill_all_python_processes()
-    if threading:
-        training_thread = Thread(target=serving_thread_callback)
-        training_thread.start()
-    else:
-        serving_thread_callback()
+
+    # Start serving thread
+    training_thread = Thread(target=serving_thread_callback)
+    training_thread.start()
+
 
 if __name__ == '__main__':
-    serve()
+    grpc_serve()
