@@ -1,5 +1,6 @@
 import hashlib
 import collections
+import logging
 import torch as th
 
 from torch import nn
@@ -13,6 +14,8 @@ from weightslab.components.tracking import TrackingMode
 from weightslab.utils.modules_dependencies import DepType
 from weightslab.components.tracking import TriggersTracker
 from weightslab.modules.neuron_ops import NeuronWiseOperations
+
+logger = logging.getLogger(__name__)
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.components.tracking import copy_forward_tracked_attrs
 
@@ -534,7 +537,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         if tracker is None or activation_map is None or input is None:
             return
         activation_map = (activation_map > 0).long()  # bool to int
-        processed_activation_map = th.sum(activation_map, dim=(-2, -1))
+        processed_activation_map = th.sum(activation_map, dim=(-2, -1)) if len(activation_map.shape) > 2 else activation_map
         copy_forward_tracked_attrs(processed_activation_map, activation_map)
         tracker.update(processed_activation_map)
 
@@ -557,10 +560,10 @@ class LayerWiseOperations(NeuronWiseOperations):
             try:
                 intermediary[self.get_module_id()] = activation_map
             except Exception as e:
-                print(
-                    f"Error {e} occurred while updating intermediary outputs",
-                    self.get_module_id(), str(activation_map)[:50],
-                    level='ERROR')
+                logger.error(
+                    f"Error {e} occurred while updating intermediary outputs: "
+                    f"{self.get_module_id()}, {str(activation_map)[:50]}"
+                )
 
         return activation_map
 
@@ -713,9 +716,8 @@ class LayerWiseOperations(NeuronWiseOperations):
                 kwargs: Additional keyword arguments.        
         """
 
-        print(
-            f"{self.get_name()}[{self.get_module_id()}].add {neuron_indices}",
-            level='DEBUG'
+        logger.debug(
+            f"{self.get_name()}[{self.get_module_id()}].add {neuron_indices}"
         )
 
         # Process neuron indices
@@ -782,10 +784,11 @@ class LayerWiseOperations(NeuronWiseOperations):
                     added_grad = th.zeros(tensors).to(self.device)
 
             # Biases
-            if not is_incoming:
+            added_bias, added_bias_grad = None, None
+            if hasattr(self, "bias") and self.bias is not None and \
+                    not is_incoming:
                 added_bias = th.zeros(nb_neurons).to(self.device)
-                added_bias_grad = None
-                if self.bias.grad is not None:
+                if hasattr(self.bias, "grad") and self.bias.grad is not None:
                     added_bias_grad = th.zeros(nb_neurons).to(self.device)
 
             if not norm:
@@ -822,8 +825,8 @@ class LayerWiseOperations(NeuronWiseOperations):
                                 ) > 1
                             )
                         )
-                    if hasattr(self, 'bias') and self.bias is not None and \
-                            not is_incoming:
+                    
+                    if added_bias is not None:
                         self.bias.data = nn.Parameter(
                             th.cat((self.bias.data.to(self.device), added_bias))
                         ).to(self.device)
@@ -843,7 +846,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                             (self.weight.grad.to(self.device), added_grad)
                         )
 
-                    if hasattr(self, 'bias') and self.bias is not None:
+                    if added_bias is not None:
                         self.bias.data = nn.Parameter(
                             th.cat((self.bias.data.to(self.device), added_bias))
                         )
@@ -989,7 +992,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                 tracker.add_neurons(nb_neurons)
 
             # Verbose
-            print(f'Add one neuron to layer {self}', level='DEBUG')
+            logger.debug(f'Add one neuron to layer {self}')
 
         # Incoming neurons, e.g., in conv2d for instance, or in norm
         if is_incoming or dependency == DepType.SAME:
@@ -1078,9 +1081,9 @@ class LayerWiseOperations(NeuronWiseOperations):
                     )
 
             # Verbose
-            print(
-                f'New {"INCOMING" if dependency != DepType.SAME else "SAME"}' + 
-                f'layer is {self}', level='DEBUG'
+            logger.debug(
+                f'New {"INCOMING" if dependency != DepType.SAME else "SAME"} ' + 
+                f'layer is {self}'
             )
 
     def _prune_neurons(
@@ -1102,9 +1105,8 @@ class LayerWiseOperations(NeuronWiseOperations):
             **kwargs: Additional keyword arguments.
         """
 
-        print(
-            f"{self.get_name()}[{self.get_module_id()}].prune {neuron_indices}",
-            level='DEBUG'
+        logger.debug(
+            f"{self.get_name()}[{self.get_module_id()}].prune {neuron_indices}"
         )
 
         # Process neuron indices
@@ -1128,11 +1130,10 @@ class LayerWiseOperations(NeuronWiseOperations):
         # Sanity check
         # # Overlapping neurons index and neurons available
         if not set(neuron_indices) & neurons:
-            print(
+            logger.warning(
                 f"{self.get_name()}.prune indices and neurons set do not "
-                f"overlapp: {neuron_indices} & {neurons} => \
-                    {neuron_indices & neurons}",
-                level='WARNING'
+                f"overlap: {neuron_indices} & {neurons} => "
+                f"{neuron_indices & neurons}"
             )
             return  # Do not change
 

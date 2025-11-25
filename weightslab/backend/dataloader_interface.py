@@ -18,7 +18,7 @@ from weightslab.components.global_monitoring import \
     pause_controller
 from weightslab.data.data_samples_with_ops import \
     DataSampleTrackingWrapper
-from weightslab.ledgers import register_dataloader, get_hyperparams, list_hyperparams
+from weightslab.backend.ledgers import register_dataloader, get_hyperparams, list_hyperparams
 
 
 class DataLoaderInterface:
@@ -56,6 +56,7 @@ class DataLoaderInterface:
         
         # Normalize inputs
         self.dataset: Dataset | DataLoader = data_loader_or_dataset
+        self.init_attributes(data_loader_or_dataset)
         if isinstance(data_loader_or_dataset, DataLoader):
             self.dataloader: DataLoader = data_loader_or_dataset
             self.tracked_dataset = DataSampleTrackingWrapper(
@@ -82,6 +83,7 @@ class DataLoaderInterface:
             # from a Dataset. This enables safe runtime updates of batch size.
             # Choose base sampler according to shuffle flag
             base_sampler = RandomSampler(self.tracked_dataset) if shuffle else SequentialSampler(self.tracked_dataset)
+
             # Lazy define the sampler class here to avoid exposing it at module level
             class MutableBatchSampler:
                 """A simple mutable batch sampler that yields lists of indices
@@ -144,6 +146,66 @@ class DataLoaderInterface:
                 register_dataloader(reg_name, self, weak=weak)
             except Exception:
                 pass
+
+    def init_attributes(self, obj):
+        """Expose attributes and methods from the wrapped `obj`.
+
+        Implementation strategy (direct iteration):
+        - Iterate over `vars(obj)` to obtain instance attributes and
+          create class-level properties that forward to `obj.<attr>`.
+        - Iterate over `vars(obj.__class__)` to find callables (methods)
+          and bind the model's bound method to this wrapper instance so
+          calling `mi.method()` invokes `mi.model.method()`.
+
+        This avoids using `dir()` and directly inspects the object's
+        own dictionaries. Existing attributes on `ModelInterface` are
+        preserved and not overwritten.
+        """
+        # Existing names on the wrapper instance/class to avoid overwriting
+        existing_instance_names = set(self.__dict__.keys())
+        existing_class_names = set(getattr(self.__class__, '__dict__', {}).keys())
+
+        # 1) Expose model instance attributes as properties on the wrapper class
+        model_vars = getattr(obj, '__dict__', {})
+        for name, value in model_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Create a property on the ModelInterface class that forwards to
+            # the underlying model attribute. Using a property keeps the
+            # attribute live (reads reflect model changes).
+            try:
+                def _make_getter(n):
+                    return lambda inst: getattr(inst.model, n)
+
+                getter = _make_getter(name)
+                prop = property(fget=getter)
+                setattr(self.__class__, name, prop)
+            except Exception:
+                # Best-effort: skip if we cannot set the property
+                continue
+
+        # 2) Bind model class-level callables (methods) to this instance
+        model_cls_vars = getattr(obj.__class__, '__dict__', {})
+        for name, member in model_cls_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Only consider callables defined on the class (functions/descriptors)
+            if callable(member):
+                try:
+                    # getattr(obj, name) returns the bound method
+                    bound = getattr(obj, name)
+                    # Attach the bound method to the wrapper instance so that
+                    # calling mi.name(...) calls model.name(...)
+                    setattr(self, name, bound)
+                except Exception:
+                    # If we cannot bind, skip gracefully
+                    continue
 
     def __len__(self) -> int:
         """Return the number of batches (delegates to the wrapped dataloader)."""

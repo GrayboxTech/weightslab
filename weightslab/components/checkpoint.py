@@ -8,7 +8,7 @@ import torch as th
 from pathlib import Path
 from typing import Set, Optional
 
-from weightslab.ledgers import (
+from weightslab.backend.ledgers import (
     get_model,
     get_optimizer,
     get_dataloader,

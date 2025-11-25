@@ -32,7 +32,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         # Accept an explicit experiment object or attempt to resolve one
         # from the global ledger to avoid depending on a single global
         # `experiment` instance.
-        from weightslab.ledgers import GLOBAL_LEDGER
+        from weightslab.backend.ledgers import GLOBAL_LEDGER
 
         self._exp_name = exp_name
         # Components resolved from GLOBAL_LEDGER (model, dataloaders, optimizer,
@@ -46,7 +46,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger). Raises RuntimeError when mandatory components are missing."""
         if getattr(self, '_components', None) and self._components:
             return
-        from weightslab.ledgers import GLOBAL_LEDGER, get_hyperparams, list_hyperparams, get_model, list_models, get_dataloader, list_dataloaders, get_optimizer, list_optimizers, get_logger, list_loggers
+        from weightslab.backend.ledgers import GLOBAL_LEDGER, get_hyperparams, list_hyperparams, get_model, list_models, get_dataloader, list_dataloaders, get_optimizer, list_optimizers, get_logger, list_loggers
 
         # resolve model
         model = None
@@ -488,9 +488,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                     pb2.ActivationMap(neuron_id=c, values=vals, H=H, W=W))
             return resp
         except (ValueError, Exception) as e:
-            print(
-                f"Error in GetActivations: {str(e)}",
-                f"Traceback: {traceback.format_exc()}")
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error in GetActivations: {str(e)}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
 
         return empty_resp
     
@@ -504,7 +505,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             with weightslab_rlock:
                 # apply hyperparameter changes via the ledger
                 hyper_parameters = request.hyper_parameter_change.hyper_parameters
-                from weightslab.ledgers import set_hyperparam, list_hyperparams
+                from weightslab.backend.ledgers import set_hyperparam, list_hyperparams
 
                 # resolve hp name: prefer explicit exp_name, else single set
                 hp_name = None
@@ -715,8 +716,10 @@ def grpc_serve(n_workers_grpc: int = 6, port_grpc: int = 50051, **_):
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
         server.add_insecure_port(f'[::]:{port_grpc}')
         try:
+            import logging
+            logger = logging.getLogger(__name__)
             server.start()
-            print("Server started. Press Ctrl+C to stop.")
+            logger.info("gRPC Server started on port %d. Press Ctrl+C to stop.", port_grpc)
             server.wait_for_termination()
         except KeyboardInterrupt:
             # Brut force kill this service

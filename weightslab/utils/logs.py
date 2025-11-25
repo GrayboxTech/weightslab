@@ -1,23 +1,71 @@
 import logging
+import tempfile
+import atexit
+import os
+from datetime import datetime
 
 
 # Define the log format to include the level, module name, and function name
 FORMAT = '%(levelname)s:%(name)s:%(funcName)s: %(message)s'
 
+# Global variable to track the log file path
+_LOG_FILE_PATH = None
 
-def setup_logging(level):
+
+def _print_log_location():
+    """Print log file location when Python exits."""
+    if _LOG_FILE_PATH and os.path.exists(_LOG_FILE_PATH):
+        print(f"\n{'='*60}\nWeightsLab session log saved to:\n{_LOG_FILE_PATH}\n{'='*60}", flush=True)
+
+
+def setup_logging(level, log_to_file=True):
     """
     Configures the logging system with the specified severity level.
+    Automatically writes logs to a temporary directory if log_to_file is True.
 
     kwargs:
-        level (int): The minimum level to process
-        (e.g., logging.DEBUG, logging.INFO).
+        level (str): The minimum level to process (e.g., 'DEBUG', 'INFO').
+        log_to_file (bool): If True, logs are written to a temp file (default: True).
     """
+    global _LOG_FILE_PATH
+    
     # Reset logger handlers to ensure previous configurations don't interfere
     logging.getLogger().handlers = []
 
-    # Basic logger configuration
-    logging.basicConfig(level=level.upper(), format=FORMAT)
+    # Create formatters
+    formatter = logging.Formatter(FORMAT)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level.upper())
+    console_handler.setFormatter(formatter)
+    
+    # Get root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level.upper())
+    root_logger.addHandler(console_handler)
+    
+    # File handler - write to temp directory
+    if log_to_file:
+        # Create temp directory for logs if it doesn't exist
+        temp_dir = tempfile.gettempdir()
+        log_dir = os.path.join(temp_dir, 'weightslab_logs')
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Create log file with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        _LOG_FILE_PATH = os.path.join(log_dir, f'weightslab_{timestamp}.log')
+        
+        file_handler = logging.FileHandler(_LOG_FILE_PATH, mode='w')
+        file_handler.setLevel(logging.DEBUG)  # Always log DEBUG to file
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+        
+        # Register exit handler to print log location
+        atexit.register(_print_log_location)
+        
+        # Log the initialization
+        logging.info(f"WeightsLab logging initialized - Log file: {_LOG_FILE_PATH}")
 
 
 def print(first_element, *other_elements, sep=' ', **kwargs):

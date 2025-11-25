@@ -19,7 +19,7 @@ from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
-from weightslab.ledgers import get_optimizer, get_optimizers, register_model, register_optimizer
+from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
 
 
 class ModelInterface(NetworkWithOps):
@@ -77,7 +77,10 @@ class ModelInterface(NetworkWithOps):
         self.traced_model.name = "N.A."
         self.guard_training_context = guard_training_context
         self.guard_testing_context = guard_testing_context
-        
+
+        # Init attributes from super object (i.e., self.model)
+        self.init_attributes(self.model)
+
         # Propagate the shape over the graph
         self.shape_propagation()
 
@@ -136,7 +139,7 @@ class ModelInterface(NetworkWithOps):
         # If checkpoint_dir not provided, try to read `root_log_dir` from
         # ledger hyperparams, otherwise fallback to './root_log_dir/checkpoints'
         try:
-            from weightslab.ledgers import list_hyperparams, get_hyperparams
+            from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
             names = list_hyperparams()
             chosen = None
             if 'main' in names:
@@ -211,6 +214,66 @@ class ModelInterface(NetworkWithOps):
             except Exception:
                 self._checkpoint_manager = None
 
+    def init_attributes(self, obj):
+        """Expose attributes and methods from the wrapped `obj`.
+
+        Implementation strategy (direct iteration):
+        - Iterate over `vars(obj)` to obtain instance attributes and
+          create class-level properties that forward to `obj.<attr>`.
+        - Iterate over `vars(obj.__class__)` to find callables (methods)
+          and bind the model's bound method to this wrapper instance so
+          calling `mi.method()` invokes `mi.model.method()`.
+
+        This avoids using `dir()` and directly inspects the object's
+        own dictionaries. Existing attributes on `ModelInterface` are
+        preserved and not overwritten.
+        """
+        # Existing names on the wrapper instance/class to avoid overwriting
+        existing_instance_names = set(self.__dict__.keys())
+        existing_class_names = set(getattr(self.__class__, '__dict__', {}).keys())
+
+        # 1) Expose model instance attributes as properties on the wrapper class
+        model_vars = getattr(obj, '__dict__', {})
+        for name, value in model_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Create a property on the ModelInterface class that forwards to
+            # the underlying model attribute. Using a property keeps the
+            # attribute live (reads reflect model changes).
+            try:
+                def _make_getter(n):
+                    return lambda inst: getattr(inst.model, n)
+
+                getter = _make_getter(name)
+                prop = property(fget=getter)
+                setattr(self.__class__, name, prop)
+            except Exception:
+                # Best-effort: skip if we cannot set the property
+                continue
+
+        # 2) Bind model class-level callables (methods) to this instance
+        model_cls_vars = getattr(obj.__class__, '__dict__', {})
+        for name, member in model_cls_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Only consider callables defined on the class (functions/descriptors)
+            if callable(member):
+                try:
+                    # getattr(obj, name) returns the bound method
+                    bound = getattr(obj, name)
+                    # Attach the bound method to the wrapper instance so that
+                    # calling mi.name(...) calls model.name(...)
+                    setattr(self, name, bound)
+                except Exception:
+                    # If we cannot bind, skip gracefully
+                    continue
+
     def __enter__(self):
         """
         Executed when entering the 'with' block.
@@ -279,6 +342,18 @@ class ModelInterface(NetworkWithOps):
                     pass
         except Exception:
             pass
+    
+    def is_training(self) -> bool:
+        """
+        Checks if the model is currently in training mode.
+
+        This method returns a boolean indicating whether the wrapped model
+        is set to training mode (`True`) or evaluation mode (`False`).
+
+        Returns:
+            bool: `True` if the model is in training mode, `False` otherwise.
+        """
+        return self.training
 
     def monkey_patching(self):
         """
@@ -422,50 +497,6 @@ class ModelInterface(NetworkWithOps):
         """
         with self as m:
             m.operate(layer_id=layer_id, op_type=op_type, neuron_indices=neuron_indices)
-
-    def state_dict(self):
-        """
-        Returns the state dictionary of the wrapped model.
-
-        This method provides a way to access the `state_dict` of the underlying
-        `self.model`, which is essential for saving and loading model parameters
-        (weights, biases, etc.). It acts as a proxy to the original PyTorch
-        model's `state_dict` method.
-
-        Returns:
-            dict: A dictionary containing a whole state of the module.
-        """
-        return super().state_dict()
-
-    def parameters(self):
-        """
-            Returns an iterator over the model's parameters.
-        """
-        return super().parameters()
-
-    def load_state_dict(self, state_dict, strict=True, assign=False):
-        """
-        Loads the model's parameters and buffers from a state dictionary.
-
-        This method is a wrapper around the underlying PyTorch model's
-        `load_state_dict` method. It allows for loading a pre-trained model's
-        state, including weights and biases, into the current model instance.
-
-        Args:
-            state_dict (dict): A dictionary containing parameters and
-                persistent buffers.
-            strict (bool, optional): Whether to strictly enforce that the keys
-                in `state_dict` match the keys returned by this module's
-                `state_dict()` method. Defaults to True.
-            assign (bool, optional): Whether to copy the data from `state_dict`
-                into the module's parameters and buffers. Defaults to False.
-
-        Returns:
-            NamedTuple: A named tuple with `missing_keys` and `unexpected_keys` fields,
-            detailing any discrepancies between the provided `state_dict` and the
-            model's own state dictionary.
-        """
-        return super().load_state_dict(state_dict, strict, assign)
 
     def __repr__(self):
         """

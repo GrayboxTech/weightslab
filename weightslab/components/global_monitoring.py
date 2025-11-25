@@ -3,10 +3,13 @@ from typing import Any
 from threading import Event, RLock, Lock
 import threading
 import time
+import logging
 
-from weightslab.ledgers import list_hyperparams, get_hyperparams, set_hyperparam
+from weightslab.backend.ledgers import list_hyperparams, get_hyperparams, set_hyperparam
 
 from weightslab.components.tracking import TrackingMode
+
+logger = logging.getLogger(__name__)
 
 
 weightslab_rlock = RLock()
@@ -102,7 +105,7 @@ class GuardContext:
         """
         
         if exc_type is RuntimeError:
-            print(f"Suppressing exception: {exc_value} in GuardContext.__exit__")
+            logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__")
             self.architecture_guard.__exit__(exc_type, exc_value, traceback)
             return True  # suppress the exception
         

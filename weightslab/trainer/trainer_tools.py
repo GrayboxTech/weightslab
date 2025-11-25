@@ -458,15 +458,17 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
         return sid, transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes
 
     except Exception as e:
-        print(f"[Error] GetSamples({sid}) failed: {e}")
-        return sid, None, None, -1, b"", b""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"GetSamples({sid}) failed: {e}")
+        return (sid, None, None, -1, b"", b"")
 
 def force_kill_all_python_processes():
     """
     Tente de tuer TOUS les processus python en cours d'exécution sur la machine.
     *** ATTENTION : UTILISER AVEC EXTRÊME PRÉCAUTION ! ***
     """
-    print("ATTENTION: Tentative de tuer tous les processus python. Ceci pourrait affecter d'autres applications.")
+    logger.warning("WARNING: Attempting to kill all Python processes. This could affect other applications.")
     
     if sys.platform.startswith('win'):
         # Windows : Utilise taskkill pour tuer tous les processus 'python.exe'
@@ -474,10 +476,10 @@ def force_kill_all_python_processes():
             # /F : Force la terminaison
             # /IM : Spécifie le nom de l'image (python.exe)
             subprocess.run(['taskkill', '/F', '/IM', 'python.exe'], check=True)
-            print("Tous les processus python (Windows) ont été terminés.")
+            logger.info("All Python processes (Windows) have been terminated.")
         except subprocess.CalledProcessError as e:
             # Cela arrive si aucun processus python n'est trouvé
-            print(f"Aucun processus python trouvé ou erreur lors de la terminaison : {e}")
+            logger.warning(f"No Python processes found or error during termination: {e}")
             
     elif sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
         # Linux/macOS : Utilise pkill avec SIGKILL (-9) pour les processus 'python' ou 'python3'
@@ -485,11 +487,11 @@ def force_kill_all_python_processes():
             # pgrep trouve les PIDs des processus nommés 'python' et pkill envoie le signal 9 (SIGKILL)
             # -f : recherche le pattern dans la ligne de commande complète (y compris les arguments)
             subprocess.run(['pkill', '-9', '-f', 'python'], check=True)
-            print("Tous les processus python (Unix/Linux/macOS) ont été terminés.")
+            logger.info("All Python processes (Unix/Linux/macOS) have been terminated.")
         except subprocess.CalledProcessError as e:
             # Cela arrive si aucun processus python n'est trouvé
-            print(f"Aucun processus python trouvé ou erreur lors de la terminaison : {e}")
+            logger.warning(f"No Python processes found or error during termination: {e}")
 
     else:
-        print(f"Système d'exploitation '{sys.platform}' non supporté pour l'arrêt forcé.")
+        logger.error(f"Operating system '{sys.platform}' not supported for forced shutdown.")
 

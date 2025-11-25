@@ -3,18 +3,21 @@ It is used to train and evaluate models. """
 
 import time
 import functools
+import logging
 import torch as th
 
 from typing import Callable
 from threading import Lock
 
 from weightslab.backend.model_interface import ModelInterface
-from weightslab.backend.data_loader_interface import DataLoaderInterface
+from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.utils.logs import print
-from weightslab.cli import cli_serve
+from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
+
+logger = logging.getLogger(__name__)
 
 
 def _save_data_statistics(
@@ -36,13 +39,14 @@ def _save_data_statistics(
             per_sample_loss_np = losses_batch
 
         # Update batch sample stats
-        get_dataloader('train_loader').tracked_dataset.update_batch_sample_stats(
+        name = 'train_loader' if get_model().is_training() else 'test_loader'
+        get_dataloader(name).tracked_dataset.update_batch_sample_stats(
             model_age,
             batch_ids_np,
             per_sample_loss_np,
             pred_np
         )
-        get_dataloader('test_loader').tracked_dataset.update_sample_stats_ex_batch(
+        get_dataloader(name).tracked_dataset.update_sample_stats_ex_batch(
             batch_ids_np,
             {
                 "loss/combined": per_sample_loss_np,
@@ -69,11 +73,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 obj.__name__ = type(obj).__name__
             except Exception:
                 obj.__name__ = str(time.time())
-            print(
+            logger.warning(
                 "Warning: Watching or editing anonymous object '" +
                 f"{obj.__name__}'."
             )
-            print(
+            logger.warning(
                 "Please add a 'name' attribute to the object."
             )
         else:

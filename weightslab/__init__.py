@@ -9,9 +9,29 @@ This file re-exports selected symbols from `weightslab.src`.
 """
 from .src import watch_or_edit, serve
 from .art import _BANNER
+from .utils.logs import setup_logging
 
 try:
-	print(_BANNER)
+	import logging
+	import os
+	
+	# Auto-initialize logging if not already configured
+	# Check for environment variable to control log level
+	log_level = os.getenv(
+		'WEIGHTSLAB_LOG_LEVEL',
+		'INFO'
+	)
+	log_to_file = os.getenv(
+		'WEIGHTSLAB_LOG_TO_FILE',
+		'true'
+	).lower() == 'true'
+	
+	# Only setup if no handlers exist yet (avoid duplicate setup)
+	if not logging.getLogger().handlers:
+		setup_logging(log_level, log_to_file=log_to_file)
+	
+	logger = logging.getLogger(__name__)
+	logger.info(_BANNER)
 except Exception:
 	pass
 

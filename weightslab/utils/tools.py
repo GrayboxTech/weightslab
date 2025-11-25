@@ -1,6 +1,7 @@
 import types
 import inspect
 import collections
+import logging
 import torch as th
 import torch.nn as nn
 
@@ -10,6 +11,8 @@ from typing import Optional, List, Any, Type, Callable, Dict
 from torch.fx import Node
 
 from weightslab.utils.logs import print
+
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------------
@@ -307,30 +310,26 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True)
             else:
                 if n != n_layers + layer_id:  # - -layer_id != + -layer_id
                     continue
-        print(f'Operate on neurons at layer {n}', level='DEBUG')
+        logger.debug(f'Operate on neurons at layer {n}')
         with model as m:
             if op is None:
-                print('Adding operation - 2 neurons added.',
-                      level='DEBUG')
-                m.operate(n, {0, 0, 0, 0, 0}, neuron_operation=1)
+                logger.debug('Adding operation - 2 neurons added.')
+                m.operate(n, {0, 0, 0, 0, 0}, op_type=1)
                 m(dummy_input) if dummy_input is not None else None
-                print('Reseting operation - every neurons reset.',
-                      level='DEBUG')
-                m.operate(n, {}, neuron_operation=4)
+                logger.debug('Reseting operation - every neurons reset.')
+                m.operate(n, {}, op_type=4)
                 m(dummy_input) if dummy_input is not None else None
-                print('Freezing operation - last neuron froze.',
-                      level='DEBUG')
-                m.operate(n, {-3}, neuron_operation=3)
+                logger.debug('Freezing operation - last neuron froze.')
+                m.operate(n, {-3}, op_type=3)
                 m(dummy_input) if dummy_input is not None else None
-                print('Pruning operation - first neuron removed.',
-                      level='DEBUG')
-                m.operate(n, {0, 1}, neuron_operation=2)
+                logger.debug('Pruning operation - first neuron removed.')
+                m.operate(n, {0, 1}, op_type=2)
                 m(dummy_input) if dummy_input is not None else NotImplemented
             else:
                 m.operate(
                     n,
                     {-1},
-                    neuron_operation=op
+                    op_type=op
                 )
                 m(dummy_input) if dummy_input is not None else None
 
@@ -414,9 +413,8 @@ def get_model_parameters_neuronwise(model: th.nn.Module, trainable_only=True):
 
     # Since all parameters in your model currently have requires_grad=True:
     # trainable_params will also equal 8,367,235
-    print(
-        f"{params} paraeters with {trainable_params} trainable parameters.",
-        level='DEBUG'
+    logger.debug(
+        f"{params} paraeters with {trainable_params} trainable parameters."
     )
 
     return (params, trainable_params) if not trainable_only else \
@@ -522,13 +520,13 @@ def load_config_from_yaml(filepath: str) -> Dict:
     try:
         with open(filepath, 'r') as f:
             config_data = yaml.safe_load(f)
-        print(f"Successfully loaded configuration from {filepath}")
+        logger.info(f"Successfully loaded configuration from {filepath}")
         return config_data
     except FileNotFoundError:
-        print(f"Error: YAML file not found at {filepath}. Using default parameters.")
+        logger.error(f"Error: YAML file not found at {filepath}. Using default parameters.")
         return {}
     except yaml.YAMLError as e:
-        print(f"Error loading YAML file: {e}. Using default parameters.")
+        logger.error(f"Error loading YAML file: {e}. Using default parameters.")
         return {}
 
 
@@ -566,11 +564,11 @@ def update_hyperparameters(global_hparams: Dict, config_data: Dict) -> None:
 
                     # 4. Replace the old instance in the dictionary
                     hparams_dict[key] = new_hparam
-                    print(f"Updated '{key}' to: {config_value} (Type: {current_item.data_type})")
+                    logger.debug(f"Updated '{key}' to: {config_value} (Type: {current_item.data_type})")
                 else:
                     # Should not happen if structures are identical, but good for safety
-                    print(f"Warning: Key '{key}' structure mismatch. Skipping update.")
+                    logger.warning(f"Warning: Key '{key}' structure mismatch. Skipping update.")
 
-    print("\n--- Starting Hyperparameter Update from YAML ---")
+    logger.info("\n--- Starting Hyperparameter Update from YAML ---")
     recursive_update(global_hparams, config_data)
-    print("--- Hyperparameter Update Complete ---")
+    logger.info("--- Hyperparameter Update Complete ---")

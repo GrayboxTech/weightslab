@@ -1,7 +1,7 @@
 """Simple optional CLI UI for weightslab experiments.
 
 Usage (from user experiment):
-    import weightslab.cli as cli
+    import weightslab.backend.cli as cli
     cli.initialize(launch_cli_client=True)
 
 This will start a small TCP command server bound to localhost and (optionally)
@@ -26,8 +26,8 @@ from typing import Optional, Any
 
 from weightslab.art import _BANNER
 
-from weightslab.ledgers import GLOBAL_LEDGER
-from weightslab.ledgers import Proxy
+from weightslab.backend.ledgers import GLOBAL_LEDGER
+from weightslab.backend.ledgers import Proxy
 from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
 
 
@@ -332,7 +332,7 @@ def _handle_command(cmd: str) -> Any:
         if verb in ('set_hp', 'sethp', 'set-hp'):
             # syntax: set_hp [hp_name] <key.path> <value>
             try:
-                from weightslab.ledgers import list_hyperparams, set_hyperparam
+                from weightslab.backend.ledgers import list_hyperparams, set_hyperparam
                 names = list_hyperparams()
                 # decide whether hp_name was supplied
                 if len(parts) < 3:
@@ -480,7 +480,7 @@ def cli_serve(host_cli: str = '127.0.0.1', port_cli: int = 10051, launch_cli: bo
         # spawn a new console running the client REPL
         import subprocess
         cmd = [sys.executable, '-u', '-c',
-               "import weightslab.cli as _cli; _cli.cli_client_main('%s', %d)" % (host_cli, actual_port)]
+               "import weightslab.backend.cli as _cli; _cli.cli_client_main('%s', %d)" % (host_cli, actual_port)]
         kwargs = {}
         if os.name == 'nt':
             # CREATE_NEW_CONSOLE causes a new terminal window on Windows
@@ -573,7 +573,7 @@ if __name__ == '__main__':
     python restart_cli.py
 
     Behavior:
-    - Starts the CLI as `python -m weightslab.cli` using the same interpreter.
+    - Starts the CLI as `python -m weightslab.backend.cli` using the same interpreter.
     - Creates a new process-group/session for the child so Ctrl+C in the
     CLI window typically does not kill the launcher.
     - If the CLI process exits, the launcher waits `restart_delay` seconds and
@@ -585,10 +585,10 @@ if __name__ == '__main__':
     import subprocess
     import os
 
-    cmd = [sys.executable, '-m', 'weightslab.cli']
+    cmd = [sys.executable, '-m', 'weightslab.backend.cli']
     restart_delay = 1.0
 
-    print('Launcher: starting CLI (module weightslab.cli).')
+    print('Launcher: starting CLI (module weightslab.backend.cli).')
     while True:
         try:
             if os.name == 'nt':

@@ -32,13 +32,6 @@ def train(loader, model, optimizer, criterion_mlt):
 
         # Inference
         optimizer.zero_grad(set_to_none=True)
-        # model.zero_grad(set_to_none=True)
-        # import gc
-        # gc.collect()
-        # torch.cuda.empty_cache()   # optional, for safety
-        # model.eval()
-        # with torch.no_grad():
-        #     pass  # forces detaching state
         output = model(input)
 
         # Compute loss
@@ -131,7 +124,7 @@ if __name__ == '__main__':
     log_dir = parameters.get('root_log_dir')
     tqdm_display = parameters.get('tqdm_display', True)
 
-    # ====================
+    # ========================
     # Watch or Edit Components
     # Logger
     logger = Logger()

@@ -6,7 +6,7 @@ import weightslab as wl
 from torchvision import datasets, transforms
 
 from weightslab.tests.torch_models import FashionCNN 
-from weightslab.ledgers import register_optimizer
+from weightslab.backend.ledgers import register_optimizer
 
 
 class OptimizerInterface:
@@ -27,6 +27,9 @@ class OptimizerInterface:
             self.optimizer = optimizer_or_cls(params, **kwargs)
             self._constructed = True
 
+        # Expose attributes and methods from the wrapped optimizer
+        self.init_attributes(self.optimizer)
+        
         # Optionally register this wrapper into the global ledger so other
         # threads / modules can access it by name. Prefer explicit `name`,
         # else infer from the optimizer class or fall back to '_optimizer'.
@@ -38,6 +41,66 @@ class OptimizerInterface:
             except Exception:
                 # avoid failing construction due to ledger issues
                 pass
+
+    def init_attributes(self, obj):
+        """Expose attributes and methods from the wrapped `obj`.
+
+        Implementation strategy (direct iteration):
+        - Iterate over `vars(obj)` to obtain instance attributes and
+          create class-level properties that forward to `obj.<attr>`.
+        - Iterate over `vars(obj.__class__)` to find callables (methods)
+          and bind the model's bound method to this wrapper instance so
+          calling `mi.method()` invokes `mi.model.method()`.
+
+        This avoids using `dir()` and directly inspects the object's
+        own dictionaries. Existing attributes on `ModelInterface` are
+        preserved and not overwritten.
+        """
+        # Existing names on the wrapper instance/class to avoid overwriting
+        existing_instance_names = set(self.__dict__.keys())
+        existing_class_names = set(getattr(self.__class__, '__dict__', {}).keys())
+
+        # 1) Expose model instance attributes as properties on the wrapper class
+        model_vars = getattr(obj, '__dict__', {})
+        for name, value in model_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Create a property on the ModelInterface class that forwards to
+            # the underlying model attribute. Using a property keeps the
+            # attribute live (reads reflect model changes).
+            try:
+                def _make_getter(n):
+                    return lambda inst: getattr(inst.model, n)
+
+                getter = _make_getter(name)
+                prop = property(fget=getter)
+                setattr(self.__class__, name, prop)
+            except Exception:
+                # Best-effort: skip if we cannot set the property
+                continue
+
+        # 2) Bind model class-level callables (methods) to this instance
+        model_cls_vars = getattr(obj.__class__, '__dict__', {})
+        for name, member in model_cls_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Only consider callables defined on the class (functions/descriptors)
+            if callable(member):
+                try:
+                    # getattr(obj, name) returns the bound method
+                    bound = getattr(obj, name)
+                    # Attach the bound method to the wrapper instance so that
+                    # calling mi.name(...) calls model.name(...)
+                    setattr(self, name, bound)
+                except Exception:
+                    # If we cannot bind, skip gracefully
+                    continue
 
     def step(self, closure=None):
         return self.optimizer.step(closure) if closure is not None else self.optimizer.step()
