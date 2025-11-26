@@ -207,9 +207,7 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
 
     tasks = getattr(experiment, "tasks", None)
     is_multi_task = bool(tasks) and len(tasks) > 1
-    sample_stats.task_type = "multi-task" if is_multi_task else getattr(
-        experiment, "task_type", getattr(dataset, "task_type", "classification")
-    )
+    sample_stats.task_type = "classification"
 
     ignore_index = getattr(dataset, "ignore_index", 255)
     num_classes  = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))

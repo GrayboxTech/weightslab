@@ -400,7 +400,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         empty_resp = pb2.ActivationResponse(layer_type="", neurons_count=0)
         
         try:
-            
             model = self._components.get('model')
             if model is None:
                 return empty_resp
@@ -413,7 +412,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             if request.origin == "eval":
                 ds = getattr(self._components.get('test_loader'), 'dataset', self._components.get('test_loader'))
 
-            sid = int(request.sample_id)
             if request.sample_id < 0 or request.sample_id >= len(ds):
                 raise ValueError(f"No sample id {request.sample_id} for {request.origin}")
 
