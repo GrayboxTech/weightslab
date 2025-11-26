@@ -1006,6 +1006,11 @@ class LayerWiseOperations(NeuronWiseOperations):
                         self.get_neurons(self.super_in_name) + nb_neurons
                     )
                 )  # Update neurons count
+            elif dependency == DepType.SAME:
+                self.set_neurons(
+                    attr_name='in_neurons',
+                    new_value=self.get_neurons(self.super_out_name)
+                )  # Update neurons count
 
             # By default get deps name from current relation
             deps_names = list(self.dst_to_src_mapping_tnsrs.keys())
@@ -1330,7 +1335,13 @@ class LayerWiseOperations(NeuronWiseOperations):
                         self.super_in_name,
                         len(idx_tokeep)
                     )
-                )
+                )  # Update neurons count
+            elif dependency == DepType.SAME:
+                self.set_neurons(
+                    attr_name='in_neurons',
+                    new_value=self.get_neurons(self.super_out_name)
+                )  # Update neurons count
+
 
             # Update index maps
             current_parent_name = kwargs.get('current_parent_name', [])
@@ -1339,16 +1350,17 @@ class LayerWiseOperations(NeuronWiseOperations):
                 'current_child_name',
                 kwargs.get('current_parent_name')
             )
-            deps_names = self.dst_to_src_mapping_tnsrs.keys() \
-                if deps_name not in self.dst_to_src_mapping_tnsrs \
-                else [deps_name]
+            # deps_names = self.dst_to_src_mapping_tnsrs.keys() \
+            #     if deps_name not in self.dst_to_src_mapping_tnsrs \
+            #     else [deps_name]
+            deps_names = self.dst_to_src_mapping_tnsrs.keys()
             if len(deps_names) > 0:
                 for dep_name in deps_names:
                     length = len(self.dst_to_src_mapping_tnsrs[dep_name])
                     if length > 0 and not hasattr(self, 'bypass') or \
-                            (hasattr(self, 'bypass')
-                             and dep_name in
-                             current_parent_name):
+                            (hasattr(self, 'bypass')):
+                            #  and dep_name in
+                            #  current_parent_name):
                         indexs = list(self.dst_to_src_mapping_tnsrs[
                             dep_name
                         ].keys())
@@ -1363,7 +1375,9 @@ class LayerWiseOperations(NeuronWiseOperations):
                             #     pass
 
                 # Normalize mapping dictionary
-                self.dst_to_src_mapping_tnsrs = normalize_dicts(self.dst_to_src_mapping_tnsrs)
+                self.dst_to_src_mapping_tnsrs = normalize_dicts(
+                    self.dst_to_src_mapping_tnsrs
+                )
 
             # # Related neurons
             # try: TODELETE
