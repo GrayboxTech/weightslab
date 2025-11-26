@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import random as rnd
+from collections import defaultdict
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
@@ -73,6 +74,7 @@ class SampleStatsEx(str, Enum):
     # AVAILABLE = "available"
     DENY_LISTED = "deny_listed"
     ENCOUNTERED = "encountered"
+    TAGS = "tags"
     # METADATA = "metadata" 
     # ANNOTATIONS = "annotations"
 
@@ -222,14 +224,23 @@ class DataSampleTrackingWrapper(Dataset):
         self._raise_if_invalid_stat_name(stat_name)
         prev_value = self.sample_statistics[stat_name].get(sample_id, None)
 
+        # Normalize 0-d numpy arrays
         if isinstance(stat_value, np.ndarray) and stat_value.ndim == 0:
             stat_value = stat_value.item()
 
+        # Debug logging for tags
+        if stat_name == SampleStatsEx.TAGS or stat_name == SampleStatsEx.TAGS.value:
+            print(f"Updating tags for sample_id={sample_id} to {stat_value}")
+
+        # Keep deny_listed count up to date
         if stat_name == SampleStatsEx.DENY_LISTED and prev_value is not None and prev_value != stat_value:
             self._handle_deny_listed_updates(stat_value)
+
+        # Prevent updating loss for discarded samples
         if stat_name == SampleStatsEx.PREDICTION_LOSS:
             if self.sample_statistics[SampleStatsEx.DENY_LISTED].get(sample_id, False):
                 raise Exception(f"Tried to update loss for discarded sample_id={sample_id}")
+
         self.sample_statistics[stat_name][sample_id] = stat_value
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False) -> int | float | bool:
@@ -255,7 +266,10 @@ class DataSampleTrackingWrapper(Dataset):
                 value = self.idx_to_idx_remapp[sample_id]
             self.sample_statistics[stat_name][sample_id] = value
         elif stat_name == SampleStatsEx.DENY_LISTED:
-            value = False
+            # existing handling
+            pass
+        elif stat_name == SampleStatsEx.TAGS:
+            value = '' # Default to empty string for tags
             self.sample_statistics[stat_name][sample_id] = value
 
         else:

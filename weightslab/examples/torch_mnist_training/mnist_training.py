@@ -4,6 +4,7 @@ import time
 import torch
 import tempfile
 import torch.nn as nn
+from weightslab.ledgers import list_dataloaders
 import weightslab as wl
 import weightslab.cli as cli
 import torch.optim as optim
@@ -99,7 +100,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
 
 
 if __name__ == '__main__':
-    print('Hello world')
     start_time = time.time()
 
     # Load YAML hyperparameters (fallback to defaults if missing)
@@ -166,9 +166,9 @@ if __name__ == '__main__':
     test_bs = parameters.get('data', {}).get('test_dataset', {}).get('batch_size', 16)
     train_shuffle = parameters.get('data', {}).get('train_dataset', {}).get('train_shuffle', True)
     test_shuffle = parameters.get('data', {}).get('test_dataset', {}).get('test_shuffle', False)
-    train_loader = wl.watch_or_edit(_train_dataset, flag='data', name='train', batch_size=train_bs, shuffle=train_shuffle, is_training=True)
-    test_loader = wl.watch_or_edit(_test_dataset, flag='data', name='test', batch_size=test_bs, shuffle=test_shuffle)
-
+    train_loader = wl.watch_or_edit(_train_dataset, flag='data', name='train_loader', batch_size=train_bs, shuffle=train_shuffle, is_training=True)
+    test_loader = wl.watch_or_edit(_test_dataset, flag='data', name='test_loader', batch_size=test_bs, shuffle=test_shuffle)
+    
     # Start serving NOW that dataloaders are registered
     serve(threading=True)
     print("=" * 60)

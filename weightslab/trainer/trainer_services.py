@@ -60,13 +60,15 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         except Exception:
             model = None
 
-        # resolve dataloaders (prefer explicit names 'train' / 'eval' / 'test')
+        # resolve dataloaders (prefer explicit names 'train' / 'eval' / 'test' / 'train_loader' / 'test_loader')
         train_loader = None
         test_loader = None
         try:
             dnames = list_dataloaders()
             if 'train' in dnames:
                 train_loader = get_dataloader('train')
+            elif 'train_loader' in dnames:
+                train_loader = get_dataloader('train_loader')
             elif len(dnames) == 1:
                 train_loader = get_dataloader()
 
@@ -74,6 +76,8 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 test_loader = get_dataloader('eval')
             elif 'test' in dnames:
                 test_loader = get_dataloader('test')
+            elif 'test_loader' in dnames:
+                test_loader = get_dataloader('test_loader')
             elif len(dnames) == 1 and train_loader is not None:
                 test_loader = train_loader
         except Exception:
@@ -790,11 +794,26 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 df = pd.DataFrame(records)
                 return df
 
-                
+            
             train_df = _dataset_to_df(train_dataset, 'train')
+            if not train_df.empty and 'image' in train_df.columns:
+                sample_img = train_df.iloc[0]['image']
+                _LOGGER.info(f"Train DF sample image shape: {sample_img.shape}, min: {sample_img.min()}, max: {sample_img.max()}, dtype: {sample_img.dtype}")
+
             eval_df = _dataset_to_df(test_dataset, 'eval')
+            if not eval_df.empty and 'image' in eval_df.columns:
+                sample_img = eval_df.iloc[0]['image']
+                _LOGGER.info(f"Eval DF sample image shape: {sample_img.shape}, min: {sample_img.min()}, max: {sample_img.max()}, dtype: {sample_img.dtype}")
+            
             
             self._all_datasets_df = pd.concat([train_df, eval_df], ignore_index=True)
+            
+            # Initialize tags and deny_listed columns if they don't exist
+            if 'tags' not in self._all_datasets_df.columns:
+                self._all_datasets_df['tags'] = ''
+            if 'deny_listed' not in self._all_datasets_df.columns:
+                self._all_datasets_df['deny_listed'] = False
+            
             _LOGGER.info(f"Created combined DataFrame with {len(self._all_datasets_df)} samples")
             _LOGGER.info(f"DataFrame columns: {list(self._all_datasets_df.columns)}")
             _LOGGER.info(f"DataFrame dtypes: {self._all_datasets_df.dtypes.to_dict()}")
@@ -804,6 +823,8 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 import sys
                 sys.path.append('/Users/marcziegler/projects/work/graybox/v5/weights_studio')
                 from agent import DataManipulationAgent
+                import agent
+                _LOGGER.info(f"DEBUG: agent module loaded from: {agent.__file__}")
                 self._agent = DataManipulationAgent(self._all_datasets_df)
                 _LOGGER.info("Data service initialized successfully with agent")
             except ImportError as e:
@@ -971,7 +992,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 if dataset is None:
                     continue
                 
-                # Build data stats from DataFrame columns
+                # Build data stats from DataFrame columns AND dataset wrapper
                 data_stats = []
                 
                 # Get stats to retrieve - if empty, get ALL columns
@@ -981,7 +1002,27 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                     stats_to_retrieve = [col for col in df_slice.columns if col != 'sample_id']
                 
                 for stat_name in stats_to_retrieve:
+                    # First try to get from DataFrame
                     stat = self._get_stat_from_row(row, stat_name)
+                    
+                    # For tags and deny_listed, also check dataset wrapper if DataFrame value is default/empty
+                    if stat_name in ['tags', 'deny_listed'] and dataset is not None and hasattr(dataset, 'sample_statistics'):
+                        try:
+                            if stat_name in dataset.sample_statistics:
+                                wrapper_value = dataset.sample_statistics[stat_name].get(sample_id)
+                                # Only use wrapper value if it's non-empty/non-default
+                                if wrapper_value is not None:
+                                    if stat_name == 'tags' and wrapper_value != '':
+                                        stat = pb2.DataStat(
+                                            name=stat_name, type='string', shape=[1], value_string=wrapper_value
+                                        )
+                                    elif stat_name == 'deny_listed':
+                                        stat = pb2.DataStat(
+                                            name=stat_name, type='scalar', shape=[1], value=[float(wrapper_value)]
+                                        )
+                        except Exception as e:
+                            _LOGGER.debug(f"Could not get {stat_name} from dataset wrapper: {e}")
+                    
                     if stat:
                         data_stats.append(stat)
                 
@@ -1005,6 +1046,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     
     def EditDataSample(self, request, context):
         """Edit sample metadata (tags, deny_listed, etc.)."""
+        print(f"DEBUG: EditDataSample called with stat_name={request.stat_name}, samples_ids={request.samples_ids}, string_value={request.string_value}")
         self._ensure_components()
         
         if request.stat_name not in ["tags", "deny_listed"]:
@@ -1030,14 +1072,18 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 dataset = getattr(test_loader, 'dataset', test_loader) if test_loader else None
             
             if dataset is None:
+                print(f"DEBUG: Dataset is None for origin={origin}")
                 continue
             
             try:
                 if request.stat_name == "tags":
+                    print(f"DEBUG: Calling dataset.set({sid}, 'tags', '{request.string_value}')")
                     dataset.set(sid, "tags", request.string_value)
+                    print(f"DEBUG: Successfully set tag for sample {sid}")
                 elif request.stat_name == "deny_listed":
                     dataset.set(sid, "deny_listed", request.bool_value)
             except Exception as e:
+                print(f"DEBUG: Exception in dataset.set: {e}")
                 _LOGGER.warning(f"Could not edit sample {sid}: {e}")
         
         # Update dataframe if it exists
