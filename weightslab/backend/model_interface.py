@@ -560,7 +560,7 @@ class ModelInterface(NetworkWithOps):
 
 
 if __name__ == "__main__":
-    from weightslab.tests.torch_models import \
+    from weightslab.baseline_models.pytorch.models import \
         FashionCNN as Model
     from weightslab.utils.logs import print, setup_logging
 

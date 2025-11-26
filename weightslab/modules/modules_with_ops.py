@@ -618,6 +618,10 @@ class LayerWiseOperations(NeuronWiseOperations):
         op_type = ArchitectureNeuronsOpType(op_type)
         op = self.get_operation(op_type)
         
+        # Sanity check on neuron indices
+        if neuron_indices is None:
+            neuron_indices = set()
+            
         # Convert generators/ranges to set first
         if hasattr(neuron_indices, '__iter__') and not isinstance(neuron_indices, (set, int, str)):
             neuron_indices = set(neuron_indices)
@@ -1596,7 +1600,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
 if __name__ == "__main__":
     from weightslab.backend.model_interface import ModelInterface
-    from weightslab.tests.torch_models import FashionCNN as Model
+    from weightslabbaseline_models.pytorch.models import FashionCNN as Model
 
     # Define the model & the input
     model = Model()

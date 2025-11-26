@@ -166,8 +166,8 @@ class DataLoaderInterface:
         existing_class_names = set(getattr(self.__class__, '__dict__', {}).keys())
 
         # 1) Expose model instance attributes as properties on the wrapper class
-        model_vars = getattr(obj, '__dict__', {})
-        for name, value in model_vars.items():
+        dataloader_vars = getattr(obj, '__dict__', {})
+        for name, value in dataloader_vars.items():
             if name.startswith('_'):
                 continue
             if name in existing_instance_names or name in existing_class_names:
@@ -178,7 +178,7 @@ class DataLoaderInterface:
             # attribute live (reads reflect model changes).
             try:
                 def _make_getter(n):
-                    return lambda inst: getattr(inst.model, n)
+                    return lambda inst: getattr(inst.dataloader, n)
 
                 getter = _make_getter(name)
                 prop = property(fget=getter)
@@ -188,8 +188,8 @@ class DataLoaderInterface:
                 continue
 
         # 2) Bind model class-level callables (methods) to this instance
-        model_cls_vars = getattr(obj.__class__, '__dict__', {})
-        for name, member in model_cls_vars.items():
+        dataloader_cls_vars = getattr(obj.__class__, '__dict__', {})
+        for name, member in dataloader_cls_vars.items():
             if name.startswith('_'):
                 continue
             if name in existing_instance_names or name in existing_class_names:
@@ -213,16 +213,28 @@ class DataLoaderInterface:
     
     def __iter__(self) -> Iterator:
         """Return an iterator over batches (delegates to the wrapped dataloader)."""
-        if self._ledger_name in get_hyperparams(list_hyperparams()[0])['data']:
-            bs = get_hyperparams(list_hyperparams()[0])['data'][self._ledger_name]['batch_size']
+        params = list_hyperparams()
+        if len(params) and self._ledger_name in get_hyperparams(params[0])['data']:
+            bs = get_hyperparams(params[0])['data'][self._ledger_name]['batch_size']
             self.set_batch_size(bs)  # check and update batch size before iterating
+        else:
+            try:
+                self.set_batch_size(64)  # default batch size if none specified
+            except RuntimeError:
+                pass  # ignore if we cannot set batch size
         self._wait_if_paused()
         return iter(self.dataloader)
     
     def __next__(self) -> Any:
-        if self._ledger_name in get_hyperparams(list_hyperparams()[0])['data']:
-            bs = get_hyperparams(list_hyperparams()[0])['data'][self._ledger_name]['batch_size']
+        params = list_hyperparams()
+        if len(params) and self._ledger_name in get_hyperparams(params[0])['data']:
+            bs = get_hyperparams(params[0])['data'][self._ledger_name]['batch_size']
             self.set_batch_size(bs)  # check and update batch size before iterating
+        else:
+            try:
+                self.set_batch_size(64)  # default batch size if none specified
+            except RuntimeError:
+                pass  # ignore if we cannot set batch size
         self._wait_if_paused()
         return self._next_batch()
 

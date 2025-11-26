@@ -4,7 +4,8 @@ import json
 import uuid
 import logging
 import torch as th
-
+import dill
+import pickle
 from pathlib import Path
 from typing import Set, Optional
 
@@ -12,6 +13,8 @@ from weightslab.backend.ledgers import (
     get_model,
     get_optimizer,
     get_dataloader,
+    register_model,
+    list_models,
     list_hyperparams,
     get_hyperparams,
     set_hyperparam,
@@ -32,6 +35,7 @@ class _CheckpointMetadataDictKeys(str, enum.Enum):
 
 class _CheckpointDictKeys(str, enum.Enum):
     MODEL = 'model'
+    MODEL_FULL = 'model_full'
     OPTIM = 'optimizer'
     LRATE = 'learning_rate'
     BSIZE = 'batch_size'
@@ -144,6 +148,7 @@ class CheckpointManager(object):
              eval_loader_name: Optional[str] = None,
              experiment_name: Optional[str] = None,
              override_filepath: Optional[str] = None,
+             save_full_model: bool = True,
              ) -> int | str | None:
         """
         Dump a checkpoint using ledger-registered objects.
@@ -193,12 +198,40 @@ class CheckpointManager(object):
         eval_data_state = None
         batch_size = None
         learning_rate = None
+        full_model_bytes = None
 
         # Model
         try:
             model = get_model(model_name)
+            # If ledger returned a Proxy-like wrapper, try to get underlying object
             try:
-                model_state = model.state_dict()
+                underlying = getattr(model, 'get', None)
+                if callable(underlying):
+                    model_obj = model.get()
+                else:
+                    model_obj = model
+            except Exception:
+                model_obj = model
+
+            try:
+                if model_obj is not None and hasattr(model_obj, 'state_dict'):
+                    model_state = model_obj.state_dict()
+                else:
+                    model_state = None
+
+                if save_full_model:
+                    try:
+                        # try cloudpickle first (can handle local classes/functions)
+                        if dill is not None:
+                            full_model_bytes = dill.dumps(model_obj)
+                        else:
+                            # fallback to standard pickle
+                            full_model_bytes = pickle.dumps(model_obj)
+                    except Exception:
+                        try:
+                            full_model_bytes = pickle.dumps(model_obj)
+                        except Exception:
+                            full_model_bytes = None
             except Exception:
                 # if model is a Proxy or missing, skip
                 model_state = None
@@ -209,11 +242,21 @@ class CheckpointManager(object):
         try:
             optim = get_optimizer(optimizer_name)
             try:
-                optimizer_state = optim.state_dict()
+                # unwrap Proxy if present
+                try:
+                    opt_underlying = getattr(optim, 'get', None)
+                    if callable(opt_underlying):
+                        optim_obj = optim.get()
+                    else:
+                        optim_obj = optim
+                except Exception:
+                    optim_obj = optim
+
+                optimizer_state = optim_obj.state_dict()
                 # attempt to extract lr from param groups
                 try:
                     lrs = []
-                    for g in optim.param_groups:
+                    for g in optim_obj.param_groups:
                         lrs.append(g.get('lr'))
                     if lrs:
                         learning_rate = lrs[0]
@@ -228,9 +271,19 @@ class CheckpointManager(object):
         try:
             tr = get_dataloader(train_loader_name)
             try:
-                train_data_state = tr.dataset.state_dict()
+                # unwrap proxy if present
                 try:
-                    batch_size = getattr(tr, 'batch_size', None)
+                    tr_under = getattr(tr, 'get', None)
+                    if callable(tr_under):
+                        tr_obj = tr.get()
+                    else:
+                        tr_obj = tr
+                except Exception:
+                    tr_obj = tr
+
+                train_data_state = tr_obj.dataset.state_dict()
+                try:
+                    batch_size = getattr(tr_obj, 'batch_size', None)
                 except Exception:
                     batch_size = None
             except Exception:
@@ -241,7 +294,16 @@ class CheckpointManager(object):
         try:
             ev = get_dataloader(eval_loader_name)
             try:
-                eval_data_state = ev.dataset.state_dict()
+                try:
+                    ev_under = getattr(ev, 'get', None)
+                    if callable(ev_under):
+                        ev_obj = ev.get()
+                    else:
+                        ev_obj = ev
+                except Exception:
+                    ev_obj = ev
+
+                eval_data_state = ev_obj.dataset.state_dict()
             except Exception:
                 eval_data_state = None
         except Exception:
@@ -252,6 +314,7 @@ class CheckpointManager(object):
             _CheckpointDictKeys.BSIZE: batch_size,
             _CheckpointDictKeys.LRATE: learning_rate,
             _CheckpointDictKeys.MODEL: model_state,
+            _CheckpointDictKeys.MODEL_FULL: full_model_bytes,
             _CheckpointDictKeys.OPTIM: optimizer_state,
             _CheckpointDictKeys.EDATA: eval_data_state,
             _CheckpointDictKeys.TDATA: train_data_state,
@@ -320,9 +383,46 @@ class CheckpointManager(object):
                     model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL], strict=False)
                 except Exception:
                     try:
-                        model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL])
+                        model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL], strict=True)
                     except Exception:
-                        _logger.exception("Failed to load model state from checkpoint")
+                        _logger.exception("Failed to load model state from checkpoint; attempting full-model replacement if available")
+                        # If a full-model object was saved, try to replace the registered model
+                        try:
+                            full_obj = ckpt_dict.get(_CheckpointDictKeys.MODEL_FULL, None)
+                            # If bytes were stored, attempt to deserialize (cloudpickle preferred)
+                            if isinstance(full_obj, (bytes, bytearray)):
+                                try:
+                                    if dill is not None:
+                                        full_obj = dill.loads(full_obj)
+                                    else:
+                                        full_obj = pickle.loads(full_obj)
+                                except Exception:
+                                    try:
+                                        full_obj = pickle.loads(full_obj)
+                                    except Exception:
+                                        full_obj = None
+
+                            if full_obj is not None:
+                                # Determine target ledger name: prefer provided model_name, else use sole registered model
+                                target_name = model_name
+                                if target_name is None:
+                                    try:
+                                        models = list_models()
+                                        if len(models) == 1:
+                                            target_name = models[0]
+                                    except Exception:
+                                        target_name = None
+
+                                if target_name is not None:
+                                    try:
+                                        register_model(target_name, full_obj)
+                                        _logger.info("Replaced ledger model '%s' with full-model from checkpoint", target_name)
+                                    except Exception:
+                                        _logger.exception("Failed to register full-model into ledger")
+                                else:
+                                    _logger.warning("No target model name available to register full-model from checkpoint")
+                        except Exception:
+                            _logger.exception("Unexpected error while attempting full-model replacement")
         except Exception:
             pass
 

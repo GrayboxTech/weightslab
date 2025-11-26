@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import threading
 import weakref
+import logging
 import os
 import time
 import yaml
 
 from typing import Any, Dict, List, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 class Proxy:
@@ -48,7 +52,10 @@ class Proxy:
         with self._lock:
             if self._obj is None:
                 raise AttributeError("Proxy target not set")
-            return getattr(self._obj, item)
+            try:
+                return getattr(self._obj, item)
+            except AttributeError:
+                return None
 
     # Special method forwarding for common container/iterable operations.
     # CPython looks up special methods on the type, so we must implement
@@ -562,7 +569,10 @@ def list_hyperparams() -> List[str]:
     return GLOBAL_LEDGER.list_hyperparams()
 
 def set_hyperparam(name: str, key_path: str, value: Any) -> None:
-    return GLOBAL_LEDGER.set_hyperparam(name, key_path, value)
+    try:
+        return GLOBAL_LEDGER.set_hyperparam(name, key_path, value)
+    except IndexError:
+        logger.error(f'no hyperparams registered under {name}')
 
 def watch_hyperparams_file(name: str, path: str, poll_interval: float = 1.0) -> None:
     return GLOBAL_LEDGER.watch_hyperparams_file(name, path, poll_interval=poll_interval)

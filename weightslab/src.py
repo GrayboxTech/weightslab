@@ -115,7 +115,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
     
-    elif flag.lower() == 'data' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
+    elif flag.lower() == 'data' or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the

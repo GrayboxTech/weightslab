@@ -3,9 +3,6 @@ import torch
 import tempfile
 import weightslab as wl
 
-from torchvision import datasets, transforms
-
-from weightslab.tests.torch_models import FashionCNN 
 from weightslab.backend.ledgers import register_optimizer
 
 
@@ -61,8 +58,8 @@ class OptimizerInterface:
         existing_class_names = set(getattr(self.__class__, '__dict__', {}).keys())
 
         # 1) Expose model instance attributes as properties on the wrapper class
-        model_vars = getattr(obj, '__dict__', {})
-        for name, value in model_vars.items():
+        optimizer_vars = getattr(obj, '__dict__', {})
+        for name, value in optimizer_vars.items():
             if name.startswith('_'):
                 continue
             if name in existing_instance_names or name in existing_class_names:
@@ -73,7 +70,7 @@ class OptimizerInterface:
             # attribute live (reads reflect model changes).
             try:
                 def _make_getter(n):
-                    return lambda inst: getattr(inst.model, n)
+                    return lambda inst: getattr(inst.optimizer, n)
 
                 getter = _make_getter(name)
                 prop = property(fget=getter)
@@ -83,8 +80,8 @@ class OptimizerInterface:
                 continue
 
         # 2) Bind model class-level callables (methods) to this instance
-        model_cls_vars = getattr(obj.__class__, '__dict__', {})
-        for name, member in model_cls_vars.items():
+        optimizer_cls_vars = getattr(obj.__class__, '__dict__', {})
+        for name, member in optimizer_cls_vars.items():
             if name.startswith('_'):
                 continue
             if name in existing_instance_names or name in existing_class_names:
@@ -137,7 +134,8 @@ class OptimizerInterface:
 
 if __name__ == "__main__":
     print('Hello World')
-
+    from weightslab.baseline_models.pytorch.models import FashionCNN
+    
     # 0. Init. variables
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     TMP_DIR = tempfile.mkdtemp()
