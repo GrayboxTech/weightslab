@@ -1,5 +1,4 @@
-import functools
-import types
+import logging
 import os
 import torch as th
 import weightslab as wl
@@ -14,12 +13,15 @@ from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.models.monkey_patcher import monkey_patch_modules
-from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
+
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 class ModelInterface(NetworkWithOps):
@@ -309,7 +311,7 @@ class ModelInterface(NetworkWithOps):
         """
         self.visited_nodes = set()  # Reset NetworkWithOps nodes visited
         if exc_type is not None:
-            print(
+            logger.error(
                 f"[{self.__class__.__name__}]: An exception occurred: \
                     {exc_type.__name__} with {exc_val} and {exc_tb}.")
             return False
@@ -426,7 +428,7 @@ class ModelInterface(NetworkWithOps):
             as a side effect if `self.print_graph` is True.
         """
         if self.print_graph:
-            print("--- Generated Graph Dependencies (FX Tracing) ---")
+            logger.info("--- Generated Graph Dependencies (FX Tracing) ---")
             or_dependencies = generate_graph_dependencies(
                 self.model,
                 self.traced_model,
@@ -560,6 +562,7 @@ class ModelInterface(NetworkWithOps):
 if __name__ == "__main__":
     from weightslab.tests.torch_models import \
         FashionCNN as Model
+    from weightslab.utils.logs import print, setup_logging
 
     # Setup prints
     setup_logging('DEBUG')

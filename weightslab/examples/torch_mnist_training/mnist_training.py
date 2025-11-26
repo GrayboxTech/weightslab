@@ -9,7 +9,6 @@ import torch.optim as optim
 import yaml
 
 from torchvision import datasets, transforms
-
 from torchmetrics.classification import Accuracy
 
 from weightslab.utils.board import Dash as Logger

@@ -269,7 +269,6 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
             record.sample_prediction.extend(pred_list)
 
         sample_stats.records.append(record)
-    # print("[BACKEND].get_data_set_representation done: ", sample_stats)
     return sample_stats
 
 def _maybe_denorm(img_t, mean=None, std=None):

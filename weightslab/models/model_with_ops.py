@@ -1,4 +1,5 @@
 import time
+import logging
 import numpy as np
 import torch as th
 
@@ -10,6 +11,9 @@ from weightslab.components.tracking import TrackingMode
 from weightslab.utils.tools import get_children
 from weightslab.utils.modules_dependencies import _ModulesDependencyManager, \
     DepType
+
+
+logger = logging.getLogger(__name__)
 
 
 class NetworkWithOps(nn.Module):
@@ -245,7 +249,7 @@ class NetworkWithOps(nn.Module):
         :type dependency: Optional[Callable], optional
         :raises ValueError: [description]
         """
-        print(f'Operate currently on neurons: {neuron_indices} ' +
+        logger.debug(f'Operate currently on neurons: {neuron_indices} ' +
               f'of layer id: {layer_id} with op_type: {op_type}')
         # Sanity check to see if layer exists
         if not isinstance(layer_id, int):
@@ -482,7 +486,7 @@ class NetworkWithOps(nn.Module):
             missing_keys, unexpected_keys, error_msgs)
 
     def load_state_dict(
-            self, state_dict, strict, assign, **kwargs):
+            self, state_dict, strict, assign=True, **kwargs):
         self.seen_samples = state_dict['seen_samples']
         self.tracking_mode = state_dict['tracking_mode']
         super().load_state_dict(

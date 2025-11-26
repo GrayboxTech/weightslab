@@ -11,6 +11,7 @@ from .src import watch_or_edit, serve
 from .art import _BANNER
 from .utils.logs import setup_logging
 
+logger = None
 try:
 	import logging
 	import os
@@ -45,6 +46,7 @@ __all__ = [
 	"watch_or_edit",
 	"serve",
     "_BANNER",
+	"logger",
 	"__version__",
 	"__license__",
     "__author__",

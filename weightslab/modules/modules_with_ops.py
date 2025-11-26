@@ -7,17 +7,18 @@ from torch import nn
 from enum import Enum
 from typing import List, Set, Optional, Callable, Tuple
 
-from weightslab.utils.logs import print
 from weightslab.utils.tools import normalize_dicts, reversing_indices
 from weightslab.components.tracking import Tracker
 from weightslab.components.tracking import TrackingMode
 from weightslab.utils.modules_dependencies import DepType
 from weightslab.components.tracking import TriggersTracker
 from weightslab.modules.neuron_ops import NeuronWiseOperations
-
-logger = logging.getLogger(__name__)
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.components.tracking import copy_forward_tracked_attrs
+
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 class LayerWiseOperations(NeuronWiseOperations):
@@ -1144,7 +1145,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # # Enough neurons to operate
         if len(neurons) <= 1:
-            print(f'Not enough neurons to operate (currently {neurons})')
+            logger.warning(f'Not enough neurons to operate (currently {neurons})')
             return
 
         # Tensor indices to keep
@@ -1280,18 +1281,12 @@ class LayerWiseOperations(NeuronWiseOperations):
                                 index_map[neuron_indice]
                             )
                         except IndexError as e:
-                            # TODO (GP): Fix specific error with these models
-                            # Condition because it raise IndexError in utests for
-                            # models:
-                            # TwoLayerUnflattenNet & ToyAvgPoolNet
-                            print(f'IndexError: {deps_name}; Error: {str(e)}', level='ERROR')
+                            logger.error(f'IndexError: {deps_name}; Error: {str(e)}')
                 # Normalize
                 self.src_to_dst_mapping_tnsrs = normalize_dicts(
                     self.src_to_dst_mapping_tnsrs
                 )
 
-            # TODO (GP): Not sure how relevant try except are now TODELETE
-            # try:
             for rel_name in self.related_dst_to_src_mapping_tnsrs:
                 length = len(
                     self.related_dst_to_src_mapping_tnsrs[rel_name]
@@ -1315,15 +1310,13 @@ class LayerWiseOperations(NeuronWiseOperations):
                 self.related_dst_to_src_mapping_tnsrs
             )
 
-            # except KeyError as e:  TODELETE
-            #     print(f'IndexError: {rel_name}; Error: {str(e)}')
             # Tracker
             for tracker in self.get_trackers():
                 tracker.prune(neuron_indices)
 
             # Verbose
-            print(f'Prune neurons from the layer: {self}', level='DEBUG')
-
+            logger.debug(f'Prune neurons from the layer: {self}')
+    
         # Incoming neurons, e.g., in conv2d for instance, or in norm
         if is_incoming or dependency == DepType.SAME:
             # We don't need to update here if already done before
@@ -1342,37 +1335,21 @@ class LayerWiseOperations(NeuronWiseOperations):
                     new_value=self.get_neurons(self.super_out_name)
                 )  # Update neurons count
 
-
-            # Update index maps
-            current_parent_name = kwargs.get('current_parent_name', [])
             # By default get deps name from current relation
-            deps_name = kwargs.get(
-                'current_child_name',
-                kwargs.get('current_parent_name')
-            )
-            # deps_names = self.dst_to_src_mapping_tnsrs.keys() \
-            #     if deps_name not in self.dst_to_src_mapping_tnsrs \
-            #     else [deps_name]
             deps_names = self.dst_to_src_mapping_tnsrs.keys()
             if len(deps_names) > 0:
                 for dep_name in deps_names:
                     length = len(self.dst_to_src_mapping_tnsrs[dep_name])
                     if length > 0 and not hasattr(self, 'bypass') or \
                             (hasattr(self, 'bypass')):
-                            #  and dep_name in
-                            #  current_parent_name):
                         indexs = list(self.dst_to_src_mapping_tnsrs[
                             dep_name
                         ].keys())
                         for neuron_indice in sorted(neuron_indices)[::-1]:
-                            # try: TODELETE
                             # Prune corresponding neurons
                             self.dst_to_src_mapping_tnsrs[
                                 dep_name
                             ].pop(indexs[neuron_indice % length])
-                            # except IndexError:
-                            #     # pass for specific batch linear case, where you have only one neuron [32: [32, 32, 34, 35]], shoud have create 3 others but only one required
-                            #     pass
 
                 # Normalize mapping dictionary
                 self.dst_to_src_mapping_tnsrs = normalize_dicts(
@@ -1380,7 +1357,6 @@ class LayerWiseOperations(NeuronWiseOperations):
                 )
 
             # # Related neurons
-            # try: TODELETE
             for rel_name in self.related_src_to_dst_mapping_tnsrs:
                 # Update mapping dictionary
                 length = len(
@@ -1405,13 +1381,10 @@ class LayerWiseOperations(NeuronWiseOperations):
                     self.related_src_to_dst_mapping_tnsrs
                 )
 
-            # except KeyError as e: TODELETE
-            #     print(f'IndexError: {rel_name}; Error: {str(e)}')
-
             # Verbose
-            print(
+            logger.debug(
                 f'New {"INCOMING" if dependency != DepType.SAME else "SAME"}' +
-                f'layer is {self}', level='DEBUG'
+                f'layer is {self}'
             )
 
     def _freeze_neurons(
@@ -1428,7 +1401,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                 is_incoming: Whether to freeze incoming neurons.
         """
 
-        print(
+        logger.debug(
             f"{self.get_name()}[{self.get_module_id()}].freeze {neuron_indices}",
             level='DEBUG'
         )
@@ -1491,7 +1464,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                 perturbation_ratio: Perturbation ratio for neuron initialization.
         """
 
-        print(
+        logger.debug(
             f"{self.get_name()}[{self.get_module_id()}].reset {neuron_indices}",
             level='DEBUG'
         )

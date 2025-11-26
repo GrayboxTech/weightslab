@@ -13,7 +13,6 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
 from weightslab.backend.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
-from weightslab.utils.logs import print
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
 

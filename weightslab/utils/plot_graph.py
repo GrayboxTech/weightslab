@@ -8,8 +8,9 @@ from torch.fx import GraphModule, Node
 from torch.fx.passes.shape_prop import ShapeProp, TensorMetadata
 
 from weightslab.models.model_with_ops import DepType
-from weightslab.utils.logs import print, setup_logging
 
+
+# Global logger
 logger = logging.getLogger(__name__)
 
 
@@ -182,9 +183,6 @@ def plot_fx_graph_with_details(
 if __name__ == "__main__":
     from weightslab.utils.tools import generate_graph_dependencies
     from torch.fx import symbolic_trace, GraphModule, Node
-
-    # Setup prints
-    setup_logging('DEBUG')
 
     print('Hello World')
 

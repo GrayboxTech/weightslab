@@ -1,22 +1,26 @@
 import io
 import types
-from threading import Thread
 import time
 import grpc
 import time
 import torch
+import logging
 import traceback
 import numpy as np
 import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
+from threading import Thread
 from concurrent import futures
-from collections import defaultdict
 
 from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
 from weightslab.trainer.trainer_tools import *
 from weightslab.trainer.trainer_tools import _get_input_tensor_for_sample
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
+
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
@@ -32,8 +36,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         # Accept an explicit experiment object or attempt to resolve one
         # from the global ledger to avoid depending on a single global
         # `experiment` instance.
-        from weightslab.backend.ledgers import GLOBAL_LEDGER
-
         self._exp_name = exp_name
         # Components resolved from GLOBAL_LEDGER (model, dataloaders, optimizer,
         # hyperparams, logger). We keep explicit experiment for backwards
@@ -46,7 +48,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger). Raises RuntimeError when mandatory components are missing."""
         if getattr(self, '_components', None) and self._components:
             return
-        from weightslab.backend.ledgers import GLOBAL_LEDGER, get_hyperparams, list_hyperparams, get_model, list_models, get_dataloader, list_dataloaders, get_optimizer, list_optimizers, get_logger, list_loggers
+        from weightslab.backend.ledgers import get_hyperparams, list_hyperparams, get_model, list_models, get_dataloader, list_dataloaders, get_optimizer, list_optimizers, get_logger, list_loggers
 
         # resolve model
         model = None
@@ -108,15 +110,15 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             hyperparams = None
 
         # resolve logger
-        logger = None
+        signal_logger = None
         try:
             lnames = list_loggers()
             if len(lnames) == 1:
-                logger = get_logger()
+                signal_logger = get_logger()
             elif 'main' in lnames:
-                logger = get_logger('main')
+                signal_logger = get_logger('main')
         except Exception:
-            logger = None
+            signal_logger = None
 
         self._components = {
             'model': model,
@@ -124,7 +126,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             'test_loader': test_loader,
             'optimizer': optimizer,
             'hyperparams': hyperparams,
-            'logger': logger,
+            'signal_logger': signal_logger,
         }
 
         # Build hyper-parameter descriptors used by the protocol. Use
@@ -159,36 +161,39 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         }
 
     def StreamStatus(self, request_iterator, context):
+        logger.debug(f"ExperimentServiceServicer.StreamStatus({request_iterator})")
+
         # ensure ledger-backed components are available
         self._ensure_components()
+        
         while True:
             # use ledger-backed logger queue when available
-            logger = self._components.get('logger') if getattr(self, '_components', None) else None
-            if logger is None or not hasattr(logger, 'queue'):
+            signal_logger = self._components.get('signal_logger') if getattr(self, '_components', None) else None
+            if signal_logger is None or not hasattr(signal_logger, 'queue'):
                 raise RuntimeError('No logger with a queue registered in GLOBAL_LEDGER')
-            log = logger.queue.get()
-            if "metric_name" in log and "acc" in log["metric_name"]:
-                # print(f"[LOG] {log['metric_name']} = {log['metric_value']:.2f}")
+            signal_log = signal_logger.queue.get()
+            if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:
+                logger.debug(f"[signal_log] {signal_log['metric_name']} = {signal_log['metric_value']:.2f}")
                 pass
 
-            if log is None:
+            if signal_log is None:
                 break
             metrics_status, annotat_status = None, None
-            if "metric_name" in log:
+            if "metric_name" in signal_log:
                 metrics_status = pb2.MetricsStatus(
-                    name=log["metric_name"],
-                    value=log["metric_value"],
+                    name=signal_log["metric_name"],
+                    value=signal_log["metric_value"],
                 )
-            elif "annotation" in log:
+            elif "annotation" in signal_log:
                 annotat_status = pb2.AnnotatStatus(
-                    name=log["annotation"])
-                for key, value in log["metadata"].items():
+                    name=signal_log["annotation"])
+                for key, value in signal_log["metadata"].items():
                     annotat_status.metadata[key] = value
 
             training_status = pb2.TrainingStatusEx(
                 timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
-                experiment_name=log["experiment_name"],
-                model_age=log["model_age"],
+                experiment_name=signal_log["experiment_name"],
+                model_age=signal_log["model_age"],
             )
 
             if metrics_status:
@@ -197,17 +202,17 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 training_status.annotat_status.CopyFrom(annotat_status)
 
             # mark task done on ledger logger queue
-            logger = self._components.get('logger')
-            if logger is not None and hasattr(logger, 'queue'):
+            signal_logger = self._components.get('signal_logger')
+            if signal_logger is not None and hasattr(signal_logger, 'queue'):
                 try:
-                    logger.queue.task_done()
+                    signal_logger.queue.task_done()
                 except Exception:
                     pass
 
             yield training_status
 
     def GetSample(self, request, context):
-        # print(f"ExperimentServiceServicer.GetSample({request})")
+        logger.debug(f"ExperimentServiceServicer.GetSample({request})")
 
         # ensure ledger-backed components are available
         self._ensure_components()
@@ -268,7 +273,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return response
 
     def GetSamples(self, request, context):
-        # print(f"ExperimentServiceServicer.GetSamples({request})")
+        logger.debug(f"ExperimentServiceServicer.GetSamples({request})")
 
         import concurrent.futures
         # ensure ledger-backed components are available
@@ -336,13 +341,16 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return response
 
     def GetWeights(self, request, context):
-        # print(f"ExperimentServiceServicer.GetWeights({request})")
+        logger.debug(f"ExperimentServiceServicer.GetWeights({request})")
+
+        # ensure ledger-backed components are available
+        self._ensure_components()
+        
+        # get answer object
         answer = pb2.WeightsResponse(success=True, error_message="")
 
         neuron_id = request.neuron_id
         layer = None
-        # ensure ledger-backed components are available
-        self._ensure_components()
 
         try:
             model = self._components.get('model')
@@ -383,13 +391,16 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return answer
 
     def GetActivations(self, request, context):
-        # print(f"ExperimentServiceServicer.GetActivations({request})")
+        logger.debug(f"ExperimentServiceServicer.GetActivations({request})")
+        
+        # ensure ledger-backed components are available
+        self._ensure_components()
+
+        # get answer object
         empty_resp = pb2.ActivationResponse(layer_type="", neurons_count=0)
-
+        
         try:
-            # ensure ledger-backed components are available
-            self._ensure_components()
-
+            
             model = self._components.get('model')
             if model is None:
                 return empty_resp
@@ -488,14 +499,14 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                     pb2.ActivationMap(neuron_id=c, values=vals, H=H, W=W))
             return resp
         except (ValueError, Exception) as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Error in GetActivations: {str(e)}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
 
         return empty_resp
     
     def ExperimentCommand(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.ExperimentCommand({request})")
+        
         # ensure ledger-backed components are available
         self._ensure_components()
 
@@ -656,9 +667,12 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return response
 
     def ManipulateWeights(self, request, context):
-        # print(f"ExperimentServiceServicer.ManipulateWeights({request})")
+        logger.debug(f"ExperimentServiceServicer.ManipulateWeights({request})")
+        
         # ensure ledger-backed components are available
         self._ensure_components()
+        
+        # get answer object & weight
         answer = pb2.WeightsOperationResponse(
             success=False, message="Unknown error")
         weight_operations = request.weight_operation
@@ -716,8 +730,6 @@ def grpc_serve(n_workers_grpc: int = 6, port_grpc: int = 50051, **_):
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
         server.add_insecure_port(f'[::]:{port_grpc}')
         try:
-            import logging
-            logger = logging.getLogger(__name__)
             server.start()
             logger.info("gRPC Server started on port %d. Press Ctrl+C to stop.", port_grpc)
             server.wait_for_termination()
