@@ -17,3 +17,8 @@ pkg_main.py
 *.db
 *.ipynb_checkpoints
 .vscode/
+
+__pycache__/
+
+experiment_service_pb2.py
+experiment_service_pb2_grpc.py

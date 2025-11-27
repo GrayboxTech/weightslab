@@ -11,8 +11,11 @@ service ExperimentService {
   rpc GetWeights(WeightsRequest) returns (WeightsResponse);
 
   rpc GetSamples (BatchSampleRequest) returns (BatchSampleResponse);
-
-  rpc GetActivations (ActivationRequest) returns (ActivationResponse);
+  
+  // Data Service (for weights_studio UI)
+  rpc ApplyDataQuery (DataQueryRequest) returns (DataQueryResponse);
+  rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
+  rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
 }
 
 
@@ -250,3 +253,69 @@ message WeightsResponse {
   bool success = 11;
   optional string error_message = 12;
 }
+
+// ============================================================================
+// Data Service Messages (for weights_studio UI integration)
+// ============================================================================
+
+message DataQueryRequest {
+  string query = 1;
+  bool accumulate = 2;
+  bool is_natural_language = 3;
+}
+
+message DataQueryResponse {
+  bool success = 1;
+  string message = 2;
+  int32 number_of_all_samples = 3;
+  int32 number_of_samples_in_the_loop = 4;
+  int32 number_of_discarded_samples = 5;
+}
+
+message DataSamplesRequest {
+  int32 start_index = 1;
+  int32 records_cnt = 2;
+  bool include_transformed_data = 3;
+  bool include_raw_data = 4;
+  repeated string stats_to_retrieve = 5;
+}
+
+message DataStat {
+  string name = 1;
+  string type = 2;
+  repeated int32 shape = 3;
+  repeated float value = 4;
+  string value_string = 5;
+}
+
+message DataRecord {
+  int32 sample_id = 1;
+  repeated DataStat data_stats = 2;
+}
+
+message DataSamplesResponse {
+  bool success = 1;
+  string message = 2;
+  repeated DataRecord data_records = 3;
+}
+
+enum SampleEditType {
+  EDIT_OVERRIDE = 0;
+  EDIT_ACCUMULATE = 1;
+}
+
+message DataEditsRequest {
+  string stat_name = 1;
+  float float_value = 2;
+  string string_value = 3;
+  bool bool_value = 4;
+  SampleEditType type = 5;
+  repeated int32 samples_ids = 6;
+  repeated string sample_origins = 7;
+}
+
+message DataEditsResponse {
+  bool success = 1;
+  string message = 2;
+}
+
