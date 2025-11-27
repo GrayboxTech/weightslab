@@ -49,11 +49,6 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationResponse.FromString,
                 _registered_method=True)
-        self.GetSample = channel.unary_unary(
-                '/ExperimentService/GetSample',
-                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SampleRequest.SerializeToString,
-                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SampleRequestResponse.FromString,
-                _registered_method=True)
         self.GetWeights = channel.unary_unary(
                 '/ExperimentService/GetWeights',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsRequest.SerializeToString,
@@ -87,12 +82,6 @@ class ExperimentServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def ManipulateWeights(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetSample(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -133,11 +122,6 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     servicer.ManipulateWeights,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationResponse.SerializeToString,
-            ),
-            'GetSample': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetSample,
-                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.SampleRequest.FromString,
-                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.SampleRequestResponse.SerializeToString,
             ),
             'GetWeights': grpc.unary_unary_rpc_method_handler(
                     servicer.GetWeights,
@@ -236,33 +220,6 @@ class ExperimentService(object):
             '/ExperimentService/ManipulateWeights',
             weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetSample(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/ExperimentService/GetSample',
-            weightslab_dot_proto_dot_experiment__service__pb2.SampleRequest.SerializeToString,
-            weightslab_dot_proto_dot_experiment__service__pb2.SampleRequestResponse.FromString,
             options,
             channel_credentials,
             insecure,

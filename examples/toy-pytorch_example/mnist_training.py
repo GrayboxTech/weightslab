@@ -182,7 +182,7 @@ if __name__ == '__main__':
     # Data
     _train_dataset = datasets.MNIST(
         root=os.path.join(parameters.get('root_log_dir'), 'data'),
-        train=True,
+        train=False,
         download=True,
         transform=transforms.Compose([
             transforms.ToTensor(),

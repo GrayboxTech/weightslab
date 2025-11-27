@@ -8,8 +8,6 @@ service ExperimentService {
 
   rpc ManipulateWeights(WeightsOperationRequest) returns (WeightsOperationResponse);
 
-  rpc GetSample(SampleRequest) returns (SampleRequestResponse);
-
   rpc GetWeights(WeightsRequest) returns (WeightsResponse);
 
   rpc GetSamples (BatchSampleRequest) returns (BatchSampleResponse);

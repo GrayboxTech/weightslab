@@ -211,67 +211,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
             yield training_status
 
-    def GetSample(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetSample({request})")
-
-        # ensure ledger-backed components are available
-        self._ensure_components()
-
-        if not request.HasField('sample_id') or not request.HasField('origin'):
-            return pb2.SampleRequestResponse(
-                error_message="Invalid request. Provide sample_id & origin.")
-
-        if request.origin not in ["train", "eval"]:
-            return pb2.SampleRequestResponse(
-                error_message=f"Invalid origin {request.origin}")
-
-        if request.sample_id < 0:
-            return pb2.SampleRequestResponse(
-                error_message=f"Invalid sample_id {request.sample_id}")
-
-        dataset = None
-        if request.origin == "train":
-            ds = self._components.get('train_loader')
-            dataset = getattr(ds, 'dataset', ds) if ds is not None else None
-        elif request.origin == "eval":
-            ds = self._components.get('test_loader')
-            dataset = getattr(ds, 'dataset', ds) if ds is not None else None
-
-        if dataset is None:
-            return pb2.SampleRequestResponse(
-                error_message=f"Dataset {request.origin} not found.")
-
-        if dataset is None:
-            return pb2.SampleRequestResponse(error_message=f"Dataset {request.origin} not found.")
-
-        if request.sample_id >= len(dataset):
-            return pb2.SampleRequestResponse(
-                error_message=f"Sample {request.sample_id} not found.")
-
-        transformed_tensor, idx, label = dataset._getitem_raw(request.sample_id)
-        # #TODO: apply transform too
-        
-        transformed_image_bytes = tensor_to_bytes(transformed_tensor)
-
-        try:
-            pil_img = load_raw_image(dataset, request.sample_id)
-            buf = io.BytesIO()
-            # pil_img.save(buf, format='PNG')
-            pil_img.save(buf, format='jpeg', quality=85)
-            raw_image_bytes = buf.getvalue()
-        except Exception as e:
-            return pb2.SampleRequestResponse(error_message=str(e))
-
-        response = pb2.SampleRequestResponse(
-            sample_id=request.sample_id,
-            origin=request.origin,
-            label=label,
-            raw_data=raw_image_bytes,         
-            data=transformed_image_bytes, 
-        )
-
-        return response
-
     def GetSamples(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetSamples({request})")
 
@@ -280,7 +219,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         self._ensure_components()
 
         ds = self._components.get('train_loader') if request.origin == "train" else self._components.get('test_loader')
-        dataset = getattr(ds, 'dataset', ds)
+        dataset = getattr(ds, 'tracked_dataset', ds)
         response = pb2.BatchSampleResponse()
 
         do_resize = request.HasField("resize_width") and request.HasField("resize_height")
@@ -408,9 +347,9 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             if int(request.layer_id) == last_layer_id:
                 return empty_resp
 
-            ds = getattr(self._components.get('train_loader'), 'dataset', self._components.get('train_loader'))
+            ds = getattr(self._components.get('train_loader'), 'tracked_dataset', self._components.get('train_loader'))
             if request.origin == "eval":
-                ds = getattr(self._components.get('test_loader'), 'dataset', self._components.get('test_loader'))
+                ds = getattr(self._components.get('test_loader'), 'tracked_dataset', self._components.get('test_loader'))
 
             if request.sample_id < 0 or request.sample_id >= len(ds):
                 raise ValueError(f"No sample id {request.sample_id} for {request.origin}")
@@ -564,7 +503,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 ds = self._components.get('train_loader')
                 if ds is None:
                     return pb2.CommandResponse(success=False, message='No train dataloader registered')
-                dataset = getattr(ds, 'dataset', ds)
+                dataset = getattr(ds, 'tracked_dataset', ds)
                 dataset.denylist_samples(
                     set(request.deny_samples_operation.sample_ids),
                     accumulate = request.deny_samples_operation.accumulate
@@ -577,7 +516,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 ds = self._components.get('test_loader')
                 if ds is None:
                     return pb2.CommandResponse(success=False, message='No eval dataloader registered')
-                dataset = getattr(ds, 'dataset', ds)
+                dataset = getattr(ds, 'tracked_dataset', ds)
                 dataset.denylist_samples(
                     set(request.deny_eval_samples_operation.sample_ids),
                     accumulate = request.deny_eval_samples_operation.accumulate
@@ -590,7 +529,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 ds = self._components.get('train_loader')
                 if ds is None:
                     return pb2.CommandResponse(success=False, message='No train dataloader registered')
-                dataset = getattr(ds, 'dataset', ds)
+                dataset = getattr(ds, 'tracked_dataset', ds)
                 dataset.allowlist_samples(allowed)
                 return pb2.CommandResponse(success=True, message=f"Un-denied {len(allowed)} train samples")
         if request.HasField('remove_eval_from_denylist_operation'):
@@ -600,7 +539,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 ds = self._components.get('test_loader')
                 if ds is None:
                     return pb2.CommandResponse(success=False, message='No eval dataloader registered')
-                dataset = getattr(ds, 'dataset', ds)
+                dataset = getattr(ds, 'tracked_dataset', ds)
                 dataset.allowlist_samples(allowed)
                 return pb2.CommandResponse(success=True, message=f"Un-denied {len(allowed)} eval samples")
         if request.HasField('load_checkpoint_operation'):
@@ -634,7 +573,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             if request.get_data_records == "train":
                 ds = self._components.get('train_loader')
                 if ds is not None:
-                    dataset = getattr(ds, 'dataset', ds)
+                    dataset = getattr(ds, 'tracked_dataset', ds)
                     response.sample_statistics.CopyFrom(
                         get_data_set_representation(
                             dataset,
@@ -649,7 +588,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             elif request.get_data_records == "eval":
                 ds = self._components.get('test_loader')
                 if ds is not None:
-                    dataset = getattr(ds, 'dataset', ds)
+                    dataset = getattr(ds, 'tracked_dataset', ds)
                     response.sample_statistics.CopyFrom(
                         get_data_set_representation(
                             dataset,
@@ -684,25 +623,23 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             op_type = ArchitectureNeuronsOpType.FREEZE
         elif weight_operations.op_type == pb2.WeightOperationType.REINITIALIZE:
             op_type = ArchitectureNeuronsOpType.RESET
-        
-        # Layer id
-        layer_id = weight_operations.layer_id
 
-        # Get neurons ids
-        if len(weight_operations.neuron_ids) > 0:
-            layer_id = weight_operations.neuron_ids[0].layer_id
-            neuron_id = [weight_operations.neuron_ids[0].neuron_id]
-        else:
-            neuron_id = []
+        # Get Model
+        model = self._components.get('model')
 
         # Operate
-        model = self._components.get('model')
-        with weightslab_rlock:
-            model.apply_architecture_op(
-                op_type=op_type,
-                layer_id=layer_id,
-                neuron_indices=neuron_id
-            )
+        for neuron_details in weight_operations.neuron_ids:
+            layer_id = neuron_details.layer_id
+            neuron_id = neuron_details.neuron_id
+
+            # Operate
+            with weightslab_rlock:
+                model.apply_architecture_op(
+                    op_type=op_type,
+                    layer_id=layer_id,
+                    neuron_indices=neuron_id
+                )
+        
 
         answer = pb2.WeightsOperationResponse(
             success=True,
