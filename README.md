@@ -30,7 +30,7 @@ By GrayBx.
     <br /><br />
 </p>
 
-[![GitHub license](https://img.shields.io/github/license/adap/flower)](None)
+[![GitHub license](https://github.com/GrayboxTech/weightslab/blob/main/LICENSE)](None)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](None)
 ![Build](https://github.com/adap/flower/actions/workflows/framework.yml/badge.svg)
 [![Downloads](https://static.pepy.tech/badge/flwr)](None)
