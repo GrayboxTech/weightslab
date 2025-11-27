@@ -4,9 +4,21 @@ import json
 import uuid
 import logging
 import torch as th
-
+import dill
+import pickle
 from pathlib import Path
-from typing import Set
+from typing import Set, Optional
+
+from weightslab.backend.ledgers import (
+    get_model,
+    get_optimizer,
+    get_dataloader,
+    register_model,
+    list_models,
+    list_hyperparams,
+    get_hyperparams,
+    set_hyperparam,
+)
 
 CHECKPOPINTS_METADATA_FILE_NAME = 'checkpoints.metadata'
 
@@ -23,6 +35,7 @@ class _CheckpointMetadataDictKeys(str, enum.Enum):
 
 class _CheckpointDictKeys(str, enum.Enum):
     MODEL = 'model'
+    MODEL_FULL = 'model_full'
     OPTIM = 'optimizer'
     LRATE = 'learning_rate'
     BSIZE = 'batch_size'
@@ -80,6 +93,21 @@ class CheckpointManager(object):
     def get_latest_experiment(self):
         return self.next_id
 
+    def get_latest_checkpoint_path(self) -> Optional[Path]:
+        """Return the most-recent checkpoint path saved in the manager, or None."""
+        try:
+            if not self.id_to_path:
+                return None
+            # id_to_path values may be strings
+            paths = [Path(p) for p in self.id_to_path.values()]
+            existing = [p for p in paths if p.exists()]
+            if not existing:
+                return None
+            latest = max(existing, key=lambda p: p.stat().st_mtime)
+            return latest
+        except Exception:
+            return None
+
     def _dump_metadata(self):
         state_dict = {
             _CheckpointMetadataDictKeys.NEXT_ID: self.next_id,
@@ -100,7 +128,6 @@ class CheckpointManager(object):
             CHECKPOPINTS_METADATA_FILE_NAME)
 
         if not file_path.exists():
-            print("Checkpoint manager load: ", file_path, " not found")
             return
 
         with open(file_path, 'r') as ckpt_metadata_file:
@@ -114,96 +141,358 @@ class CheckpointManager(object):
         self.id_to_path = state_dict[_CheckpointMetadataDictKeys.ID_2_PATH]
         self.id_to_prnt = state_dict[_CheckpointMetadataDictKeys.ID_2_PRNT]
 
-    def dump(self, experiment: "Experiment", override_filepath = None):
+    def dump(self,
+             model_name: Optional[str] = None,
+             optimizer_name: Optional[str] = None,
+             train_loader_name: Optional[str] = None,
+             eval_loader_name: Optional[str] = None,
+             experiment_name: Optional[str] = None,
+             override_filepath: Optional[str] = None,
+             save_full_model: bool = True,
+             ) -> int | str | None:
+        """
+        Dump a checkpoint using ledger-registered objects.
+
+        If a specific name is provided, the corresponding object is used;
+        otherwise the ledger's single registered object is used (if any).
+        Returns the checkpoint id (int) for managed dumps, or -1 for an
+        override filepath write.
+        """
+        # If override filepath requested, write a small metadata JSON and return
         if override_filepath:
             ckpt_save_path = self.root_directory.joinpath(Path(override_filepath))
             info = {
-                "experiment_name": experiment.name,
-                "batch_size": experiment.batch_size,
-                "learning_rate": experiment.learning_rate,
-                "step": experiment.performed_train_steps(),
-                "optimizer": type(experiment.optimizer).__name__,
-                "model": type(experiment.model).__name__,
-                "train_dataset_len": len(experiment.train_dataset),
-                "eval_dataset_len": len(experiment.eval_dataset),
+                "experiment_name": experiment_name,
             }
-            with open(ckpt_save_path, 'w') as f:
-                json.dump(info, f, indent=2)
+            # try to enrich info from ledger objects
+            try:
+                model = get_model(model_name)
+                try:
+                    info["model"] = type(model).__name__
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            try:
+                with open(ckpt_save_path, 'w') as f:
+                    json.dump(info, f, indent=2)
+            except Exception:
+                pass
             return -1
 
-        else:
-            current_ckpt_id = self._generate_checkpoint_id()
-            _logger.info(
-                "Dumping experiment: %d", current_ckpt_id)
-            self.id_to_prnt[current_ckpt_id] = self.prnt_id
-            self.prnt_id = current_ckpt_id
-            file_name = "ckpt_" + str(current_ckpt_id) + "_" + str(uuid.uuid4())
-            ckpt_save_path = self.root_directory.joinpath(Path(file_name))
-            self.id_to_path[current_ckpt_id] = str(ckpt_save_path)
-            self._dump_metadata()
+        # Normal managed dump: create id and path
+        current_ckpt_id = self._generate_checkpoint_id()
+        _logger.info("Dumping checkpoint: %d", current_ckpt_id)
+        self.id_to_prnt[current_ckpt_id] = self.prnt_id
+        self.prnt_id = current_ckpt_id
+        file_name = "ckpt_" + str(current_ckpt_id) + "_" + str(uuid.uuid4())
+        ckpt_save_path = self.root_directory.joinpath(Path(file_name))
+        self.id_to_path[current_ckpt_id] = str(ckpt_save_path)
+        self._dump_metadata()
 
-        with experiment.architecture_guard:
-            model_state = experiment.model.state_dict()
-            optimizer_state = experiment.optimizer.state_dict()
+        # Gather states defensively from ledger
+        model_state = None
+        optimizer_state = None
+        train_data_state = None
+        eval_data_state = None
+        batch_size = None
+        learning_rate = None
+        full_model_bytes = None
 
-        th.save({
-            _CheckpointDictKeys.ENAME: experiment.name,
-            _CheckpointDictKeys.BSIZE: experiment.batch_size,
-            _CheckpointDictKeys.LRATE: experiment.learning_rate,
+        # Model
+        try:
+            model = get_model(model_name)
+            # If ledger returned a Proxy-like wrapper, try to get underlying object
+            try:
+                underlying = getattr(model, 'get', None)
+                if callable(underlying):
+                    model_obj = model.get()
+                else:
+                    model_obj = model
+            except Exception:
+                model_obj = model
+
+            try:
+                if model_obj is not None and hasattr(model_obj, 'state_dict'):
+                    model_state = model_obj.state_dict()
+                else:
+                    model_state = None
+
+                if save_full_model:
+                    try:
+                        # try cloudpickle first (can handle local classes/functions)
+                        if dill is not None:
+                            full_model_bytes = dill.dumps(model_obj)
+                        else:
+                            # fallback to standard pickle
+                            full_model_bytes = pickle.dumps(model_obj)
+                    except Exception:
+                        try:
+                            full_model_bytes = pickle.dumps(model_obj)
+                        except Exception:
+                            full_model_bytes = None
+            except Exception:
+                # if model is a Proxy or missing, skip
+                model_state = None
+        except Exception:
+            model_state = None
+
+        # Optimizer
+        try:
+            optim = get_optimizer(optimizer_name)
+            try:
+                # unwrap Proxy if present
+                try:
+                    opt_underlying = getattr(optim, 'get', None)
+                    if callable(opt_underlying):
+                        optim_obj = optim.get()
+                    else:
+                        optim_obj = optim
+                except Exception:
+                    optim_obj = optim
+
+                optimizer_state = optim_obj.state_dict()
+                # attempt to extract lr from param groups
+                try:
+                    lrs = []
+                    for g in optim_obj.param_groups:
+                        lrs.append(g.get('lr'))
+                    if lrs:
+                        learning_rate = lrs[0]
+                except Exception:
+                    learning_rate = None
+            except Exception:
+                optimizer_state = None
+        except Exception:
+            optimizer_state = None
+
+        # Train / Eval dataloaders
+        try:
+            tr = get_dataloader(train_loader_name)
+            try:
+                # unwrap proxy if present
+                try:
+                    tr_under = getattr(tr, 'get', None)
+                    if callable(tr_under):
+                        tr_obj = tr.get()
+                    else:
+                        tr_obj = tr
+                except Exception:
+                    tr_obj = tr
+
+                train_data_state = tr_obj.dataset.state_dict()
+                try:
+                    batch_size = getattr(tr_obj, 'batch_size', None)
+                except Exception:
+                    batch_size = None
+            except Exception:
+                train_data_state = None
+        except Exception:
+            train_data_state = None
+
+        try:
+            ev = get_dataloader(eval_loader_name)
+            try:
+                try:
+                    ev_under = getattr(ev, 'get', None)
+                    if callable(ev_under):
+                        ev_obj = ev.get()
+                    else:
+                        ev_obj = ev
+                except Exception:
+                    ev_obj = ev
+
+                eval_data_state = ev_obj.dataset.state_dict()
+            except Exception:
+                eval_data_state = None
+        except Exception:
+            eval_data_state = None
+
+        payload = {
+            _CheckpointDictKeys.ENAME: experiment_name,
+            _CheckpointDictKeys.BSIZE: batch_size,
+            _CheckpointDictKeys.LRATE: learning_rate,
             _CheckpointDictKeys.MODEL: model_state,
+            _CheckpointDictKeys.MODEL_FULL: full_model_bytes,
             _CheckpointDictKeys.OPTIM: optimizer_state,
-            _CheckpointDictKeys.EDATA:
-                experiment.eval_loader.dataset.state_dict(),
-            _CheckpointDictKeys.TDATA:
-                experiment.train_loader.dataset.state_dict(),
-        }, ckpt_save_path)
+            _CheckpointDictKeys.EDATA: eval_data_state,
+            _CheckpointDictKeys.TDATA: train_data_state,
+        }
 
+        try:
+            th.save(payload, ckpt_save_path)
+        except Exception:
+            _logger.exception("Failed to save checkpoint to %s", ckpt_save_path)
 
         return current_ckpt_id
 
-    def load(self, checkpoint_id: int | str, experiment: "Experiment"):
-        _logger.info(f"Loading checkpoint: {checkpoint_id}")
+    def load(self,
+             checkpoint_id_or_path: int | str,
+             model_name: Optional[str] = None,
+             optimizer_name: Optional[str] = None,
+             train_loader_name: Optional[str] = None,
+             eval_loader_name: Optional[str] = None,
+             hyperparams_name: Optional[str] = None,
+             ) -> None:
+        """
+        Load a checkpoint and apply contained states to ledger-registered objects.
 
-        if checkpoint_id not in self.id_to_path:
-            checkpoint_id = str(checkpoint_id)
+        `checkpoint_id_or_path` may be an integer id managed by this manager,
+        or a direct filesystem path.
+        """
+        _logger.info(f"Loading checkpoint: {checkpoint_id_or_path}")
 
-        if checkpoint_id not in self.id_to_path:
-            _logger.warning(f"Checkpoint {checkpoint_id} not found")
-            return
-
-        if not os.path.exists(self.id_to_path[checkpoint_id]):
-            _logger.warning(f"Checkpoint {checkpoint_id} file not found")
-            return
-
-        self.prnt_id = checkpoint_id
+        path = None
         try:
-            ckpt_dict = th.load(self.id_to_path[checkpoint_id])
+            if isinstance(checkpoint_id_or_path, (int,)):
+                if checkpoint_id_or_path not in self.id_to_path:
+                    _logger.warning(f"Checkpoint {checkpoint_id_or_path} not found")
+                    return
+                path = self.id_to_path[checkpoint_id_or_path]
+            else:
+                # try as path or string id
+                if str(checkpoint_id_or_path) in self.id_to_path:
+                    path = self.id_to_path[str(checkpoint_id_or_path)]
+                elif os.path.exists(str(checkpoint_id_or_path)):
+                    path = str(checkpoint_id_or_path)
+                else:
+                    _logger.warning(f"Checkpoint {checkpoint_id_or_path} not found")
+                    return
+
+            if not path or not os.path.exists(path):
+                _logger.warning(f"Checkpoint file not found: {path}")
+                return
+
+            self.prnt_id = checkpoint_id_or_path
+            ckpt_dict = th.load(path)
         except Exception as e:
-            _logger.error(
-                f"Could not load checkpoint {checkpoint_id} due to {str(e)}")   
+            _logger.error(f"Could not load checkpoint due to {str(e)}")
+            return
 
-        experiment.name = ckpt_dict[_CheckpointDictKeys.ENAME]
-        experiment.batch_size = ckpt_dict[_CheckpointDictKeys.BSIZE]
-        experiment.learning_rate = ckpt_dict[_CheckpointDictKeys.LRATE]
-        experiment.model.load_state_dict(
-            ckpt_dict[_CheckpointDictKeys.MODEL], strict=False)
-        experiment.last_loaded_ckpt_batch_size = ckpt_dict.get(_CheckpointDictKeys.BSIZE, None)
-        # experiment.optimizer.zero_grad()
-        
+        # Apply to model if present in ledger
         try:
-            
-            experiment.optimizer = experiment.optimizer_class(
-                experiment.model.parameters(), lr=experiment.learning_rate)
-            experiment.optimizer.load_state_dict(
-                ckpt_dict[_CheckpointDictKeys.OPTIM])
-        except ValueError:
-            print(
-                f"Checkpoint {checkpoint_id} does not contain the same "
-                f"version of the optimizer the as the current experiment.")
+            model = None
+            try:
+                model = get_model(model_name)
+            except Exception:
+                model = None
 
-        experiment.eval_loader.dataset.load_state_dict(
-            ckpt_dict[_CheckpointDictKeys.EDATA])
-        experiment.train_loader.dataset.load_state_dict(
-            ckpt_dict[_CheckpointDictKeys.TDATA])
+            if model is not None and ckpt_dict.get(_CheckpointDictKeys.MODEL) is not None:
+                try:
+                    model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL], strict=False)
+                except Exception:
+                    try:
+                        model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL], strict=True)
+                    except Exception:
+                        _logger.exception("Failed to load model state from checkpoint; attempting full-model replacement if available")
+                        # If a full-model object was saved, try to replace the registered model
+                        try:
+                            full_obj = ckpt_dict.get(_CheckpointDictKeys.MODEL_FULL, None)
+                            # If bytes were stored, attempt to deserialize (cloudpickle preferred)
+                            if isinstance(full_obj, (bytes, bytearray)):
+                                try:
+                                    if dill is not None:
+                                        full_obj = dill.loads(full_obj)
+                                    else:
+                                        full_obj = pickle.loads(full_obj)
+                                except Exception:
+                                    try:
+                                        full_obj = pickle.loads(full_obj)
+                                    except Exception:
+                                        full_obj = None
 
-        experiment.reset_data_iterators()
+                            if full_obj is not None:
+                                # Determine target ledger name: prefer provided model_name, else use sole registered model
+                                target_name = model_name
+                                if target_name is None:
+                                    try:
+                                        models = list_models()
+                                        if len(models) == 1:
+                                            target_name = models[0]
+                                    except Exception:
+                                        target_name = None
+
+                                if target_name is not None:
+                                    try:
+                                        register_model(target_name, full_obj)
+                                        _logger.info("Replaced ledger model '%s' with full-model from checkpoint", target_name)
+                                    except Exception:
+                                        _logger.exception("Failed to register full-model into ledger")
+                                else:
+                                    _logger.warning("No target model name available to register full-model from checkpoint")
+                        except Exception:
+                            _logger.exception("Unexpected error while attempting full-model replacement")
+        except Exception:
+            pass
+
+        # Apply optimizer state if possible
+        try:
+            optim = None
+            try:
+                optim = get_optimizer(optimizer_name)
+            except Exception:
+                optim = None
+
+            if optim is not None and ckpt_dict.get(_CheckpointDictKeys.OPTIM) is not None:
+                try:
+                    optim.load_state_dict(ckpt_dict[_CheckpointDictKeys.OPTIM])
+                except Exception:
+                    _logger.exception("Failed to load optimizer state from checkpoint")
+        except Exception:
+            pass
+
+        # Restore dataset states
+        try:
+            tr = None
+            try:
+                tr = get_dataloader(train_loader_name)
+            except Exception:
+                tr = None
+            if tr is not None and ckpt_dict.get(_CheckpointDictKeys.TDATA) is not None:
+                try:
+                    tr.dataset.load_state_dict(ckpt_dict[_CheckpointDictKeys.TDATA])
+                except Exception:
+                    _logger.exception("Failed to load train dataset state from checkpoint")
+        except Exception:
+            pass
+
+        try:
+            ev = None
+            try:
+                ev = get_dataloader(eval_loader_name)
+            except Exception:
+                ev = None
+            if ev is not None and ckpt_dict.get(_CheckpointDictKeys.EDATA) is not None:
+                try:
+                    ev.dataset.load_state_dict(ckpt_dict[_CheckpointDictKeys.EDATA])
+                except Exception:
+                    _logger.exception("Failed to load eval dataset state from checkpoint")
+        except Exception:
+            pass
+
+        # Update hyperparameters in ledger if requested
+        try:
+            hp_name = hyperparams_name
+            if hp_name is None:
+                names = list_hyperparams()
+                if 'main' in names:
+                    hp_name = 'main'
+                elif 'experiment' in names:
+                    hp_name = 'experiment'
+                elif len(names) == 1:
+                    hp_name = names[0]
+
+            if hp_name is not None:
+                try:
+                    # set batch size and learning rate if present
+                    b = ckpt_dict.get(_CheckpointDictKeys.BSIZE, None)
+                    lr = ckpt_dict.get(_CheckpointDictKeys.LRATE, None)
+                    if b is not None:
+                        set_hyperparam(hp_name, 'batch_size', b)
+                    if lr is not None:
+                        set_hyperparam(hp_name, 'learning_rate', lr)
+                except Exception:
+                    pass
+        except Exception:
+            pass

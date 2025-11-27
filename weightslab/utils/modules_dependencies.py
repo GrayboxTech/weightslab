@@ -1,8 +1,11 @@
 import collections
 import enum
+import logging
 
 import torch.nn as nn
 from typing import List, Set
+
+logger = logging.getLogger(__name__)
 
 
 class DepType(str, enum.Enum):
@@ -133,7 +136,7 @@ class _ModulesDependencyManager():
             isinstance(reverse_if_id_in, int) and
             reverse_if_id_in not in self.dependency_2_id_2_id[dep_type]
         ):
-            print('No dependencies found to reverse')
+            logger.warning('No dependencies found to reverse')
             return
 
         # Generte the reverse path from {0: [1, 2]} to {1: [0], 2: [0], 0: []}

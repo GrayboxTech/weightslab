@@ -1,15 +1,18 @@
+import yaml
 import types
 import inspect
+import logging
 import collections
 import torch as th
 import torch.nn as nn
 
 from copy import deepcopy
-from typing import Optional, List, Any, Type
-
+from typing import Optional, List, Any, Type, Callable, Dict
 from torch.fx import Node
 
-from weightslab.utils.logs import print
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------------
@@ -307,30 +310,26 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True)
             else:
                 if n != n_layers + layer_id:  # - -layer_id != + -layer_id
                     continue
-        print(f'Operate on neurons at layer {n}', level='DEBUG')
+        logger.debug(f'\nOperate on neurons at layer {n}')
         with model as m:
             if op is None:
-                print('Adding operation - 2 neurons added.',
-                      level='DEBUG')
-                m.operate(n, {0, 0, 0, 0, 0}, neuron_operation=1)
+                logger.debug('Adding operation - 5 neurons added.')
+                m.operate(n, {0, 0, 0, 0, 0}, op_type=1)
                 m(dummy_input) if dummy_input is not None else None
-                print('Reseting operation - every neurons reset.',
-                      level='DEBUG')
-                m.operate(n, {}, neuron_operation=4)
+                logger.debug('Reseting operation - every neurons reset.')
+                m.operate(n, {}, op_type=4)
                 m(dummy_input) if dummy_input is not None else None
-                print('Freezing operation - last neuron froze.',
-                      level='DEBUG')
-                m.operate(n, {-3}, neuron_operation=3)
+                logger.debug('Freezing operation - last neuron froze.')
+                m.operate(n, {-1}, op_type=3)
                 m(dummy_input) if dummy_input is not None else None
-                print('Pruning operation - first neuron removed.',
-                      level='DEBUG')
-                m.operate(n, {0, 1}, neuron_operation=2)
+                logger.debug('Pruning operation - first neuron removed.')
+                m.operate(n, {0, 1}, op_type=2)
                 m(dummy_input) if dummy_input is not None else NotImplemented
             else:
                 m.operate(
                     n,
                     {-1},
-                    neuron_operation=op
+                    op_type=op
                 )
                 m(dummy_input) if dummy_input is not None else None
 
@@ -414,9 +413,8 @@ def get_model_parameters_neuronwise(model: th.nn.Module, trainable_only=True):
 
     # Since all parameters in your model currently have requires_grad=True:
     # trainable_params will also equal 8,367,235
-    print(
-        f"{params} paraeters with {trainable_params} trainable parameters.",
-        level='DEBUG'
+    logger.debug(
+        f"{params} paraeters with {trainable_params} trainable parameters."
     )
 
     return (params, trainable_params) if not trainable_only else \
@@ -484,3 +482,49 @@ def reversing_indices(n_neurons, indices_set):
             ) <= -1
         }
     )[::-1]
+
+
+def validate_kwargs(f: Callable, kwargs: Dict[str, Any]):
+    """
+    Validates a dictionary of keyword arguments (kwargs) against the signature
+    of a target function (f).
+
+    If the function f accepts a variadic keyword argument (**kwargs),
+    validation is skipped for extraneous parameters.
+
+    Args:
+        f: The function whose signature is used for validation.
+        kwargs: The dictionary of keyword arguments to check.
+
+    """
+    # 1. Get the signature of the target function
+    signature = inspect.signature(f)
+
+    # 2. Extract the names of all expected parameters
+    # This set contains argument names (e.g., 'a', 'b', 'debug').
+    expected_params = set(signature.parameters.keys())
+
+    # 3. Check for the presence of **kwargs (VAR_KEYWORD)
+    # If the function accepts **kwargs, we allow any extra arguments.
+    accepts_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in signature.parameters.values()
+    )
+
+    return kwargs if accepts_var_kwargs else \
+        set(kwargs.keys()) - expected_params
+
+
+def load_config_from_yaml(filepath: str) -> Dict:
+    """Loads configuration data from a YAML file."""
+    try:
+        with open(filepath, 'r') as f:
+            config_data = yaml.safe_load(f)
+        logger.info(f"Successfully loaded configuration from {filepath}")
+        return config_data
+    except FileNotFoundError:
+        logger.error(f"Error: YAML file not found at {filepath}. Using default parameters.")
+        return {}
+    except yaml.YAMLError as e:
+        logger.error(f"Error loading YAML file: {e}. Using default parameters.")
+        return {}

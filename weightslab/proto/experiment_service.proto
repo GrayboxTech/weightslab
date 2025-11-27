@@ -1,0 +1,252 @@
+syntax = "proto3";
+
+
+service ExperimentService {
+  rpc StreamStatus (Empty) returns (stream TrainingStatusEx);
+
+  rpc ExperimentCommand (TrainerCommand) returns (CommandResponse);
+
+  rpc ManipulateWeights(WeightsOperationRequest) returns (WeightsOperationResponse);
+
+  rpc GetWeights(WeightsRequest) returns (WeightsResponse);
+
+  rpc GetSamples (BatchSampleRequest) returns (BatchSampleResponse);
+
+  rpc GetActivations (ActivationRequest) returns (ActivationResponse);
+}
+
+
+message Empty {}
+
+message NeuronId {
+  int32 layer_id = 1;
+  int32 neuron_id = 2;
+}
+
+enum WeightOperationType {
+  ZEROFY = 0;
+  REINITIALIZE = 1;
+  FREEZE = 2;
+  REMOVE_NEURONS = 9;
+  ADD_NEURONS = 10;
+}
+
+enum ZerofyPredicate {
+  ZEROFY_PREDICATE_NONE = 0;
+  ZEROFY_PREDICATE_WITH_FROZEN = 1; 
+  ZEROFY_PREDICATE_WITH_OLDER  = 2; 
+}
+
+message WeightOperation {
+  optional WeightOperationType op_type = 1;
+  optional int32 layer_id = 2;
+  repeated NeuronId neuron_ids = 3;
+
+  int32 neurons_to_add = 9;
+
+  repeated int32 zerofy_from_incoming_ids = 11;
+  repeated int32 zerofy_to_neuron_ids = 12;
+  repeated ZerofyPredicate zerofy_predicates = 13;
+}
+
+message WeightsOperationRequest {
+  optional WeightOperation weight_operation = 1;
+}
+
+message WeightsOperationResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message HyperParameters {
+  optional string experiment_name = 1;
+  optional int32 training_steps_to_do = 2;
+  optional float learning_rate = 3;
+  optional int32 batch_size = 4;
+  optional int32 full_eval_frequency = 5;
+  optional int32 checkpont_frequency = 6;
+  optional bool is_training = 7;
+}
+
+message MetricsStatus {
+  string name = 1;
+  float value = 2;
+}
+
+message AnnotatStatus {
+  string name = 1;
+  map<string, float> metadata = 2;
+}
+
+message TrainingStatusEx {
+  optional string timestamp = 1;
+  optional string experiment_name = 2;
+  optional int32 model_age = 3;
+
+  optional MetricsStatus metrics_status = 4;
+  optional AnnotatStatus annotat_status = 5;
+}
+
+message HyperParameterCommand {
+  optional HyperParameters hyper_parameters = 1;
+}
+
+message DenySamplesOperation {
+  repeated int32 sample_ids = 1;
+  bool accumulate = 2;
+}
+
+message LoadCheckpointOperation {
+  int32 checkpoint_id = 1;
+}
+
+message TrainerCommand {
+  bool get_hyper_parameters = 4;
+  bool get_interactive_layers = 5;
+  optional string get_data_records = 6;
+  optional int32 get_single_layer_info_id = 8;
+  optional HyperParameterCommand hyper_parameter_change = 1;
+  optional DenySamplesOperation deny_samples_operation = 7;
+  optional DenySamplesOperation deny_eval_samples_operation = 10;
+  optional LoadCheckpointOperation load_checkpoint_operation = 9;
+  optional DenySamplesOperation remove_from_denylist_operation = 11;
+  optional DenySamplesOperation remove_eval_from_denylist_operation = 12;
+}
+
+message HyperParameterDesc {
+  string label = 1;
+  string name = 2;
+  string type = 3;
+  optional float numerical_value = 4;
+  optional string string_value = 5;
+}
+
+message NeuronStatistics {
+  optional NeuronId neuron_id = 1;
+  optional int32 neuron_age = 2;
+  optional float train_trigger_rate = 3;
+  optional float eval_trigger_rate = 4;
+
+  optional float learning_rate = 7;
+  map<int32, float> incoming_lr = 8;
+}
+
+message LayerRepresentation {
+  optional int32 layer_id = 1;
+  optional string layer_name = 2;
+  optional string layer_type = 3;
+  
+  optional int32 neurons_count = 4;
+  optional int32 incoming_neurons_count = 5;
+  
+  optional int32 kernel_size = 6;
+  optional int32 stride = 7;
+
+  repeated NeuronStatistics neurons_statistics = 10;
+}
+
+message ActivationRequest {
+  int32 layer_id = 1;
+  int32 sample_id = 2;   
+  string origin = 3;
+}
+
+message ActivationMap {
+  int32 neuron_id = 1;
+  repeated float values = 2; 
+  int32 H = 3;
+  int32 W = 4;               
+}
+
+message ActivationResponse {
+  string layer_type = 1;
+  int32 neurons_count = 2;
+  repeated ActivationMap activations = 3;
+}
+
+message TaskField {
+  string name = 1;
+  oneof value {
+    float float_value = 2;
+    int32 int_value = 3;
+    string string_value = 4;
+    bytes bytes_value = 5;
+    bool bool_value = 6;
+  }
+}
+
+message RecordMetadata {
+  int32 sample_id = 1;
+  repeated int32 sample_label = 2;
+  repeated int32 sample_prediction = 3;
+  float sample_last_loss = 4;
+  int32 sample_encounters = 5;
+  bool sample_discarded = 6;
+  repeated TaskField extra_fields = 7;
+  bytes prediction_raw = 9;
+  string task_type = 10;   
+}
+
+message SampleStatistics {
+  optional string origin = 6;
+  optional int32 sample_count = 7;
+
+  string task_type = 9;
+
+  repeated RecordMetadata records = 8;  
+}
+
+message CommandResponse {
+  bool success = 1;
+  string message = 2;
+
+  repeated HyperParameterDesc hyper_parameters_descs = 3;
+  repeated LayerRepresentation layer_representations = 4;
+  optional SampleStatistics sample_statistics = 5;
+}
+
+message SampleRequest {
+  optional int32 sample_id = 1;
+  optional string origin = 2;
+}
+
+message SampleRequestResponse {
+  optional int32 sample_id = 1;
+  optional string origin = 2;
+  optional int32 label = 3;
+  optional bytes data = 4;
+  optional string error_message = 5;
+  optional bytes raw_data = 6; 
+  optional bytes mask = 7;       
+  optional bytes prediction = 8;
+}
+
+message BatchSampleRequest {
+  repeated int32 sample_ids = 1;
+  string origin = 2;
+  optional int32 resize_width = 3;
+  optional int32 resize_height = 4;
+}
+
+message BatchSampleResponse {
+  repeated SampleRequestResponse samples = 1;
+}
+
+message WeightsRequest {
+  NeuronId neuron_id = 1;
+}
+
+message WeightsResponse {
+  NeuronId neuron_id = 1;
+  optional string layer_name = 2;
+  optional string layer_type = 3;
+
+  int32 incoming = 4;
+  int32 outgoing = 5;
+  optional int32 kernel_size = 6;
+
+  repeated float weights = 7;
+
+  bool success = 11;
+  optional string error_message = 12;
+}

@@ -1,70 +1,20 @@
-import os
-import sys
 import time
-import inspect
 import warnings; warnings.filterwarnings("ignore")
 import unittest
 import traceback
 import torch as th
-import importlib.util
-import torch.nn as nn
-
-from typing import Type
 
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
-from weightslab.backend.watcher_editor import WatcherEditor
+from weightslab.backend.model_interface import ModelInterface
 from weightslab.utils.tools import model_op_neurons, \
     get_model_parameters_neuronwise
 from weightslab.utils.logs import print
+from weightslab.baseline_models.pytorch.models import ALL_MODEL_CLASSES
 
 
 # Set Global Default Settings
 DEVICE = 'cpu' if not th.cuda.is_available() else 'cuda'
 th.manual_seed(42)  # Set SEED
-
-
-# 1. Utility function to dynamically find model classes (from previous answer)
-def get_th_model_classes(file_path: str) -> list[Type[nn.Module]]:
-    # ... (Implementation of get_th_model_classes) ...
-    module_name = os.path.splitext(os.path.basename(file_path))[0]
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None:
-        raise FileNotFoundError(f"Could not find module file at: {file_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    model_classes = []
-
-    for _, obj in inspect.getmembers(module):
-        if inspect.isclass(obj):
-            if issubclass(obj, nn.Module) and obj is not nn.Module and \
-                    obj.__module__ == module_name:
-                model_classes.append(obj)
-
-    return model_classes
-
-
-# 2. Define the path to your file containing the models
-MODEL_FILE_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "torch_models.py"
-)
-
-# 3. Get the list of all model classes to parametrize the test
-try:
-    ALL_MODEL_CLASSES = get_th_model_classes(MODEL_FILE_PATH)
-except FileNotFoundError:
-    print(f"Could not find model file at: {MODEL_FILE_PATH}", level='ERROR')
-except Exception as e:
-    print(f"Error loading models from file: {e}", level='ERROR')
-
-# If no models are found, you might want to skip or fail the test session
-if not ALL_MODEL_CLASSES:
-    print(
-        f"No th.nn.Module classes found in {MODEL_FILE_PATH}",
-        level='ERROR'
-    )
 
 
 # --- Test Class 1: Dynamic Inference and Shape Checks ---
@@ -93,7 +43,7 @@ def create_inference_test(ModelClass):
         for inference verification.
     """
 
-    def test_inference(self, model, dummy_input, op=None):
+    def _test_inference(self, model, dummy_input, op=None):
         # Infer
         try:
             with th.no_grad():
@@ -110,6 +60,78 @@ def create_inference_test(ModelClass):
             f"\nOperation was {op}"
             ) if self is not None else None
 
+    def _check_model_architecture_neurons_consistency(self, model, debug=False):
+        """
+            For complicated models only (e.g., FCN50), check that the
+            architecture neurons are consistent throughout the model.
+            This layer (105) and its dependencies are the most complex as
+            it implies both recurrent batchnorms and init convs.
+        """
+        if not debug:
+            print = lambda x: None
+        n = 105
+        a = model.layers[90].out_neurons == model.layers[91].out_neurons == model.layers[91].in_neurons == model.layers[92].out_neurons == model.layers[93].out_neurons == model.layers[93].in_neurons == model.layers[98].out_neurons == model.layers[99].out_neurons == model.layers[99].in_neurons == model.layers[104].out_neurons == model.layers[105].out_neurons == model.layers[105].in_neurons == model.layers[106].in_neurons
+        
+        eq = True
+        print(f'Operate initially on layer {n}')
+        print(f'In/Out are good ?: {a}')
+
+        # Last
+        out_shapes = [(k, len(model.layers[106].dst_to_src_mapping_tnsrs[k])) for k in model.layers[106].dst_to_src_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(106:{eq}) Indexs maps are good ?: {out_shapes}')
+
+        # Rec BN
+        # src2dst 
+        print('\n')
+        out_shapes = [(k, len(model.layers[105].src_to_dst_mapping_tnsrs[k])) for k in model.layers[105].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(105:{eq}) src2dst Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[99].src_to_dst_mapping_tnsrs[k])) for k in model.layers[99].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(99:{eq}) src2dst Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[93].src_to_dst_mapping_tnsrs[k])) for k in model.layers[93].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(93:{eq}) src2dst Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[91].src_to_dst_mapping_tnsrs[k])) for k in model.layers[91].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(91:{eq}) src2dst Indexs maps are good ?: {out_shapes}')
+        # dst2src 
+        print('\n')
+        out_shapes = [(k, len(model.layers[105].dst_to_src_mapping_tnsrs[k])) for k in model.layers[105].dst_to_src_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(105:{eq}) dst2src Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[99].dst_to_src_mapping_tnsrs[k])) for k in model.layers[99].dst_to_src_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(99:{eq}) dst2src Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[93].dst_to_src_mapping_tnsrs[k])) for k in model.layers[93].dst_to_src_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(93:{eq}) dst2src Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[91].dst_to_src_mapping_tnsrs[k])) for k in model.layers[91].dst_to_src_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(91:{eq}) dst2src Indexs maps are good ?: {out_shapes}')
+
+        # Init CN
+        print('\n')
+        out_shapes = [(k, len(model.layers[104].src_to_dst_mapping_tnsrs[k])) for k in model.layers[104].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(104:{eq}) Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[98].src_to_dst_mapping_tnsrs[k])) for k in model.layers[98].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(98:{eq}) Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[92].src_to_dst_mapping_tnsrs[k])) for k in model.layers[92].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(92:{eq}) Indexs maps are good ?: {out_shapes}')
+        out_shapes = [(k, len(model.layers[90].src_to_dst_mapping_tnsrs[k])) for k in model.layers[90].src_to_dst_mapping_tnsrs]
+        eq &= len(set([i[1] for i in out_shapes]))==1
+        print(f'(90:{eq}) Indexs maps are good ?: {out_shapes}')
+
+        # Assert all good
+        self.assertTrue(
+            eq,
+            f"Model architecture neurons consistency check failed."
+        )
+
     def model_test(self):
         # --- Setup ---
         # # Initialize model
@@ -117,7 +139,7 @@ def create_inference_test(ModelClass):
         # # Create dummy input tensor
         dummy_input = th.randn(model.input_shape).to(DEVICE)
         # # Interface the model
-        model = WatcherEditor(
+        model = ModelInterface(
             model,
             dummy_input=dummy_input,
             print_graph=False
@@ -125,22 +147,22 @@ def create_inference_test(ModelClass):
         model.to(DEVICE)
         model.eval()
         model_name = ModelClass.__name__
+        layer_id = len(model.layers) // 2  # Middle layer
         print(f"\n--- Running Inference Test: {model_name} ---")
 
         # --- Forward Pass Testing ---
-        test_inference(self, model, dummy_input)
+        _test_inference(self, model, dummy_input)
 
         # --- Model Edition Testing ---
         # #############################
         # ########### ADD #############
         # #############################
         op = ArchitectureNeuronsOpType.ADD
-        layer_id = len(model.layers) // 2
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
         model_op_neurons(model, layer_id=layer_id, op=op, rand=False)
-        test_inference(self, model, dummy_input, op=op)
+        _test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
         self.assertGreater(
@@ -154,12 +176,11 @@ def create_inference_test(ModelClass):
         # ######### PRUNE #############
         # #############################
         op = ArchitectureNeuronsOpType.PRUNE
-        layer_id = len(model.layers) // 2
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
         model_op_neurons(model, layer_id=layer_id, op=op, rand=False)
-        test_inference(self, model, dummy_input, op=op)
+        _test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
         self.assertLess(
@@ -173,12 +194,11 @@ def create_inference_test(ModelClass):
         # ######### RESET #############
         # #############################
         op = ArchitectureNeuronsOpType.RESET
-        layer_id = len(model.layers) // 2
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
         model_op_neurons(model, layer_id=layer_id, op=op, rand=False)
-        test_inference(self, model, dummy_input, op=op)
+        _test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
         self.assertEqual(
@@ -195,17 +215,13 @@ def create_inference_test(ModelClass):
         initial_nb_trainable_parameters = get_model_parameters_neuronwise(
             model
         )
-        model_op_neurons(model, layer_id=-1, op=op)
-        test_inference(self, model, dummy_input, op=op)
+        model_op_neurons(model, layer_id=layer_id, op=op)
+        _test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
-        self.assertIn(
+        self.assertLess(
             nb_trainable_parameters,
-            range(
-                initial_nb_trainable_parameters,
-                initial_nb_trainable_parameters-20,
-                -1
-            ),
+            initial_nb_trainable_parameters,
             f"Neurons operation {op}: Wrong behavior with" +
             f"initially {initial_nb_trainable_parameters} trainable" +
             f" parameters, and now {nb_trainable_parameters}."
@@ -214,8 +230,8 @@ def create_inference_test(ModelClass):
         # #############################
         # ####### UNFROZEN ############
         # #############################
-        model_op_neurons(model, layer_id=-1, op=op)
-        test_inference(self, model, dummy_input, op=op)
+        model_op_neurons(model, layer_id=layer_id, op=op)
+        _test_inference(self, model, dummy_input, op=op)
         # # Check nb trainable parameters (which should be greater)
         nb_trainable_parameters = get_model_parameters_neuronwise(model)
         self.assertEqual(
@@ -229,18 +245,24 @@ def create_inference_test(ModelClass):
         # #############################
         print('Performing model parameters operations..', level='DEBUG')
         model_op_neurons(model)
-        test_inference(self, model, dummy_input)
+        _test_inference(self, model, dummy_input)
 
+        # For one of the most complicated model, check IN OUT Neurons matching and indexing
+        # TODO (GP): Implement something more relevant than just FCN50 excl.
+        if ModelClass.__name__ == 'FCN50':
+            print('Performing second model parameters operations..', level='DEBUG')
+            _test_inference(self, model, dummy_input)
+            _check_model_architecture_neurons_consistency(model)  # Check architecture neurons consistency
+
+    # Set unique name for the test
     model_test.__name__ = f'test_{ModelClass.__name__}_inference_check'
 
     return model_test
 
 
 # Add dynamic tests to TestAllModelInference
-for ModelClass in ALL_MODEL_CLASSES:
-    if len(sys.argv) == 1 or len(sys.argv) >= 2 \
-            and sys.argv[1] != "" \
-            and sys.argv[1].lower() in ModelClass.__name__.lower():
+if ALL_MODEL_CLASSES and len(ALL_MODEL_CLASSES) > 0:
+    for ModelClass in ALL_MODEL_CLASSES:
         test_method = create_inference_test(ModelClass)
         setattr(TestAllModelInference, test_method.__name__, test_method)
 

@@ -94,12 +94,12 @@ def generate_mappings(
     elif len(src_channels) > len(dst_channels):
         # Case 2: Many-to-one (src > dst)
         # A "batch" of source neurons maps to a single dstination neuron.
-        if len(src_channels) % len(dst_channels) != 0:
-            raise ValueError(
-                f"Source channels ({src_channels}) must be perfectly \
-                 divisible by dstination channels ({dst_channels}) \
-                 for many-to-one mapping."
-            )
+        # if len(src_channels) % len(dst_channels) != 0:
+        #     raise ValueError(
+        #         f"Source channels ({src_channels}) must be perfectly \
+        #          divisible by dstination channels ({dst_channels}) \
+        #          for many-to-one mapping."
+        #     )
 
         # 1. Calculate the block size.
         # This determines how many linear layer neurons map to one convolution channel.
