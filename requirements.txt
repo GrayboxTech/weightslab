@@ -16,4 +16,7 @@ numpy==1.24.1
 sympy==1.12.1
 tqdm==4.66.4
 typing_extensions==4.12.2
-tqdm==4.66.4
+grpcio==1.76.0
+grpcio-tools==1.76.0
+protobuf==5.29.1
+pyyaml

@@ -1,7 +1,7 @@
 # Configuration for mnist training example
 # Every parameter wrote at level 0 has as parent experiment_name
 device: cpu
-root_log_dir: "/tmp/weightslab_mnist"  # Changed from hardcoded Windows path
+root_log_dir: "/tmp/weightslab_mnist"
 tqdm_display: true
 skip_loading: true
 eval_steps: 50
