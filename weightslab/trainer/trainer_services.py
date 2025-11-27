@@ -740,67 +740,96 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             train_dataset = getattr(train_loader, 'dataset', train_loader)
             test_dataset = getattr(test_loader, 'dataset', test_loader)
                         
-            def _dataset_to_df(dataset, origin):
+            def _dataset_to_df(dataset_or_loader, origin):
                 """
                 Convert a torch/torchvision dataset into a pandas DataFrame that the UI can consume.
-                The DataFrame will contain:
-                    - sample_id (int)
-                    - label      (int)
-                    - image      (np.ndarray)   <-- pixel data, shape (28,28) for MNIST
-                    - origin     (str)
                 """
-                # Fast path for torchvision MNIST‑like datasets that expose .data and .targets
-                if hasattr(dataset, "data") and hasattr(dataset, "targets"):
-                    # `dataset.data` is a torch Tensor of shape (N, 28, 28)
-                    # `dataset.targets` is a torch Tensor of shape (N,)
-                    images = dataset.data.numpy()          # shape (N, 28, 28)
-                    labels = dataset.targets.numpy()       # shape (N,)
-                    records = [
-                        {
-                            "sample_id": i,
-                            "label": int(labels[i]),
-                            "image": images[i],   # keep as NumPy array – protobuf conversion will flatten it
-                            "origin": origin,
-                        }
-                        for i in range(len(dataset))
-                    ]
-                else:
-                    # Generic fallback – iterate over the dataset items
-                    records = []
-                    for i in range(len(dataset)):
+                # 1. Identify the raw dataset (for images) and the wrapper (for stats)
+                raw_ds = dataset_or_loader
+                # Unwrap to find the underlying data source for images
+                while True:
+                    if hasattr(raw_ds, 'wrapped_dataset'):
+                        raw_ds = raw_ds.wrapped_dataset
+                    elif hasattr(raw_ds, 'dataset'):
+                        raw_ds = raw_ds.dataset
+                    else:
+                        break
+                
+                # 2. Extract basic data (images, labels) from the raw dataset
+                # We use the raw dataset to ensure we get ALL samples, not just the currently active ones
+                records = []
+                
+                # Fast path for torchvision MNIST-like datasets
+                if hasattr(raw_ds, "data") and hasattr(raw_ds, "targets"):
+                    try:
+                        images = raw_ds.data.numpy()
+                        labels = raw_ds.targets.numpy()
+                        records = [
+                            {
+                                "sample_id": i,
+                                "label": int(labels[i]),
+                                "image": images[i],
+                                "origin": origin,
+                            }
+                            for i in range(len(raw_ds))
+                        ]
+                    except Exception as e:
+                        _LOGGER.warning(f"Fast path failed for {origin}: {e}")
+                
+                # Fallback if fast path failed or wasn't available
+                if not records:
+                    # Iterate over raw_ds to get all samples
+                    for i in range(len(raw_ds)):
                         try:
-                            item = dataset[i]               # usually (image, label)
+                            item = raw_ds[i]
                             if isinstance(item, (tuple, list)):
                                 img, lbl = item[0], item[-1]
                             else:
                                 img, lbl = item, None
-                            # Convert the image to a NumPy array (torch Tensor → np.ndarray)
+                            
                             if hasattr(img, "numpy"):
                                 img_arr = img.numpy()
                             else:
                                 img_arr = np.array(img)
-                            records.append(
-                                {
-                                    "sample_id": i,
-                                    "label": int(lbl) if lbl is not None else None,
-                                    "image": img_arr,
-                                    "origin": origin,
-                                }
-                            )
+                                
+                            records.append({
+                                "sample_id": i,
+                                "label": int(lbl) if lbl is not None else None,
+                                "image": img_arr,
+                                "origin": origin,
+                            })
                         except Exception as e:
                             _LOGGER.warning(f"Failed to convert sample {i}: {e}")
                             continue
 
                 df = pd.DataFrame(records)
+                
+                # 3. Merge dynamic stats from the wrapper (if available)
+                # Try the input object first (e.g. DataLoaderInterface), then fallback to raw_ds (unlikely to have stats but possible)
+                stats_source = dataset_or_loader
+                if hasattr(stats_source, 'as_records'):
+                    try:
+                        stats_records = stats_source.as_records()
+                        if stats_records:
+                            stats_df = pd.DataFrame(stats_records)
+                            # Ensure sample_id is int
+                            if 'sample_id' in stats_df.columns:
+                                stats_df['sample_id'] = stats_df['sample_id'].astype(int)
+                                
+                            # Merge stats into the main dataframe
+                            df = pd.merge(df, stats_df, on='sample_id', how='left', suffixes=('', '_stats'))
+                    except Exception as e:
+                        _LOGGER.warning(f"Failed to merge stats for {origin}: {e}")
+
                 return df
 
             
-            train_df = _dataset_to_df(train_dataset, 'train')
+            train_df = _dataset_to_df(train_loader, 'train')
             if not train_df.empty and 'image' in train_df.columns:
                 sample_img = train_df.iloc[0]['image']
                 _LOGGER.info(f"Train DF sample image shape: {sample_img.shape}, min: {sample_img.min()}, max: {sample_img.max()}, dtype: {sample_img.dtype}")
 
-            eval_df = _dataset_to_df(test_dataset, 'eval')
+            eval_df = _dataset_to_df(test_loader, 'eval')
             if not eval_df.empty and 'image' in eval_df.columns:
                 sample_img = eval_df.iloc[0]['image']
                 _LOGGER.info(f"Eval DF sample image shape: {sample_img.shape}, min: {sample_img.min()}, max: {sample_img.max()}, dtype: {sample_img.dtype}")
@@ -867,10 +896,73 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             )
         return None
     
+    def _refresh_data_stats(self):
+        """Refresh dynamic stats in the dataframe from underlying datasets."""
+        if self._all_datasets_df is None:
+            return
+
+        try:
+            dfs = []
+            
+            # Helper to get stats
+            def _get_stats(loader, origin):
+                if loader:
+                    recs = None
+                    # Try loader first (DataLoaderInterface)
+                    if hasattr(loader, 'as_records'):
+                        recs = loader.as_records()
+                    else:
+                        # Try dataset
+                        ds = getattr(loader, 'dataset', loader)
+                        if hasattr(ds, 'as_records'):
+                            recs = ds.as_records()
+                            
+                    if recs:
+                        df = pd.DataFrame(recs)
+                        df['origin'] = origin
+                        if 'sample_id' in df.columns:
+                            df['sample_id'] = df['sample_id'].astype(int)
+                        return df
+                return None
+
+            train_stats = _get_stats(self._components.get('train_loader'), 'train')
+            if train_stats is not None: dfs.append(train_stats)
+            
+            eval_stats = _get_stats(self._components.get('test_loader'), 'eval')
+            if eval_stats is not None: dfs.append(eval_stats)
+            
+            if not dfs:
+                return
+
+            all_stats = pd.concat(dfs, ignore_index=True)
+            if all_stats.empty:
+                return
+                
+            # Update self._all_datasets_df
+            # We use set_index to align rows by (origin, sample_id)
+            target_df = self._all_datasets_df.set_index(['origin', 'sample_id'])
+            source_df = all_stats.set_index(['origin', 'sample_id'])
+            
+            # Update existing columns and add new ones
+            for col in source_df.columns:
+                target_df[col] = source_df[col]
+            
+            self._all_datasets_df = target_df.reset_index()
+            
+            # Update agent's reference
+            if self._agent:
+                self._agent.df = self._all_datasets_df
+                
+        except Exception as e:
+            _LOGGER.warning(f"Failed to refresh data stats: {e}")
+
     def ApplyDataQuery(self, request, context):
         """Apply query to filter/sort/manipulate dataset."""
         if self._agent is None:
             self._initialize_data_service()
+        else:
+            self._refresh_data_stats()
+
         
         # If query is empty, just return current dataframe info
         if request.query == "":

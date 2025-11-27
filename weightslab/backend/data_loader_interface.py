@@ -124,12 +124,14 @@ class DataLoaderInterface:
         self._iterator = iter(self.dataloader)
     
     def as_records(self, limit: int = -1):
-        """Return dataset records via the underlying dataset's `as_records()`
+        """Return dataset records via the tracked dataset's `as_records()`
         method if available.
 
         Args:
             limit: optional limit on records passed to underlying implementation.
         """
+        if hasattr(self.tracked_dataset, "as_records"):
+            return self.tracked_dataset.as_records(limit)
         if hasattr(self.dataset, "as_records"):
             return self.dataset.as_records(limit)
         raise AttributeError(
