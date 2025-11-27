@@ -1,3 +1,5 @@
+import time
+import logging
 import numpy as np
 import torch as th
 
@@ -11,12 +13,16 @@ from weightslab.utils.modules_dependencies import _ModulesDependencyManager, \
     DepType
 
 
+logger = logging.getLogger(__name__)
+
+
 class NetworkWithOps(nn.Module):
     def __init__(self):
         super(NetworkWithOps, self).__init__()
 
         # Initialize variables
         self.seen_samples = 0
+        self.seen_batched_samples = 0
         self.visited_nodes = set()  # Memory trace of explored nodes
         self.name = self._get_name()  # Name of the model
         self.linearized_layers = []
@@ -84,6 +90,9 @@ class NetworkWithOps(nn.Module):
     def get_age(self):
         return self.seen_samples
 
+    def get_batched_age(self):
+        return self.seen_batched_samples
+     
     def get_name(self):
         return self.name
 
@@ -135,12 +144,82 @@ class NetworkWithOps(nn.Module):
         if not hasattr(tracked_input, 'batch_size'):
             setattr(tracked_input, 'batch_size', tracked_input.shape[0])
         self.seen_samples += tracked_input.batch_size
-
+        self.seen_batched_samples += 1
+        
+        # If an instance provides an auto-dump hook (e.g., ModelInterface), call it.
+        try:
+            hook = getattr(self, '_maybe_auto_dump', None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
     def operate(
         self,
         layer_id: int,
         neuron_indices: Set[int] | int = {},
-        neuron_operation: Enum = None,
+        op_type: Enum = None,
+        current_child_name: Optional[str] = None,
+        skip_initialization: bool = False,
+        _suppress_incoming_ids: Optional[Set[int]] = set(),
+        _suppress_rec_ids: Optional[Set[int]] = set(),
+        _suppress_same_ids: Optional[Set[int]] = set(),
+        dependency: Optional[Callable] = None,
+        **kwargs
+    ):
+        """
+        Wrapper function for _operate to reset visited nodes memory.
+
+        :param layer_id: [description]
+        :type layer_id: int
+        :param neuron_indices: [description]
+        :type neuron_indices: int
+        :type op_type: Operation TAG
+        :param skip_initialization: [description], defaults to False
+        :type skip_initialization: bool, optional
+        :param _suppress_incoming_ids: [description], defaults to None
+        :type _suppress_incoming_ids: Optional[Set[int]], optional
+        :param _suppress_same_ids: [description], defaults to None
+        :type _suppress_same_ids: Optional[Set[int]], optional
+        :param current_child_name: [description], defaults to None
+        :type current_child_name: Optional[str], optional
+        :param dependency: The type of in/out dependency, defaults to None
+        :type dependency: Optional[Callable], optional
+        :raises ValueError: [description]
+        """
+        # Reset visited nodes memory
+        self.visited_nodes = set()
+
+        # Call the recursive function
+        self._operate(
+            layer_id,
+            neuron_indices,
+            op_type,
+            current_child_name,
+            skip_initialization,
+            _suppress_incoming_ids,
+            _suppress_rec_ids,
+            _suppress_same_ids,
+            dependency,
+            **kwargs
+        )
+
+        # Final hooking after operation
+        for hook_fn in self._architecture_change_hook_fns:
+            hook_fn(self)
+        
+        # wait for all processes to sync
+        th.cuda.synchronize() if th.cuda.is_available() else None
+        time.sleep(0.5)  # small sleep to ensure all ops are done
+
+    def _operate(
+        self,
+        layer_id: int,
+        neuron_indices: Set[int] | int = {},
+        op_type: Enum = None,
         current_child_name: Optional[str] = None,
         skip_initialization: bool = False,
         _suppress_incoming_ids: Optional[Set[int]] = set(),
@@ -157,7 +236,7 @@ class NetworkWithOps(nn.Module):
         :type layer_id: int
         :param neuron_indices: [description]
         :type neuron_indices: int
-        :type neuron_operation: Operation TAG
+        :type op_type: Operation TAG
         :param skip_initialization: [description], defaults to False
         :type skip_initialization: bool, optional
         :param _suppress_incoming_ids: [description], defaults to None
@@ -170,15 +249,16 @@ class NetworkWithOps(nn.Module):
         :type dependency: Optional[Callable], optional
         :raises ValueError: [description]
         """
-
+        logger.debug(f'Operate currently on neurons: {neuron_indices} ' +
+              f'of layer id: {layer_id} with op_type: {op_type}')
         # Sanity check to see if layer exists
         if not isinstance(layer_id, int):
             raise ValueError(
                 f"[NetworkWithOps.operate] Layer_id ({layer_id}) is not int.")
-        if neuron_operation is None:
+        if op_type is None:
             raise ValueError(
                 f"[NetworkWithOps.operate] Neuron operation " + 
-                f"{neuron_operation} has not been defined.")
+                f"{op_type} has not been defined.")
         
         # Convert to index from back
         layer_id = self._reverse_indexing(layer_id, len(self.layers))
@@ -211,10 +291,10 @@ class NetworkWithOps(nn.Module):
 
             # Operate on the dependent layer
             kwargs['current_child_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 rec_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
@@ -232,10 +312,10 @@ class NetworkWithOps(nn.Module):
 
             # Operate on the dependent layer
             kwargs['current_parent_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 rec_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_same_ids=_suppress_same_ids,
@@ -258,10 +338,10 @@ class NetworkWithOps(nn.Module):
 
             # Operate on the dependent layer
             kwargs['current_child_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 same_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
@@ -279,10 +359,10 @@ class NetworkWithOps(nn.Module):
 
             # Operate on the dependent layer
             kwargs['current_parent_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 same_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
@@ -319,7 +399,7 @@ class NetworkWithOps(nn.Module):
             incoming_module.operate(
                 neuron_indices=neuron_indices,
                 is_incoming=True,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=False,
                 dependency=DepType.INCOMING,
                 **kwargs
@@ -345,7 +425,7 @@ class NetworkWithOps(nn.Module):
             if incoming_module is not None else current_child_name
         module.operate(
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 dependency=dependency,
                 **kwargs
@@ -379,19 +459,16 @@ class NetworkWithOps(nn.Module):
 
                     # Operate
                     kwargs['current_parent_name'] = module.get_name_wi_id()
-                    self.operate(
+                    self._operate(
                         producer_id,
                         neuron_indices=delta,
                         skip_initialization=True,
-                        neuron_operation=neuron_operation,
+                        op_type=op_type,
                         _suppress_incoming_ids={child_id},
                         dependency=DepType.INCOMING,
                         **kwargs
                     )
 
-        # Hooking
-        for hook_fn in self._architecture_change_hook_fns:
-            hook_fn(self)
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         state = super().state_dict(destination, prefix, keep_vars)
@@ -409,7 +486,7 @@ class NetworkWithOps(nn.Module):
             missing_keys, unexpected_keys, error_msgs)
 
     def load_state_dict(
-            self, state_dict, strict, assign, **kwargs):
+            self, state_dict, strict, assign=True, **kwargs):
         self.seen_samples = state_dict['seen_samples']
         self.tracking_mode = state_dict['tracking_mode']
         super().load_state_dict(

@@ -1,0 +1,67 @@
+# MNIST training configuration (example)
+# Top-level keys describe runtime environment and experiment settings.
+
+# Device to run training on: 'cpu' or 'cuda'
+device: cuda
+
+# Root directory where logs, checkpoints and other artifacts are stored.
+# Use a platform-appropriate path. If unset, a default under the current
+# working directory will be used.
+root_log_dir: "C:\\Users\\GUILLA~1\\Desktop\\trash\\tmpx71e1085"
+
+# Whether to show tqdm progress bars during training/evaluation.
+tqdm_display: true
+
+# When true, skip loading pre-existing checkpoints at start-up (useful for
+# fresh runs or debugging).
+skip_loading: true
+
+# Number of train steps between evaluation runs (or evaluation scheduling
+# parameter used by the example script). Smaller values => more frequent evals.
+eval_steps: 50
+
+
+# ----- Experiment identity and scheduling -----
+
+# Human-readable name for the experiment. Also used as a key in the ledger
+# when registering hyperparameters and artifacts.
+experiment_name: Exp_CNN_Test
+
+# Total number of training steps to perform (approx). Training loops may
+# check this to decide when to stop.
+training_steps_to_do: 20000
+
+# Ratio used to compute how often a full evaluation run occurs relative to
+# training steps (example: eval every `training_steps / eval_full_to_train_steps_ratio`).
+eval_full_to_train_steps_ratio: 555
+
+# How often to dump checkpoints relative to training steps. Larger values
+# reduce checkpoint frequency.
+experiment_dump_to_train_steps_ratio: 67
+
+# Whether to skip loading the latest checkpoint at initialization.
+skip_checkpoint_load: false
+
+
+# ----- Data configuration -----
+# Configure datasets and dataloaders. Each dataset entry maps to fields that
+# the data loader interface recognizes (shuffle, batch_size, drop_last, ...)
+data:
+  train_loader:
+    # Shuffle training data each epoch for stochasticity
+    train_shuffle: true
+    # Number of samples per batch for training
+    batch_size: 256
+  test_loader:
+    # Do not shuffle evaluation dataset
+    test_shuffle: false
+    # Batch size used during evaluation
+    batch_size: 256
+    # Whether to drop the last incomplete batch during evaluation
+    drop_last: false
+
+
+# ----- Optimizer / training hyperparameters -----
+optimizer:
+  # Learning rate used by the optimizer (example: SGD/Adam)
+  lr: 0.01

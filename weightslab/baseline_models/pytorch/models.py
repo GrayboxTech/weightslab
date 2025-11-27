@@ -5,15 +5,23 @@
     batch normalization, and max pooling that are useful to stress test
     our neuron operations.
 """
+import os
 import warnings; warnings.filterwarnings("ignore")
 import torch
+import inspect
+import logging
+import importlib
 import torch.nn as nn
-from typing import Callable
 import torchvision.models as models
 
+from typing import Callable, Type
 from torch.nn import functional as F
 
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
+
+
+# Define logger
+logger = logging.getLogger(__name__)
 
 
 # --- Basic CNN & MLP Models ---
@@ -1325,7 +1333,6 @@ class UNet(nn.Module):
         return torch.cat([skip, upsampled], dim=1)
 
 
-# TODO (GP): Not working now: indexing dict not updated from src edges for dst or inverse
 class UNet3p(nn.Module):
     """
     UNet 3+ Architecture for Semantic Segmentation.
@@ -1638,8 +1645,13 @@ class UNet3D(nn.Module):
         return logits
 
 
+# Get the list of all model classes to parametrize the test
+ALL_MODEL_CLASSES = [
+    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, TinyUNet_Straightforward, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
+]
+
 if __name__ == "__main__":
-    from weightslab.backend.watcher_editor import ModelInterface
+    from weightslab.backend.model_interface import ModelInterface
     from weightslab.utils.logs import print, setup_logging
 
     # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
@@ -1833,18 +1845,18 @@ if __name__ == "__main__":
     # model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
     # model_op_neurons(model, op=)
     with model as m:
-        m.operate(1, {-1}, neuron_operation=1)
+        m.operate(1, {-1}, op_type=1)
     model(dummy_input)  # Inference test
     with model as m:
-        m.operate(1, {-14, -2}, neuron_operation=2)
+        m.operate(1, {-14, -2}, op_type=2)
     model(dummy_input)  # Inference test
     with model as m:
-        m.operate(1, {-14, -2}, neuron_operation=3)
+        m.operate(1, {-14, -2}, op_type=3)
     model(dummy_input)  # Inference test
     with model as m:
-        m.operate(1, {-14, -2}, neuron_operation=4)
+        m.operate(1, {-14, -2}, op_type=4)
     model(dummy_input)  # Inference test
-    # with model as m:
-    #     m.operate(3, {-1}, neuron_operation=1)
-    # model(dummy_input)  # Inference test
+    with model as m:
+        m.operate(3, {-1}, op_type=1)
+    model(dummy_input)  # Inference test
     print(f'Inference test of the modified model is:\n{model(dummy_input)}')

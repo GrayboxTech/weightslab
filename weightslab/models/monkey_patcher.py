@@ -1,12 +1,16 @@
 import types
+import logging
 import torch.nn as nn
 
 from weightslab.modules.modules_with_ops import \
     NeuronWiseOperations, LayerWiseOperations
-from weightslab.utils.logs import print
 from weightslab.utils.tools import \
     what_layer_type, extract_in_out_params, \
     get_module_device, rename_with_ops
+
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 def monkey_patch_modules(module: nn.Module):
@@ -55,8 +59,8 @@ def monkey_patch_modules(module: nn.Module):
             super_out_name=out_name
         )
     except Exception as e:
-        print(f'Exception raised during custom init for"\
-               f"{module.__class__.__name__}: {e}', level='ERROR')
+        logger.error(f'Exception raised during custom init for"\
+               f"{module.__class__.__name__}: {e}')
         pass
 
     # --- Step 3: Update module name with "with_ops" suffix

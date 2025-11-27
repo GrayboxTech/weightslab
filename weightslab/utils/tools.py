@@ -1,15 +1,18 @@
+import yaml
 import types
 import inspect
+import logging
 import collections
 import torch as th
 import torch.nn as nn
 
 from copy import deepcopy
 from typing import Optional, List, Any, Type, Callable, Dict
-
 from torch.fx import Node
 
-from weightslab.utils.logs import print
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------------
@@ -307,30 +310,26 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True)
             else:
                 if n != n_layers + layer_id:  # - -layer_id != + -layer_id
                     continue
-        print(f'Operate on neurons at layer {n}', level='DEBUG')
+        logger.debug(f'\nOperate on neurons at layer {n}')
         with model as m:
             if op is None:
-                print('Adding operation - 2 neurons added.',
-                      level='DEBUG')
-                m.operate(n, {0, 0, 0, 0, 0}, neuron_operation=1)
+                logger.debug('Adding operation - 5 neurons added.')
+                m.operate(n, {0, 0, 0, 0, 0}, op_type=1)
                 m(dummy_input) if dummy_input is not None else None
-                print('Reseting operation - every neurons reset.',
-                      level='DEBUG')
-                m.operate(n, {}, neuron_operation=4)
+                logger.debug('Reseting operation - every neurons reset.')
+                m.operate(n, {}, op_type=4)
                 m(dummy_input) if dummy_input is not None else None
-                print('Freezing operation - last neuron froze.',
-                      level='DEBUG')
-                m.operate(n, {-3}, neuron_operation=3)
+                logger.debug('Freezing operation - last neuron froze.')
+                m.operate(n, {-1}, op_type=3)
                 m(dummy_input) if dummy_input is not None else None
-                print('Pruning operation - first neuron removed.',
-                      level='DEBUG')
-                m.operate(n, {0, 1}, neuron_operation=2)
+                logger.debug('Pruning operation - first neuron removed.')
+                m.operate(n, {0, 1}, op_type=2)
                 m(dummy_input) if dummy_input is not None else NotImplemented
             else:
                 m.operate(
                     n,
                     {-1},
-                    neuron_operation=op
+                    op_type=op
                 )
                 m(dummy_input) if dummy_input is not None else None
 
@@ -414,9 +413,8 @@ def get_model_parameters_neuronwise(model: th.nn.Module, trainable_only=True):
 
     # Since all parameters in your model currently have requires_grad=True:
     # trainable_params will also equal 8,367,235
-    print(
-        f"{params} paraeters with {trainable_params} trainable parameters.",
-        level='DEBUG'
+    logger.debug(
+        f"{params} paraeters with {trainable_params} trainable parameters."
     )
 
     return (params, trainable_params) if not trainable_only else \
@@ -522,55 +520,11 @@ def load_config_from_yaml(filepath: str) -> Dict:
     try:
         with open(filepath, 'r') as f:
             config_data = yaml.safe_load(f)
-        print(f"Successfully loaded configuration from {filepath}")
+        logger.info(f"Successfully loaded configuration from {filepath}")
         return config_data
     except FileNotFoundError:
-        print(f"Error: YAML file not found at {filepath}. Using default parameters.")
+        logger.error(f"Error: YAML file not found at {filepath}. Using default parameters.")
         return {}
     except yaml.YAMLError as e:
-        print(f"Error loading YAML file: {e}. Using default parameters.")
+        logger.error(f"Error loading YAML file: {e}. Using default parameters.")
         return {}
-
-
-def update_hyperparameters(global_hparams: Dict, config_data: Dict) -> None:
-    """
-    Recursively updates the 'value' field of HyperParam namedtuples 
-    in the global_hparams dictionary based on the nested config_data.
-    """
-
-    def recursive_update(hparams_dict, config_dict):
-        for key, config_value in config_dict.items():
-            if key in hparams_dict:
-                current_item = hparams_dict[key]
-
-                if isinstance(config_value, dict) and isinstance(current_item, dict):
-                    # Recurse for nested dictionaries (e.g., 'data' or 'train_dataset')
-                    recursive_update(current_item, config_value)
-                elif isinstance(current_item, HyperParam):
-                    # Found a HyperParam at the leaf node, update its 'value'
-
-                    # NOTE: Since namedtuple instances are immutable, we must 
-                    # create a new HyperParam instance with the updated value.
-
-                    # 1. Get existing attributes (data_type, default_value, etc.)
-                    existing_attrs = current_item._asdict()
-
-                    # 2. Convert the YAML value to the expected data_type if necessary
-                    # In this example, YAML often handles type conversion correctly, 
-                    # but explicit casting based on current_item.data_type is safer 
-                    # for real-world scenarios. We'll skip complex casting here 
-                    # as YAML's safe_load generally preserves basic types (int, float, bool).
-
-                    # 3. Create the new HyperParam instance with the new value
-                    new_hparam = current_item._replace(value=config_value)
-
-                    # 4. Replace the old instance in the dictionary
-                    hparams_dict[key] = new_hparam
-                    print(f"Updated '{key}' to: {config_value} (Type: {current_item.data_type})")
-                else:
-                    # Should not happen if structures are identical, but good for safety
-                    print(f"Warning: Key '{key}' structure mismatch. Skipping update.")
-
-    print("\n--- Starting Hyperparameter Update from YAML ---")
-    recursive_update(global_hparams, config_data)
-    print("--- Hyperparameter Update Complete ---")

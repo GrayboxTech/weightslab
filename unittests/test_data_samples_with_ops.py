@@ -76,7 +76,6 @@ class _TinyDummyDataset:
 
 _DUMMY_DATASET = DummyDataset()
 _TINY_DUMMY_DATASET = _TinyDummyDataset(n=6)
-_DUMMY_SEG_DATASET = DummySegmentationDataset()
 
 
 class DataSampleTrackingWrapperTest(unittest.TestCase):
@@ -86,8 +85,7 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
         # Init Variables
         self.stamp = time.time()
         self.wrapped_dataset = DataSampleTrackingWrapper(
-            _DUMMY_DATASET,
-            task_type="classification"
+            _DUMMY_DATASET
         )
         self.ids_and_losses_1 = (np.array([5, 0, 2]), np.array([0, 1.4, 2.34]))
         self.ids_and_losses_2 = (np.array([1, 4, 3]), np.array([0.4, 0.2, 0]))
@@ -312,76 +310,6 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
         self.assertEqual(len(self.wrapped_dataset), 40000)
 
 
-# class DataSampleTrackingWrapperTestSegmentation(unittest.TestCase):
-#     def setUp(self):
-#         self.ds = DataSampleTrackingWrapper(
-#             _DUMMY_SEG_DATASET, task_type="segmentation")
-#         self.losses_1 = np.array([0.8, 0.5])
-#         self.losses_2 = np.array([0.2, 0.4])
-#         # Simulated predictions: for 4 samples, predicted masks with all class 1 for simplicity
-#         self.preds_1 = [np.ones((4, 4), dtype=np.int64) for _ in range(2)]
-#         self.preds_2 = [np.zeros((4, 4), dtype=np.int64) for _ in range(2)]
-
-#     def test_no_denylisting(self):
-#         self.assertEqual(len(self.ds), 4)
-#         img, idx, mask = self.ds[1]
-#         self.assertTrue(np.allclose(img, 1.0))
-#         self.assertEqual(idx, 1)
-#         self.assertTrue(np.all(mask == 1))
-
-#     def test_update_batch_sample_stats_and_iou(self):
-#         # Update first 2 samples with predictions
-#         self.ds.update_batch_sample_stats(
-#             model_age=1,
-#             ids_batch=np.array([0, 1]),
-#             losses_batch=self.losses_1,
-#             predct_batch=np.array(self.preds_1)
-#         )
-#         # Update next 2 samples
-#         self.ds.update_batch_sample_stats(
-#             model_age=2,
-#             ids_batch=np.array([2, 3]),
-#             losses_batch=self.losses_2,
-#             predct_batch=np.array(self.preds_2)
-#         )
-#         # Should not crash, should return a dict with mean_iou
-#         result = self.ds.get_label_breakdown()
-#         self.assertIsInstance(result, dict)
-#         self.assertIn("mean_iou", result)
-#         if result["mean_iou"] is not None:
-#             self.assertGreaterEqual(result["mean_iou"], 0.0)
-#             self.assertLessEqual(result["mean_iou"], 1.0)
-#         else:
-#             # It's ok for mean_iou to be None if there's no overlap/non-bg class
-#             pass
-
-#     def test_denylist_and_allowlist(self):
-#         # Denylist last sample
-#         self.ds.denylist_samples({3})
-#         self.assertEqual(len(self.ds), 3)
-#         # Allowlist all again
-#         self.ds.allowlist_samples(None)
-#         self.assertEqual(len(self.ds), 4)
-#         # Denylist two, then allowlist one back
-#         self.ds.denylist_samples({1, 2})
-#         self.assertEqual(len(self.ds), 2)
-#         self.ds.allowlist_samples({2})
-#         self.assertEqual(len(self.ds), 3)
-
-#     def test_store_and_load_with_stats(self):
-#         # Update stats
-#         self.ds.update_batch_sample_stats(
-#             1, np.array([0, 1]), self.losses_1, np.array(self.preds_1)
-#         )
-#         self.ds.update_batch_sample_stats(
-#             2, np.array([2, 3]), self.losses_2, np.array(self.preds_2)
-#         )
-#         # Save and reload
-#         ds2 = DataSampleTrackingWrapper(_DUMMY_SEG_DATASET, task_type="segmentation")
-#         ds2.load_state_dict(self.ds.state_dict())
-#         self.assertEqual(self.ds, ds2)
-
-
 class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
     def setUp(self):
         print(f"\n--- Start {self._testMethodName} ---\n")
@@ -389,7 +317,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         # Init Variables
         self.stamp = time.time()
         self.base_ds = _TINY_DUMMY_DATASET
-        self.ds = DataSampleTrackingWrapper(self.base_ds, task_type="classification")
+        self.ds = DataSampleTrackingWrapper(self.base_ds)
 
     def tearDown(self):
         """
@@ -484,7 +412,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         state = self.ds.state_dict()
 
         # load into a fresh wrapper
-        ds2 = DataSampleTrackingWrapper(self.base_ds, task_type="classification")
+        ds2 = DataSampleTrackingWrapper(self.base_ds)
         ds2.load_state_dict(state)
 
         # check scalar ex

@@ -2,6 +2,9 @@
 
 import pandas as pd
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Dash:
@@ -31,7 +34,7 @@ class Dash:
 
     def _load(self):
         if not os.path.exists(self.root_directory):
-            print("Dash._load ", self.root_directory, " does not exist")
+            logger.error(f"Dash._load {self.root_directory} does not exist")
             return
         graph_n_lines_path = os.path.join(
             self.root_directory, 'graph_n_lines.pkl')
@@ -39,9 +42,10 @@ class Dash:
             self.root_directory, 'lines_2_annot.pkl')
         if not os.path.exists(graph_n_lines_path) or \
                 not os.path.exists(lines_2_annot_path):
-            print(
+            logger.error(
                 f"Dash._load {graph_n_lines_path} or {lines_2_annot_path} "
-                f"does not exist.")
+                f"does not exist."
+            )
             return
 
         self.graph_n_lines = pd.read_pickle(graph_n_lines_path)

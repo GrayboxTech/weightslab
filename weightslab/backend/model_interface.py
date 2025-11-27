@@ -1,21 +1,27 @@
-import functools
-import types
+import logging
+import os
 import torch as th
+import weightslab as wl
 
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
 
+from weightslab.components.checkpoint import CheckpointManager
 from weightslab.components.tracking import TrackingMode
 from weightslab.models.model_with_ops import NetworkWithOps
 from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.models.monkey_patcher import monkey_patch_modules
-from weightslab.utils.logs import print, setup_logging
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies
-from weightslab.components.global_monitoring import pause_controller
+from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
+from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
+
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 class ModelInterface(NetworkWithOps):
@@ -25,7 +31,11 @@ class ModelInterface(NetworkWithOps):
             dummy_input: th.Tensor = None,
             device: str = 'cpu',
             print_graph: bool = False,
-            print_graph_filename: str = None):
+            print_graph_filename: str = None,
+            name: str = None,
+            register: bool = True,
+            weak: bool = False
+    ):
         """
         Initializes the WatcherEditor instance.
 
@@ -57,6 +67,7 @@ class ModelInterface(NetworkWithOps):
         # # Disable tracking for implementation
         self.tracking_mode = TrackingMode.DISABLED
         self.name = "Test Architecture Model"
+        self.device = device
         self.model = model.to(device)
         if dummy_input is not None:
             self.dummy_input = dummy_input.to(device)
@@ -66,7 +77,11 @@ class ModelInterface(NetworkWithOps):
         self.print_graph_filename = print_graph_filename
         self.traced_model = symbolic_trace(model)
         self.traced_model.name = "N.A."
-        self.pause_ctrl = pause_controller
+        self.guard_training_context = guard_training_context
+        self.guard_testing_context = guard_testing_context
+
+        # Init attributes from super object (i.e., self.model)
+        self.init_attributes(self.model)
 
         # Propagate the shape over the graph
         self.shape_propagation()
@@ -81,7 +96,185 @@ class ModelInterface(NetworkWithOps):
         self.define_deps()
 
         # Clean
+        # Optionally register wrapper in global ledger
+        if register:
+            try:
+                # Prefer an explicit name. Otherwise prefer a meaningful
+                # candidate (function __name__ when informative, then
+                # the class name). Avoid using the generic literal
+                # 'model' which can be produced by wrappers/patching and
+                # lead to duplicate registrations.
+                if name:
+                    reg_name = name
+                else:
+                    candidate = getattr(model, '__name__', None)
+                    if candidate and candidate.lower() != 'model':
+                        reg_name = candidate
+                    else:
+                        clsname = getattr(model.__class__, '__name__', None)
+                        reg_name = clsname if clsname and clsname.lower() != 'model' else (name or 'model')
+
+                register_model(reg_name, self, weak=weak)
+                self._ledger_name = reg_name
+            except Exception:
+                pass
+
         del self.traced_model
+        
+        # Hook optimizer update on architecture change 
+        self.register_hook_fn_for_architecture_change(
+            lambda model: self._update_optimizer(model)
+        )
+
+        # Set Model Training Guard
+        self.guard_training_context.model = self
+        self.guard_testing_context.model = self
+
+        # Checkpoint manager (optional)
+        # skip_checkpoint_load: bool = False,
+        # auto_dump_every_steps: int = 0
+        self._checkpoint_manager = None
+        # self._checkpoint_auto_every_steps = int(auto_dump_every_steps or 0)
+        _checkpoint_auto_every_steps = 0
+        _checkpoint_dir = None
+        _skip_checkpoint_load = False
+        # If checkpoint_dir not provided, try to read `root_log_dir` from
+        # ledger hyperparams, otherwise fallback to './root_log_dir/checkpoints'
+        try:
+            from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
+            names = list_hyperparams()
+            chosen = None
+            if 'main' in names:
+                chosen = 'main'
+            elif 'experiment' in names:
+                chosen = 'experiment'
+            elif len(names) == 1:
+                chosen = names[0]
+
+            if chosen:
+                hp = get_hyperparams(chosen)
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    try:
+                        hp = hp.get()
+                    except Exception:
+                        hp = None
+                if isinstance(hp, dict):
+                    # Root dir for checkpoints
+                    root = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
+                    _checkpoint_dir = os.path.join(str(root), 'checkpoints') if root else None
+                    # Auto dump every N steps
+                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
+                    # Skip loading at init
+                    _skip_checkpoint_load = hp.get('skip_checkpoint_load') or hp.get('skip-checkpoint-load') or False
+        except Exception:
+            _checkpoint_dir = None
+            _checkpoint_manager = None
+            _checkpoint_auto_every_steps = 0
+            _skip_checkpoint_load = False
+        self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
+
+        if _checkpoint_dir:
+            try:
+                self._checkpoint_manager = CheckpointManager(_checkpoint_dir)
+                # attempt to load latest checkpoint unless skipped
+                # TODO (GP): 
+                # """
+                #     Traceback (most recent call last):
+                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\components\checkpoint.py", line 323, in load
+                #         model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL])
+                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\backend\model_interface.py", line 438, in load_state_dict
+                #         return super().load_state_dict(state_dict, strict, assign)
+                #             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\models\model_with_ops.py", line 432, in load_state_dict
+                #         super().load_state_dict(
+                #     File "c:\Users\GuillaumePelluet\Documents\Codes\grayBox\python_env\weightslab\Lib\site-packages\torch\nn\modules\module.py", line 2152, in load_state_dict
+                #         raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
+                #     RuntimeError: Error(s) in loading state_dict for ModelInterface:
+                #             Unexpected key(s) in state_dict: "seen_samples", "tracking_mode", "model.c1.train_dataset_tracker.number_of_neurons", "model.c1.train_dataset_tracker.triggrs_by_neuron", "model.c1.train_dataset_tracker.updates_by_neuron", "model.c1.eval_dataset_tracker.number_of_neurons", "model.c1.eval_dataset_tracker.triggrs_by_neuron", "model.c1.eval_dataset_tracker.updates_by_neuron", "model.b1.train_dataset_tracker.number_of_neurons", "model.b1.train_dataset_tracker.triggrs_by_neuron", "model.b1.train_dataset_tracker.updates_by_neuron", "model.b1.eval_dataset_tracker.number_of_neurons", "model.b1.eval_dataset_tracker.triggrs_by_neuron", "model.b1.eval_dataset_tracker.updates_by_neuron", "model.c2.train_dataset_tracker.number_of_neurons", "model.c2.train_dataset_tracker.triggrs_by_neuron", "model.c2.train_dataset_tracker.updates_by_neuron", "model.c2.eval_dataset_tracker.number_of_neurons", "model.c2.eval_dataset_tracker.triggrs_by_neuron", "model.c2.eval_dataset_tracker.updates_by_neuron", "model.b2.train_dataset_tracker.number_of_neurons", "model.b2.train_dataset_tracker.triggrs_by_neuron", "model.b2.train_dataset_tracker.updates_by_neuron", "model.b2.eval_dataset_tracker.number_of_neurons", "model.b2.eval_dataset_tracker.triggrs_by_neuron", "model.b2.eval_dataset_tracker.updates_by_neuron", "model.fc3.train_dataset_tracker.number_of_neurons", "model.fc3.train_dataset_tracker.triggrs_by_neuron", "model.fc3.train_dataset_tracker.updates_by_neuron", "model.fc3.eval_dataset_tracker.number_of_neurons", "model.fc3.eval_dataset_tracker.triggrs_by_neuron", "model.fc3.eval_dataset_tracker.updates_by_neuron", "model.fc4.train_dataset_tracker.number_of_neurons", "model.fc4.train_dataset_tracker.triggrs_by_neuron", "model.fc4.train_dataset_tracker.updates_by_neuron", "model.fc4.eval_dataset_tracker.number_of_neurons", "model.fc4.eval_dataset_tracker.triggrs_by_neuron", "model.fc4.eval_dataset_tracker.updates_by_neuron".
+                #             size mismatch for model.c1.weight: copying a param with shape torch.Size([10, 1, 3, 3]) from checkpoint, the shape in current model is torch.Size([4, 1, 3, 3]).
+                #             size mismatch for model.c1.bias: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.weight: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.bias: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.running_mean: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b1.running_var: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.c2.weight: copying a param with shape torch.Size([5, 10, 3, 3]) from checkpoint, the shape in current model is torch.Size([4, 4, 3, 3]).
+                #             size mismatch for model.c2.bias: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.weight: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.bias: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.running_mean: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.b2.running_var: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
+                #             size mismatch for model.fc3.weight: copying a param with shape torch.Size([64, 180]) from checkpoint, the shape in current model is torch.Size([64, 144]).
+                # """
+                # if not _skip_checkpoint_load:
+                #     try:
+                #         latest = self._checkpoint_manager.get_latest_checkpoint_path()
+                #         if latest:
+                #             # best-effort load into ledger-registered objects
+                #             self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
+                #     except Exception:
+                #         pass
+            except Exception:
+                self._checkpoint_manager = None
+
+    def init_attributes(self, obj):
+        """Expose attributes and methods from the wrapped `obj`.
+
+        Implementation strategy (direct iteration):
+        - Iterate over `vars(obj)` to obtain instance attributes and
+          create class-level properties that forward to `obj.<attr>`.
+        - Iterate over `vars(obj.__class__)` to find callables (methods)
+          and bind the model's bound method to this wrapper instance so
+          calling `mi.method()` invokes `mi.model.method()`.
+
+        This avoids using `dir()` and directly inspects the object's
+        own dictionaries. Existing attributes on `ModelInterface` are
+        preserved and not overwritten.
+        """
+        # Existing names on the wrapper instance/class to avoid overwriting
+        existing_instance_names = set(self.__dict__.keys())
+        existing_class_names = set(getattr(self.__class__, '__dict__', {}).keys())
+
+        # 1) Expose model instance attributes as properties on the wrapper class
+        model_vars = getattr(obj, '__dict__', {})
+        for name, value in model_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Create a property on the ModelInterface class that forwards to
+            # the underlying model attribute. Using a property keeps the
+            # attribute live (reads reflect model changes).
+            try:
+                def _make_getter(n):
+                    return lambda inst: getattr(inst.model, n)
+
+                getter = _make_getter(name)
+                prop = property(fget=getter)
+                setattr(self.__class__, name, prop)
+            except Exception:
+                # Best-effort: skip if we cannot set the property
+                continue
+
+        # 2) Bind model class-level callables (methods) to this instance
+        model_cls_vars = getattr(obj.__class__, '__dict__', {})
+        for name, member in model_cls_vars.items():
+            if name.startswith('_'):
+                continue
+            if name in existing_instance_names or name in existing_class_names:
+                continue
+
+            # Only consider callables defined on the class (functions/descriptors)
+            if callable(member):
+                try:
+                    # getattr(obj, name) returns the bound method
+                    bound = getattr(obj, name)
+                    # Attach the bound method to the wrapper instance so that
+                    # calling mi.name(...) calls model.name(...)
+                    setattr(self, name, bound)
+                except Exception:
+                    # If we cannot bind, skip gracefully
+                    continue
 
     def __enter__(self):
         """
@@ -118,11 +311,51 @@ class ModelInterface(NetworkWithOps):
         """
         self.visited_nodes = set()  # Reset NetworkWithOps nodes visited
         if exc_type is not None:
-            print(
+            logger.error(
                 f"[{self.__class__.__name__}]: An exception occurred: \
                     {exc_type.__name__} with {exc_val} and {exc_tb}.")
             return False
         return False
+
+    def _update_optimizer(self, model):
+        for opt_name in get_optimizers():
+            # Overwrite the optimizer with the same class and lr, updated
+            opt = get_optimizer(opt_name)
+            lr = opt.get_lr()[0]
+            optimizer_class = type(opt.optimizer)
+            _optimizer = optimizer_class(
+                model.parameters(),
+                lr=lr
+            )
+
+            wl.watch_or_edit(_optimizer, flag='optimizer', name=opt_name)
+
+    def _maybe_auto_dump(self):
+        # Called from base class hook after seen_samples updates.
+        try:
+            if self._checkpoint_manager is None or self._checkpoint_auto_every_steps <= 0:
+                return
+            batched_age = int(self.get_batched_age())
+            if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
+                try:
+                    # best-effort managed dump using ledger names
+                    self._checkpoint_manager.dump(model_name=getattr(self, '_ledger_name', None))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    def is_training(self) -> bool:
+        """
+        Checks if the model is currently in training mode.
+
+        This method returns a boolean indicating whether the wrapped model
+        is set to training mode (`True`) or evaluation mode (`False`).
+
+        Returns:
+            bool: `True` if the model is in training mode, `False` otherwise.
+        """
+        return self.training
 
     def monkey_patching(self):
         """
@@ -195,7 +428,7 @@ class ModelInterface(NetworkWithOps):
             as a side effect if `self.print_graph` is True.
         """
         if self.print_graph:
-            print("--- Generated Graph Dependencies (FX Tracing) ---")
+            logger.info("--- Generated Graph Dependencies (FX Tracing) ---")
             or_dependencies = generate_graph_dependencies(
                 self.model,
                 self.traced_model,
@@ -250,51 +483,22 @@ class ModelInterface(NetworkWithOps):
         Returns:
             th.Tensor: The output tensor from the model's forward pass.
         """
-
-        self.pause_ctrl.wait_if_paused()  # Wait until resume
         
+        # Check device
+        if x.device != self.device:
+            x = x.to(self.device)
+
         self.maybe_update_age(x)
         out = self.model(x)
 
         return out
-
-    def state_dict(self):
+    
+    def apply_architecture_op(self, op_type, layer_id, neuron_indices=None):
         """
-        Returns the state dictionary of the wrapped model.
-
-        This method provides a way to access the `state_dict` of the underlying
-        `self.model`, which is essential for saving and loading model parameters
-        (weights, biases, etc.). It acts as a proxy to the original PyTorch
-        model's `state_dict` method.
-
-        Returns:
-            dict: A dictionary containing a whole state of the module.
+            Applies an architecture operation to the model within a managed context.
         """
-        return super().state_dict()
-
-    def load_state_dict(self, state_dict, strict=True, assign=False):
-        """
-        Loads the model's parameters and buffers from a state dictionary.
-
-        This method is a wrapper around the underlying PyTorch model's
-        `load_state_dict` method. It allows for loading a pre-trained model's
-        state, including weights and biases, into the current model instance.
-
-        Args:
-            state_dict (dict): A dictionary containing parameters and
-                persistent buffers.
-            strict (bool, optional): Whether to strictly enforce that the keys
-                in `state_dict` match the keys returned by this module's
-                `state_dict()` method. Defaults to True.
-            assign (bool, optional): Whether to copy the data from `state_dict`
-                into the module's parameters and buffers. Defaults to False.
-
-        Returns:
-            NamedTuple: A named tuple with `missing_keys` and `unexpected_keys` fields,
-            detailing any discrepancies between the provided `state_dict` and the
-            model's own state dictionary.
-        """
-        return super().load_state_dict(state_dict, strict, assign)
+        with self as m:
+            m.operate(layer_id=layer_id, op_type=op_type, neuron_indices=neuron_indices)
 
     def __repr__(self):
         """
@@ -356,8 +560,9 @@ class ModelInterface(NetworkWithOps):
 
 
 if __name__ == "__main__":
-    from weightslab.tests.torch_models import \
-        UNet as Model
+    from weightslab.baseline_models.pytorch.models import \
+        FashionCNN as Model
+    from weightslab.utils.logs import print, setup_logging
 
     # Setup prints
     setup_logging('DEBUG')
@@ -377,6 +582,17 @@ if __name__ == "__main__":
     model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
     print(f'Inference results {model(dummy_input)}')  # infer
     print(model)
+
+    # --- DEBUG ---
+    with model as m:
+        print(f'Model before operation:\n{m}')
+        # Apply operation
+        m.operate(
+            op_type=1,
+            layer_id=3,
+            neuron_indices=range(5)
+        )
+        print(f'Model after operation:\n{m}')
 
     # Model Operations
     # # Test: add neurons

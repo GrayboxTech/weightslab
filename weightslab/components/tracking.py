@@ -1,5 +1,5 @@
 """ Module containing tracking related interfaces and classes. """
-
+import logging
 import enum
 from collections import defaultdict
 from typing import Set, List
@@ -8,6 +8,8 @@ import torch as th
 from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 
+# Global logger
+logger = logging.getLogger(__name__)
 _TRACKING_TENSOR_DISPLAY_LIMIT = 8
 
 
@@ -509,7 +511,7 @@ class TriggersTrackerClazzAndSampleID(TriggersTracker):
                 neuron_id, order_by_occurences=True)
             return (trggr / max(count, 1), in_id, label)
         except IndexError as e:
-            print("TrackerClazzAndSampleID.get_neuron_stats error ", e)
+            logger.error("TrackerClazzAndSampleID.get_neuron_stats error ", e)
 
     def get_neuron_pretty_repr(self, neuron_id: int, prefix: str = '') -> str:
         """

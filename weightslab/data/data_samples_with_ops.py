@@ -1,3 +1,5 @@
+import logging
+import torch as th
 import numpy as np
 import pandas as pd
 import random as rnd
@@ -6,7 +8,8 @@ from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset
 
-
+# Global logger
+logger = logging.getLogger(__name__)
 SamplePredicateFn = Callable[[], bool]
 
 
@@ -489,7 +492,7 @@ class DataSampleTrackingWrapper(Dataset):
                     sample_id, SampleStatsEx.PREDICTION_RAW.value, raw=True)
                 label = self.get(sample_id, SampleStatsEx.TARGET, raw=True)
             except KeyError as e:
-                print(f"Sample {sample_id}: KeyError {e}")
+                logger.error(f"Sample {sample_id}: KeyError {e}")
                 continue
 
             if predicate(
@@ -497,7 +500,7 @@ class DataSampleTrackingWrapper(Dataset):
                     exposure_amount, deny_listed, prediction_class, label):
                 denied_samples_ids.add(sample_id)
                 if verbose:
-                    print(f"Denied sample {sample_id} "
+                    logger.info(f"Denied sample {sample_id} "
                           f"with prediction age {prediction_age}, "
                           f"prediction loss {prediction_loss}, "
                           f"exposure amount {exposure_amount}, "
@@ -509,7 +512,7 @@ class DataSampleTrackingWrapper(Dataset):
     def deny_samples_with_predicate(self, predicate: SamplePredicateFn):
         self.dataframe = None
         denied_samples_ids = self._get_denied_sample_ids(predicate)
-        print("denied samples with predicate ", len(denied_samples_ids))
+        logger.info("denied samples with predicate ", len(denied_samples_ids))
         self.denylist_samples(denied_samples_ids)
 
     def deny_samples_and_sample_allowed_with_predicate(
@@ -534,7 +537,7 @@ class DataSampleTrackingWrapper(Dataset):
             allowed_samples_no * allow_to_denied_factor)
 
         if verbose:
-            print(f'DataSampleTrackingWrapper.deny_samples_and_sample'
+            logger.info(f'DataSampleTrackingWrapper.deny_samples_and_sample'
                   f'_allowed_with_predicate denied {denied_samples_cnt} '
                   f'samples, allowed {allowed_samples_no} samples, and will '
                   f'toggle back to allowed {target_allowed_samples_no} samples'
@@ -577,7 +580,7 @@ class DataSampleTrackingWrapper(Dataset):
             if weight <= 1.0 else int(weight)
 
         if verbose:
-            print(f'DataSampleTrackingWrapper'
+            logger.info(f'DataSampleTrackingWrapper'
                   f'apply_weighted_predicate '
                   f'denied {denied_samples_cnt} samples.')
 
@@ -592,13 +595,13 @@ class DataSampleTrackingWrapper(Dataset):
             override_denied_sample_ids |= self._denied_samples_ids
 
         if verbose:
-            print(f'DataSampleTrackingWrapper'
+            logger.info(f'DataSampleTrackingWrapper'
                   f'apply_weighted_predicate '
                   f'denied ids {list(override_denied_sample_ids)[:20]}')
 
         self.denylist_samples(
             override_denied_sample_ids, override=True)
-        print("DataSampleTrackingWrapper.apply_weighted_predicate #len", len(self))
+        logger.debug(f"DataSampleTrackingWrapper.apply_weighted_predicate #len {len(self)}")
 
     def _get_stats_dataframe(self, limit: int = -1):
         data_frame = pd.DataFrame(

@@ -2,47 +2,31 @@ syntax = "proto3";
 
 
 service ExperimentService {
-  // Metrics
   rpc StreamStatus (Empty) returns (stream TrainingStatusEx);
 
-  // Experiment management
   rpc ExperimentCommand (TrainerCommand) returns (CommandResponse);
 
-  // Graph Interaction
   rpc ManipulateWeights(WeightsOperationRequest) returns (WeightsOperationResponse);
-  rpc GetWeights(WeigthsRequest) returns (WeightsResponse);
-  rpc GetActivations (ActivationRequest) returns (ActivationResponse);
 
-  // Data Management
-  rpc GetSample(SampleRequest) returns (SampleRequestResponse);
+  rpc GetWeights(WeightsRequest) returns (WeightsResponse);
+
   rpc GetSamples (BatchSampleRequest) returns (BatchSampleResponse);
+
+  rpc GetActivations (ActivationRequest) returns (ActivationResponse);
 }
 
 
 message Empty {}
-
 
 message NeuronId {
   int32 layer_id = 1;
   int32 neuron_id = 2;
 }
 
-message NeuronConnection {
-  NeuronId from_neuron = 1;
-  NeuronId to_neuron = 2;
-}
-
 enum WeightOperationType {
   ZEROFY = 0;
   REINITIALIZE = 1;
   FREEZE = 2;
-  UNFREEZE = 11;
-  FREEZE_BIAS = 3;
-  FREEZE_INCOMING = 4;
-  OVERRIDE_WEIGHTS = 5;
-  OVERIIDE_BIASSES = 8;
-  CHANGE_LEARNING_RATE = 6;
-  SORT_BY_STAT = 7;
   REMOVE_NEURONS = 9;
   ADD_NEURONS = 10;
 }
@@ -58,22 +42,10 @@ message WeightOperation {
   optional int32 layer_id = 2;
   repeated NeuronId neuron_ids = 3;
 
-  optional NeuronId incoming_neuron_id = 4;
-
-  repeated float override_values = 5;
-
-  optional float individual_learning_rate = 6;
-
-  optional string sorting_statistic_name = 7;
-
   int32 neurons_to_add = 9;
 
-  repeated NeuronConnection connections_to_zerofy = 10;
-
   repeated int32 zerofy_from_incoming_ids = 11;
-
   repeated int32 zerofy_to_neuron_ids = 12;
-
   repeated ZerofyPredicate zerofy_predicates = 13;
 }
 
@@ -154,11 +126,9 @@ message NeuronStatistics {
   optional int32 neuron_age = 2;
   optional float train_trigger_rate = 3;
   optional float eval_trigger_rate = 4;
-  optional float weight_difference = 5;
-  optional float bias_difference = 6;
 
   optional float learning_rate = 7;
-  map<int32, float> incoming_learning_rate = 8;
+  map<int32, float> incoming_lr = 8;
 }
 
 message LayerRepresentation {
@@ -172,32 +142,27 @@ message LayerRepresentation {
   optional int32 kernel_size = 6;
   optional int32 stride = 7;
 
-  map<int32, float> per_neuron_learning_rates = 8;
-  map<int32, float> per_incoming_neuron_learning_rates = 9;
-
   repeated NeuronStatistics neurons_statistics = 10;
 }
 
 message ActivationRequest {
   int32 layer_id = 1;
   int32 sample_id = 2;   
-  string origin = 3;    
-  bool pre_activation = 4; 
+  string origin = 3;
 }
 
 message ActivationMap {
   int32 neuron_id = 1;
   repeated float values = 2; 
-  int32 H = 3;               
+  int32 H = 3;
   int32 W = 4;               
 }
 
 message ActivationResponse {
-  string layer_type = 1;       
+  string layer_type = 1;
   int32 neurons_count = 2;
   repeated ActivationMap activations = 3;
 }
-
 
 message TaskField {
   string name = 1;
@@ -214,12 +179,11 @@ message RecordMetadata {
   int32 sample_id = 1;
   repeated int32 sample_label = 2;
   repeated int32 sample_prediction = 3;
-  string sample_last_loss = 4;
+  float sample_last_loss = 4;
   int32 sample_encounters = 5;
   bool sample_discarded = 6;
-  repeated TaskField extra_fields = 7;     
-  bytes mask_preview = 8;                  
-  bytes prediction_raw = 9;                 
+  repeated TaskField extra_fields = 7;
+  bytes prediction_raw = 9;
   string task_type = 10;   
 }
 
@@ -228,11 +192,6 @@ message SampleStatistics {
   optional int32 sample_count = 7;
 
   string task_type = 9;
-  map<int32, int32> sample_label = 1;
-  map<int32, int32> sample_prediction = 2;
-  map<int32, float> sample_last_loss = 3;
-  map<int32, int32> sample_encounters = 4;
-  map<int32, bool> sample_discarded = 5;
 
   repeated RecordMetadata records = 8;  
 }
@@ -273,17 +232,11 @@ message BatchSampleResponse {
   repeated SampleRequestResponse samples = 1;
 }
 
-message WeigthsRequest{
+message WeightsRequest {
   NeuronId neuron_id = 1;
-  bool with_bias = 2;
-  bool with_learning_rate = 3;
-  bool with_incoming_learning_rates = 4;
-  bool include_gradients = 5;
-  optional int32 start_neuron_idx = 6; 
-  optional int32 end_neuron_idx = 7; 
 }
 
-message WeightsResponse{
+message WeightsResponse {
   NeuronId neuron_id = 1;
   optional string layer_name = 2;
   optional string layer_type = 3;
@@ -293,11 +246,7 @@ message WeightsResponse{
   optional int32 kernel_size = 6;
 
   repeated float weights = 7;
-  optional float bias = 8;
-  optional float learning_rate = 9;
-  map<int32, float> incoming_learning_rates = 10;
 
   bool success = 11;
   optional string error_message = 12;
 }
-

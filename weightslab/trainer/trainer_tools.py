@@ -67,7 +67,7 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
             learning_rate=neuron_lr,
         )
         for incoming_id, incoming_lr in layer.incoming_neuron_2_lr[tensor_name].items():
-            neuron_representation.incoming_neurons_lr[incoming_id] = incoming_lr
+            neuron_representation.incoming_lr[incoming_id] = incoming_lr
 
         neuron_representations.append(neuron_representation)
 
@@ -169,24 +169,63 @@ def _labels_from_mask_path_histogram(path, num_classes=None, ignore_index=255):
 
 def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     sample_stats = pb2.SampleStatistics()
-    sample_stats.sample_count = len(dataset.wrapped_dataset)
+    # Robustly obtain a dataset length even when 'dataset' may be a ledger Proxy
+    def _safe_dataset_length(ds):
+        # Try len(ds) first (Proxy implements __len__ when underlying set)
+        try:
+            return len(ds)
+        except Exception:
+            pass
+
+        # Try common wrapped attributes but guard against Proxy AttributeError
+        for attr in ('wrapped_dataset', 'dataset', 'wrapped'):
+            try:
+                wrapped = getattr(ds, attr)
+            except Exception:
+                wrapped = None
+            if wrapped is not None:
+                try:
+                    return len(wrapped)
+                except Exception:
+                    # try inspect records
+                    try:
+                        return len(list(getattr(wrapped, 'as_records')()))
+                    except Exception:
+                        try:
+                            return len(list(getattr(ds, 'as_records')()))
+                        except Exception:
+                            pass
+
+        # Last resort: try to iterate as_records on ds
+        try:
+            recs = ds.as_records()
+            return len(list(recs))
+        except Exception:
+            return 0
+
+    sample_stats.sample_count = _safe_dataset_length(dataset)
 
     tasks = getattr(experiment, "tasks", None)
     is_multi_task = bool(tasks) and len(tasks) > 1
-    sample_stats.task_type = "multi-task" if is_multi_task else getattr(
-        experiment, "task_type", getattr(dataset, "task_type", "classification")
-    )
+    sample_stats.task_type = "classification"
 
     ignore_index = getattr(dataset, "ignore_index", 255)
     num_classes  = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))
 
-    for sample_id, row in enumerate(dataset.as_records()):
+    # Safely iterate dataset records; if as_records isn't available or dataset is a placeholder
+    # fall back to an empty iterator.
+    try:
+        records_iter = dataset.as_records()
+    except Exception:
+        records_iter = []
+
+    for sample_id, row in enumerate(records_iter):
         loss = row.get('prediction_loss', -1)
         if not isinstance(loss, dict):
             loss = {'loss': loss} 
         record = pb2.RecordMetadata(
             sample_id=row.get('sample_id', sample_id),
-            sample_last_loss=str(loss),
+            sample_last_loss=float(row.get('prediction_loss', -1)),
             sample_encounters=int(row.get('encountered', row.get('exposure_amount', 0))),
             sample_discarded=bool(row.get('deny_listed', False)),
             task_type=sample_stats.task_type,
@@ -228,7 +267,6 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
             record.sample_prediction.extend(pred_list)
 
         sample_stats.records.append(record)
-    # print("[BACKEND].get_data_set_representation done: ", sample_stats)
     return sample_stats
 
 def _maybe_denorm(img_t, mean=None, std=None):
@@ -417,15 +455,17 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
         return sid, transformed_bytes, raw_bytes, cls_label, mask_bytes, pred_bytes
 
     except Exception as e:
-        print(f"[Error] GetSamples({sid}) failed: {e}")
-        return sid, None, None, -1, b"", b""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"GetSamples({sid}) failed: {e}")
+        return (sid, None, None, -1, b"", b"")
 
 def force_kill_all_python_processes():
     """
     Tente de tuer TOUS les processus python en cours d'exécution sur la machine.
     *** ATTENTION : UTILISER AVEC EXTRÊME PRÉCAUTION ! ***
     """
-    print("ATTENTION: Tentative de tuer tous les processus python. Ceci pourrait affecter d'autres applications.")
+    logger.warning("WARNING: Attempting to kill all Python processes. This could affect other applications.")
     
     if sys.platform.startswith('win'):
         # Windows : Utilise taskkill pour tuer tous les processus 'python.exe'
@@ -433,10 +473,10 @@ def force_kill_all_python_processes():
             # /F : Force la terminaison
             # /IM : Spécifie le nom de l'image (python.exe)
             subprocess.run(['taskkill', '/F', '/IM', 'python.exe'], check=True)
-            print("Tous les processus python (Windows) ont été terminés.")
+            logger.info("All Python processes (Windows) have been terminated.")
         except subprocess.CalledProcessError as e:
             # Cela arrive si aucun processus python n'est trouvé
-            print(f"Aucun processus python trouvé ou erreur lors de la terminaison : {e}")
+            logger.warning(f"No Python processes found or error during termination: {e}")
             
     elif sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
         # Linux/macOS : Utilise pkill avec SIGKILL (-9) pour les processus 'python' ou 'python3'
@@ -444,11 +484,11 @@ def force_kill_all_python_processes():
             # pgrep trouve les PIDs des processus nommés 'python' et pkill envoie le signal 9 (SIGKILL)
             # -f : recherche le pattern dans la ligne de commande complète (y compris les arguments)
             subprocess.run(['pkill', '-9', '-f', 'python'], check=True)
-            print("Tous les processus python (Unix/Linux/macOS) ont été terminés.")
+            logger.info("All Python processes (Unix/Linux/macOS) have been terminated.")
         except subprocess.CalledProcessError as e:
             # Cela arrive si aucun processus python n'est trouvé
-            print(f"Aucun processus python trouvé ou erreur lors de la terminaison : {e}")
+            logger.warning(f"No Python processes found or error during termination: {e}")
 
     else:
-        print(f"Système d'exploitation '{sys.platform}' non supporté pour l'arrêt forcé.")
+        logger.error(f"Operating system '{sys.platform}' not supported for forced shutdown.")
 

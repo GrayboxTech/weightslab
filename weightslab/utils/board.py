@@ -2,7 +2,7 @@ import queue
 
 
 class Dash:
-    def __init__(self, root_directory: str) -> None:
+    def __init__(self) -> None:
         self.queue = queue.Queue()
         self.graph_names = set()
 

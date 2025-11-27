@@ -1,760 +1,442 @@
 """ The Experiment class is the main class of the graybox package.
 It is used to train and evaluate models. """
 
+import time
 import functools
+import logging
 import torch as th
 
-from tqdm import trange
-from pathlib import Path
-from torch.utils.tensorboard import SummaryWriter
-from typing import Dict, Any, Callable, List
-from collections import namedtuple
-from threading import Lock, RLock
-from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Callable
+from threading import Lock
 
-from weightslab.utils.logs import print
-from weightslab.utils.board import Dash
 from weightslab.backend.model_interface import ModelInterface
-from weightslab.components.checkpoint import CheckpointManager
-from weightslab.components.global_monitoring import GuardContext
-from weightslab.data.data_samples_with_ops import \
-    DataSampleTrackingWrapper
+from weightslab.backend.dataloader_interface import DataLoaderInterface
+from weightslab.backend.optimizer_interface import OptimizerInterface
+from weightslab.backend.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.cli import cli_serve
+from weightslab.trainer.trainer_services import grpc_serve
+
+logger = logging.getLogger(__name__)
 
 
-class WeightsLab:
-    """
-        Experiment class is the main class of the graybox package.
-        It is used to train and evaluate models. Every change to the models, or
-        the experiment parameters are made through this class
-    """
-
-    # Global hyperparameters dictionary
-    HyperParam = namedtuple(
-        "HyperParam",
-        [
-            "data_type",
-            "value",
-            "default_value",
-            "fct2call",
-            "related_functions"
-        ]
-    )
-    HyperParam.__new__.__defaults__ = (
-        None,
-        None,
-        (),
-        ()
-    )
-    GLOBAL_HYPER_PARAMETERS: Dict = {}
-
-    def __init__(
-            self,
-            config: Dict[str, Any] = None
-    ):
-
-        # Thread safeguards
-        self.lock = Lock()
-        self.architecture_guard = RLock()
-        self.training_guard = GuardContext(self, for_training=True)
-        self.testing_guard = GuardContext(self, for_training=False)
-
-        # Read hyperparameters from the config
-        self.set_global_hyperparam(
-            config_data=config
-        )
-
-        # Variables
-        self.is_training = True
-        self.training_steps_to_do = 2048
-        self.eval_full_to_train_steps_ratio = 64
-        self.experiment_dump_to_train_steps_ratio = 1024
-        self.occured_train_steps = 0
-        self.occured_eval__steps = 0
-        self.train_loop_callbacks = []
-        self.train_loop_clbk_freq = 50
-        self.train_loop_clbk_call = True
-        self.learning_rate = 1e-2
-        self.root_log_dir = Path(self.get_global_hyperparam('root_log_dir'))
-        if not self.root_log_dir.exists():
-            self.root_log_dir.mkdir(parents=True, exist_ok=True)
-
-        # Init Logger and CheckpointManager
-        self.logger = Dash(self.root_log_dir)  # SummaryWriter(self.root_log_dir)
-        self.chkpt_manager = CheckpointManager(self.root_log_dir)
-        self.chkpt_manager.load(
-            self.chkpt_manager.get_latest_experiment(), self
-        ) if not self.get_global_hyperparam('skip_loading') else None
-
-    def logger_add_scalars(self, name: str, data: Dict, model_age: int):
-        self.logger.add_scalars(
-            name,
-            data,
-            global_step=model_age
-        )
-
-    def get_model_age(self):
-        return self.model.get_age()
-    
-    def set_is_training(self, is_training: bool):
-        if is_training and not self.model.pause_ctrl.is_paused():
-            self.is_training = is_training
-            self.model.pause_ctrl.pause()
+def _save_data_statistics(
+    model_age: int,
+    batch_ids: th.Tensor,
+    losses_batch: th.Tensor,
+    preds: th.Tensor,
+    lock: Lock = Lock()
+):
+    with lock:
+        # Get batch data
+        pred_np = preds.detach().cpu().numpy()
+        batch_ids_np = batch_ids.detach().cpu().numpy()
+        if not isinstance(losses_batch, dict):
+            per_sample_loss_np = losses_batch.detach().cpu().numpy()
         else:
-            self.is_training = is_training
-            self.model.pause_ctrl.resume()
+            for k in losses_batch:
+                losses_batch[k] = losses_batch[k].detach().cpu().numpy()
+            per_sample_loss_np = losses_batch
 
-    def update_data_statistics(
-        self,
-        model_age: int,
-        batch_ids: th.Tensor,
-        losses_batch: th.Tensor,
-        preds: th.Tensor,
-        is_training: bool = True
-    ):
-        with self.lock:
-            # Get batch data
-            pred_np = preds.detach().cpu().numpy()
-            batch_ids_np = batch_ids.detach().cpu().numpy()
-            if not isinstance(losses_batch, dict):
-                per_sample_loss_np = losses_batch.detach().cpu().numpy()
-            else:
-                for k in losses_batch:
-                    losses_batch[k] = losses_batch[k].detach().cpu().numpy()
-                per_sample_loss_np = losses_batch
-
-            # Update batch sample stats
-            self.train_dataset_loader.dataset.update_batch_sample_stats(
-                model_age,
-                batch_ids_np,
-                per_sample_loss_np,
-                pred_np
-            )
-            self.train_dataset_loader.dataset.update_sample_stats_ex_batch(
-                batch_ids_np,
-                {
-                    "loss/combined": per_sample_loss_np,
-                    "pred": pred_np
-                }
-            )
-
-    def apply_dict_namespace(self, cfg: Dict[str, Any]) -> None:
-        """
-        Recursively set attributes on self. For nested dicts, create a
-        SimpleNamespace on the instance, so nested keys are available as attributes.
-
-        Example:
-            cfg = {'a': {'b': 1}}
-            -> self.a is a SimpleNamespace and self.a.b == 1
-        """
-        def _apply(target, mapping: Dict[str, Any], path=None):
-            if path is None:
-                path = []
-
-            for k, v in mapping.items():
-                keys = path + [k]
-                if isinstance(v, dict):
-                    # ensure namespace exists on the current target
-                    ns = getattr(target, k, None)
-                    if not isinstance(ns, SimpleNamespace):
-                        ns = SimpleNamespace()
-                        setattr(target, k, ns)
-                    _apply(ns, v, keys)
-                else:
-                    # set the value on the target (could be self or a SimpleNamespace)
-                    setattr(target, k, v)
-
-                    # create readable method suffix from the key path
-                    name_suffix = "_".join(keys)
-                    getter_name = f"get_{name_suffix}"
-                    setter_name = f"set_{name_suffix}"
-
-                    # factories to capture current keys (avoid late-binding closure issue)
-                    def make_getter(captured_keys):
-                        def getter():
-                            with self.lock:
-                                obj = self
-                                for part in captured_keys:
-                                    obj = getattr(obj, part)
-                                return obj
-                        return getter
-
-                    def make_setter(captured_keys):
-                        def setter(new_value):
-                            with self.lock:
-                                obj = self
-                                for part in captured_keys[:-1]:
-                                    obj = getattr(obj, part)
-                                setattr(obj, captured_keys[-1], new_value)
-                        return setter
-
-                    # attach methods to the instance
-                    setattr(self, getter_name, make_getter(keys))
-                    setattr(self, setter_name, make_setter(keys))
-
-        _apply(self, cfg)
-        
-    def set_global_hyperparam(self, config_data: Dict) -> None:
-        self.GLOBAL_HYPER_PARAMETERS.update(config_data)
-        self.apply_dict_namespace(config_data)
-
-    def get_global_hyperparam(
-        self,
-        name: str = None,
-        p: Any = None,
-        default_value: Any = None
-    ) -> HyperParam:
-        """
-            Get the global hyperparameter for the given name, supporting nested 
-            key paths (e.g., 'optimizer/Adam/lr').
-
-            If 'p' is provided, it takes the highest precedence.
-        """
-        # 1. Highest Precedence: If 'p' is provided, return it immediately.
-        if p is not None:
-            return p
-
-        # 2. Path Traversal: If a 'name' (path) is provided, attempt to traverse the structure.
-        if name:
-            # Clean the path and split into components (e.g., '/opt/Adam/lr' -> ['opt', 'Adam', 'lr'])
-            path_components = name.strip('/').split('/')
-            current_level = self.GLOBAL_HYPER_PARAMETERS
-
-            try:
-                # Iterate through the components to traverse the nested dictionary
-                for key in path_components:
-                    # Check if the current level is a dictionary and contains the key
-                    if isinstance(current_level, dict) and key in current_level:
-                        current_level = current_level[key]
-                    else:
-                        # Path segment not found or structure is not a dictionary
-                        return default_value
-
-                # If loop completes, 'current_level' holds the final value
-                return current_level
-
-            except Exception:
-                # Catch any unexpected errors during traversal (e.g., if a non-dict was indexed)
-                return default_value
-
-        # 3. Fallback: If no name was provided, or if retrieval logic above failed, 
-        # return the default value.
-        return default_value
-
-    # ========================================================================
-    # ========================================================================
-    # Main functions
-    # Basic idea here: generate wl_exp (instance of Experiment, or Experiment directly),
-    # and set the objects here (model, optimizer, data, etc.)
-    # TODO (GP): Create abstract classes for Experiment with get_model, get_data, or whatever object maybe ?
-    # Or maybe not.
-    def watch_or_edit(self, obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
-        """
-        Watch or edit the given object.
-
-        Args:
-            obj (Callable): The object to watch or edit.
-            flag (str): The flag specifying the type of object to watch or
-            edit.
-            kwargs (Any): Additional keyword arguments to pass.
-        """
-
-        # Sanity check
-        if not hasattr(obj, '__name__'):
-            if obj_name is None:
-                obj.__name__ = 'anonymous'
-                print(
-                    "Warning: Watching or editing anonymous object '" +
-                    f"{obj.__name__}'."
-                )
-                print(
-                    "Please add a 'name' attribute to the object."
-                )
-            else:
-                obj.__name__ = obj_name
-
-        # Related functions
-        if flag == 'model' or 'model' in obj.__name__.lower():
-            return self._watch_or_edit_model(obj, **kwargs)
-        elif flag == 'data' or 'data' in obj.__name__.lower():
-            return self._watch_or_edit_dataset(obj, **kwargs)
-        elif flag == 'optimizer' or 'optimizer' in obj.__name__.lower():
-            return self._watch_or_edit_optimizer(obj, **kwargs)
-
-    def _watch_or_edit_model(self, model: Callable, **_) -> None:
-        """
-            Set up the model for tracking and validation
-
-            Args:
-                model (Callable): The torch model to watch or edit.
-        """
-
-        # Interface the torch model with weightslab's ModelInterface
-        self._interface_model(model)
-        # Register function to update optimizer when model
-        # architecture changes
-        self.model.register_hook_fn_for_architecture_change(
-            lambda model: self._update_optimizer(model)
+        # Update batch sample stats
+        name = 'train_loader' if get_model().is_training() else 'test_loader'
+        get_dataloader(name).tracked_dataset.update_batch_sample_stats(
+            model_age,
+            batch_ids_np,
+            per_sample_loss_np,
+            pred_np
         )
-
-        return self.model
-
-    def _watch_or_edit_dataset(self, dataset: Callable, **kwargs) -> None:
-        """
-            Set up the dataset for tracking and validation
-
-            Args:
-                dataset (Callable): The dataset to watch or edit.
-                kwargs (Any): Additional keyword arguments to pass to the
-                DataLoader.
-        """
-
-        # TODO (GP): iter(loader) not working with n_workers > 0
-        n_workers = self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/num_workers',
-                kwargs.get('num_workers'),
-                0
-            )
-        if n_workers > 0:
-            raise ValueError("Invalid number of workers. Please use a positive integer.")
-
-        # Data Loader
-        tracked_dataset = DataSampleTrackingWrapper(
-            dataset
-        )
-        tracked_dataset._map_updates_hook_fns.append(
-            (self.reset_data_iterators, kwargs)
-        )
-        loader = th.utils.data.DataLoader(
-            tracked_dataset,
-            batch_size=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/batch_size',
-                kwargs.get('batch_size'),
-                1
-            ),
-            shuffle=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/train_shuffle',
-                kwargs.get('train_shuffle'),
-                True
-            ),
-            num_workers=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/num_workers',
-                kwargs.get('num_workers'),
-                0
-            ),
-            drop_last=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/drop_last',
-                kwargs.get('drop_last'),
-                True
-            ),
-            pin_memory=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/pin_memory',
-                kwargs.get('pin_memory'),
-                False
-            ),
-            **self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/kwargs',
-                kwargs.get('kwargs'),
-                {}
-            ),
-        )
-
-        # Set instance variables
-        # # set {train|test}_dataset_loader
-        setattr(self, f'{dataset.__name__}_tracker', loader)
-        # # set {train|test}_dataset_loader
-        setattr(self, f'{dataset.__name__}_loader', loader)
-        # # set {train|test}_dataset_iterator
-        setattr(self, f'{dataset.__name__}_iterator', iter(loader))
-
-        return getattr(self, f'{dataset.__name__}_iterator')
-
-    def _watch_or_edit_optimizer(self, obj: Callable, **kwargs) -> None:
-        """
-            Set up the model optimizer.
-
-            Args:
-                dataset (Callable): The Optimizer class to watch or edit.
-                kwargs (Any): Additional keyword arguments to pass to the
-                DataLoader.
-        """
-        self.optimizer_class = obj
-        self.optimizer = obj(
-            self.model.parameters(),
-            **(self.get_global_hyperparam(
-                f'/optimizer/{obj.__name__}/',
-                None
-            ) or kwargs)
-        )
-        return self.optimizer
-
-    def watch(self, obj: Callable, flag: str = "default", log=False, **kwargs) -> None:
-        """
-        Monkey patches the 'forward' method of the input object (obj) to inject
-        logging action after the original calculation.
-
-        Args:
-            obj: The callable object (e.g., nn.CrossEntropyLoss) to patch.
-            flag: The name to use for logging (e.g., 'loss/bin_loss').
-
-        Returns:
-            The patched object.
-        """
-        if 'loss' in flag.lower():
-            return self._watch_loss(obj, flag, log, **kwargs)
-        elif 'metric' in flag.lower():
-            return self._watch_metric(obj, flag, log, **kwargs)
-
-    def _watch_loss(self, obj: Callable, flag: str, log: bool, **kwargs): 
-        # Ensure the object has a forward method to patch
-        if not hasattr(obj, 'forward') \
-                or not callable(getattr(obj, 'forward')):
-            raise ValueError(
-                f"Object {obj} does not have a callable 'forward' method \
-                to patch."
-            )
-
-        # Capture the original forward method.
-        original_forward = obj.forward
-
-        # Define the new wrapper function (closure).
-        # It captures 'self' (ExperimentLogger instance), 'original_forward',
-        # and 'flag'.
-        @functools.wraps(original_forward)
-        def new_forward_func(*args, **kwargs):
-            _flag = None
-            if 'flag' in kwargs:
-                _flag = kwargs.pop('flag', None)
-
-            # --- EXECUTE ORIGINAL LOGIC ---
-            # Call the original method with all passed arguments.
-            # This returns the raw loss tensor needed for backpropagation.
-            losses_value = original_forward(*args, **kwargs)
-
-            # --- INJECT CUSTOM LOGGING ACTION ---
-            try:
-                tag = flag if _flag is None else _flag
-
-                # 1. Get logging context
-                model_age = self.get_model_age()
-
-                # 2. Extract loss value and format for logger
-                # Detach, move to CPU, convert to numpy scalar (item())
-                flat_losses_value = losses_value.flatten().mean()
-
-                # Log results
-                self.logger.add_scalars(
-                    tag,
-                    {tag: flat_losses_value},
-                    global_step=model_age
-                ) if log else None
-
-            except Exception as e:
-                print(f"Logging Warning: Failed to log value for flag '{tag}': {e}")
-
-            # --- RETURN ORIGINAL RESULT ---
-            # This MUST return the raw tensor for the optimizer's backward pass.
-            return losses_value
-
-        # Apply the Monkey Patch
-        print(
-            "Successfully patched 'forward' method for object: " +
-            f"{obj.__class__.__name__} with flag '{flag}'",
-            level='DEBUG'
-        )
-        obj.forward = new_forward_func
-
-        return obj
-
-    def _watch_metric(self, obj: Callable, flag: str, log: bool, **kwargs): 
-        # Ensure the object has a compute method to patch
-        if not hasattr(obj, 'compute') \
-                or not callable(getattr(obj, 'compute')):
-            raise ValueError(
-                f"Object {obj} does not have a callable 'compute' method \
-                to patch."
-            )
-
-        # Capture the original compute method.
-        original_compute = obj.compute
-
-        # Define the new wrapper function (closure).
-        # It captures 'self' (ExperimentLogger instance), 'original_compute',
-        # and 'flag'.
-        @functools.wraps(original_compute)
-        def new_compute_func(*args, **kwargs):
-            _flag = None
-            if 'flag' in kwargs:
-                _flag = kwargs.pop('flag', None)
-
-            # --- EXECUTE ORIGINAL LOGIC ---
-            # Call the original method with all passed arguments.
-            # This returns the raw loss tensor needed for backpropagation.
-            value = original_compute(*args, **kwargs)
-
-            # --- INJECT CUSTOM LOGGING ACTION ---
-            try:
-                tag = flag if _flag is None else _flag
-
-                # 1. Get logging context
-                model_age = self.get_model_age()
-
-                # 2. Extract loss value and format for logger
-                # Detach, move to CPU, convert to numpy scalar (item())
-                metric_value = value.detach().cpu().numpy().item()
-
-                # Log results
-                self.logger.add_scalars(
-                    tag,
-                    {tag: metric_value},
-                    global_step=model_age
-                ) if log else None
-
-            except Exception as e:
-                print(f"Logging Warning: Failed to log value for flag '{tag}': {e}")
-
-            # --- RETURN ORIGINAL RESULT ---
-            # This MUST return the raw tensor for the optimizer's backward pass.
-            return value
-
-        # Apply the Monkey Patch
-        print(
-            "Successfully patched 'compute' method for object: " +
-            f"{obj.__class__.__name__} with flag '{flag}'",
-            level='DEBUG'
-        )
-        obj.compute = new_compute_func
-
-        return obj
-
-    # =========================================
-    # Training & Inference functions
-    # Model state
-
-
-    # ========================================================================
-    # ========================================================================
-    # Private functions
-    def __repr__(self):
-        with self.lock:
-            return f"Experiment[{id(self)}, {self.name}] " + \
-                f"is_train: {self.is_training} " + \
-                f"steps: {self.training_steps_to_do}"
-
-    def _update_optimizer(self, model):
-        self.optimizer = self.optimizer_class(
-            model.parameters(),
-            lr=self.learning_rate
-        )
-
-    def _pick_legacy_dense_pred(self, preds, x):
-        HxW = None
-        if isinstance(x, th.Tensor) and x.ndim >= 4:
-            HxW = (int(x.shape[-2]), int(x.shape[-1]))
-
-        best, best_score = None, -1.0
-        for p in preds.values():
-            if not isinstance(p, th.Tensor):
-                continue
-            if not (p.ndim >= 3 or (p.ndim == 2 and p.shape[1] >= 64)):
-                continue
-            if p.ndim == 3:  # [N, H, W]
-                H, W = int(p.shape[-2]), int(p.shape[-1])
-            elif p.ndim >= 4:
-                H, W = int(p.shape[-2]), int(p.shape[-1])
-            else:
-                continue
-            score = float(H * W)
-            if HxW and (H, W) == HxW:
-                score += 1e9
-            if score > best_score:
-                best, best_score = p, score
-
-        # fallback: first pred if nothing dense
-        return best if best is not None else next(iter(preds.values()))
-
-    def _interface_model(self, model):
-        self.model = ModelInterface(
-            model,
-            dummy_input=th.randn(model.input_shape),
-            device=self.get_global_hyperparam('device')
-        )
-
-    def register_train_loop_callback(self, callback):
-        """Add callback that will be called every train_loop_clbk_freq steps
-        during the training loop
-
-        Args:
-            callback (function): a function that will be called in training
-        """
-        self.train_loop_callbacks.append(callback)
-
-    def unregister_train_loop_callback(self, callback):
-        """Remove callback from the list of callbacks that are called during
-        training.
-
-        Args:
-            callback (function): the function handle to be removed
-        """
-        self.train_loop_callbacks.remove(callback)
-
-    def toggle_train_loop_callback_calls(self):
-        """Toggle the calling of the callbacks during training loop
-            This either enables or disables the callbacks.
-        """
-        self.train_loop_clbk_call = not self.train_loop_clbk_call
-
-    def toggle_is_training(self):
-        """Toggle the calling of the callbacks during training loop
-            This either enables or disables the callbacks.
-        """
-        if not self.pause_ctrl.is_paused():
-            self.pause_ctrl.pause()
-        else:
-            self.pause_ctrl.resume()
-
-    def performed_train_steps(self):
-        """Return the number of training steps that have been performed.
-
-        Returns:
-            int: the number of training steps that have been performed
-        """
-        return self.occured_train_steps
-
-    def performed_eval_steps(self):
-        """Return the number of evaluation steps that have been performed.
-
-        Returns:
-            int: the number of evaluation steps that have been performed
-        """
-        return self.occured_eval__steps
-
-    def dump(self):
-        """Dump the experiment into a checkpoint. Marks the checkpoint on the
-        plots."""
-        self.chkpt_manager.dump(self)
-        graph_names = self.logger.get_graph_names()
-        self.logger.add_annotations(
-            graph_names, self.name, "checkpoint", self.model.get_age(),
+        get_dataloader(name).tracked_dataset.update_sample_stats_ex_batch(
+            batch_ids_np,
             {
-                "checkpoint_id": self.chkpt_manager.get_latest_experiment()
+                "loss/combined": per_sample_loss_np,
+                "pred": pred_np
             }
         )
 
-    def load(self, checkpoint_id: int):
-        """Loads the given checkpoint with a given id.
 
-        Args:
-            checkpoint_id (int): the checkpoint id to be loaded
-        """
-        self.optimizer.zero_grad()
-        self.chkpt_manager.load(checkpoint_id, self)
+def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
+    """
+    Watch or edit the given object.
 
-    def print_checkpoints_tree(self):
-        """Display the checkpoints tree."""
-        print(self.chkpt_manager.id_to_path)
+    Args:
+        obj (Callable): The object to watch or edit.
+        flag (str): The flag specifying the type of object to watch or
+        edit.
+        kwargs (Any): Additional keyword arguments to pass.
+    """
 
-    # ========================================================================
-    # ========================================================================
-    # Data functions
-    def reset_data_iterators(self, **kwargs: dict) -> None:
-        """
-            Reset the data iterators. This is necessary when anything related
-            to datasets or dataloaders changes.
-        """
-
-        # Train
-        dataset = self.train_dataset_tracker
-        self.train_dataset_loader = th.utils.data.DataLoader(
-            dataset,
-            batch_size=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/batch_size',
-                kwargs.get('batch_size'),
-                1
-            ),
-            shuffle=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/train_shuffle',
-                kwargs.get('train_shuffle'),
-                True
-            ),
-            num_workers=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/num_workers',
-                kwargs.get('num_workers'),
-                8
-            ),
-            drop_last=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/drop_last',
-                kwargs.get('drop_last'),
-                True
-            ),
-            pin_memory=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/pin_memory',
-                kwargs.get('pin_memory'),
-                False
-            ),
-            **self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/kwargs',
-                kwargs.get('kwargs'),
-                {}
-            ),
-        )
-        self.train_dataset_iterator = iter(self.train_dataset_loader)
-
-        # Eval
-        dataset = self.test_dataset_tracker
-        self.test_dataset_loader = th.utils.data.DataLoader(
-            dataset,
-            batch_size=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/batch_size',
-                kwargs.get('batch_size'),
-                1
-            ),
-            shuffle=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/train_shuffle',
-                kwargs.get('train_shuffle'),
-                True
-            ),
-            num_workers=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/num_workers',
-                kwargs.get('num_workers'),
-                8
-            ),
-            drop_last=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/drop_last',
-                kwargs.get('drop_last'),
-                True
-            ),
-            pin_memory=self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/pin_memory',
-                kwargs.get('pin_memory'),
-                False
-            ),
-            **self.get_global_hyperparam(
-                f'/data/{dataset.__name__}/kwargs',
-                kwargs.get('kwargs'),
-                {}
-            ),
-        )
-        self.test_dataset_iterator = iter(self.test_dataset_loader)
-
-    def get_train_records(self):
-        """"Get all the train samples are records."""
-        with self.lock:
-            return self.train_dataset_loader.dataset.as_records()
-
-    def get_eval_records(self):
-        """"Get all the train samples are records."""
-        with self.lock:
-            return self.test_dataset_loader.dataset.as_records()
-
-    # ========================================================================
-    # ========================================================================
-    # Trainer worker function
-    def apply_architecture_op(self, op_type, **kwargs):
-        # Operate
-        with self.architecture_guard, self.model as model:
-            model.operate(
-                layer_id=kwargs['layer_id'],
-                neuron_indices=kwargs['neuron_indices'],
-                neuron_operation=op_type
+    # Sanity check
+    if not hasattr(obj, '__name__'):
+        if obj_name is None and 'name' not in kwargs:
+            try:
+                obj.__name__ = type(obj).__name__
+            except Exception:
+                obj.__name__ = str(time.time())
+            logger.warning(
+                "Warning: Watching or editing anonymous object '" +
+                f"{obj.__name__}'."
             )
+            logger.warning(
+                "Please add a 'name' attribute to the object."
+            )
+        else:
+            if hasattr(obj, '__name__'):
+                obj.__name__ = obj_name
+
+    # Related functions
+    if flag.lower() == 'model' or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
+        # Derive a sane registration name: prefer explicit `name` kwarg,
+        # then a meaningful __name__ if it is not the generic 'model',
+        # then the class name. This avoids accidental registration under
+        # the literal 'model' which can lead to duplicates.
+        if kwargs.get('name'):
+            reg_name = kwargs.get('name')
+        else:
+            candidate = getattr(obj, '__name__', None)
+            if candidate and candidate.lower() != 'model':
+                reg_name = candidate
+            else:
+                clsname = getattr(obj.__class__, '__name__', None)
+                reg_name = clsname if clsname and clsname.lower() != 'model' else (kwargs.get('name') or 'model')
+        # Ensure ledger has a placeholder (Proxy) for this name so callers
+        # receive a stable handle that will be updated in-place when the
+        # real wrapper is registered. `get_model` will create a Proxy if
+        # the name is not yet present.
+        try:
+            proxy = get_model(reg_name)
+        except Exception:
+            proxy = None
+
+        # Now construct the wrapper and let it register into the ledger.
+        wrapper = ModelInterface(obj, **kwargs)
+
+        # Prefer returning the proxy (if one exists) so external callers hold
+        # a stable reference that will see updates. If no proxy was
+        # obtainable, return the wrapper itself.
+        return proxy if proxy is not None else wrapper
+    
+    elif flag.lower() == 'data' or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
+        reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
+        # Ensure ledger has a placeholder (Proxy) for this name so callers
+        # receive a stable handle that will be updated in-place when the
+        # real wrapper is registered. `get_dataloader` will create a Proxy if
+        # the name is not yet present.
+        try:
+            proxy = get_dataloader(reg_name)
+        except Exception:
+            proxy = None
+
+        # Now construct the wrapper and let it register into the ledger.
+        wrapper = DataLoaderInterface(obj, **kwargs)
+
+        # Prefer returning the proxy (if one exists) so external callers hold
+        # a stable reference that will see updates. If no proxy was
+        # obtainable, return the wrapper itself.
+        return proxy if proxy is not None else wrapper
+    
+    elif flag.lower() == 'optimizer' or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
+        # Determine registration name first
+        reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj, '__class__', type(obj)).__name__ or '_optimizer'
+        # Ensure ledger has a placeholder (Proxy) for this name so callers
+        # receive a stable handle that will be updated in-place when the
+        # real wrapper is registered. `get_optimizer` will create a Proxy if
+        # the name is not yet present.
+        try:
+            proxy = get_optimizer(reg_name)
+        except Exception:
+            proxy = None
+
+        # Now construct the wrapper and let it register into the ledger.
+        wrapper = OptimizerInterface(obj, **kwargs)
+
+        # Prefer returning the proxy (if one exists) so external callers hold
+        # a stable reference that will see updates. If no proxy was
+        # obtainable, return the wrapper itself.
+        return proxy if proxy is not None else wrapper
+    
+    elif flag.lower() == 'logger' or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
+        # Determine registration name for the logger (prefer explicit name)
+        reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj.__class__, '__name__', None) or 'main'
+        # Ensure there's a proxy placeholder if callers already requested the logger
+        try:
+            proxy = get_logger(reg_name)
+        except Exception:
+            proxy = None
+
+        # Register the logger into the ledger. This will update any proxy in-place.
+        register_logger(reg_name, obj)
+
+        # Return a stable handle (proxy) when available, otherwise the registered logger
+        return proxy if proxy is not None else get_logger(reg_name)
+    
+    # Signals: metrics / losses / custom monitors
+    elif 'loss' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
+        # derive registration name from second part of flag if provided
+        reg_name = kwargs.get('name') or flag
+
+        # decide how to wrap: loss-like (forward) or metric-like (compute)
+        # wrap forward
+        try:
+            if hasattr(obj, 'forward') and callable(getattr(obj, 'forward')):
+                original_forward = obj.forward
+
+                # New forward with logging and save stats
+                @functools.wraps(original_forward)
+                def new_forward(*a, **kw):
+                    # Remove parameters
+                    _ = kw.pop('flag', None)
+                    ids = kw.pop('batch_ids', None)
+                    model_age = kw.pop('model_age', None)
+                    preds = kw.pop('preds', None)
+
+                    # Original forward
+                    out = original_forward(*a, **kw)
+
+                    # extract scalar 
+                    batch_scalar = None
+                    scalar = None
+                    try:
+                        # Assume loss returns per-sample losses - mean by default
+                        if isinstance(out, th.Tensor):
+                            batch_scalar = out.detach().cpu()
+                            scalar = float(batch_scalar.mean().item())
+                        else:
+                            try:
+                                import numpy as _np
+                                batch_scalar = _np.array(out)
+                                scalar = float(batch_scalar.mean())
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    
+                    # log if requested and logger present
+                    if kwargs.get('log', False) and scalar is not None:
+                        try:
+                            # try to get a ledger-registered logger
+                            logger = None
+                            try:
+                                logger = get_logger()
+                            except Exception:
+                                try:
+                                    logger = get_logger('main')
+                                except Exception:
+                                    logger = None
+
+                            if logger is not None and hasattr(logger, 'add_scalars'):
+                                # attempt to get a sensible global_step
+                                step = 0
+                                try:
+                                    m = get_model()
+                                    step = int(m.get_age())
+                                except Exception:
+                                    step = 0
+                                logger.add_scalars(
+                                    reg_name,
+                                    {reg_name: scalar},
+                                    global_step=step
+                                )
+                        except Exception:
+                            pass
+                    
+                    # Save statistics if requested and applicable
+                    if batch_scalar is not None and ids is not None and model_age is not None:
+                        _save_data_statistics(
+                            model_age=model_age,
+                            batch_ids=ids,
+                            losses_batch=batch_scalar,
+                            preds=preds
+                        )
+                    return out
+
+                obj.forward = new_forward
+
+            # register wrapped signal in ledger
+            try:
+                register_signal(reg_name, obj)
+            except Exception:
+                pass
+
+            # return proxy if exists else the object
+            try:
+                return get_signal(reg_name)
+            except Exception:
+                return obj
+        except Exception:
+            # fall back to hyperparams branch if something unexpected
+            pass
+
+
+    elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
+        # derive registration name from second part of flag if provided
+        reg_name = kwargs.get('name') or flag
+
+        # decide how to wrap: loss-like (forward) or metric-like (compute)
+        # wrap forward
+        try:
+            if hasattr(obj, 'compute') and callable(getattr(obj, 'compute')):
+                original_compute = obj.compute
+
+                @functools.wraps(original_compute)
+                def new_compute(*a, **kw):
+                    _flag = None
+                    if 'flag' in kw:
+                        _flag = kw.pop('flag', None)
+                    out = original_compute(*a, **kw)
+
+                    try:
+                        if isinstance(out, th.Tensor):
+                            scalar = float(out.detach().cpu().mean().item())
+                        else:
+                            try:
+                                import numpy as _np
+                                scalar = float(_np.array(out).mean())
+                            except Exception:
+                                scalar = None
+                    except Exception:
+                        scalar = None
+
+                    if kwargs.get('log', False) and scalar is not None:
+                        try:
+                            logger = None
+                            try:
+                                logger = get_logger()
+                            except Exception:
+                                try:
+                                    logger = get_logger('main')
+                                except Exception:
+                                    logger = None
+                            if logger is not None and hasattr(logger, 'add_scalars'):
+                                step = 0
+                                try:
+                                    m = get_model()
+                                    step = int(m.get_age())
+                                except Exception:
+                                    step = 0
+                                logger.add_scalars(reg_name, {reg_name: scalar}, global_step=step)
+                        except Exception:
+                            pass
+
+                    return out
+
+                obj.compute = new_compute
+
+            elif hasattr(obj, 'forward') and callable(getattr(obj, 'forward')):
+                original_forward = obj.forward
+
+                @functools.wraps(original_forward)
+                def new_forward(*a, **kw):
+                    _flag = None
+                    if 'flag' in kw:
+                        _flag = kw.pop('flag', None)
+                    out = original_forward(*a, **kw)
+
+                    # extract scalar
+                    try:
+                        if isinstance(out, th.Tensor):
+                            scalar = float(out.detach().cpu().mean().item())
+                        else:
+                            try:
+                                import numpy as _np
+                                scalar = float(_np.array(out).mean())
+                            except Exception:
+                                scalar = None
+                    except Exception:
+                        scalar = None
+
+                    # log if requested and logger present
+                    if kwargs.get('log', False) and scalar is not None:
+                        try:
+                            # try to get a ledger-registered logger
+                            logger = None
+                            try:
+                                logger = get_logger()
+                            except Exception:
+                                try:
+                                    logger = get_logger('main')
+                                except Exception:
+                                    logger = None
+
+                            if logger is not None and hasattr(logger, 'add_scalars'):
+                                # attempt to get a sensible global_step
+                                step = 0
+                                try:
+                                    m = get_model()
+                                    step = int(m.get_age())
+                                except Exception:
+                                    step = 0
+                                logger.add_scalars(reg_name, {reg_name: scalar}, global_step=step)
+                        except Exception:
+                            pass
+
+                    return out
+
+                obj.forward = new_forward
+
+            # register wrapped signal in ledger
+            try:
+                register_signal(reg_name, obj)
+            except Exception:
+                pass
+
+            # return proxy if exists else the object
+            try:
+                return get_signal(reg_name)
+            except Exception:
+                return obj
+        except Exception:
+            # fall back to hyperparams branch if something unexpected
+            pass
+
+    else:
+        # Support hyperparameters/watchable parameter dicts or YAML paths.
+        if flag is None:
+            raise ValueError("Obj name should contains at least 'model', 'data', 'optimizer' or 'hp'.")
+
+        fl = flag.lower()
+        if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters'):
+            # obj may be a dict of parameters or a path to a YAML file
+            name = kwargs.get('name') or getattr(obj, '__name__', None) or 'hyperparams'
+            # If obj is a string, treat as a file path and start watcher
+            try:
+                if isinstance(obj, str):
+                    path = obj
+                    # register empty/defaults if provided in kwargs
+                    defaults = kwargs.get('defaults', None)
+                    if defaults:
+                        register_hyperparams(name, defaults)
+                    # start ledger-managed watcher
+                    watch_hyperparams_file(name, path, poll_interval=kwargs.get('poll_interval', 1.0))
+                    # return the ledger handle (proxy or dict)
+                    return get_hyperparams(name)
+                elif isinstance(obj, dict):
+                    register_hyperparams(name, obj)
+                    return get_hyperparams(name)
+                else:
+                    # unsupported type for hp; attempt best-effort registration
+                    try:
+                        register_hyperparams(name, dict(obj))
+                        return get_hyperparams(name)
+                    except Exception:
+                        raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
+            except Exception:
+                # bubble up original error
+                raise
+
+        raise ValueError(f"Obj name {obj} should contains at least 'model', 'data' or 'optimizer'.")
+
+
+def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
+    """ Serve the trainer services.
+
+    Args:
+        serving_cli (bool): Whether to use the CLI.
+        serving_grpc (bool): Whether to serve gRPC.
+    """
+
+    if serving_grpc:
+        grpc_serve(**kwargs)
+        
+    if serving_cli:
+        cli_serve(**kwargs)
+    
