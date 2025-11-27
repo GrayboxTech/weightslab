@@ -30,7 +30,6 @@ from weightslab.components.checkpoint import CheckpointManager
 
 # Set Global Default Settings
 th.manual_seed(42)  # Set SEED
-TMP_DIR = tempfile.mkdtemp()
 DEVICE = "cpu"
 
 
@@ -40,7 +39,7 @@ class CheckpointManagerTest(unittest.TestCase):
 
         # Init Variables
         self.stamp = time.time()
-        self.temporary_directory = TMP_DIR
+        self.temporary_directory = tempfile.mkdtemp()
 
         # Initialize the checkpoint manager
         self.checkpoint_manager = CheckpointManager(self.temporary_directory)
@@ -144,6 +143,7 @@ class CheckpointManagerTest(unittest.TestCase):
 
     def test_three_dumps_one_load(self):
         # Dump a untrained model into checkpoint.
+        self.checkpoint_manager = CheckpointManager(tempfile.mkdtemp())
         self.assertFalse(self.checkpoint_manager.id_to_path)
         self.checkpoint_manager.dump(
             model_name='exp_model',
