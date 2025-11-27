@@ -15,6 +15,7 @@ def get_git_info():
         
         return branch, version, commit_hash
     except subprocess.CalledProcessError:
+        print('Git Not Found or not a git repository.')
         return None, None, None
 
 

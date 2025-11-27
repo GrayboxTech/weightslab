@@ -53,7 +53,7 @@ jobs:
     - name: 5. Run Unit Tests
       # Assuming you have a standard 'tests/' directory and use pytest
       run: |
-        python -m unittest discover ./tests
+        python -m unittest discover
 
     - name: 6. Show Test Success or Failure
       # If any tests fail, the workflow will fail and stop executing further steps

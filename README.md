@@ -89,8 +89,8 @@ pip install -r ./requirements.txt
 Several code examples show different usage from toy to more complicated models (based with PyTorch).
 
 Quickstart examples:
-- [Toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/examples/toy-pytorch_example)
-- [Advanced (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/examples/advanced-pytorch_example)
+- [Toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/toy-pytorch_example)
+- [Advanced (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/advanced-pytorch_example)
 
 <!-- ### Documentation -->
 
