@@ -24,7 +24,7 @@ import os
 import time
 from typing import Optional, Any
 
-from weightslab.art import _BANNER
+from weightslab import _BANNER
 
 from weightslab.backend.ledgers import GLOBAL_LEDGER
 from weightslab.backend.ledgers import Proxy
