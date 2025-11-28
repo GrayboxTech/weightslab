@@ -5,7 +5,8 @@ import logging
 import collections
 import torch as th
 import torch.nn as nn
-
+import numpy as np
+import random
 from copy import deepcopy
 from typing import Optional, List, Any, Type, Callable, Dict
 from torch.fx import Node
@@ -13,6 +14,14 @@ from torch.fx import Node
 
 # Global logger
 logger = logging.getLogger(__name__)
+
+
+def seed_everything(seed):
+    """Seed everything for reproducibility."""
+    np.random.seed(seed)
+    th.manual_seed(seed)
+    random.seed(seed)
+    th.backends.cudnn.deterministic = True
 
 
 # ----------------------------------------------------------------------------
@@ -299,6 +308,7 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True)
         Test function to iteratively update neurons for each layer,
         then test inference. Everything match ?
     """
+    seed_everything(42) if rand else None  # Set seed for reproducibility
     n_layers = len(model.layers)
     for n in range(n_layers-1, -1, -1):
         if rand and th.rand(1) > 0.5 and layer_id is None and dummy_input is None:
@@ -311,21 +321,25 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True)
                 if n != n_layers + layer_id:  # - -layer_id != + -layer_id
                     continue
         logger.debug(f'\nOperate on neurons at layer {n}')
-        with model as m:
-            if op is None:
+        if op is None:
+            with model as m:
                 logger.debug('Adding operation - 5 neurons added.')
                 m.operate(n, {0, 0, 0, 0, 0}, op_type=1)
                 m(dummy_input) if dummy_input is not None else None
+            with model as m:
                 logger.debug('Reseting operation - every neurons reset.')
                 m.operate(n, {}, op_type=4)
                 m(dummy_input) if dummy_input is not None else None
+            with model as m:
                 logger.debug('Freezing operation - last neuron froze.')
                 m.operate(n, {-1}, op_type=3)
                 m(dummy_input) if dummy_input is not None else None
+            with model as m:
                 logger.debug('Pruning operation - first neuron removed.')
                 m.operate(n, {0, 1}, op_type=2)
-                m(dummy_input) if dummy_input is not None else NotImplemented
-            else:
+                m(dummy_input) if dummy_input is not None else None
+        else:
+            with model as m:
                 m.operate(
                     n,
                     {-1},

@@ -211,7 +211,7 @@ class NetworkWithOps(nn.Module):
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
         
-        # wait for all processes to sync
+        # wait for all processes to sync - used for bkwd sync
         th.cuda.synchronize() if th.cuda.is_available() else None
         time.sleep(0.5)  # small sleep to ensure all ops are done
 
@@ -407,7 +407,7 @@ class NetworkWithOps(nn.Module):
 
             # Keep visited node in mem. if it's a bypass node,
             # i.e., it's incoming from a cat layer for instance.
-            self.visited_nodes.add(incoming_id) if not bypass else None
+            self.visited_nodes.add(incoming_id)
 
             # Save incoming children from layer_id
             updated_incoming_children.append(incoming_id)
@@ -506,3 +506,71 @@ class NetworkWithOps(nn.Module):
         if intermediary_outputs:
             return x, intermediaries
         return x
+
+
+if __name__ == "__main__":
+    print("This is the NetworkWithOps module.")
+    from weightslab.baseline_models.pytorch.models import TinyUNet_Straightforward
+    from weightslab.backend.model_interface import ModelInterface
+    from weightslab.utils.tools import model_op_neurons
+
+    DEVICE = 'cuda' if th.cuda.is_available() else 'cpu'
+
+    def _test_inference(model, dummy_input, op=None):
+        import traceback
+        # Infer
+        try:
+            with th.no_grad():
+                model(dummy_input)
+        except Exception as e:
+            print(f"Error during inference: {e}")
+            traceback.print_exc()
+
+    # # Initialize model
+    model = TinyUNet_Straightforward()
+    # # Create dummy input tensor
+    dummy_input = th.randn(model.input_shape).to(DEVICE)
+    # # Interface the model
+    model = ModelInterface(
+        model,
+        dummy_input=dummy_input,
+        print_graph=False
+    )
+    model.to(DEVICE)
+    model.eval()
+    layer_id = len(model.layers) // 2  # Middle layer
+
+    # --- Forward Pass Testing ---
+    _test_inference(model, dummy_input)
+
+    # #############################
+    # ######## OP. mix ############
+    # #############################
+    # n = 3
+    # with model as m:
+    #     logger.debug('Adding operation - 5 neurons added.')
+    #     m.operate(n, 0, op_type=2)
+    #     m(dummy_input) if dummy_input is not None else None
+    # with model as m:
+    #     logger.debug('Pruning operation - first neuron removed.')
+    #     m.operate(n, 0, op_type=2)
+    #     m(dummy_input) if dummy_input is not None else None
+
+    print('----'*50)
+    print('Performing model parameters operations..')
+
+    # model_op_neurons(model, dummy_input=dummy_input, rand=False)
+    if True:
+        n = 2
+        print(n)
+        with model as m:
+            print('Adding operation - 5 neurons added.')
+            m.operate(n, {-1, -1}, op_type=2)
+            m(dummy_input) if dummy_input is not None else None
+    if True:
+        n = 6
+        print(n)
+        with model as m:
+            print('Adding operation - 5 neurons added.')
+            m.operate(n, {-1, -1}, op_type=2)
+            m(dummy_input) if dummy_input is not None else None

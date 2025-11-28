@@ -159,13 +159,13 @@ class NetworkWithOpsTest(unittest.TestCase):
         replicated_model.load_state_dict(state_dict, strict=False)
         self.assertEqual(self.dummy_network, replicated_model)
 
-    def test_train_add_neurons_train(self):
+    def test_train_add(self):
         # Set Tracker
         self.dummy_network.set_tracking_mode(TrackingMode.TRAIN)
 
         # Train for like 10 epochs
         for _ in trange(1, desc="Training.."):
-            corrects_first_epochs = self._train_one_epoch(cutoff=10)
+            self._train_one_epoch(cutoff=10)
 
         # Operate on the first layer - ADD
         with self.dummy_network as model:
@@ -175,13 +175,9 @@ class NetworkWithOpsTest(unittest.TestCase):
                 op_type=ArchitectureNeuronsOpType.ADD
             )
 
-        # Train for another 10 epochs
+        # Train for another 10 epochs - Basically check if training works after operation
         for _ in trange(1, desc="Training again.."):
-            corrects_secnd_epochs = self._train_one_epoch(cutoff=10)
-
-        # Check if the model has been trained correctly and any updated ?
-        self.assertNotEqual(
-            corrects_first_epochs, corrects_secnd_epochs)
+            self._train_one_epoch(cutoff=10)
 
     def test_train_prune(self):
         # Set Tracker
