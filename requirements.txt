@@ -1,0 +1,16 @@
+# List the packages and their exact versions
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
+torchinfo==1.8.0
+torchmetrics==1.8.2
+tensorboard==2.20
+dash==2.17.1
+dash_bootstrap_components==1.6.0
+dash_daq==0.5.0
+grpcio==1.67.0
+grpcio-tools==1.67.0
+pandas==2.2.3
+Pillow==11.0.0
+protobuf==6.33
+tqdm==4.66.4
