@@ -40,7 +40,10 @@ class PauseController:
     def is_paused(self):
         return not self._event.is_set()
 
+
+# Global pause controller instance
 pause_controller = PauseController()
+
 
 class OpContext:
     """
