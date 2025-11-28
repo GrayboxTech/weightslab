@@ -21,4 +21,4 @@ dill==0.4.0
 PyYAML==6.0.3
 grpcio==1.76.0
 grpcio-tools==1.76.0
-protobuf==5.29.1
+protobuf==6.33
