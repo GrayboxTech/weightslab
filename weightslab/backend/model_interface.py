@@ -333,7 +333,7 @@ class ModelInterface(NetworkWithOps):
     def _maybe_auto_dump(self):
         # Called from base class hook after seen_samples updates.
         try:
-            if self._checkpoint_manager is None or self._checkpoint_auto_every_steps <= 0:
+            if not self.is_training() or self._checkpoint_manager is None or self._checkpoint_auto_every_steps <= 0:
                 return
             batched_age = int(self.get_batched_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
