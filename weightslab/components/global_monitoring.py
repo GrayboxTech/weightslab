@@ -25,9 +25,7 @@ class PauseController:
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
-        print('Waiting if paused...')
         self._event.wait()   # releases GIL while waiting
-        print('Wait over, resuming...')
 
     def pause(self):
         print('Training paused.')
