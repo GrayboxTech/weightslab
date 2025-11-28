@@ -202,6 +202,34 @@ def generate_graph_dependencies(
     """
     dependencies = []
 
+    def clean_dependencies(
+        dependencies: List[Tuple[nn.Module, nn.Module, DepType]]
+    ) -> List[Tuple[nn.Module, nn.Module, DepType]]:
+        """Remove self-loops and duplicate dependency edges.
+
+        - Self-loops (where src is dst) are removed.
+        - Duplicate edges (same src object, same dst object, same DepType)
+        are removed, preserving the first occurrence order.
+
+        Args:
+            dependencies: List of tuples (src_module, dst_module, DepType).
+
+        Returns:
+            Cleaned list of dependencies.
+        """
+        seen = set()
+        cleaned = []
+        for src, dst, dep in dependencies:
+            # Remove self-loops
+            if src is dst:
+                continue
+            key = (id(src), id(dst), dep)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append((src, dst, dep))
+        return cleaned
+
     # Map to store the last *structural module* (instance) that produced the
     # output for a given node.
     # This map is crucial for implementing the "pass-through" logic for
@@ -362,9 +390,12 @@ def generate_graph_dependencies(
             else:
                 node_to_module[node] = None  # Placeholder or constant input
 
+    # Clean dependencies (remove duplicates and self-loops)
+    dependencies = clean_dependencies(dependencies)
+    
     # Generate mapping tensor btw deps
     if not indexing_neurons:
-        return dependencies 
+        return dependencies
     for edge in dependencies:
         # Get src and dst modules and type
         src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]
