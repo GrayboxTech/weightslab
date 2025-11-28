@@ -1647,9 +1647,12 @@ class UNet3D(nn.Module):
 
 # Get the list of all model classes to parametrize the test
 ALL_MODEL_CLASSES = [
-    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, TinyUNet_Straightforward, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
+    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
 ]
-
+# TODO (GP):
+#   - Currently, TinyUNet_Straightforward operations (prune at least) is not working because the index mapping is not working as upsample wi. factor 2 or more is not considered in the mapping and in the graph generally.
+# Harcoded solution will be to check, and if one layer btw BN3 and CN8 is a upsampling, with multiply the mapping by the factor i.e., factor of 2, CN8 dst_to_src{'BN3': {0: [0,]*factor, 1: [1,]*factor]}.
+ 
 if __name__ == "__main__":
     from weightslab.backend.model_interface import ModelInterface
     from weightslab.utils.logs import print, setup_logging

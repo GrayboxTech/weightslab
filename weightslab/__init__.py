@@ -27,9 +27,10 @@ try:
 		'true'
 	).lower() == 'true'
 	
-	# Only setup if no handlers exist yet (avoid duplicate setup)
-	if not logging.getLogger().handlers:
-		setup_logging(log_level, log_to_file=log_to_file)
+	# Initialize logging (ensure console + file handlers are configured).
+	# setup_logging resets handlers, so it's safe to call here and guarantees
+	# both a console StreamHandler and a FileHandler (when requested).
+	setup_logging(log_level, log_to_file=log_to_file)
 	
 	logger = logging.getLogger(__name__)
 	logger.info(_BANNER)
