@@ -24,8 +24,6 @@ import os
 import time
 from typing import Optional, Any
 
-from weightslab import _BANNER
-
 from weightslab.backend.ledgers import GLOBAL_LEDGER
 from weightslab.backend.ledgers import Proxy
 from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
@@ -453,6 +451,8 @@ def cli_serve(host_cli: str = '127.0.0.1', port_cli: int = 10051, launch_cli: bo
             launch_cli: Whether to launch a new console window running the
                 client REPL connected to the server.
     """
+    from weightslab import _BANNER
+
     global _server_thread, _server_port, _server_host
 
     if _server_thread is not None and _server_thread.is_alive():
