@@ -21,7 +21,9 @@ from weightslab.components.global_monitoring import (
     pause_controller,
 )
 
-logging.basicConfig(level=logging.INFO)
+
+# Setup logging
+logging.basicConfig(level=logging.ERROR)
 
 
 # -----------------------------------------------------------------------------

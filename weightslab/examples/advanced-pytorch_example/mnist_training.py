@@ -2,6 +2,7 @@ import os
 import tqdm
 import time
 import warnings
+import logging
 import torch
 import tempfile
 import torch.nn as nn
@@ -18,6 +19,8 @@ from weightslab.components.global_monitoring import \
     guard_testing_context
 
 
+# Setup logging
+logging.basicConfig(level=logging.ERROR)
 warnings.filterwarnings("ignore")
 
 
