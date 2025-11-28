@@ -38,7 +38,6 @@ class PauseController:
         set_hyperparam(None, 'is_training', True)
 
     def is_paused(self):
-        print('Checking if paused:', not self._event.is_set())
         return not self._event.is_set()
 
 pause_controller = PauseController()
