@@ -10,6 +10,8 @@ service ExperimentService {
 
   rpc GetWeights(WeightsRequest) returns (WeightsResponse);
 
+  rpc GetActivations(ActivationRequest) returns (ActivationResponse);
+  
   rpc GetSamples (BatchSampleRequest) returns (BatchSampleResponse);
   
   // Data Service (for weights_studio UI)

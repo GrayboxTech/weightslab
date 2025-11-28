@@ -238,7 +238,7 @@ if __name__ == '__main__':
 
         # Test
         test_loss, test_metric = None, None
-        if train_step > 0 and train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
+        if train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
             test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device)
 
         # Verbose

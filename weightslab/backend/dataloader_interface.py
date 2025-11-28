@@ -85,11 +85,15 @@ class DataLoaderInterface:
             self.dataloader: DataLoader = data_loader_or_dataset
             self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader)
             self.tracked_dataset._map_updates_hook_fns.append(
-                self._reset_iterator
+                (self._reset_iterator, {})
             )
         else:
             # Dataset supplied: wrap and build our own DataLoader with a mutable batch sampler
             self.tracked_dataset = DataSampleTrackingWrapper(data_loader_or_dataset)
+            self.tracked_dataset._map_updates_hook_fns.append(
+                (self._reset_iterator, {})
+            )
+
 
             # store kwargs so we can recreate dataloader if needed
             self._dl_build_kwargs = dict(

@@ -1215,9 +1215,9 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 message="Model not found or invalid op_type",
             )
 
-        for neuron_details in weight_operations.neuron_ids:
-            layer_id = neuron_details.layer_id
-            neuron_id = neuron_details.neuron_id
+        if len(weight_operations.neuron_ids) == 0:
+            layer_id = weight_operations.layer_id
+            neuron_id = []
 
             with weightslab_rlock:
                 model.apply_architecture_op(
@@ -1225,6 +1225,19 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                     layer_id=layer_id,
                     neuron_indices=neuron_id,
                 )
+
+        else:
+            for neuron_details in weight_operations.neuron_ids:
+                layer_id = neuron_details.layer_id
+                neuron_id = neuron_details.neuron_id
+
+                with weightslab_rlock:
+                    model.apply_architecture_op(
+                        op_type=op_type,
+                        layer_id=layer_id,
+                        neuron_indices=neuron_id,
+                    )
+        
 
         answer = pb2.WeightsOperationResponse(
             success=True,
