@@ -61,14 +61,11 @@ class CNN(nn.Module):
     
 # --- Define functions ---
 def train(loader, model, optimizer, criterion_mlt):
-    print(f'\n{time.time()}: Training step...')
     with guard_training_context:
-        print(f'\n{time.time()}: In training context')
         # Get next batch
         (input, ids, label) = next(loader)
         input = input.to('cuda')
         label = label.to('cuda')
-        print(f'Input shape: {input.shape}, Label shape: {label.shape}')
 
         # Inference
         optimizer.zero_grad(set_to_none=True)
@@ -87,7 +84,6 @@ def train(loader, model, optimizer, criterion_mlt):
         # Propagate
         loss.backward()
         optimizer.step()
-    print(f'{time.time()}: Out training context.\n')
 
     # Returned signals detach from the computational graph
     return loss.detach().cpu().item()
