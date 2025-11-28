@@ -16,9 +16,14 @@ numpy==1.24.1
 sympy==1.12.1
 tqdm==4.66.4
 typing_extensions==4.12.2
-tqdm==4.66.4
 dill==0.4.0
 PyYAML==6.0.3
 grpcio==1.76.0
 grpcio-tools==1.76.0
 protobuf==6.33
+
+# UI - List the packages and their exact versions
+dash==2.17.1
+dash_bootstrap_components==1.6.0
+dash_daq==0.5.0
+Pillow==11.0.0

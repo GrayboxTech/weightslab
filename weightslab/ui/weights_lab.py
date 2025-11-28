@@ -1,22 +1,13 @@
+import io
+import re
 import ast
 import dash
-from dash import dcc
-from dash import html
-from enum import Enum
-import re
-from dash import dcc, html
-from dash import dash_table
-from dash.dependencies import Input
-from dash.dependencies import Output
-from dash.dependencies import State
+import plotly.graph_objs as go
 
 import dash_daq as daq
 import dash_bootstrap_components as dbc
-import plotly.graph_objs as go
-from typing import Iterable, Tuple, Dict, List, Any
 
 import argparse
-import asyncio
 import base64
 import grpc
 import os
@@ -28,12 +19,24 @@ import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 import pandas as pd
 import plotly.graph_objs as go
-from dash import dcc, html, MATCH, ALL, no_update, ctx
-from dash.dependencies import Input, Output, State
 import logging
 import collections
 import numpy as np
-import base64
+import random
+import hashlib
+
+from dash import dcc
+from dash import html
+from enum import Enum
+from dash import dash_table
+from dash import dcc, html, MATCH, ALL, no_update, ctx
+from dash.dependencies import Input, Output, State
+from dash.dependencies import Input
+from dash.dependencies import Output
+from dash.dependencies import State
+
+from typing import Tuple, Dict, List, Any
+from flask import Response, request, abort
 from io import BytesIO
 from PIL import Image
 from collections import defaultdict
@@ -41,10 +44,6 @@ from dash.dash_table.Format import Format, Scheme
 from utils.scope_timer import ScopeTimer
 from dataclasses import dataclass
 from math import isqrt
-import random
-from flask import Response, request, abort
-import hashlib
-import io
 
 
 # Set up logging
