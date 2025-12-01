@@ -35,9 +35,7 @@ The granular statistics and interactive paradigm enables powerful workflows:
 ## Getting Started
 ### Watch our demo below:
 
-<div style="position: relative; padding-bottom: 56.25%; height: 0;">
-  <iframe src="https://www.loom.com/embed/5d04822a0933427d971d320f64687730" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe>
-</div>
+[![Watch the video](https://cdn.loom.com/sessions/thumbnails/5d04822a0933427d971d320f64687730-with-play.gif)](https://www.loom.com/share/5d04822a0933427d971d320f64687730)
 
 ### Installation
 Define a python environment
