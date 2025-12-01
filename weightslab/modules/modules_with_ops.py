@@ -1140,6 +1140,8 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # Sanity check
         # # Overlapping neurons index and neurons available
+        if -1 in neuron_indices:
+            neuron_indices = set([len(neurons)-1])
         if not set(neuron_indices) & neurons:
             logger.warning(
                 f"{self.get_name()}.prune indices and neurons set do not "
@@ -1266,6 +1268,8 @@ class LayerWiseOperations(NeuronWiseOperations):
                 length = len(self.src_to_dst_mapping_tnsrs[deps_names[0]]) \
                     if len(deps_names) > 0 else None
                 for deps_name in deps_names:
+                    if hasattr(kwargs, 'current_parent_name') and dep_name not in kwargs.get('current_parent_name', []):
+                        continue
                     for neuron_indice in neuron_indices:
                         # Get the corresponding dst indexs (e.g., Linear)
                         neuron_indice = neuron_indice % length
@@ -1344,9 +1348,14 @@ class LayerWiseOperations(NeuronWiseOperations):
             deps_names = self.dst_to_src_mapping_tnsrs.keys()
             if len(deps_names) > 0:
                 for dep_name in deps_names:
+                    if hasattr(kwargs, 'current_parent_name') and dep_name not in kwargs.get('current_parent_name', []):
+                        continue
+                    # TODO (GP): Not working with TinyUnet3p FWD model
+                    # TODO (GP): The cn8 dst2src mapping is not updated properly for bn3, updated twice each call, so finally 
+                    # TODO (GP): Index mapping is {}
                     length = len(self.dst_to_src_mapping_tnsrs[dep_name])
-                    if length > 0 and not hasattr(self, 'bypass') or \
-                            (hasattr(self, 'bypass')):
+                    if length > 0 and (not hasattr(self, 'bypass') or \
+                            (hasattr(self, 'bypass'))):
                         indexs = list(self.dst_to_src_mapping_tnsrs[
                             dep_name
                         ].keys())

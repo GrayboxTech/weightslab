@@ -13,6 +13,7 @@ from weightslab.utils.modules_dependencies import _ModulesDependencyManager, \
     DepType
 
 
+# Global logger
 logger = logging.getLogger(__name__)
 
 
@@ -387,14 +388,14 @@ class NetworkWithOps(nn.Module):
             # # incoming several time (inc_node = th.cat([...,]))
             bypass = hasattr(incoming_module, "bypass")
 
-            # to avoid double expansion except for bypass nodes
+            # Avoid double expansion except for bypass nodes
             if incoming_id in self.visited_nodes and not bypass:
                 continue
             if _suppress_incoming_ids and incoming_id \
                     in _suppress_incoming_ids:
                 continue
 
-            # # Operate on module incoming neurons
+            # Operate on module incoming neurons
             kwargs['current_parent_name'] = module.get_name_wi_id()
             incoming_module.operate(
                 neuron_indices=neuron_indices,
@@ -516,6 +517,89 @@ if __name__ == "__main__":
 
     DEVICE = 'cuda' if th.cuda.is_available() else 'cpu'
 
+    class TinyUNet_Straightforward(nn.Module):
+        """
+        Implémentation UNet ultra-minimaliste (1 niveau d'encodage/décodage)
+        utilisant l'interpolation pour l'upsampling.
+
+        Architecture:
+        Input (H, W) -> Enc1 -> Bottleneck -> Up1 -> Output (H, W)
+        """
+        def __init__(self, in_channels=1, out_classes=1):
+            super().__init__()
+
+            # Set input shape
+            self.input_shape = (1, 1, 256, 256)
+
+            # Hyperparamètres (Canaux à chaque étape)
+            # c[1]=8 (Encodage/Décodage), c[2]=16 (Bottleneck)
+            c = [in_channels, 8, 16]
+
+            # --- A. ENCODER (Down Path) ---
+            # 1. ENCODER 1: Conv -> 8 canaux (Génère le skip connection x1)
+            self.enc1 = nn.Sequential(
+                nn.Conv2d(c[0], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c[1], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True)
+            )
+            self.pool1 = nn.MaxPool2d(2)  # Downsample 1
+
+            # --- B. BOTTLENECK ---
+            # 2. BOTTLENECK: Conv -> 16 canaux
+            self.bottleneck = nn.Sequential(
+                nn.Conv2d(c[1], c[2], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[2]),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c[2], c[2], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[2]),
+                nn.ReLU(inplace=True)
+            )
+
+            # --- C. DECODER (Up Path) ---
+            # 3. UPSAMPLE 1 (Transition Bottleneck -> Up1)
+            # Interpolation du Bottleneck (16 -> 32)
+            scale_factor = 2
+            self.up_interp1 = nn.Upsample(
+                scale_factor=scale_factor,
+                mode='bilinear',
+                align_corners=True
+            )
+            # Dual conv after cat (In: 16 (bottleneck) + 8 (skip) = 24 -> Out: 8)
+            self.up_conv1 = nn.Sequential(
+                nn.Conv2d(c[2] + scale_factor * c[1], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c[1], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True)
+            )
+
+            # --- D. OUTPUT ---
+            # 4. OUTPUT: Ramène à out_classes
+            self.out_conv = nn.Conv2d(c[1], out_classes, kernel_size=1)
+
+        def forward(self, x):
+            # 1. ENCODER
+            x1 = self.enc1(x)
+            p1 = self.pool1(x1)  # Skip x1
+
+            # 2. BOTTLENECK
+            bottleneck = self.bottleneck(p1)
+
+            # 3. DECODER 1: Interp + Concat (x1) + Conv
+            up_b = self.up_interp1(bottleneck)
+            merged1 = th.cat([x1, self.up_interp1(p1), up_b], dim=1)
+            d1 = self.up_conv1(merged1)
+
+            # 4. OUTPUT
+            logits = self.out_conv(d1)
+
+            return logits
+
+
     def _test_inference(model, dummy_input, op=None):
         import traceback
         # Infer
@@ -525,6 +609,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error during inference: {e}")
             traceback.print_exc()
+
 
     # # Initialize model
     model = TinyUNet_Straightforward()
@@ -543,30 +628,17 @@ if __name__ == "__main__":
     # --- Forward Pass Testing ---
     _test_inference(model, dummy_input)
 
-    # #############################
-    # ######## OP. mix ############
-    # #############################
-    # n = 3
-    # with model as m:
-    #     logger.debug('Adding operation - 5 neurons added.')
-    #     m.operate(n, 0, op_type=2)
-    #     m(dummy_input) if dummy_input is not None else None
-    # with model as m:
-    #     logger.debug('Pruning operation - first neuron removed.')
-    #     m.operate(n, 0, op_type=2)
-    #     m(dummy_input) if dummy_input is not None else None
-
     print('----'*50)
     print('Performing model parameters operations..')
-
     # model_op_neurons(model, dummy_input=dummy_input, rand=False)
-    if True:
-        n = 2
-        print(n)
-        with model as m:
-            print('Adding operation - 5 neurons added.')
-            m.operate(n, {-1, -1}, op_type=2)
-            m(dummy_input) if dummy_input is not None else None
+
+    # if True:
+    #     n = 7
+    #     print(n)
+    #     with model as m:
+    #         print('Adding operation - 5 neurons added.')
+    #         m.operate(n, {-1, -1}, op_type=2)
+    #         m(dummy_input) if dummy_input is not None else None
     if True:
         n = 6
         print(n)
@@ -574,3 +646,22 @@ if __name__ == "__main__":
             print('Adding operation - 5 neurons added.')
             m.operate(n, {-1, -1}, op_type=2)
             m(dummy_input) if dummy_input is not None else None
+    len(m.layers[8].dst_to_src_mapping_tnsrs['BatchNorm2d_3']) == m.layers[3].out_neurons == m.layers[3].in_neurons
+    len(m.layers[8].dst_to_src_mapping_tnsrs['BatchNorm2d_7']) == m.layers[7].out_neurons == m.layers[7].in_neurons
+
+
+    # if True:
+    #     n = 3
+    #     print(n)
+    #     with model as m:
+    #         print('Adding operation - 5 neurons added.')
+    #         m.operate(n, {-1, -1}, op_type=2)
+    #         m(dummy_input) if dummy_input is not None else None
+    # if True:
+    #     n = 2
+    #     print(n)
+    #     with model as m:
+    #         print('Adding operation - 5 neurons added.')
+    #         m.operate(n, {-1, -1}, op_type=2)
+    #         m(dummy_input) if dummy_input is not None else None
+    print()
