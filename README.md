@@ -9,19 +9,18 @@
 </pred>
 </pred style="font-style: italic;">
 WeightsLab — Inspect, Edit and Evolve Neural Networks
-By GrayBx.
+By Graybx.
 </pre>
 </div>
 
-## Presentation
-WeightsLab is a powerful tool for editing and inspecting AI model weights during training.
-This early prototype helps you debug and fix common training issues through interactive weight manipulation and granular analysis.
+## About WeightsLab
+WeightsLab is a powerful tool for editing and inspecting data & AI model weights, during training.
 
 ### What Problems Does It Solve?
 WeightsLab addresses critical training challenges:
 
-* Overfitting and training plateaus
-* Dataset insights and optimization
+* Overfitting and training plateau
+* Dataset insights & optimization
 * Over/Under parameterization
 
 ### Key Capabilities
@@ -34,7 +33,7 @@ The granular statistics and interactive paradigm enables powerful workflows:
 
 
 ## Getting Started
-### 6-Minute Loom
+### Watch our demo below:
 [![Loom](https://img.shields.io/badge/loom%20-0000FF)](https://www.loom.com/share/5d04822a0933427d971d320f64687730)
 
 ### Installation
@@ -72,12 +71,12 @@ Quickstart examples:
 
 ### Community
 
-Graybox is built by a wonderful community of researchers and engineers. 
+Graybx is built by a wonderful community of researchers and engineers. 
 
 
 ### Citation
 
-If you publish work that uses GrayBx, please cite Graybx as follows:
+If you publish work that uses Graybx, please cite Graybx as follows:
 
 ```bibtex
 @article{graybx2025,
