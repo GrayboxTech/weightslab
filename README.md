@@ -1,3 +1,13 @@
+<div align="center">
+  <img
+    src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/GitHub_banner_WL.jpg"
+    alt="Graybox Logo"
+    height="250"
+  />
+  <h3>Place your AI anywhere between blackbox and whitebox — with insights and control</h3>
+</div>
+
+
 # WeightsLab: A Friendly BlackBox interactive approach
 
 <div style="text-align: center;">
