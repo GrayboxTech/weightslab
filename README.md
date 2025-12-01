@@ -35,8 +35,10 @@ The granular statistics and interactive paradigm enables powerful workflows:
 ## Getting Started
 ### Watch our demo below:
 
-<div style="position: relative; padding-bottom: 62.5%; height: 0;">
-  <iframe src="https://www.loom.com/embed/5d04822a0933427d971d320f64687730?sid=8f3e4c5d-9b4e-4f3e-a5d1-2c3d4e5f6g7h" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe>
+<div>
+  <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
+    <img src="https://cdn.loom.com/sessions/thumbnails/5d04822a0933427d971d320f64687730-00001.gif" style="max-width:100%;">
+  </a>
 </div>
 
 ### Installation
