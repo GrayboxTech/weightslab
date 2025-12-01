@@ -816,6 +816,11 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             logger.info("Initializing data service (first call)")
             self._initialize_data_service()
 
+        try:
+            self._refresh_data_stats()
+        except Exception as e:
+            logger.warning(f"Failed to refresh data stats in GetDataSamples: {e}")
+
         if self._all_datasets_df is None:
             logger.error("Data service initialization failed - no dataframe available")
             return pb2.DataSamplesResponse(
@@ -823,6 +828,14 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 message="Data service not available",
                 data_records=[],
             )
+
+        # if self._all_datasets_df is None:
+        #     logger.error("Data service initialization failed - no dataframe available")
+        #     return pb2.DataSamplesResponse(
+        #         success=False,
+        #         message="Data service not available",
+        #         data_records=[],
+        #     )
         
         logger.info(f"DataFrame has {len(self._all_datasets_df)} total samples")
 
