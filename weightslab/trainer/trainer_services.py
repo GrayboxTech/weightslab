@@ -638,15 +638,27 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
             # Optional: external agent (weights_studio integration)
             try:
-                import sys
+                import sys, os
 
-                sys.path.append("/Users/marcziegler/projects/work/graybox/v6/weights_studio")
-                from agent import DataManipulationAgent  # noqa: F401
+                # path to trainer_services.py
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+
+                # repo root: /Users/.../v0
+                repo_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
+
+                # weights_studio location: /Users/.../v0/weights_studio
+                weights_studio_path = os.path.join(repo_root, "weights_studio")
+
+                if os.path.isdir(weights_studio_path) and weights_studio_path not in sys.path:
+                    sys.path.append(weights_studio_path)
+
+                from agent import DataManipulationAgent
                 import agent
 
                 logger.info(f"DEBUG: agent module loaded from: {agent.__file__}")
                 self._agent = DataManipulationAgent(self._all_datasets_df)
                 logger.info("Data service initialized successfully with agent")
+
             except ImportError as e:
                 logger.warning(f"DataManipulationAgent not available: {e}")
                 self._agent = None
@@ -798,15 +810,21 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
     def GetDataSamples(self, request, context):
         """Retrieve samples with their data statistics."""
+        logger.info(f"GetDataSamples called: start_index={request.start_index}, records_cnt={request.records_cnt}")
+        
         if self._all_datasets_df is None:
+            logger.info("Initializing data service (first call)")
             self._initialize_data_service()
 
         if self._all_datasets_df is None:
+            logger.error("Data service initialization failed - no dataframe available")
             return pb2.DataSamplesResponse(
                 success=False,
                 message="Data service not available",
                 data_records=[],
             )
+        
+        logger.info(f"DataFrame has {len(self._all_datasets_df)} total samples")
 
         try:
             if request.start_index < 0 or request.records_cnt <= 0:
@@ -889,6 +907,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                     )
                 )
 
+            logger.info(f"Successfully created {len(data_records)} data records from {len(df_slice)} dataframe rows")
             return pb2.DataSamplesResponse(
                 success=True,
                 message=f"Retrieved {len(data_records)} data records",

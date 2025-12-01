@@ -282,3 +282,11 @@ if __name__ == "__main__":
     print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
+
+    # Keep the script running to serve requests for the UI
+    print("\nServer is still running. Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping server...")
