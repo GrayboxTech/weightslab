@@ -940,30 +940,40 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         train_loader = self._components.get("train_loader")
         test_loader = self._components.get("test_loader")
 
+        # --- update underlying tracking wrapper ---
         for sid, origin in zip(request.samples_ids, request.sample_origins):
-            dataset = None
+            ds = None
             if origin == "train":
-                dataset = getattr(train_loader, "dataset", train_loader) if train_loader else None
+                ds = train_loader
             elif origin == "eval":
-                dataset = getattr(test_loader, "dataset", test_loader) if test_loader else None
+                ds = test_loader
 
-            if dataset is None:
+            if ds is None:
                 continue
+
+            # Prefer the tracking wrapper if present
+            dataset = getattr(ds, "tracked_dataset", ds)
 
             try:
                 if request.stat_name == "tags":
-                    dataset.set(sid, "tags", request.string_value)
+                    dataset.set(int(sid), "tags", request.string_value)
                 elif request.stat_name == "deny_listed":
-                    dataset.set(sid, "deny_listed", request.bool_value)
+                    dataset.set(int(sid), "deny_listed", request.bool_value)
             except Exception as e:
                 logger.warning(f"Could not edit sample {sid}: {e}")
 
+        # --- update cached dataframe, if already built ---
         if self._all_datasets_df is not None:
             for sid, origin in zip(request.samples_ids, request.sample_origins):
-                mask = (self._all_datasets_df["sample_id"] == sid) & (
-                    self._all_datasets_df["origin"] == origin
+                mask = (
+                    (self._all_datasets_df["sample_id"] == int(sid)) &
+                    (self._all_datasets_df["origin"] == origin)
                 )
-                value = request.string_value if request.stat_name == "tags" else request.bool_value
+                value = (
+                    request.string_value
+                    if request.stat_name == "tags"
+                    else request.bool_value
+                )
                 self._all_datasets_df.loc[mask, request.stat_name] = value
 
         return pb2.DataEditsResponse(
