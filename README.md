@@ -13,23 +13,6 @@ By GrayBx.
 </pre>
 </div>
 
-
-<p align="center">
-    <a href="https://www.linkedin.com/company/graybx-com/posts/?feedView=all">Website</a> |
-    <a href="https://www.linkedin.com/company/graybx-com/posts/?feedView=all">In</a> |
-    <a href="https://www.linkedin.com/company/graybx-com/posts/?feedView=all">Blog</a> |
-    <a href="https://www.linkedin.com/company/graybx-com/posts/?feedView=all">Docs</a> |
-    <a href="https://www.linkedin.com/company/graybx-com/posts/?feedView=all">Slack</a>
-    <br /><br />
-</p>
-
-[![GitHub license](https://github.com/GrayboxTech/weightslab/blob/main/LICENSE)](None)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](None)
-![Build](https://github.com/adap/flower/actions/workflows/framework.yml/badge.svg)
-[![Downloads](https://static.pepy.tech/badge/flwr)](None)
-[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-flwr-blue)](None)
-[![Slack](https://img.shields.io/badge/Chat-Slack-red)](None)
-
 ## Presentation
 WeightsLab is a powerful tool for editing and inspecting AI model weights during training.
 This early prototype helps you debug and fix common training issues through interactive weight manipulation and granular analysis.
