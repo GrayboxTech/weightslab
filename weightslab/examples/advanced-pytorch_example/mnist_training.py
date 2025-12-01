@@ -45,14 +45,14 @@ class VGG16(nn.Module):
     
     
 # --- Define functions ---
-def train(loader, model, optimizer, criterion_mlt):
+def train(loader, model, optimizer, criterion_mlt, device):
     print(f'\n{time.time()}: Training step...')
     with guard_training_context:
         print(f'\n{time.time()}: In training context')
         # Get next batch
         (input, ids, label) = next(loader)
-        input = input.to('cuda')
-        label = label.to('cuda')
+        input = input.to(device)
+        label = label.to(device)
         print(f'Input shape: {input.shape}, Label shape: {label.shape}')
 
         # Inference
@@ -223,7 +223,7 @@ if __name__ == '__main__':
         train_range = tqdm.trange(max_steps, dynamic_ncols=True)
     for train_step in train_range:
         # Train
-        train_loss = train(train_loader, model, optimizer, train_criterion_mlt)
+        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Test
         test_loss, test_metric = None, None

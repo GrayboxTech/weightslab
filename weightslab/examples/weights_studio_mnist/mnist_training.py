@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.ERROR)
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_mlt, device="cpu"):
+def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:
         (inputs, ids, labels) = next(loader)

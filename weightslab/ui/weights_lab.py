@@ -27,7 +27,6 @@ import hashlib
 
 from dash import dcc
 from dash import html
-from enum import Enum
 from dash import dash_table
 from dash import dcc, html, MATCH, ALL, no_update, ctx
 from dash.dependencies import Input, Output, State
@@ -37,6 +36,7 @@ from dash.dependencies import State
 
 from typing import Tuple, Dict, List, Any
 from flask import Response, request, abort
+from enum import Enum
 from io import BytesIO
 from PIL import Image
 from collections import defaultdict

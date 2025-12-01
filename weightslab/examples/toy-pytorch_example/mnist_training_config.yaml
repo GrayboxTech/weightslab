@@ -2,7 +2,7 @@
 # Top-level keys describe runtime environment and experiment settings.
 
 # Device to run training on: 'cpu' or 'cuda'
-device: cuda
+device: cpu
 
 # Root directory where logs, checkpoints and other artifacts are stored.
 # Use a platform-appropriate path. If unset, a default under the current
