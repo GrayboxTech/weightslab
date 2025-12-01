@@ -68,8 +68,9 @@ pip install -r ./requirements.txt
 ```
 
 
-### GrayBx Usage Example
-Several code examples show different usage from toy to more complicated models (based with PyTorch).
+### Cookbook
+
+Check out our materials, with examples from toy to more complex models.
 
 Quickstart examples:
 - [Toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/toy-pytorch_example)
@@ -79,7 +80,8 @@ Quickstart examples:
 
 ### Community
 
-Graybx is built by a wonderful community of researchers and engineers. 
+Graybx is building a wonderful community of AI researchers and engineers.
+Are you interested in joining our project ? Contact us at hello [at] graybx [dot] com
 
 
 ### Citation
