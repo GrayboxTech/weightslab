@@ -4,25 +4,8 @@
     alt="Graybox Logo"
     height="250"
   />
-  <h3>Place your AI anywhere between blackbox and whitebox — with insights and control</h3>
 </div>
-
-
-# WeightsLab: A Friendly BlackBox interactive approach
-
-<div style="text-align: center;">
-<pre style="background-color: transparent;">
-<span style="color: red;">/WW      /WW</span>           /aa           /aa         /aa               <span style="color: green;">/aa</span>                 /aa      
-<span style="color: red;">| WW  /W | WW</span>          |__/          | aa        | aa              <span style="color: green;">| aa</span>                | aa      
-<span style="color: red;">| WW /WWW| WW</span>  /aaaaaa  /aa  /aaaaaa | aaaaaaa  /aaaaaa    /aaaaaaa<span style="color: green;">| aa</span>        /aaaaaa | aaaaaaa 
-<span style="color: red;">| WW/WW WW WW</span> /aa__  aa| aa /aa__  aa| aa__  aa|_  aa_/   /aa_____/<span style="color: green;">| aa</span>       |____  aa| aa__  aa
-<span style="color: red;">| WWWW_  WWWW</span>| aaaaaaaa| aa| aa  \ aa| aa  \ aa  | aa    |  aaaaaa <span style="color: green;">| aa</span>        /aaaaaaa| aa  \ aa
-<span style="color: red;">| WWW/ \  WWW</span>| aa_____/| aa| aa  | aa| aa  | aa  | aa /aa \____  aa<span style="color: green;">| aa</span>       /aa__  aa| aa  | aa
-<span style="color: red;">| WW/   \  WW</span>|  aaaaaaa| aa|  aaaaaaa| aa  | aa  |  aaaa/ /aaaaaaa/<span style="color: green;">| aaaaaaaa</span>  aaaaaaa| aaaaaaa/
-<span style="color: red;">|__/     \__/</span> \_______/|__/ \____  aa|__/  |__/   \___/  |_______/ <span style="color: green;">|________/</span> \_______/|_______/ 
-                            /aa  \ aa                                                            
-                           |  aaaaaa/                                                            
-                            \______/                                                             
+                                                     
 </pred>
 </pred style="font-style: italic;">
 WeightsLab — Inspect, Edit and Evolve Neural Networks
