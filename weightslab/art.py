@@ -39,7 +39,3 @@ Git branch: {branch}
 Version: {version}
 Commit hash: {commit_hash}
 """
-
-
-if __name__ == "__main__":
-    print(_BANNER)

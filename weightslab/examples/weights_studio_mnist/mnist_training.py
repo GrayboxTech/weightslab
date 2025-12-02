@@ -12,6 +12,7 @@ import yaml
 import weightslab as wl
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
+from torchvision import datasets, transforms, models
 
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.utils.board import Dash as Logger
@@ -20,7 +21,7 @@ from weightslab.components.global_monitoring import (
     guard_testing_context,
     pause_controller,
 )
-
+os.environ["GRPC_VERBOSITY"] = "debug"
 
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
@@ -106,7 +107,7 @@ if __name__ == "__main__":
         serving_cli=False,     # no CLI TCP server, no extra terminal
         host_cli="127.0.0.1",
         port_cli=0,
-        launch_cli=False,
+        launch_cli=True,
     )
 
     # 2) Load hyperparameters (from YAML if present)
@@ -174,7 +175,6 @@ if __name__ == "__main__":
         transform=transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,)),
             ]
         ),
     )
@@ -185,7 +185,6 @@ if __name__ == "__main__":
         transform=transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,)),
             ]
         ),
     )
@@ -282,11 +281,3 @@ if __name__ == "__main__":
     print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
-
-    # Keep the script running to serve requests for the UI
-    print("\nServer is still running. Press Ctrl+C to stop.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nStopping server...")
