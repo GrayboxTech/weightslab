@@ -11,6 +11,7 @@ import torch.optim as optim
 import yaml
 
 from torchvision import datasets, transforms
+from torch.utils.data import Dataset, ConcatDataset
 from torchmetrics.classification import Accuracy
 
 from weightslab.utils.board import Dash as Logger
@@ -58,7 +59,6 @@ class CNN(nn.Module):
         return x
 
 
-    
 # --- Define functions ---
 def train(loader, model, optimizer, criterion_mlt, device):
     with guard_training_context:
@@ -181,7 +181,7 @@ if __name__ == '__main__':
     # Data
     _train_dataset = datasets.MNIST(
         root=os.path.join(parameters.get('root_log_dir'), 'data'),
-        train=False,
+        train=True,
         download=True,
         transform=transforms.Compose([
             transforms.ToTensor(),
@@ -197,6 +197,59 @@ if __name__ == '__main__':
             transforms.Normalize((0.5,), (0.5,))
         ])
     )
+
+    # --- Helpers to manipulate indices and data without copying transforms ---
+    class IndexMappingDataset(Dataset):
+        """Proxy dataset that remaps indices to a base dataset."""
+        def __init__(self, base_ds: Dataset, index_map: list[int]):
+            self.base = base_ds
+            self.index_map = index_map
+
+        def __len__(self):
+            return len(self.index_map)
+
+        def __getitem__(self, idx):
+            return self.base[self.index_map[idx]]
+
+    class TensorListDataset(Dataset):
+        """Simple dataset backed by in-memory lists of tensors and labels."""
+        def __init__(self, images, labels):
+            self.images = images
+            self.labels = labels
+
+        def __len__(self):
+            return len(self.images)
+
+        def __getitem__(self, idx):
+            return self.images[idx], self.labels[idx]
+
+    # --- Build train with duplicates: last 1000 equal to first 1000 ---
+    base_train_len = len(_train_dataset)
+    dup_k = min(1000, base_train_len)
+    train_index_map = list(range(base_train_len)) + list(range(dup_k))
+    _train_dataset = IndexMappingDataset(_train_dataset, train_index_map)
+
+    # --- Build test so last 100 equal to last 100 of train (after duplication) ---
+    base_test_len = len(_test_dataset)
+    tail_n = min(100, len(_train_dataset))
+
+    # 1) First part: original test minus last 100 slots
+    head_len = max(0, base_test_len - tail_n)
+    test_head = IndexMappingDataset(_test_dataset, list(range(head_len)))
+
+    # 2) Tail from train's last 100 samples (post-dup)
+    tail_images, tail_labels = [], []
+    start_tail = len(_train_dataset) - tail_n
+    for i in range(start_tail, start_tail + tail_n):
+        img, lbl = _train_dataset[i]
+        tail_images.append(img)
+        tail_labels.append(lbl)
+    test_tail = TensorListDataset(tail_images, tail_labels)
+
+    # 3) Final test is concatenation
+    _test_dataset = ConcatDataset([test_head, test_tail])
+    
+
     train_bs = parameters.get('data', {}).get('train_dataset', {}).get('batch_size', 16)
     test_bs = parameters.get('data', {}).get('test_dataset', {}).get('batch_size', 16)
     train_shuffle = parameters.get('data', {}).get('train_dataset', {}).get('train_shuffle', True)

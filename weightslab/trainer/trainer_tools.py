@@ -1,18 +1,23 @@
-import time
-from statistics import mean, stdev
-
 import io
 import sys
-import time
-import time
+import io
+import xxhash
+import hashlib
+import numpy as np
 import torch
+import logging
 import subprocess
 import numpy as np
 import weightslab.proto.experiment_service_pb2 as pb2
 
 from PIL import Image
+from typing import Union
 from torchvision import transforms
 from typing import List, Tuple, Iterable
+
+
+# Get Global Logger
+logger = logging.getLogger(__name__)
 
 
 def get_hyper_parameters_pb(
@@ -491,4 +496,3 @@ def force_kill_all_python_processes():
 
     else:
         logger.error(f"Operating system '{sys.platform}' not supported for forced shutdown.")
-

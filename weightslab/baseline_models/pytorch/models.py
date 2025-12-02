@@ -1645,9 +1645,198 @@ class UNet3D(nn.Module):
         return logits
 
 
+class YOLOv3Tiny(nn.Module):
+    """
+    A simplified YOLOv3-Tiny object detection model implementation.
+    
+    Architecture:
+    - Darknet-inspired backbone with residual connections
+    - Two detection scales (13x13 and 26x26)
+    - Outputs bounding boxes, objectness scores, and class predictions
+    
+    Output format per detection scale:
+    - Shape: (B, num_anchors, grid_h, grid_w, 5 + num_classes)
+    - 5 = [x, y, w, h, objectness]
+    """
+    
+    def __init__(self, num_classes=80, num_anchors=3):
+        super().__init__()
+        self.input_shape = (1, 3, 416, 416)
+        self.num_classes = num_classes
+        self.num_anchors = num_anchors
+        self.output_channels = num_anchors * (5 + num_classes)
+        
+        # Anchors for YOLOv3-Tiny (scaled for 416x416)
+        # Format: [(w, h), ...] for each scale
+        self.anchors_scale1 = [[81, 82], [135, 169], [344, 319]]  # 13x13
+        self.anchors_scale2 = [[23, 27], [37, 58], [81, 82]]      # 26x26
+        
+        def conv_bn_leaky(in_c, out_c, kernel_size, stride=1, padding=1):
+            """Standard convolution block with BatchNorm and LeakyReLU."""
+            return nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size, stride, padding, bias=False),
+                nn.BatchNorm2d(out_c),
+                nn.LeakyReLU(0.1, inplace=True)
+            )
+        
+        # --- BACKBONE (Feature Extractor) ---
+        
+        # Stage 1: Input 416x416 -> 208x208
+        self.stage1 = nn.Sequential(
+            conv_bn_leaky(3, 16, 3, 1, 1),
+            nn.MaxPool2d(2, 2)  # 208x208
+        )
+        
+        # Stage 2: 208x208 -> 104x104
+        self.stage2 = nn.Sequential(
+            conv_bn_leaky(16, 32, 3, 1, 1),
+            nn.MaxPool2d(2, 2)  # 104x104
+        )
+        
+        # Stage 3: 104x104 -> 52x52
+        self.stage3 = nn.Sequential(
+            conv_bn_leaky(32, 64, 3, 1, 1),
+            nn.MaxPool2d(2, 2)  # 52x52
+        )
+        
+        # Stage 4: 52x52 -> 26x26
+        self.stage4 = nn.Sequential(
+            conv_bn_leaky(64, 128, 3, 1, 1),
+            nn.MaxPool2d(2, 2)  # 26x26
+        )
+        
+        # Stage 5: 26x26 -> 13x13
+        self.stage5 = nn.Sequential(
+            conv_bn_leaky(128, 256, 3, 1, 1),
+            nn.MaxPool2d(2, 2)  # 13x13
+        )
+        
+        # Stage 6: Additional feature processing at 13x13
+        self.stage6 = nn.Sequential(
+            conv_bn_leaky(256, 512, 3, 1, 1),
+            nn.MaxPool2d(2, 1, padding=1),  # 13x13 (stride=1 maintains size)
+            conv_bn_leaky(512, 1024, 3, 1, 1)
+        )
+        
+        # --- DETECTION HEAD 1 (13x13 scale - large objects) ---
+        self.detect1_conv = nn.Sequential(
+            conv_bn_leaky(1024, 256, 1, 1, 0),
+            conv_bn_leaky(256, 512, 3, 1, 1)
+        )
+        self.detect1_output = nn.Conv2d(512, self.output_channels, 1, 1, 0)
+        
+        # --- ROUTE LAYER (for skip connection) ---
+        self.route_conv = conv_bn_leaky(256, 128, 1, 1, 0)
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')  # 13x13 -> 26x26
+        
+        # --- DETECTION HEAD 2 (26x26 scale - medium objects) ---
+        # Input: concatenated [upsampled route (128) + stage4 output (128)] = 256
+        self.detect2_conv = nn.Sequential(
+            conv_bn_leaky(256, 256, 3, 1, 1)
+        )
+        self.detect2_output = nn.Conv2d(256, self.output_channels, 1, 1, 0)
+    
+    def forward(self, x):
+        # --- BACKBONE FORWARD PASS ---
+        x1 = self.stage1(x)       # 208x208 x 16
+        x2 = self.stage2(x1)      # 104x104 x 32
+        x3 = self.stage3(x2)      # 52x52 x 64
+        x4 = self.stage4(x3)      # 26x26 x 128 (saved for skip connection)
+        x5 = self.stage5(x4)      # 13x13 x 256
+        x6 = self.stage6(x5)      # 13x13 x 1024
+        
+        # --- DETECTION SCALE 1 (13x13 - large objects) ---
+        detect1_features = self.detect1_conv(x6)  # 13x13 x 512
+        detect1_raw = self.detect1_output(detect1_features)  # 13x13 x output_channels
+        
+        # Reshape: (B, output_channels, 13, 13) -> (B, num_anchors, 13, 13, 5+num_classes)
+        b, _, h1, w1 = detect1_raw.shape
+        detect1 = detect1_raw.view(b, self.num_anchors, 5 + self.num_classes, h1, w1)
+        detect1 = detect1.permute(0, 1, 3, 4, 2).contiguous()  # (B, 3, 13, 13, 85)
+        
+        # --- ROUTE FOR DETECTION SCALE 2 ---
+        route = self.route_conv(detect1_features[:, :256, :, :])  # Extract first 256 channels
+        route_upsampled = self.upsample(route)  # 26x26 x 128
+        
+        # Concatenate with stage4 features (skip connection)
+        concat = torch.cat([route_upsampled, x4], dim=1)  # 26x26 x 256
+        
+        # --- DETECTION SCALE 2 (26x26 - medium objects) ---
+        detect2_features = self.detect2_conv(concat)  # 26x26 x 256
+        detect2_raw = self.detect2_output(detect2_features)  # 26x26 x output_channels
+        
+        # Reshape: (B, output_channels, 26, 26) -> (B, num_anchors, 26, 26, 5+num_classes)
+        b, _, h2, w2 = detect2_raw.shape
+        detect2 = detect2_raw.view(b, self.num_anchors, 5 + self.num_classes, h2, w2)
+        detect2 = detect2.permute(0, 1, 3, 4, 2).contiguous()  # (B, 3, 26, 26, 85)
+        
+        # Return both detection scales
+        # Each scale: (B, num_anchors, grid_h, grid_w, 5 + num_classes)
+        return detect1, detect2
+    
+    def decode_predictions(self, predictions, img_size=416, conf_thresh=0.5):
+        """
+        Decode raw YOLO predictions into bounding boxes.
+        
+        Args:
+            predictions: tuple of (detect1, detect2) from forward()
+            img_size: original image size
+            conf_thresh: confidence threshold for filtering
+        
+        Returns:
+            List of detections per image: [x, y, w, h, conf, class_id]
+        """
+        detections = []
+        
+        for scale_idx, pred in enumerate(predictions):
+            # pred shape: (B, num_anchors, grid_h, grid_w, 5 + num_classes)
+            anchors = self.anchors_scale1 if scale_idx == 0 else self.anchors_scale2
+            
+            b, num_anchors, grid_h, grid_w, _ = pred.shape
+            stride = img_size // grid_h
+            
+            # Apply sigmoid to tx, ty, objectness, and class predictions
+            pred[..., 0:2] = torch.sigmoid(pred[..., 0:2])  # x, y
+            pred[..., 4:] = torch.sigmoid(pred[..., 4:])    # objectness + classes
+            
+            # Convert to absolute coordinates
+            for anchor_idx in range(num_anchors):
+                for i in range(grid_h):
+                    for j in range(grid_w):
+                        # Objectness filtering
+                        objectness = pred[:, anchor_idx, i, j, 4]
+                        if objectness < conf_thresh:
+                            continue
+                        
+                        # Decode bounding box
+                        tx, ty = pred[:, anchor_idx, i, j, 0:2]
+                        tw, th = pred[:, anchor_idx, i, j, 2:4]
+                        
+                        # Center coordinates
+                        bx = (tx + j) * stride
+                        by = (ty + i) * stride
+                        
+                        # Width and height
+                        anchor_w, anchor_h = anchors[anchor_idx]
+                        bw = anchor_w * torch.exp(tw)
+                        bh = anchor_h * torch.exp(th)
+                        
+                        # Class prediction
+                        class_scores = pred[:, anchor_idx, i, j, 5:]
+                        class_id = torch.argmax(class_scores, dim=-1)
+                        class_conf = class_scores[:, class_id]
+                        
+                        # Final confidence
+                        conf = objectness * class_conf
+                        
+                        detections.append([bx, by, bw, bh, conf, class_id])
+        
+        return detections
+
+
 # Get the list of all model classes to parametrize the test
 ALL_MODEL_CLASSES = [
-    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
+    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D, YOLOv3Tiny
 ]
 # TODO (GP):
 #   - Currently, TinyUNet_Straightforward operations (prune at least) is not working because the index mapping is not working as upsample wi. factor 2 or more is not considered in the mapping and in the graph generally.

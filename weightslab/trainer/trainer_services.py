@@ -533,40 +533,29 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 """Convert a dataset/loader into a DataFrame usable by the UI."""
                 raw_ds = dataset_or_loader
                 # logger.info(f"DEBUG: Unwrapping {type(raw_ds)} for {origin}")
-                while True:
-                    if hasattr(raw_ds, "wrapped_dataset"):
-                        new_ds = raw_ds.wrapped_dataset
-                        if new_ds is not None:
-                            raw_ds = new_ds
-                        else:
-                            break
-                    elif hasattr(raw_ds, "dataset"):
-                        new_ds = raw_ds.dataset
-                        if new_ds is not None:
-                            raw_ds = new_ds
-                        else:
-                            break
-                    else:
-                        break
-                    
-                    if raw_ds is None:
-                        break
+                new_ds, new_ids = raw_ds.wrapped_dataset if hasattr(raw_ds, 'wrapped_dataset') else raw_ds.dataset, raw_ds.unique_ids
+                if new_ds is not None:
+                    raw_ds = new_ds
+                if new_ids is not None:
+                    raw_ids = new_ids
+                else:
+                    raw_ids = range(len(raw_ds))
 
                 if raw_ds is None:
                     logger.warning(f"raw_ds is None for {origin}, returning empty DF")
                     return pd.DataFrame()
 
                 records = []
-
                 # Fast path for torchvision-style datasets with data/targets
-                if hasattr(raw_ds, "data") and hasattr(raw_ds, "targets"):
+                if hasattr(raw_ds, "data") and hasattr(raw_ds, "targets") and raw_ids is not None:
                     try:
                         images = raw_ds.data.numpy()
                         labels = raw_ds.targets.numpy()
                         for i in range(len(raw_ds)):
+                            uid = raw_ids[i]
                             records.append(
                                 {
-                                    "sample_id": i,
+                                    "sample_id": uid,
                                     "label": int(labels[i]),
                                     "image": images[i],
                                     "origin": origin,
@@ -574,33 +563,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                             )
                     except Exception as e:
                         logger.warning(f"Fast path failed for {origin}: {e}")
-
-                # Fallback: iterate samples
-                if not records:
-                    for i in range(len(raw_ds)):
-                        try:
-                            item = raw_ds[i]
-                            if isinstance(item, (tuple, list)):
-                                img, lbl = item[0], item[-1]
-                            else:
-                                img, lbl = item, None
-
-                            if hasattr(img, "numpy"):
-                                img_arr = img.numpy()
-                            else:
-                                img_arr = np.array(img)
-
-                            records.append(
-                                {
-                                    "sample_id": i,
-                                    "label": int(lbl) if lbl is not None else None,
-                                    "image": img_arr,
-                                    "origin": origin,
-                                }
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to convert sample {i}: {e}")
-                            continue
 
                 df = pd.DataFrame(records)
 

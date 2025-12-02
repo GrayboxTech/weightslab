@@ -3,15 +3,35 @@ import torch as th
 import numpy as np
 import pandas as pd
 import random as rnd
-from collections import defaultdict
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
+from weightslab.utils.tools import array_id_2bytes
+
 
 # Global logger
 logger = logging.getLogger(__name__)
 SamplePredicateFn = Callable[[], bool]
+
+# Global UID registry to detect train/test overlaps within a process
+GLOBAL_UID_REGISTRY: Dict[str, Set[int]] = {
+    'train': set(),
+    'test': set(),
+    'other': set(),
+}
+
+def _detect_dataset_split(ds) -> str:
+    """Best-effort split detection for common datasets."""
+    train_attr = getattr(ds, 'train', None)
+    if train_attr is True:
+        return 'train'
+    if train_attr is False:
+        return 'test'
+    split = getattr(ds, 'split', None)
+    if isinstance(split, str) and split.lower() in ('train', 'test'):
+        return split.lower()
+    return 'other'
 
 
 def _is_scalarish(x) -> bool:
@@ -99,6 +119,32 @@ class _StateDictKeys(str, Enum):
 
 class DataSampleTrackingWrapper(Dataset):
     def __init__(self, wrapped_dataset: Dataset):
+        # First, generate UIDs and detect duplicates before wrapping
+        logger.info(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
+        self.unique_ids, self.unique_id_to_index = self._generate_unique_ids_parallel(wrapped_dataset)
+        logger.info(f"Generated {len(self.unique_ids)} unique IDs")
+
+        # Detect duplicates and keep only first occurrences
+        seen_uid: Dict[int, int] = {}
+        kept_indices = []
+
+        for idx, uid in enumerate(self.unique_ids):
+            uid_int = int(uid)
+            if uid_int not in seen_uid:
+                # First occurrence, keep it
+                seen_uid[uid_int] = idx
+                kept_indices.append(idx)
+        num_duplicates = len(self.unique_ids) - len(kept_indices)
+        self.unique_ids = self.unique_ids[kept_indices]
+        if num_duplicates > 0:
+            logger.warning(
+                f"[DataSampleTrackingWrapper] Found {num_duplicates} duplicate samples. "
+                f"Keeping {len(kept_indices)} unique samples. Duplicates physically removed from dataset."
+            )
+            # Wrap the original dataset with Subset to only expose non-duplicate indices
+            wrapped_dataset = Subset(wrapped_dataset, kept_indices)
+        
+        # Now proceed with initialization using the deduplicated dataset
         self.__name__ = wrapped_dataset.__name__ if hasattr(
             wrapped_dataset,
             "__name__"
@@ -118,9 +164,11 @@ class DataSampleTrackingWrapper(Dataset):
         self.dataframe = None
         self._map_updates_hook_fns = []
 
-        for sample_id in range(len(self.wrapped_dataset)):
+        # Initialize per-sample stats
+        for sample_index in range(len(self.wrapped_dataset)):
+            uid = int(self.unique_ids[sample_index])
             self.update_sample_stats(
-                sample_id,
+                uid,
                 {
                     SampleStatsEx.PREDICTION_AGE.value: -1,
                     SampleStatsEx.PREDICTION_RAW.value: -1e9,
@@ -129,6 +177,24 @@ class DataSampleTrackingWrapper(Dataset):
                 }
             )
 
+        # Build index mapping
+        self._update_index_to_index()
+
+        # Register UIDs globally and warn about train/test overlaps
+        # Get the original dataset if this is a Subset
+        original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
+        split = _detect_dataset_split(original_ds)
+        current_set = set(int(u) for u in self.unique_ids)
+        # Check overlap with other splits
+        other = 'test' if split == 'train' else 'train'
+        overlap = current_set & GLOBAL_UID_REGISTRY.get(other, set())
+        if overlap:
+            logger.warning(
+                f"[DataSampleTrackingWrapper] Detected {len(overlap)} overlapping UIDs between {split} and {other}."
+            )
+        # Update registry
+        GLOBAL_UID_REGISTRY.setdefault(split, set()).update(current_set)
+
     def __eq__(self, other: "DataSampleTrackingWrapper") -> bool:
         # Unsafely assume that the wrapped dataset are the same
         # TODO(rotaru): investigate how to compare the underlying dataset
@@ -136,6 +202,61 @@ class DataSampleTrackingWrapper(Dataset):
             self.idx_to_idx_remapp == other.idx_to_idx_remapp and \
             self.denied_sample_cnt == other.denied_sample_cnt and \
             self.sample_statistics == other.sample_statistics
+
+    def _generate_unique_ids_parallel(self, dataset: Callable = None) -> np.ndarray:
+        """
+        Generate unique IDs for all samples in parallel using array_id_2bytes.
+        Returns a numpy array of uint64 IDs.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import multiprocessing as mp
+
+        dataset = self.wrapped_dataset if dataset is None else dataset
+
+        n_samples = len(dataset)
+        unique_ids = np.zeros(n_samples, dtype=np.int32)
+        unique_id_to_index = {}
+
+        def compute_id(idx):
+            """Compute unique ID for a single sample."""
+            try:
+                # Get the data from the dataset
+                data = dataset[idx]
+                
+                # Extract the actual data array (first element of tuple typically)
+                if isinstance(data, tuple):
+                    data_array = data[0]
+                else:
+                    data_array = data
+                
+                # Convert to numpy if it's a tensor
+                if hasattr(data_array, 'numpy'):
+                    data_array = data_array.numpy()
+                elif not isinstance(data_array, np.ndarray):
+                    data_array = np.array(data_array)
+                
+                # Generate the ID
+                uid = array_id_2bytes(data_array, return_hex=False, tronc_1byte=True)
+                return idx, uid
+            except Exception as e:
+                logger.warning(f"Failed to generate ID for sample {idx}: {e}")
+                return idx, idx  # Fallback to index as ID
+        
+        # Use ThreadPoolExecutor for I/O-bound data loading
+        # Adjust max_workers based on your system (typically CPU count)
+        max_workers = min(mp.cpu_count(), 8)
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = {executor.submit(compute_id, idx): idx for idx in range(n_samples)}
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                idx, uid = future.result()
+                unique_ids[idx] = uid
+                unique_id_to_index[uid] = idx if uid not in unique_id_to_index else unique_id_to_index[uid]
+        
+        return unique_ids, unique_id_to_index
 
     def state_dict(self) -> Dict:
         return {
@@ -212,12 +333,10 @@ class DataSampleTrackingWrapper(Dataset):
 
         self.idx_to_idx_remapp = {}
         sample_id_2_denied = self.sample_statistics[SampleStatsEx.DENY_LISTED]
-        denied_samples_ids = {id
-                              for id in sample_id_2_denied.keys()
-                              if sample_id_2_denied[id]}
+        denied_sample_uids = {sid for sid, val in sample_id_2_denied.items() if val}
         delta = 0
-        for idx in range(len(self.wrapped_dataset)):
-            if idx in denied_samples_ids:
+        for idx, uid in enumerate(self.unique_ids):
+            if int(uid) in denied_sample_uids:
                 delta += 1
             else:
                 self.idx_to_idx_remapp[idx - delta] = idx
@@ -256,11 +375,11 @@ class DataSampleTrackingWrapper(Dataset):
             if hasattr(self.wrapped_dataset, 'targets'):
                 if raw and self.idx_to_idx_remapp:
                     sample_id  = self.idx_to_idx_remapp[sample_id]
-                value = self.wrapped_dataset.targets[sample_id]
+                value = self.wrapped_dataset.targets[self.unique_id_to_index[sample_id]]
             else:
                 value = self[sample_id][2]  # 0 -> data; 1 -> index; 2 -> label;
                 if raw and self.idx_to_idx_remapp:
-                    value = self._getitem_raw(sample_id)[2]
+                    value = self._getitem_raw(id=sample_id)[2]
             self.sample_statistics[stat_name][sample_id] = value
 
         elif stat_name == SampleStatsEx.SAMPLE_ID:
@@ -447,16 +566,16 @@ class DataSampleTrackingWrapper(Dataset):
         self.dataframe = None
         prev_denied = {sid for sid, is_denied in self.sample_statistics[SampleStatsEx.DENY_LISTED].items() if is_denied}
         if not denied_samples_ids:
-            for sample_id in range(len(self.wrapped_dataset)):
-                self.sample_statistics[SampleStatsEx.DENY_LISTED][sample_id] = False
+            for uid in self.unique_ids:
+                self.sample_statistics[SampleStatsEx.DENY_LISTED][int(uid)] = False
             self.denied_sample_cnt = 0
         else:
             if accumulate:
                 denied_samples_ids = set(denied_samples_ids) | prev_denied
             cnt = 0
-            for sample_id in range(len(self.wrapped_dataset)):
-                is_denied = sample_id in denied_samples_ids
-                self.sample_statistics[SampleStatsEx.DENY_LISTED][sample_id] = is_denied
+            for uid in self.unique_ids:
+                is_denied = int(uid) in denied_samples_ids
+                self.sample_statistics[SampleStatsEx.DENY_LISTED][int(uid)] = is_denied
                 cnt += int(is_denied)
             self.denied_sample_cnt = cnt
         self._update_index_to_index()
@@ -465,16 +584,16 @@ class DataSampleTrackingWrapper(Dataset):
         self.dataframe = None
         if allowlist_samples_ids is None:
             # Allow all
-            for sample_id in range(len(self.wrapped_dataset)):
-                self.sample_statistics[SampleStatsEx.DENY_LISTED][sample_id] = False
+            for uid in self.unique_ids:
+                self.sample_statistics[SampleStatsEx.DENY_LISTED][int(uid)] = False
             self.denied_sample_cnt = 0
         else:
             for sample_id in allowlist_samples_ids:
-                self.sample_statistics[SampleStatsEx.DENY_LISTED][sample_id] = False
+                self.sample_statistics[SampleStatsEx.DENY_LISTED][int(sample_id)] = False
             # Now count total denied
             denied_cnt = 0
-            for sample_id in range(len(self.wrapped_dataset)):
-                if self.sample_statistics[SampleStatsEx.DENY_LISTED][sample_id]:
+            for uid in self.unique_ids:
+                if self.sample_statistics[SampleStatsEx.DENY_LISTED][int(uid)]:
                     denied_cnt += 1
             self.denied_sample_cnt = denied_cnt
         self._update_index_to_index()
@@ -488,7 +607,8 @@ class DataSampleTrackingWrapper(Dataset):
         if predicate is None:
             return denied_samples_ids
 
-        for sample_id in range(len(self.wrapped_dataset)):
+        for idx, uid in enumerate(self.unique_ids):
+            sample_id = int(uid)
             # These are hard-codes for classification tasks, so we treat them
             # differently.
             prediction_class, label = None, None
@@ -676,15 +796,19 @@ class DataSampleTrackingWrapper(Dataset):
                 raise IndexError() from err
         return self._getitem_raw(index)
 
-    def _getitem_raw(self, index: int):
+    def _getitem_raw(self, index: int = None, id: int = None):
+        if id is not None:
+            index = self.unique_id_to_index[id]
         data = self.wrapped_dataset[index]
         if len(data) == 2:
+            id = self.unique_ids[index]
             item, target = data
-            return item, index, target
+            return item, id, target
         else:
             raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
 
     def __len__(self):
+        # wrapped_dataset is already deduplicated, just subtract denied samples
         return len(self.wrapped_dataset) - self.denied_sample_cnt
     
     def get_prediction_mask(self, sample_id, task_name=None):
