@@ -1270,7 +1270,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
 # -----------------------------------------------------------------------------
-def grpc_serve(n_workers_grpc: int = 4, grpc_host: int = 50051, **_):
+def grpc_serve(n_workers_grpc: int = 4, grpc_host: str = "localhost:50051", **_):
     """Configure trainer services such as gRPC server.
 
     Args:
@@ -1284,7 +1284,7 @@ def grpc_serve(n_workers_grpc: int = 4, grpc_host: int = 50051, **_):
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=n_workers_grpc))
         servicer = trainer.ExperimentServiceServicer()
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f'0.0.0.0:{port_grpc}')  # guarantees IPv4 connectivity from containers.
+        server.add_insecure_port(f'{grpc_host}')  # guarantees IPv4 connectivity from containers.
         try:
             server.start()
             server.wait_for_termination()

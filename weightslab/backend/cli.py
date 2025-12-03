@@ -445,7 +445,7 @@ def _server_loop(host: str, port: int):
             pass
 
 
-def cli_serve(host_cli: str = '127.0.0.1:10051', **_):
+def cli_serve(host_cli: str = 'localhost:10051', **_):
     """
         Start the CLI server and optionally open a client in a new console.
         This CLI now operates on objects registered in the global ledger only.
