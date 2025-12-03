@@ -36,8 +36,15 @@ class ExperimentContext:
         `self` (model, train/test dataloaders, optimizer, hyperparams,
         logger). Raises RuntimeError when mandatory components are missing.
         """
+        # If we already have components and at least one loader is non-None, keep them.
+        # This avoids re-resolving every time, but lets us recover from an early
+        # "no dataloaders yet" snapshot.
         if getattr(self, "_components", None) and self._components:
-            return
+            tl = self._components.get("train_loader")
+            vl = self._components.get("test_loader")
+            if tl is not None or vl is not None:
+                return
+            # else: we had components but no loaders – try resolving again
 
         from weightslab.backend.ledgers import (
             get_hyperparams,
