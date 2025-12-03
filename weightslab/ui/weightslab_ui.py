@@ -46,8 +46,6 @@ from dataclasses import dataclass
 from math import isqrt
 
 
-sys.argv.extend(['--root_directory', r'C:\\Users\\GUILLA~1\\Desktop\\trash\\tmpx71e1085'])
-
 # Set up logging
 logger = logging.getLogger("ui")
 
@@ -2298,25 +2296,89 @@ def parse_args():
         "--root_directory",
         type=str,
         required=True,
-        help="Path to the directory",
-        default="./fashion-mnist-dev/"
+        help="Path to the directory"
+    )
+    parser.add_argument(
+        "--grpc_host",
+        type=str,
+        required=False,
+        help="gRPC host address",
+        default="localhost:50051"
+    )
+    parser.add_argument(
+        "--ui_host",
+        type=str,
+        required=False,
+        help="UI port",
+        default="localhost:8050"
     )
     args = parser.parse_args()
-    if not os.path.isdir(args.root_directory):
-        logger.error("invalid_root_directory", extra={"root_directory": args.root_directory})
-        sys.exit(1)
+
     return args
 
 
-def main():
-    args = parse_args()
+def check_host_available(ui_host: str, timeout: float = 5.0) -> bool:
+    """
+    Check if the gRPC ui_host is available before attempting to connect.
+    
+    Args:
+        ui_host: Host address in format 'hostname:port' or 'ip:port'
+        timeout: Connection timeout in seconds
+        
+    Returns:
+        True if ui_host is reachable, False otherwise
+    """
+    import socket
+    
+    try:
+        # Parse ui_host and port
+        if ':' in ui_host:
+            hostname, port_str = ui_host.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            hostname = ui_host
+            port = 50051  # Default gRPC port
+        
+        # Try to establish a TCP connection
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((hostname, port))
+        sock.close()
+        
+        if result == 0:
+            logger.info("host_available", extra={"ui_host": ui_host})
+            return True
+        else:
+            logger.warning("host_unavailable", extra={"ui_host": ui_host, "error_code": result})
+            return False
+            
+    except socket.gaierror as e:
+        logger.error("host_resolution_failed", extra={"ui_host": ui_host, "error": str(e)})
+        return False
+    except ValueError as e:
+        logger.error("invalid_host_format", extra={"ui_host": ui_host, "error": str(e)})
+        return False
+    except Exception as e:
+        logger.error("host_check_failed", extra={"ui_host": ui_host, "error": str(e)})
+        return False
+
+
+def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051', **_):
+    # Sanity checks
+    # # Check if root directory exists
+    if not os.path.isdir(root_directory):
+        try:
+            os.makedirs(root_directory, exist_ok=True)
+        except Exception as e:
+            logger.info("created_root_directory", extra={"root_directory": root_directory})
+            sys.exit(1)
 
     channel = grpc.insecure_channel(
-        'localhost:50051',
+        grpc_host,
         options=[('grpc.max_receive_message_length', 32 * 1024 * 1024)]
     )
     stub = pb2_grpc.ExperimentServiceStub(channel)
-    ui_state = UIState(args.root_directory)
+    ui_state = UIState(root_directory=root_directory)
     app = dash.Dash(
         __name__,
         external_stylesheets=[dbc.themes.ZEPHYR],
@@ -2362,7 +2424,7 @@ def main():
         get_interactive_layers=True,
         get_data_records="train",
     )
-    logger.info("About Fetching initial state.")
+    logger.info("\nAbout Fetching initial state.")
 
     with ScopeTimer(tag="initial_state_fetch_and_update") as t:
         initial_state_response = stub.ExperimentCommand(
@@ -2450,6 +2512,8 @@ def main():
                     ui_state.update_from_server_state(state)
             except Exception as e:
                 print("Error updating UI state:", e)
+            # Sleep to avoid hammering the gRPC server and causing GIL contention
+            time.sleep(0.5)  # Update every 0.5 second - adjust as needed
 
     consistency_thread = threading.Thread(
         target=fetch_server_state_and_update_ui_state, daemon=True)
@@ -3996,8 +4060,50 @@ def main():
 
         return figure, no_update
 
-    app.run(debug=False, port=8050, use_reloader=False)
+    # Run the Dash app
+    host_addr, host_port = ui_host.split(":")
+    app.run(debug=False, host=host_addr, port=int(host_port), use_reloader=False)
+
+
+def ui_serve(root_directory: str = None, ui_host: str = "localhost:8050", grpc_host: str = 'localhost:50051', **_):
+    """Launch the UI in a separate subprocess to avoid GIL contention."""
+    import subprocess
+    import sys
+    
+    # Build command to run this file as a subprocess
+    cmd = [
+        sys.executable,  # Use the same Python interpreter
+        __file__,        # This file (weightslab_ui.py)
+        "--root_directory", str(root_directory),
+        "--ui_host", str(ui_host),
+        "--grpc_host", str(grpc_host)
+    ]
+    
+    logger.info("ui_subprocess_starting", extra={
+        "command": " ".join(cmd),
+        "ui_host": ui_host,
+        "grpc_host": grpc_host,
+        "root_directory": root_directory
+    })
+    
+    # Launch UI as subprocess - output goes to parent console
+    ui_process = subprocess.Popen(
+        cmd,
+        stdout=None,  # Inherit parent's stdout (console)
+        stderr=None,  # Inherit parent's stderr (console)
+        stdin=subprocess.DEVNULL
+    )
+    
+    logger.info("ui_subprocess_started", extra={
+        "pid": ui_process.pid,
+        "ui_host": ui_host,
+        "grpc_host": grpc_host,
+        "root_directory": root_directory
+    })
+    
+    return ui_process
 
 
 if __name__ == '__main__':
-    main()
+    args = parse_args()
+    main(root_directory=args.root_directory, ui_host=args.ui_host, grpc_host=args.grpc_host)

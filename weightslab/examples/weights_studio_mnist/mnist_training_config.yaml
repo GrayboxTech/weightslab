@@ -16,10 +16,10 @@ is_training: true
 data:
   train_loader:
     train_shuffle: true
-    batch_size: 256
+    batch_size: 64
   test_loader:
     test_shuffle: false
-    batch_size: 256
+    batch_size: 64
     drop_last: false
 
 optimizer:

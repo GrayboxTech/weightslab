@@ -98,17 +98,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
 if __name__ == "__main__":
     start_time = time.time()
 
-    # 1) Start WeightsLab services (gRPC only, no CLI)
-    wl.serve(
-        serving_grpc=True,
-        n_workers_grpc=6,
-        port_grpc=50051,
-        serving_cli=False,     # no CLI TCP server, no extra terminal
-        host_cli="127.0.0.1",
-        port_cli=0,
-        launch_cli=False,
-    )
-
     # 2) Load hyperparameters (from YAML if present)
     parameters = {}
     config_path = os.path.join(os.path.dirname(__file__), "mnist_training_config.yaml")
@@ -169,7 +158,7 @@ if __name__ == "__main__":
     # Data (MNIST train/test)
     _train_dataset = datasets.MNIST(
         root=os.path.join(parameters["root_log_dir"], "data"),
-        train=True,
+        train=False,
         download=True,
         transform=transforms.Compose(
             [
@@ -193,7 +182,6 @@ if __name__ == "__main__":
     # Read data config in unified style: data.train_loader / data.test_loader
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
-
     train_bs = train_cfg.get("batch_size", 16)
     test_bs = test_cfg.get("batch_size", 16)
     train_shuffle = train_cfg.get("train_shuffle", True)
@@ -235,6 +223,23 @@ if __name__ == "__main__":
         log=True,
     )
 
+    # 1) Start WeightsLab services (gRPC only, no CLI)
+    wl.serve(
+        # UI client settings
+        serving_ui=True,
+        ui_host="localhost:8050",
+        root_directory=log_dir,
+        
+        # gRPC server settings
+        serving_grpc=True,
+        n_workers_grpc=2,
+        grpc_host="localhost:50051",
+
+        # CLI server settings
+        serving_cli=True,     # no CLI TCP server, no extra terminal
+        host_cli="localhost:0",
+    )
+
     # 4) HARD-UNPAUSE global training state so guard_training_context can't block
     try:
         pause_controller.resume()
@@ -255,14 +260,13 @@ if __name__ == "__main__":
     print("=" * 60 + "\n")
 
     train_range = tqdm.trange(max_steps, dynamic_ncols=True) if tqdm_display else range(max_steps)
-
     for train_step in train_range:
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Periodic full eval
         test_loss, test_metric = None, None
-        if train_step % eval_every == 0:
+        if train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
             test_loss, test_metric = test(
                 test_loader,
                 model,
@@ -282,11 +286,3 @@ if __name__ == "__main__":
     print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
-
-    # Keep the script running to serve requests for the UI
-    print("\nServer is still running. Press Ctrl+C to stop.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nStopping server...")

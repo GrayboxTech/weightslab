@@ -1,6 +1,7 @@
 """ The Experiment class is the main class of the graybox package.
 It is used to train and evaluate models. """
 
+import sys
 import time
 import functools
 import logging
@@ -15,7 +16,10 @@ from weightslab.backend.optimizer_interface import OptimizerInterface
 from weightslab.backend.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
+from weightslab.ui.weightslab_ui import ui_serve
 
+
+# Get global logger
 logger = logging.getLogger(__name__)
 
 
@@ -426,7 +430,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         raise ValueError(f"Obj name {obj} should contains at least 'model', 'data' or 'optimizer'.")
 
 
-def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
+def serve(serving_ui: bool = False, serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """ Serve the trainer services.
 
     Args:
@@ -434,8 +438,16 @@ def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> No
         serving_grpc (bool): Whether to serve gRPC.
     """
 
+    # Sanity check
+    if serving_ui and not serving_grpc:
+        logger.error("UI server requires gRPC server to be enabled.")
+        sys.exit(1)
+
     if serving_grpc:
         grpc_serve(**kwargs)
+
+    if serving_ui and serving_grpc:
+        ui_serve(**kwargs)
         
     if serving_cli:
         cli_serve(**kwargs)
