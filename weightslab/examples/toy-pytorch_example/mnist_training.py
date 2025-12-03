@@ -123,18 +123,6 @@ if __name__ == '__main__':
     print('Hello world')
     start_time = time.time()
 
-    # Initialize WeightsLab CLI & gRPC
-    wl.serve(
-        serving_grpc=True,
-        n_workers_grpc=6,
-        port_grpc=50051,
-
-        serving_cli=True,
-        port_cli=0,
-        host_cli='127.0.0.1',
-        launch_cli=True
-    )
-
     # ====================
     # Hyperparameters & Setup
     # Load YAML hyperparameters (fallback to defaults if missing)
@@ -224,6 +212,31 @@ if __name__ == '__main__':
         name='test_metric/mlt_metric',
         log=True
     )
+
+    # ============================
+    # 5. Start WeightsLab services
+    wl.serve(
+        # UI client settings
+        serving_ui=True,
+        ui_host="localhost:8050",
+        root_directory=log_dir,
+        
+        # gRPC server settings
+        serving_grpc=True,
+        n_workers_grpc=2,
+        grpc_host="localhost:50051",
+
+        # CLI server settings
+        serving_cli=True,     # no CLI TCP server, no extra terminal
+        host_cli="localhost:0",
+    )
+
+    print("=" * 60)
+    print("🚀 STARTING TRAINING")
+    print(f"📈 Total steps: {parameters.get('training_steps_to_do', 6666)}")
+    print(f"🔄 Evaluation every {parameters.get('eval_full_to_train_steps_ratio', 50)} steps")
+    print(f"💾 Logs will be saved to: {log_dir}")
+    print("=" * 60 + "\n")
 
     # ================
     # 6. Training Loop

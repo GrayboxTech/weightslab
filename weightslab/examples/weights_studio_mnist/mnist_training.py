@@ -98,7 +98,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
 if __name__ == "__main__":
     start_time = time.time()
 
-    # 2) Load hyperparameters (from YAML if present)
+    # Load hyperparameters (from YAML if present)
     parameters = {}
     config_path = os.path.join(os.path.dirname(__file__), "mnist_training_config.yaml")
     if os.path.exists(config_path):
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     max_steps = parameters.get("training_steps_to_do", 1000)
     eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
 
-    # 3) Register components in the GLOBAL_LEDGER via watch_or_edit
+    # Register components in the GLOBAL_LEDGER via watch_or_edit
     # Logger
     logger = Logger()
     wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
@@ -223,7 +223,7 @@ if __name__ == "__main__":
         log=True,
     )
 
-    # 1) Start WeightsLab services (gRPC only, no CLI)
+    # Start WeightsLab services
     wl.serve(
         # UI client settings
         serving_ui=True,
@@ -239,18 +239,6 @@ if __name__ == "__main__":
         serving_cli=True,     # no CLI TCP server, no extra terminal
         host_cli="localhost:0",
     )
-
-    # 4) HARD-UNPAUSE global training state so guard_training_context can't block
-    try:
-        pause_controller.resume()
-        # In case resume() has a bug / race, force the internals too
-        if hasattr(pause_controller, "_paused"):
-            pause_controller._paused = False
-        if hasattr(pause_controller, "_event"):
-            pause_controller._event.set()
-        print(">>> Forced training to RUN state (pause_controller).")
-    except Exception as e:
-        print(f">>> Failed to force unpause: {e}")
 
     print("=" * 60)
     print("🚀 STARTING TRAINING")
