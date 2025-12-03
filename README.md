@@ -39,9 +39,9 @@ The granular statistics and interactive paradigm enables powerful workflows:
   <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
     <p>Demo Video - Watch Video</p>
   </a>
-  <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
+  <!-- <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
     <img style="max-width:300px;" src="https://cdn.loom.com/sessions/thumbnails/5d04822a0933427d971d320f64687730-00001.gif">
-  </a>
+  </a> -->
 </div>
 
 ### Installation
@@ -73,8 +73,9 @@ pip install -r ./requirements.txt
 Check out our materials, with examples from toy to more complex models.
 
 Quickstart examples:
-- [Toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/toy-pytorch_example)
-- [Advanced (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/advanced-pytorch_example)
+- [Weights Lab - Toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/toy-pytorch_example)
+- [Weights Lab - Advanced (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/advanced-pytorch_example)
+- [Weights Studio - Toy(PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/advanced-pytorch_example)
 
 <!-- ### Documentation -->
 
