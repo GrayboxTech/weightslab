@@ -1,4 +1,3 @@
-import io
 import types
 import time
 import grpc
@@ -197,6 +196,9 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 raise RuntimeError("No logger with a queue registered in GLOBAL_LEDGER")
 
             signal_log = signal_logger.queue.get()
+
+            if "metric_name" in signal_log:
+                logger.info(f"[StreamStatus] Sending metric: {signal_log['metric_name']} = {signal_log.get('metric_value', 'N/A')}")
 
             if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:
                 logger.debug(f"[signal_log] {signal_log['metric_name']} = {signal_log['metric_value']:.2f}")
@@ -647,16 +649,15 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 repo_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
 
                 # weights_studio location: /Users/.../v0/weights_studio
-                weights_studio_path = os.path.join(repo_root, "weights_studio")
+                weights_studio_path = os.path.join(repo_root, "weights_studio/agent")
 
                 if os.path.isdir(weights_studio_path) and weights_studio_path not in sys.path:
                     sys.path.append(weights_studio_path)
 
-                from agent import DataManipulationAgent
                 import agent
 
                 logger.info(f"DEBUG: agent module loaded from: {agent.__file__}")
-                self._agent = DataManipulationAgent(self._all_datasets_df)
+                self._agent = agent.DataManipulationAgent(self._all_datasets_df)
                 logger.info("Data service initialized successfully with agent")
 
             except ImportError as e:
@@ -1283,7 +1284,7 @@ def grpc_serve(n_workers_grpc: int = 4, grpc_host: int = 50051, **_):
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=n_workers_grpc))
         servicer = trainer.ExperimentServiceServicer()
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(grpc_host)
+        server.add_insecure_port(f'0.0.0.0:{port_grpc}')  # guarantees IPv4 connectivity from containers.
         try:
             server.start()
             server.wait_for_termination()

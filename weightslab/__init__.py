@@ -32,8 +32,6 @@ try:
 	# both a console StreamHandler and a FileHandler (when requested).
 	setup_logging(log_level, log_to_file=log_to_file)
 	
-	logger = logging.getLogger(__name__)
-	logger.info(_BANNER)
 except Exception:
 	pass
 
