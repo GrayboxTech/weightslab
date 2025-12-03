@@ -1,3 +1,4 @@
+import os
 import types
 import time
 import grpc
@@ -198,7 +199,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
             signal_log = signal_logger.queue.get()
 
             if "metric_name" in signal_log:
-                logger.info(f"[StreamStatus] Sending metric: {signal_log['metric_name']} = {signal_log.get('metric_value', 'N/A')}")
+                logger.debug(f"[StreamStatus] Sending metric: {signal_log['metric_name']} = {signal_log.get('metric_value', 'N/A')}")
 
             if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:
                 logger.debug(f"[signal_log] {signal_log['metric_name']} = {signal_log['metric_value']:.2f}")
@@ -1270,7 +1271,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
 # -----------------------------------------------------------------------------
-def grpc_serve(n_workers_grpc: int = 4, grpc_host: str = "localhost:50051", **_):
+def grpc_serve(n_workers_grpc: int = 4, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
     """Configure trainer services such as gRPC server.
 
     Args:
@@ -1280,11 +1281,13 @@ def grpc_serve(n_workers_grpc: int = 4, grpc_host: str = "localhost:50051", **_)
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
 
+    grpc_port = int(os.getenv("GRPC_BACKEND_PORT", grpc_port))
+
     def serving_thread_callback():
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=n_workers_grpc))
         servicer = trainer.ExperimentServiceServicer()
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f'{grpc_host}')  # guarantees IPv4 connectivity from containers.
+        server.add_insecure_port(f'{grpc_host}:'+ str(grpc_port))  # guarantees IPv4 connectivity from containers.
         try:
             server.start()
             server.wait_for_termination()
@@ -1301,6 +1304,7 @@ def grpc_serve(n_workers_grpc: int = 4, grpc_host: str = "localhost:50051", **_)
         "thread_name": training_thread.name,
         "thread_id": training_thread.ident,
         "grpc_host": grpc_host,
+        "grpc_port": grpc_port,
         "n_workers_grpc": n_workers_grpc
     })
 

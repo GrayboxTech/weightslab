@@ -207,17 +207,14 @@ if __name__ == '__main__':
     wl.serve(
         # UI client settings
         serving_ui=True,
-        ui_host="localhost:8050",
         root_directory=log_dir,
         
         # gRPC server settings
         serving_grpc=True,
         n_workers_grpc=2,
-        grpc_host="localhost:50051",
 
         # CLI server settings
-        serving_cli=True,     # no CLI TCP server, no extra terminal
-        host_cli="localhost:0",
+        serving_cli=True
     )
 
     print("=" * 60)
