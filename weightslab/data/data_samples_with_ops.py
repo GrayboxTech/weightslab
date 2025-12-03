@@ -1,12 +1,16 @@
+import logging
+import torch as th
 import numpy as np
 import pandas as pd
 import random as rnd
+from collections import defaultdict
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset
 
-
+# Global logger
+logger = logging.getLogger(__name__)
 SamplePredicateFn = Callable[[], bool]
 
 
@@ -73,6 +77,7 @@ class SampleStatsEx(str, Enum):
     # AVAILABLE = "available"
     DENY_LISTED = "deny_listed"
     ENCOUNTERED = "encountered"
+    TAGS = "tags"
     # METADATA = "metadata" 
     # ANNOTATIONS = "annotations"
 
@@ -93,10 +98,12 @@ class _StateDictKeys(str, Enum):
 
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset, task_type: str = "classification"):
+    def __init__(self, wrapped_dataset: Dataset):
+        self.__name__ = wrapped_dataset.__name__ if hasattr(
+            wrapped_dataset,
+            "__name__"
+        ) else "dataset"
         self.wrapped_dataset = wrapped_dataset
-        self.task_type = task_type
-
         self._denied_samples_ids = set()
         self.denied_sample_cnt = 0
         self.idx_to_idx_remapp = dict()
@@ -197,11 +204,11 @@ class DataSampleTrackingWrapper(Dataset):
                              f"expected: {SampleStatsEx.ALL()}")
 
     def _update_index_to_index(self):
-        # import pdb; pdb.set_trace()
 
         if self._map_updates_hook_fns:
-            for map_update_hook_fn in self._map_updates_hook_fns:
-                map_update_hook_fn()
+            for (map_update_hook_fn, map_update_hook_fn_params) \
+                    in self._map_updates_hook_fns:
+                map_update_hook_fn(**map_update_hook_fn_params)
 
         self.idx_to_idx_remapp = {}
         sample_id_2_denied = self.sample_statistics[SampleStatsEx.DENY_LISTED]
@@ -220,14 +227,23 @@ class DataSampleTrackingWrapper(Dataset):
         self._raise_if_invalid_stat_name(stat_name)
         prev_value = self.sample_statistics[stat_name].get(sample_id, None)
 
+        # Normalize 0-d numpy arrays
         if isinstance(stat_value, np.ndarray) and stat_value.ndim == 0:
             stat_value = stat_value.item()
 
+        # Debug logging for tags
+        if stat_name == SampleStatsEx.TAGS or stat_name == SampleStatsEx.TAGS.value:
+            print(f"Updating tags for sample_id={sample_id} to {stat_value}")
+
+        # Keep deny_listed count up to date
         if stat_name == SampleStatsEx.DENY_LISTED and prev_value is not None and prev_value != stat_value:
             self._handle_deny_listed_updates(stat_value)
+
+        # Prevent updating loss for discarded samples
         if stat_name == SampleStatsEx.PREDICTION_LOSS:
             if self.sample_statistics[SampleStatsEx.DENY_LISTED].get(sample_id, False):
                 raise Exception(f"Tried to update loss for discarded sample_id={sample_id}")
+
         self.sample_statistics[stat_name][sample_id] = stat_value
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False) -> int | float | bool:
@@ -253,7 +269,10 @@ class DataSampleTrackingWrapper(Dataset):
                 value = self.idx_to_idx_remapp[sample_id]
             self.sample_statistics[stat_name][sample_id] = value
         elif stat_name == SampleStatsEx.DENY_LISTED:
-            value = False
+            # existing handling
+            pass
+        elif stat_name == SampleStatsEx.TAGS:
+            value = '' # Default to empty string for tags
             self.sample_statistics[stat_name][sample_id] = value
 
         else:
@@ -487,7 +506,7 @@ class DataSampleTrackingWrapper(Dataset):
                     sample_id, SampleStatsEx.PREDICTION_RAW.value, raw=True)
                 label = self.get(sample_id, SampleStatsEx.TARGET, raw=True)
             except KeyError as e:
-                print(f"Sample {sample_id}: KeyError {e}")
+                logger.error(f"Sample {sample_id}: KeyError {e}")
                 continue
 
             if predicate(
@@ -495,7 +514,7 @@ class DataSampleTrackingWrapper(Dataset):
                     exposure_amount, deny_listed, prediction_class, label):
                 denied_samples_ids.add(sample_id)
                 if verbose:
-                    print(f"Denied sample {sample_id} "
+                    logger.info(f"Denied sample {sample_id} "
                           f"with prediction age {prediction_age}, "
                           f"prediction loss {prediction_loss}, "
                           f"exposure amount {exposure_amount}, "
@@ -507,7 +526,7 @@ class DataSampleTrackingWrapper(Dataset):
     def deny_samples_with_predicate(self, predicate: SamplePredicateFn):
         self.dataframe = None
         denied_samples_ids = self._get_denied_sample_ids(predicate)
-        print("denied samples with predicate ", len(denied_samples_ids))
+        logger.info("denied samples with predicate ", len(denied_samples_ids))
         self.denylist_samples(denied_samples_ids)
 
     def deny_samples_and_sample_allowed_with_predicate(
@@ -532,7 +551,7 @@ class DataSampleTrackingWrapper(Dataset):
             allowed_samples_no * allow_to_denied_factor)
 
         if verbose:
-            print(f'DataSampleTrackingWrapper.deny_samples_and_sample'
+            logger.info(f'DataSampleTrackingWrapper.deny_samples_and_sample'
                   f'_allowed_with_predicate denied {denied_samples_cnt} '
                   f'samples, allowed {allowed_samples_no} samples, and will '
                   f'toggle back to allowed {target_allowed_samples_no} samples'
@@ -575,7 +594,7 @@ class DataSampleTrackingWrapper(Dataset):
             if weight <= 1.0 else int(weight)
 
         if verbose:
-            print(f'DataSampleTrackingWrapper'
+            logger.info(f'DataSampleTrackingWrapper'
                   f'apply_weighted_predicate '
                   f'denied {denied_samples_cnt} samples.')
 
@@ -590,13 +609,13 @@ class DataSampleTrackingWrapper(Dataset):
             override_denied_sample_ids |= self._denied_samples_ids
 
         if verbose:
-            print(f'DataSampleTrackingWrapper'
+            logger.info(f'DataSampleTrackingWrapper'
                   f'apply_weighted_predicate '
                   f'denied ids {list(override_denied_sample_ids)[:20]}')
 
         self.denylist_samples(
             override_denied_sample_ids, override=True)
-        print("DataSampleTrackingWrapper.apply_weighted_predicate #len", len(self))
+        logger.debug(f"DataSampleTrackingWrapper.apply_weighted_predicate #len {len(self)}")
 
     def _get_stats_dataframe(self, limit: int = -1):
         data_frame = pd.DataFrame(

@@ -94,12 +94,12 @@ def generate_mappings(
     elif len(src_channels) > len(dst_channels):
         # Case 2: Many-to-one (src > dst)
         # A "batch" of source neurons maps to a single dstination neuron.
-        if len(src_channels) % len(dst_channels) != 0:
-            raise ValueError(
-                f"Source channels ({src_channels}) must be perfectly \
-                 divisible by dstination channels ({dst_channels}) \
-                 for many-to-one mapping."
-            )
+        # if len(src_channels) % len(dst_channels) != 0:
+        #     raise ValueError(
+        #         f"Source channels ({src_channels}) must be perfectly \
+        #          divisible by dstination channels ({dst_channels}) \
+        #          for many-to-one mapping."
+        #     )
 
         # 1. Calculate the block size.
         # This determines how many linear layer neurons map to one convolution channel.
@@ -201,6 +201,34 @@ def generate_graph_dependencies(
         structuralSAME and INCOMING constraints.
     """
     dependencies = []
+
+    def clean_dependencies(
+        dependencies: List[Tuple[nn.Module, nn.Module, DepType]]
+    ) -> List[Tuple[nn.Module, nn.Module, DepType]]:
+        """Remove self-loops and duplicate dependency edges.
+
+        - Self-loops (where src is dst) are removed.
+        - Duplicate edges (same src object, same dst object, same DepType)
+        are removed, preserving the first occurrence order.
+
+        Args:
+            dependencies: List of tuples (src_module, dst_module, DepType).
+
+        Returns:
+            Cleaned list of dependencies.
+        """
+        seen = set()
+        cleaned = []
+        for src, dst, dep in dependencies:
+            # Remove self-loops
+            if src is dst:
+                continue
+            key = (id(src), id(dst), dep)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append((src, dst, dep))
+        return cleaned
 
     # Map to store the last *structural module* (instance) that produced the
     # output for a given node.
@@ -362,9 +390,12 @@ def generate_graph_dependencies(
             else:
                 node_to_module[node] = None  # Placeholder or constant input
 
+    # Clean dependencies (remove duplicates and self-loops)
+    dependencies = clean_dependencies(dependencies)
+    
     # Generate mapping tensor btw deps
     if not indexing_neurons:
-        return dependencies 
+        return dependencies
     for edge in dependencies:
         # Get src and dst modules and type
         src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]
