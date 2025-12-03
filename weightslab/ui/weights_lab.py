@@ -41,10 +41,12 @@ from io import BytesIO
 from PIL import Image
 from collections import defaultdict
 from dash.dash_table.Format import Format, Scheme
-from utils.scope_timer import ScopeTimer
+from weightslab.ui.utils.scope_timer import ScopeTimer
 from dataclasses import dataclass
 from math import isqrt
 
+
+sys.argv.extend(['--root_directory', r'C:\\Users\\GUILLA~1\\Desktop\\trash\\tmpx71e1085'])
 
 # Set up logging
 logger = logging.getLogger("ui")
