@@ -12,6 +12,7 @@ import yaml
 import weightslab as wl
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
+from torchvision import datasets, transforms, models
 
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.utils.board import Dash as Logger
@@ -20,7 +21,7 @@ from weightslab.components.global_monitoring import (
     guard_testing_context,
     pause_controller,
 )
-
+os.environ["GRPC_VERBOSITY"] = "debug"
 
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
@@ -163,7 +164,6 @@ if __name__ == "__main__":
         transform=transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,)),
             ]
         ),
     )
@@ -174,7 +174,6 @@ if __name__ == "__main__":
         transform=transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,)),
             ]
         ),
     )
@@ -227,17 +226,14 @@ if __name__ == "__main__":
     wl.serve(
         # UI client settings
         serving_ui=True,
-        ui_host="localhost:8050",
         root_directory=log_dir,
         
         # gRPC server settings
         serving_grpc=True,
         n_workers_grpc=2,
-        grpc_host="localhost:50051",
 
         # CLI server settings
-        serving_cli=True,     # no CLI TCP server, no extra terminal
-        host_cli="localhost:0",
+        serving_cli=True
     )
 
     print("=" * 60)

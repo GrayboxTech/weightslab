@@ -4065,24 +4065,31 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     app.run(debug=False, host=host_addr, port=int(host_port), use_reloader=False)
 
 
-def ui_serve(root_directory: str = None, ui_host: str = "localhost:8050", grpc_host: str = 'localhost:50051', **_):
+def ui_serve(root_directory: str = None, ui_host: str = "localhost", ui_port: int = 8050, grpc_host: str = 'localhost', grpc_port: int = 50051, **_):
     """Launch the UI in a separate subprocess to avoid GIL contention."""
     import subprocess
     import sys
     
+    ui_host = os.environ.get("WEIGHTSLAB_UI_HOST", ui_host)
+    ui_port = int(os.environ.get("WEIGHTSLAB_UI_PORT", ui_port))
+    grpc_host = os.environ.get("GRPC_BACKEND_HOST", grpc_host)
+    grpc_port = int(os.environ.get("GRPC_BACKEND_PORT   ", grpc_port))
+
     # Build command to run this file as a subprocess
     cmd = [
         sys.executable,  # Use the same Python interpreter
         __file__,        # This file (weightslab_ui.py)
         "--root_directory", str(root_directory),
-        "--ui_host", str(ui_host),
-        "--grpc_host", str(grpc_host)
+        "--ui_host", f'{ui_host}:{ui_port}',
+        "--grpc_host", f'{grpc_host}:{grpc_port}'
     ]
     
     logger.info("ui_subprocess_starting", extra={
         "command": " ".join(cmd),
         "ui_host": ui_host,
+        "ui_port": ui_port,
         "grpc_host": grpc_host,
+        "grpc_port": grpc_port,
         "root_directory": root_directory
     })
     
@@ -4097,7 +4104,9 @@ def ui_serve(root_directory: str = None, ui_host: str = "localhost:8050", grpc_h
     logger.info("ui_subprocess_started", extra={
         "pid": ui_process.pid,
         "ui_host": ui_host,
+        "ui_port": ui_port,
         "grpc_host": grpc_host,
+        "grpc_port": grpc_port,
         "root_directory": root_directory
     })
     

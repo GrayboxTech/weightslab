@@ -445,35 +445,35 @@ def _server_loop(host: str, port: int):
             pass
 
 
-def cli_serve(host_cli: str = '127.0.0.1:10051', **_):
+def cli_serve(cli_host: str = 'localhost', **_):
     """
         Start the CLI server and optionally open a client in a new console.
         This CLI now operates on objects registered in the global ledger only.
 
         Args:
-            host_cli: Host to bind the server to (default: localhost).
-            port_cli: Port to bind the server to (default: 0 = random free port).
+            cli_host: Host to bind the server to (default: localhost).
     """
+
     from weightslab import _BANNER
 
     global _server_thread, _server_port, _server_host
+    cli_host = os.environ.get('CLI_HOST', 'localhost')
+    cli_port = int(os.environ.get('CLI_PORT', '0'))
 
     if _server_thread is not None and _server_thread.is_alive():
         return {'ok': False, 'error': 'server_already_running'}
-    host_cli, port_cli = host_cli.split(':')
-    port_cli = int(port_cli)
     
     # start server thread
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((host_cli, port_cli))
+    sock.bind((cli_host, cli_port))
     sock.listen(1)
     actual_port = sock.getsockname()[1]
     sock.close()
 
     _server_thread = threading.Thread(
         target=_server_loop,
-        args=(host_cli, actual_port),
+        args=(cli_host, actual_port),
         daemon=True,
         name="WeightsLab CLI Server",
     )
@@ -481,7 +481,9 @@ def cli_serve(host_cli: str = '127.0.0.1:10051', **_):
     logger.info("cli_thread_started", extra={
         "thread_name": _server_thread.name,
         "thread_id": _server_thread.ident,
-        "host_cli": host_cli
+        "cli_host": cli_host,
+        "cli_port": cli_port,
+        "actual_port": actual_port
     })
     # wait briefly for server to come up
     time.sleep(0.05)
@@ -494,14 +496,14 @@ def cli_serve(host_cli: str = '127.0.0.1:10051', **_):
     # spawn a new console running the client REPL
     import subprocess
     cmd = [sys.executable, '-u', '-c',
-            "import weightslab.backend.cli as _cli; _cli.cli_client_main('%s', %d)" % (host_cli, actual_port)]
+            "import weightslab.backend.cli as _cli; _cli.cli_client_main('%s', %d)" % (cli_host, actual_port)]
     kwargs = {}
     if os.name == 'nt':
         # CREATE_NEW_CONSOLE causes a new terminal window on Windows
         kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
     subprocess.Popen(cmd, cwd=os.getcwd(), **kwargs)
 
-    return {'ok': True, 'host': host_cli, 'port': actual_port}
+    return {'ok': True, 'host': cli_host, 'port': actual_port}
 
 
 def cli_client_main(host: str, port: int):
