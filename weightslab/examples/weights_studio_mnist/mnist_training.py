@@ -99,19 +99,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
 if __name__ == "__main__":
     start_time = time.time()
 
-    # 1) Start WeightsLab services (gRPC only, no CLI)
-    wl.serve(
-        serving_grpc=True,
-        n_workers_grpc=6,
-        port_grpc=int(os.environ.get("GRPC_BACKEND_PORT", 50051)),
-        
-        serving_cli=False,     # no CLI TCP server, no extra terminal
-        host_cli="127.0.0.1",
-        port_cli=0,
-        launch_cli=True,
-    )
-
-    # 2) Load hyperparameters (from YAML if present)
+    # Load hyperparameters (from YAML if present)
     parameters = {}
     config_path = os.path.join(os.path.dirname(__file__), "mnist_training_config.yaml")
     if os.path.exists(config_path):
@@ -145,7 +133,7 @@ if __name__ == "__main__":
     max_steps = parameters.get("training_steps_to_do", 1000)
     eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
 
-    # 3) Register components in the GLOBAL_LEDGER via watch_or_edit
+    # Register components in the GLOBAL_LEDGER via watch_or_edit
     # Logger
     logger = Logger()
     wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
@@ -171,7 +159,7 @@ if __name__ == "__main__":
     # Data (MNIST train/test)
     _train_dataset = datasets.MNIST(
         root=os.path.join(parameters["root_log_dir"], "data"),
-        train=True,
+        train=False,
         download=True,
         transform=transforms.Compose(
             [
@@ -193,7 +181,6 @@ if __name__ == "__main__":
     # Read data config in unified style: data.train_loader / data.test_loader
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
-
     train_bs = train_cfg.get("batch_size", 16)
     test_bs = test_cfg.get("batch_size", 16)
     train_shuffle = train_cfg.get("train_shuffle", True)
@@ -235,17 +222,22 @@ if __name__ == "__main__":
         log=True,
     )
 
-    # 4) HARD-UNPAUSE global training state so guard_training_context can't block
-    try:
-        pause_controller.resume()
-        # In case resume() has a bug / race, force the internals too
-        if hasattr(pause_controller, "_paused"):
-            pause_controller._paused = False
-        if hasattr(pause_controller, "_event"):
-            pause_controller._event.set()
-        print(">>> Forced training to RUN state (pause_controller).")
-    except Exception as e:
-        print(f">>> Failed to force unpause: {e}")
+    # Start WeightsLab services
+    wl.serve(
+        # UI client settings
+        serving_ui=True,
+        ui_host="localhost:8050",
+        root_directory=log_dir,
+        
+        # gRPC server settings
+        serving_grpc=True,
+        n_workers_grpc=2,
+        grpc_host="localhost:50051",
+
+        # CLI server settings
+        serving_cli=True,     # no CLI TCP server, no extra terminal
+        host_cli="localhost:0",
+    )
 
     print("=" * 60)
     print("🚀 STARTING TRAINING")
@@ -255,14 +247,13 @@ if __name__ == "__main__":
     print("=" * 60 + "\n")
 
     train_range = tqdm.trange(max_steps, dynamic_ncols=True) if tqdm_display else range(max_steps)
-
     for train_step in train_range:
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Periodic full eval
         test_loss, test_metric = None, None
-        if train_step % eval_every == 0:
+        if train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
             test_loss, test_metric = test(
                 test_loader,
                 model,

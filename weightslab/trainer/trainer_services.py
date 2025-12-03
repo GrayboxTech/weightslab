@@ -1270,7 +1270,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
 # -----------------------------------------------------------------------------
-def grpc_serve(n_workers_grpc: int = 6, port_grpc: int = 50051, **_):
+def grpc_serve(n_workers_grpc: int = 4, grpc_host: int = 50051, **_):
     """Configure trainer services such as gRPC server.
 
     Args:
@@ -1287,14 +1287,22 @@ def grpc_serve(n_workers_grpc: int = 6, port_grpc: int = 50051, **_):
         server.add_insecure_port(f'0.0.0.0:{port_grpc}')  # guarantees IPv4 connectivity from containers.
         try:
             server.start()
-            logger.info("gRPC Server started on port %d. Press Ctrl+C to stop.", port_grpc)
             server.wait_for_termination()
         except KeyboardInterrupt:
             force_kill_all_python_processes()
 
-    training_thread = Thread(target=serving_thread_callback)
+    training_thread = Thread(
+        target=serving_thread_callback,
+        daemon=True,
+        name="WeightsLab gRPC Server",
+    )
     training_thread.start()
-
+    logger.info("grpc_thread_started", extra={
+        "thread_name": training_thread.name,
+        "thread_id": training_thread.ident,
+        "grpc_host": grpc_host,
+        "n_workers_grpc": n_workers_grpc
+    })
 
 if __name__ == "__main__":
     grpc_serve()

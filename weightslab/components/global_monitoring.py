@@ -28,7 +28,7 @@ class PauseController:
         self._event.wait()   # releases GIL while waiting
 
     def pause(self):
-        print('Training paused.')
+        print('\nTraining paused.')
         self._event.clear()
         set_hyperparam(None, 'is_training', False)
     
