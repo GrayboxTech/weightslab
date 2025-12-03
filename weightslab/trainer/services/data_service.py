@@ -308,7 +308,7 @@ class DataService:
 
                 records = []
 
-                # Fast path for torchvision-style datasets with data/targets
+                # Fast path for torchvision-style datasets with data/targets (MNIST, etc.)
                 if hasattr(raw_ds, "data") and hasattr(raw_ds, "targets"):
                     try:
                         images = raw_ds.data.numpy()
@@ -325,8 +325,29 @@ class DataService:
                     except Exception as e:
                         logger.warning(f"Fast path failed for {origin}: {e}")
 
-                # Fallback: iterate samples
+                # Fast path for ImageFolder datasets - only load metadata, not images
+                # This prevents OOM and timeouts with large datasets
+                if not records and hasattr(raw_ds, "samples") and hasattr(raw_ds, "targets"):
+                    try:
+                        logger.info(f"Using ImageFolder fast path for {origin} with {len(raw_ds)} samples")
+                        for i in range(len(raw_ds)):
+                            records.append(
+                                {
+                                    "sample_id": i,
+                                    "label": int(raw_ds.targets[i]),
+                                    # Don't load image here - will be loaded on-demand by GetDataSamples
+                                    "origin": origin,
+                                }
+                            )
+                    except Exception as e:
+                        logger.warning(f"ImageFolder fast path failed for {origin}: {e}")
+
+                # Fallback: iterate samples (WARNING: slow for large datasets!)
                 if not records:
+                    logger.warning(
+                        f"Using slow fallback path for {origin} - this may take a while "
+                        f"and consume significant memory for {len(raw_ds)} samples"
+                    )
                     for i in range(len(raw_ds)):
                         try:
                             item = raw_ds[i]
@@ -628,13 +649,13 @@ class DataService:
 
     def GetDataSamples(self, request, context):
         """Retrieve samples with their data statistics."""
-        logger.info(
+        logger.debug(
             f"GetDataSamples called: start_index={request.start_index}, "
             f"records_cnt={request.records_cnt}"
         )
 
         if self._all_datasets_df is None:
-            logger.info("Initializing data service (first call)")
+            logger.debug("Initializing data service (first call)")
             self._initialize_data_service()
 
         if self._all_datasets_df is None:
@@ -693,9 +714,59 @@ class DataService:
                 stats_to_retrieve = list(request.stats_to_retrieve)
                 if not stats_to_retrieve:
                     stats_to_retrieve = [c for c in df_slice.columns if c != "sample_id"]
+                
+                # Always include 'image' if include_raw_data is true, even if not in DataFrame
+                # (for lazy-loaded ImageFolder datasets)
+                if request.include_raw_data and "image" not in stats_to_retrieve:
+                    stats_to_retrieve.append("image")
 
                 for stat_name in stats_to_retrieve:
                     stat = self._get_stat_from_row(row, stat_name)
+
+                    # Special handling for 'image' - load on-demand if not in DataFrame
+                    if stat_name == "image" and stat is None and dataset is not None:
+                        try:
+                            # Unwrap to get the raw dataset (similar to _dataset_to_df)
+                            raw_ds = dataset
+                            while True:
+                                if hasattr(raw_ds, "wrapped_dataset"):
+                                    new_ds = raw_ds.wrapped_dataset
+                                    if new_ds is not None:
+                                        raw_ds = new_ds
+                                    else:
+                                        break
+                                elif hasattr(raw_ds, "dataset"):
+                                    new_ds = raw_ds.dataset
+                                    if new_ds is not None:
+                                        raw_ds = new_ds
+                                    else:
+                                        break
+                                else:
+                                    break
+                                if raw_ds is None:
+                                    break
+                            
+                            # Load image on-demand from the raw dataset
+                            if raw_ds is not None:
+                                item = raw_ds[sample_id]
+                                if isinstance(item, (tuple, list)):
+                                    img = item[0]
+                                else:
+                                    img = item
+                                
+                                if hasattr(img, "numpy"):
+                                    img_arr = img.numpy()
+                                else:
+                                    img_arr = np.array(img)
+                                
+                                stat = pb2.DataStat(
+                                    name="image",
+                                    type="array",
+                                    shape=list(img_arr.shape),
+                                    value=img_arr.flatten().astype(float).tolist(),
+                                )
+                        except Exception as e:
+                            logger.warning(f"Could not load image on-demand for sample {sample_id} from {origin}: {e}")
 
                     if (
                         stat_name in ["tags", "deny_listed"]
