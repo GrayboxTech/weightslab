@@ -103,7 +103,8 @@ if __name__ == "__main__":
     wl.serve(
         serving_grpc=True,
         n_workers_grpc=6,
-        port_grpc=50051,
+        port_grpc=int(os.environ.get("GRPC_BACKEND_PORT", 50051)),
+        
         serving_cli=False,     # no CLI TCP server, no extra terminal
         host_cli="127.0.0.1",
         port_cli=0,
