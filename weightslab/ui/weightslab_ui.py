@@ -4073,7 +4073,7 @@ def ui_serve(root_directory: str = None, ui_host: str = "localhost", ui_port: in
     ui_host = os.environ.get("WEIGHTSLAB_UI_HOST", ui_host)
     ui_port = int(os.environ.get("WEIGHTSLAB_UI_PORT", ui_port))
     grpc_host = os.environ.get("GRPC_BACKEND_HOST", grpc_host)
-    grpc_port = int(os.environ.get("GRPC_BACKEND_PORT   ", grpc_port))
+    grpc_port = int(os.environ.get("GRPC_BACKEND_PORT", grpc_port))
 
     # Build command to run this file as a subprocess
     cmd = [
