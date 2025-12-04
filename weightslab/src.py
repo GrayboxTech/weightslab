@@ -42,7 +42,22 @@ def _save_data_statistics(
             per_sample_loss_np = losses_batch
 
         # Update batch sample stats
-        name = 'train_loader' if get_model().is_training() else 'test_loader'
+        # Check if model is in training mode
+        is_training = True
+        try:
+            m = get_model()
+            if hasattr(m, "is_training"):
+                is_training = m.is_training()
+            elif hasattr(m, "training"):
+                is_training = m.training
+        except Exception:
+            pass
+            
+        name = 'train_loader' if is_training else 'test_loader'
+        
+        # Debug logging
+        # logger.info(f"Saving stats to {name}. Loss shape: {per_sample_loss_np.shape if hasattr(per_sample_loss_np, 'shape') else 'scalar'}")
+        
         get_dataloader(name).tracked_dataset.update_batch_sample_stats(
             model_age,
             batch_ids_np,
@@ -203,7 +218,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         # Assume loss returns per-sample losses - mean by default
                         if isinstance(out, th.Tensor):
                             batch_scalar = out.detach().cpu()
-                            scalar = float(batch_scalar.mean().item())
+                            if batch_scalar.ndim == 0:
+                                scalar = float(batch_scalar.item())
+                            else:
+                                scalar = float(batch_scalar.mean().item())
                         else:
                             try:
                                 import numpy as _np
