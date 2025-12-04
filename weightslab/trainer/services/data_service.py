@@ -104,6 +104,8 @@ class DataService:
         # Data service components (initialized lazily on first use)
         # Single dataframe representing the current "view".
         self._all_datasets_df: pd.DataFrame | None = None
+        # NEW: base dataframe (unfiltered) used for reset operations
+        self._base_df: pd.DataFrame | None = None
         self._agent = None
 
     # -------------------------------------------------------------------------
@@ -438,6 +440,13 @@ class DataService:
             logger.debug(f"Created combined DataFrame with {len(self._all_datasets_df)} samples")
             logger.debug(f"DataFrame columns: {list(self._all_datasets_df.columns)}")
 
+            # NEW: keep a base snapshot of the unfiltered dataframe for reset
+            try:
+                self._base_df = self._all_datasets_df.copy(deep=True)
+            except Exception as e:
+                logger.warning(f"Failed to create base dataframe copy: {e}")
+                self._base_df = None
+
             # Optional: external agent (weights_studio integration)
             try:
                 import sys, os
@@ -585,13 +594,52 @@ class DataService:
                         message="Natural language queries require Ollama agent (not available)",
                     )
 
-                # Let the agent translate NL → operation spec
+                # Let the agent translate NL → operation spec or reset intent
                 self._agent.df = source_df
                 operation = self._agent.query(request.query)
 
-                func = operation.get("function")
-                params = operation.get("params", {})
+                # Check for agent-driven reset intent
+                params = operation.get("params", {}) or {}
+                if params.get("__agent_reset__"):
+                    # Reset to base df (unfiltered) and refresh dynamic stats
+                    if self._base_df is not None:
+                        try:
+                            self._all_datasets_df = self._base_df.copy(deep=True)
+                        except Exception as e:
+                            logger.warning(f"Failed to copy base dataframe during reset: {e}")
+                            self._all_datasets_df = self._base_df
+                        # Refresh dynamic stats (tags/deny_listed, etc.)
+                        try:
+                            self._refresh_data_stats()
+                        except Exception as e:
+                            logger.warning(f"Failed to refresh stats after reset: {e}")
+                        message = "Reset view to base dataset"
+                    else:
+                        logger.warning("[ApplyDataQuery] Agent requested reset but _base_df is None")
+                        message = "Reset requested but base dataset is not available"
 
+                    total_count = len(self._all_datasets_df)
+                    discarded_count = (
+                        len(
+                            self._all_datasets_df[
+                                self._all_datasets_df.get("deny_listed", False) == True  # noqa: E712
+                            ]
+                        )
+                        if "deny_listed" in self._all_datasets_df.columns
+                        else 0
+                    )
+                    in_loop_count = total_count - discarded_count
+
+                    return pb2.DataQueryResponse(
+                        success=True,
+                        message=message,
+                        number_of_all_samples=total_count,
+                        number_of_samples_in_the_loop=in_loop_count,
+                        number_of_discarded_samples=discarded_count,
+                    )
+
+                func = operation.get("function")
+                # For df.query, we apply directly on the current source_df
                 if func == "df.query":
                     expr = params.get("expr", "")
                     logger.debug(
