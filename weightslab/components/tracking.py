@@ -1,5 +1,5 @@
 """ Module containing tracking related interfaces and classes. """
-
+import logging
 import enum
 from collections import defaultdict
 from typing import Set, List
@@ -8,6 +8,8 @@ import torch as th
 from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 
+# Global logger
+logger = logging.getLogger(__name__)
 _TRACKING_TENSOR_DISPLAY_LIMIT = 8
 
 
@@ -116,10 +118,10 @@ class TriggersTracker(Tracker):
     def __init__(self, number_of_neurons: int, device: th.device = None, disabled: bool = False):
         super().__init__()
         self.device = device
-        self.number_of_neurons = number_of_neurons
+        self.number_of_neurons = th.tensor(number_of_neurons if number_of_neurons is not None else 0)
         self.disabled = disabled
-        self.triggrs_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
-        self.updates_by_neuron = th.zeros(number_of_neurons).long().to(self.device)
+        self.triggrs_by_neuron = th.zeros(self.number_of_neurons).long().to(self.device)
+        self.updates_by_neuron = th.zeros(self.number_of_neurons).long().to(self.device)
 
     def reset_stats(self):
         """
@@ -140,7 +142,7 @@ class TriggersTracker(Tracker):
         return hash(
             (
                 str(self.device),
-                self.number_of_neurons,
+                self.number_of_neurons.item(),
                 triggers_tuple,
                 updates_tuple
             )
@@ -148,13 +150,13 @@ class TriggersTracker(Tracker):
 
     def __repr__(self) -> str:
         return "TriggersTracker[#%d]: [%s] & [%s]" % (\
-            self.number_of_neurons,
+            self.number_of_neurons.item(),
             str(self.triggrs_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT]),
             str(self.updates_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT])
         )
 
     def __eq__(self, other: "TriggersTracker") -> bool:
-        are_equals = self.number_of_neurons == other.number_of_neurons and \
+        are_equals = self.number_of_neurons.item() == other.number_of_neurons.item() and \
             th.equal(self.triggrs_by_neuron, other.triggrs_by_neuron) and \
             th.equal(self.updates_by_neuron, other.updates_by_neuron)
         return are_equals
@@ -250,7 +252,7 @@ class TriggersTracker(Tracker):
         self.updates_by_neuron = updates_by_neuron
 
         if update_neuron_count:
-            self.number_of_neurons = len(kept_neurons)
+            self.number_of_neurons = th.tensor(len(kept_neurons))
 
         self.to(self.device)
 
@@ -271,7 +273,7 @@ class TriggersTracker(Tracker):
                 f"cannot add {neuron_count} neurons.")
 
         zeros = th.zeros(neuron_count).to(self.device)
-        self.number_of_neurons += neuron_count
+        self.number_of_neurons += th.tensor(neuron_count)
         self.triggrs_by_neuron = th.cat((self.triggrs_by_neuron, zeros)).long()
         self.updates_by_neuron = th.cat((self.updates_by_neuron, zeros)).long()
 
@@ -302,7 +304,7 @@ class TriggersTracker(Tracker):
 
     def get_neuron_number(self) -> int:
         """ Get the number of neurons in the layer. """
-        return self.number_of_neurons
+        return self.number_of_neurons.item()
 
     def get_neuron_pretty_repr(self, neuron_id: int, prefix: str = '') -> str:
         """ Get a pretty representation of the neuron statistics. """
@@ -346,13 +348,13 @@ class TriggersTrackerClazzAndSampleID(TriggersTracker):
         triggers_by_class = [
             dict(def_dict) for def_dict in self.triggers_by_class]
         return "TrackerClazzAndSampleID[#%d]: [%s] & [%s] & [%s] & [%s]" % (\
-            self.number_of_neurons,
+            self.number_of_neurons.item(),
             str(self.triggrs_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT]),
             str(self.updates_by_neuron[:_TRACKING_TENSOR_DISPLAY_LIMIT]),
             str(self.triggers_by_in_id), str(triggers_by_class))
 
     def __eq__(self, other: "TriggersTrackerClazzAndSampleID") -> bool:
-        are_equals = self.number_of_neurons == other.number_of_neurons and \
+        are_equals = self.number_of_neurons.item() == other.number_of_neurons.item() and \
             th.equal(self.triggrs_by_neuron, other.triggrs_by_neuron) and \
             th.equal(self.updates_by_neuron, other.updates_by_neuron) and \
             self.triggers_by_in_id == other.triggers_by_in_id and \
@@ -458,7 +460,7 @@ class TriggersTrackerClazzAndSampleID(TriggersTracker):
         self.triggers_by_class = triggers_by_class
 
         if update_neuron_count:
-            self.number_of_neurons = len(kept_neurons)
+            self.number_of_neurons = th.tensor(len(kept_neurons))
 
     def reset(self, indices: Set[int]):
         super().reset(indices)
@@ -519,7 +521,7 @@ class TriggersTrackerClazzAndSampleID(TriggersTracker):
                 neuron_id, order_by_occurences=True)
             return (trggr / max(count, 1), in_id, label)
         except IndexError as e:
-            print("TrackerClazzAndSampleID.get_neuron_stats error ", e)
+            logger.error("TrackerClazzAndSampleID.get_neuron_stats error ", e)
 
     def get_neuron_pretty_repr(self, neuron_id: int, prefix: str = '') -> str:
         """

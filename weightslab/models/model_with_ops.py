@@ -1,3 +1,5 @@
+import time
+import logging
 import numpy as np
 import torch as th
 
@@ -11,12 +13,17 @@ from weightslab.utils.modules_dependencies import _ModulesDependencyManager, \
     DepType
 
 
+# Global logger
+logger = logging.getLogger(__name__)
+
+
 class NetworkWithOps(nn.Module):
     def __init__(self):
         super(NetworkWithOps, self).__init__()
 
         # Initialize variables
         self.seen_samples = 0
+        self.seen_batched_samples = 0
         self.visited_nodes = set()  # Memory trace of explored nodes
         self.name = self._get_name()  # Name of the model
         self.linearized_layers = []
@@ -84,6 +91,9 @@ class NetworkWithOps(nn.Module):
     def get_age(self):
         return self.seen_samples
 
+    def get_batched_age(self):
+        return self.seen_batched_samples
+     
     def get_name(self):
         return self.name
 
@@ -135,12 +145,82 @@ class NetworkWithOps(nn.Module):
         if not hasattr(tracked_input, 'batch_size'):
             setattr(tracked_input, 'batch_size', tracked_input.shape[0])
         self.seen_samples += tracked_input.batch_size
-
+        self.seen_batched_samples += 1
+        
+        # If an instance provides an auto-dump hook (e.g., ModelInterface), call it.
+        try:
+            hook = getattr(self, '_maybe_auto_dump', None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
     def operate(
         self,
         layer_id: int,
         neuron_indices: Set[int] | int = {},
-        neuron_operation: Enum = None,
+        op_type: Enum = None,
+        current_child_name: Optional[str] = None,
+        skip_initialization: bool = False,
+        _suppress_incoming_ids: Optional[Set[int]] = set(),
+        _suppress_rec_ids: Optional[Set[int]] = set(),
+        _suppress_same_ids: Optional[Set[int]] = set(),
+        dependency: Optional[Callable] = None,
+        **kwargs
+    ):
+        """
+        Wrapper function for _operate to reset visited nodes memory.
+
+        :param layer_id: [description]
+        :type layer_id: int
+        :param neuron_indices: [description]
+        :type neuron_indices: int
+        :type op_type: Operation TAG
+        :param skip_initialization: [description], defaults to False
+        :type skip_initialization: bool, optional
+        :param _suppress_incoming_ids: [description], defaults to None
+        :type _suppress_incoming_ids: Optional[Set[int]], optional
+        :param _suppress_same_ids: [description], defaults to None
+        :type _suppress_same_ids: Optional[Set[int]], optional
+        :param current_child_name: [description], defaults to None
+        :type current_child_name: Optional[str], optional
+        :param dependency: The type of in/out dependency, defaults to None
+        :type dependency: Optional[Callable], optional
+        :raises ValueError: [description]
+        """
+        # Reset visited nodes memory
+        self.visited_nodes = set()
+
+        # Call the recursive function
+        self._operate(
+            layer_id,
+            neuron_indices,
+            op_type,
+            current_child_name,
+            skip_initialization,
+            _suppress_incoming_ids,
+            _suppress_rec_ids,
+            _suppress_same_ids,
+            dependency,
+            **kwargs
+        )
+
+        # Final hooking after operation
+        for hook_fn in self._architecture_change_hook_fns:
+            hook_fn(self)
+        
+        # wait for all processes to sync - used for bkwd sync
+        th.cuda.synchronize() if th.cuda.is_available() else None
+        time.sleep(0.5)  # small sleep to ensure all ops are done
+
+    def _operate(
+        self,
+        layer_id: int,
+        neuron_indices: Set[int] | int = {},
+        op_type: Enum = None,
         current_child_name: Optional[str] = None,
         skip_initialization: bool = False,
         _suppress_incoming_ids: Optional[Set[int]] = set(),
@@ -157,7 +237,7 @@ class NetworkWithOps(nn.Module):
         :type layer_id: int
         :param neuron_indices: [description]
         :type neuron_indices: int
-        :type neuron_operation: Operation TAG
+        :type op_type: Operation TAG
         :param skip_initialization: [description], defaults to False
         :type skip_initialization: bool, optional
         :param _suppress_incoming_ids: [description], defaults to None
@@ -170,15 +250,16 @@ class NetworkWithOps(nn.Module):
         :type dependency: Optional[Callable], optional
         :raises ValueError: [description]
         """
-
+        logger.debug(f'Operate currently on neurons: {neuron_indices} ' +
+              f'of layer id: {layer_id} with op_type: {op_type}')
         # Sanity check to see if layer exists
         if not isinstance(layer_id, int):
             raise ValueError(
                 f"[NetworkWithOps.operate] Layer_id ({layer_id}) is not int.")
-        if neuron_operation is None:
+        if op_type is None:
             raise ValueError(
                 f"[NetworkWithOps.operate] Neuron operation " + 
-                f"{neuron_operation} has not been defined.")
+                f"{op_type} has not been defined.")
         
         # Convert to index from back
         print(f"[DEBUG OPERATE] Called with layer_id={layer_id}")
@@ -207,16 +288,19 @@ class NetworkWithOps(nn.Module):
                 layer_id, DepType.REC):
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
-            if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
+            if rec_dep_id in _suppress_rec_ids or \
+                    rec_dep_id == layer_id:# or \
+                    # kwargs.get('current_child_name', None) == \
+                    # self._dep_manager.id_2_layer[rec_dep_id].get_name_wi_id():
                 continue
             _suppress_rec_ids.add(layer_id)
 
             # Operate on the dependent layer
             kwargs['current_child_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 rec_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
@@ -229,16 +313,19 @@ class NetworkWithOps(nn.Module):
             print(f"[DEBUG REC] Layer {layer_id} has REC child {rec_dep_id}")
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
-            if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
+            if rec_dep_id in _suppress_rec_ids or \
+                    rec_dep_id == layer_id:# or \
+                    # kwargs.get('current_parent_name', None) == \
+                    # self._dep_manager.id_2_layer[rec_dep_id].get_name_wi_id():
                 continue
             _suppress_rec_ids.add(layer_id)
 
             # Operate on the dependent layer
             kwargs['current_parent_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 rec_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_same_ids=_suppress_same_ids,
@@ -256,16 +343,19 @@ class NetworkWithOps(nn.Module):
             print(f"[DEBUG SAME PARENT] Layer {layer_id} has SAME parent {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
-            if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
+            if same_dep_id in _suppress_same_ids or \
+                    same_dep_id == layer_id: #or \
+                    # kwargs.get('current_child_name', None) == \
+                    # self._dep_manager.id_2_layer[same_dep_id].get_name_wi_id():
                 continue
             _suppress_same_ids.add(layer_id)
 
             # Operate on the dependent layer
             kwargs['current_child_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 same_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
@@ -278,16 +368,19 @@ class NetworkWithOps(nn.Module):
             print(f"[DEBUG SAME CHILD] Layer {layer_id} has SAME child {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
-            if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
+            if same_dep_id in _suppress_same_ids or \
+                    same_dep_id == layer_id: # or \
+                    # kwargs.get('current_parent_name', None) == \
+                    # self._dep_manager.id_2_layer[same_dep_id].get_name_wi_id():
                 continue
             _suppress_same_ids.add(layer_id)
 
             # Operate on the dependent layer
             kwargs['current_parent_name'] = module.get_name_wi_id()
-            self.operate(
+            self._operate(
                 same_dep_id,
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 _suppress_incoming_ids=_suppress_incoming_ids,
                 _suppress_rec_ids=_suppress_rec_ids,
@@ -318,7 +411,7 @@ class NetworkWithOps(nn.Module):
             # # incoming several time (inc_node = th.cat([...,]))
             bypass = hasattr(incoming_module, "bypass")
 
-            # to avoid double expansion except for bypass nodes
+            # Avoid double expansion except for bypass nodes
             if incoming_id in self.visited_nodes and not bypass:
                 print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in visited_nodes")
                 continue
@@ -327,37 +420,20 @@ class NetworkWithOps(nn.Module):
                 print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in _suppress_incoming_ids")
                 continue
 
-            # # Operate on module incoming neurons
+            # Operate on module incoming neurons
             kwargs['current_parent_name'] = module.get_name_wi_id()
-            
-            # Check if we should recurse (for coupled layers like BatchNorm)
-            # or just do a leaf update (for decoupled layers like Conv/Linear)
-            is_coupled = isinstance(incoming_module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
-            
-            if is_coupled:
-                print(f"[DEBUG] Recursing on coupled INCOMING child {incoming_module.get_name_wi_id()}")
-                self.operate(
-                    incoming_id,
-                    neuron_indices,
-                    neuron_operation=neuron_operation,
-                    skip_initialization=False,
-                    dependency=DepType.INCOMING,
-                    **kwargs
-                )
-                # self.operate handles visited_nodes internally
-            else:
-                print(f"[DEBUG] Leaf update on INCOMING child {incoming_module.get_name_wi_id()}")
-                incoming_module.operate(
-                    neuron_indices=neuron_indices,
-                    is_incoming=True,
-                    neuron_operation=neuron_operation,
-                    skip_initialization=False,
-                    dependency=DepType.INCOMING,
-                    **kwargs
-                )
-                # Keep visited node in mem. if it's a bypass node,
-                # i.e., it's incoming from a cat layer for instance.
-                self.visited_nodes.add(incoming_id) if not bypass else None
+            incoming_module.operate(
+                neuron_indices=neuron_indices,
+                is_incoming=True,
+                op_type=op_type,
+                skip_initialization=False,
+                dependency=DepType.INCOMING,
+                **kwargs
+            )
+
+            # Keep visited node in mem. if it's a bypass node,
+            # i.e., it's incoming from a cat layer for instance.
+            self.visited_nodes.add(incoming_id)
 
             # Save incoming children from layer_id
             updated_incoming_children.append(incoming_id)
@@ -369,13 +445,17 @@ class NetworkWithOps(nn.Module):
         if dependency is None:
             dependency = DepType.SAME if hasattr(module, 'wl_same_flag') \
                 and module.wl_same_flag else None
-
+        # # Define child
+        if incoming_module is not None:
+            kwargs['current_child_name'] = incoming_module.get_name_wi_id()
+        elif current_child_name is not None and current_child_name in module.src_to_dst_mapping_tnsrs:
+            kwargs['current_child_name'] = current_child_name
+        else:
+            kwargs['current_child_name'] = None  # Its child is an Orphan node
         # # Operate
-        kwargs['current_child_name'] = incoming_module.get_name_wi_id() \
-            if incoming_module is not None else current_child_name
         module.operate(
                 neuron_indices,
-                neuron_operation=neuron_operation,
+                op_type=op_type,
                 skip_initialization=skip_initialization,
                 dependency=dependency,
                 **kwargs
@@ -409,19 +489,16 @@ class NetworkWithOps(nn.Module):
 
                     # Operate
                     kwargs['current_parent_name'] = module.get_name_wi_id()
-                    self.operate(
+                    self._operate(
                         producer_id,
                         neuron_indices=delta,
                         skip_initialization=True,
-                        neuron_operation=neuron_operation,
+                        op_type=op_type,
                         _suppress_incoming_ids={child_id},
                         dependency=DepType.INCOMING,
                         **kwargs
                     )
 
-        # Hooking
-        for hook_fn in self._architecture_change_hook_fns:
-            hook_fn(self)
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         state = super().state_dict(destination, prefix, keep_vars)
@@ -439,7 +516,7 @@ class NetworkWithOps(nn.Module):
             missing_keys, unexpected_keys, error_msgs)
 
     def load_state_dict(
-            self, state_dict, strict, assign, **kwargs):
+            self, state_dict, strict, assign=True, **kwargs):
         self.seen_samples = state_dict['seen_samples']
         self.tracking_mode = state_dict['tracking_mode']
         super().load_state_dict(
@@ -459,3 +536,161 @@ class NetworkWithOps(nn.Module):
         if intermediary_outputs:
             return x, intermediaries
         return x
+
+
+if __name__ == "__main__":
+    print("This is the NetworkWithOps module.")
+    from weightslab.baseline_models.pytorch.models import TinyUNet_Straightforward
+    from weightslab.backend.model_interface import ModelInterface
+    from weightslab.utils.tools import model_op_neurons
+
+    DEVICE = 'cuda' if th.cuda.is_available() else 'cpu'
+
+    class TinyUNet_Straightforward(nn.Module):
+        """
+        Implémentation UNet ultra-minimaliste (1 niveau d'encodage/décodage)
+        utilisant l'interpolation pour l'upsampling.
+
+        Architecture:
+        Input (H, W) -> Enc1 -> Bottleneck -> Up1 -> Output (H, W)
+        """
+        def __init__(self, in_channels=1, out_classes=1):
+            super().__init__()
+
+            # Set input shape
+            self.input_shape = (1, 1, 256, 256)
+
+            # Hyperparamètres (Canaux à chaque étape)
+            # c[1]=8 (Encodage/Décodage), c[2]=16 (Bottleneck)
+            c = [in_channels, 8, 16]
+
+            # --- A. ENCODER (Down Path) ---
+            # 1. ENCODER 1: Conv -> 8 canaux (Génère le skip connection x1)
+            self.enc1 = nn.Sequential(
+                nn.Conv2d(c[0], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c[1], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True)
+            )
+            self.pool1 = nn.MaxPool2d(2)  # Downsample 1
+
+            # --- B. BOTTLENECK ---
+            # 2. BOTTLENECK: Conv -> 16 canaux
+            self.bottleneck = nn.Sequential(
+                nn.Conv2d(c[1], c[2], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[2]),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c[2], c[2], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[2]),
+                nn.ReLU(inplace=True)
+            )
+
+            # --- C. DECODER (Up Path) ---
+            # 3. UPSAMPLE 1 (Transition Bottleneck -> Up1)
+            # Interpolation du Bottleneck (16 -> 32)
+            scale_factor = 2
+            self.up_interp1 = nn.Upsample(
+                scale_factor=scale_factor,
+                mode='bilinear',
+                align_corners=True
+            )
+            # Dual conv after cat (In: 16 (bottleneck) + 8 (skip) = 24 -> Out: 8)
+            self.up_conv1 = nn.Sequential(
+                nn.Conv2d(c[2] + scale_factor * c[1], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c[1], c[1], kernel_size=3, padding=1),
+                nn.BatchNorm2d(c[1]),
+                nn.ReLU(inplace=True)
+            )
+
+            # --- D. OUTPUT ---
+            # 4. OUTPUT: Ramène à out_classes
+            self.out_conv = nn.Conv2d(c[1], out_classes, kernel_size=1)
+
+        def forward(self, x):
+            # 1. ENCODER
+            x1 = self.enc1(x)
+            p1 = self.pool1(x1)  # Skip x1
+
+            # 2. BOTTLENECK
+            bottleneck = self.bottleneck(p1)
+
+            # 3. DECODER 1: Interp + Concat (x1) + Conv
+            up_b = self.up_interp1(bottleneck)
+            merged1 = th.cat([x1, self.up_interp1(p1), up_b], dim=1)
+            d1 = self.up_conv1(merged1)
+
+            # 4. OUTPUT
+            logits = self.out_conv(d1)
+
+            return logits
+
+
+    def _test_inference(model, dummy_input, op=None):
+        import traceback
+        # Infer
+        try:
+            with th.no_grad():
+                model(dummy_input)
+        except Exception as e:
+            print(f"Error during inference: {e}")
+            traceback.print_exc()
+
+
+    # # Initialize model
+    model = TinyUNet_Straightforward()
+    # # Create dummy input tensor
+    dummy_input = th.randn(model.input_shape).to(DEVICE)
+    # # Interface the model
+    model = ModelInterface(
+        model,
+        dummy_input=dummy_input,
+        print_graph=False
+    )
+    model.to(DEVICE)
+    model.eval()
+    layer_id = len(model.layers) // 2  # Middle layer
+
+    # --- Forward Pass Testing ---
+    _test_inference(model, dummy_input)
+
+    print('----'*50)
+    print('Performing model parameters operations..')
+    # model_op_neurons(model, dummy_input=dummy_input, rand=False)
+
+    # if True:
+    #     n = 7
+    #     print(n)
+    #     with model as m:
+    #         print('Adding operation - 5 neurons added.')
+    #         m.operate(n, {-1, -1}, op_type=2)
+    #         m(dummy_input) if dummy_input is not None else None
+    if True:
+        n = 6
+        print(n)
+        with model as m:
+            print('Adding operation - 5 neurons added.')
+            m.operate(n, {-1, -1}, op_type=2)
+            m(dummy_input) if dummy_input is not None else None
+    len(m.layers[8].dst_to_src_mapping_tnsrs['BatchNorm2d_3']) == m.layers[3].out_neurons == m.layers[3].in_neurons
+    len(m.layers[8].dst_to_src_mapping_tnsrs['BatchNorm2d_7']) == m.layers[7].out_neurons == m.layers[7].in_neurons
+
+
+    # if True:
+    #     n = 3
+    #     print(n)
+    #     with model as m:
+    #         print('Adding operation - 5 neurons added.')
+    #         m.operate(n, {-1, -1}, op_type=2)
+    #         m(dummy_input) if dummy_input is not None else None
+    # if True:
+    #     n = 2
+    #     print(n)
+    #     with model as m:
+    #         print('Adding operation - 5 neurons added.')
+    #         m.operate(n, {-1, -1}, op_type=2)
+    #         m(dummy_input) if dummy_input is not None else None
+    print()

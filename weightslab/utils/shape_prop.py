@@ -224,7 +224,7 @@ class ShapeProp(torch.fx.Interpreter):
 
 
 if __name__ == "__main__":
-    from weightslab.tests.torch_models import TwoLayerUnflattenNet
+    from weightslabbaseline_models.pytorch.models import TwoLayerUnflattenNet
 
     N, D_in, H, D_out = 64, 1000, 100, 10
     x = torch.randn(N, D_in)

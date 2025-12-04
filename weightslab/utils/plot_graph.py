@@ -1,4 +1,5 @@
 import graphviz
+import logging
 import torch as th
 import torch.nn as nn
 
@@ -7,7 +8,10 @@ from torch.fx import GraphModule, Node
 from torch.fx.passes.shape_prop import ShapeProp, TensorMetadata
 
 from weightslab.models.model_with_ops import DepType
-from weightslab.utils.logs import print, setup_logging
+
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 
 # Helper to retrieve module instance (needed for custom deps)
@@ -133,7 +137,7 @@ def plot_fx_graph_with_details(
                     color="#2F4F4F"
                 )
 
-    print("\n--- Plotting Phase: Detected Constraints/Dependencies ---")
+    logger.info("\n--- Plotting Phase: Detected Constraints/Dependencies ---")
     for srcs_mod, dests_mod, dep_type in custom_dependencies:
         if not isinstance(dests_mod, list):
             dests_mod = make_safelist(dests_mod)
@@ -171,17 +175,14 @@ def plot_fx_graph_with_details(
     # Render the graph
     try:
         dot.render(filename, view=True, format='pdf', overwrite_source=True)
-        print(f'Graph rendered at {filename}', level="DEBUG")
+        logger.debug(f'Graph rendered at {filename}')
     except graphviz.backend.execute.CalledProcessError as e:
-        print(f'No graph rendering as {e}', level='ERROR')
+        logger.error(f'No graph rendering as {e}')
 
 
 if __name__ == "__main__":
     from weightslab.utils.tools import generate_graph_dependencies
     from torch.fx import symbolic_trace, GraphModule, Node
-
-    # Setup prints
-    setup_logging('DEBUG')
 
     print('Hello World')
 

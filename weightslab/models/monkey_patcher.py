@@ -1,18 +1,23 @@
 import types
+import logging
 import torch.nn as nn
 
 from weightslab.modules.modules_with_ops import \
     NeuronWiseOperations, LayerWiseOperations
-from weightslab.utils.logs import print
 from weightslab.utils.tools import \
     what_layer_type, extract_in_out_params, \
     get_module_device, rename_with_ops
 
 
-def monkey_patch(module: nn.Module):
+# Global logger
+logger = logging.getLogger(__name__)
+
+
+def monkey_patch_modules(module: nn.Module):
     """
         Dynamically injects LayerWiseOperations methods, wraps forward, and
         renames the module's displayed class name.
+       
         Args:
             module (nn.Module): The module to be patched.
     """
@@ -28,8 +33,6 @@ def monkey_patch(module: nn.Module):
 
     # --- Step 0: Extract Input and Output Parameters from layers ---
     in_dim, out_dim, in_name, out_name = extract_in_out_params(module)
-    if in_dim is None and out_dim is None and in_name is None and out_name is None:
-        return module
 
     # --- Step 1: Inject Mixin Methods (As before) ---
     # # First, set layer type attribute
@@ -54,8 +57,8 @@ def monkey_patch(module: nn.Module):
             super_out_name=out_name
         )
     except Exception as e:
-        print(f'Exception raised during custom init for"\
-               f"{module.__class__.__name__}: {e}', level='ERROR')
+        logger.error(f'Exception raised during custom init for"\
+               f"{module.__class__.__name__}: {e}')
         pass
 
     # --- Step 3: Update module name with "with_ops" suffix
@@ -74,5 +77,6 @@ def monkey_patch(module: nn.Module):
         )
         return output
     module.forward = types.MethodType(wrapped_forward, module)  # Monkey patch
+    module.is_leaf = True
 
     return module

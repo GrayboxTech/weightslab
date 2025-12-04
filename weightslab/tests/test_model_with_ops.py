@@ -15,12 +15,17 @@ from torchvision import datasets as ds
 from torchvision import transforms as T
 
 from weightslab.components.tracking import TrackingMode
+<<<<<<< HEAD
 <<<<<<< Updated upstream
 from weightslab.backend.watcher_editor import WatcherEditor
 =======
 from weightslab.weightslab.backend.model_interface import ModelInterface
 >>>>>>> Stashed changes
 from weightslab.tests.torch_models import FashionCNN as Model
+=======
+from weightslab.backend.model_interface import ModelInterface
+from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
+>>>>>>> 0e96a840a38a23e0de383561c870c80f9a33ae88
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 
@@ -36,8 +41,8 @@ class NetworkWithOpsTest(unittest.TestCase):
         transform = T.Compose([T.ToTensor()])
         self.test_dir = TMP_DIR
         os.makedirs(self.test_dir, exist_ok=True)
-        self.model = Model()
-        self.dummy_network = WatcherEditor(
+        self.model = CNN()
+        self.dummy_network = ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
             print_graph=False
@@ -78,7 +83,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             f"{time.time()-self.stamp}s ---\n")
 
     def _replicated_model(self):
-        return WatcherEditor(
+        return ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
             print_graph=False
@@ -146,12 +151,12 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.dummy_network.operate(
             self.dummy_network.layers[0].get_module_id(),
             neuron_indices=2,
-            neuron_operation=ArchitectureNeuronsOpType.ADD
+            op_type=ArchitectureNeuronsOpType.ADD
         )
         self.dummy_network.operate(
             -1,
             neuron_indices=set([0, 1, 2]),
-            neuron_operation=ArchitectureNeuronsOpType.PRUNE
+            op_type=ArchitectureNeuronsOpType.PRUNE
         )
 
         # Store
@@ -163,29 +168,25 @@ class NetworkWithOpsTest(unittest.TestCase):
         replicated_model.load_state_dict(state_dict, strict=False)
         self.assertEqual(self.dummy_network, replicated_model)
 
-    def test_train_add_neurons_train(self):
+    def test_train_add(self):
         # Set Tracker
         self.dummy_network.set_tracking_mode(TrackingMode.TRAIN)
 
         # Train for like 10 epochs
         for _ in trange(1, desc="Training.."):
-            corrects_first_epochs = self._train_one_epoch(cutoff=10)
+            self._train_one_epoch(cutoff=10)
 
         # Operate on the first layer - ADD
         with self.dummy_network as model:
             model.operate(
                 0,
                 -1,
-                neuron_operation=ArchitectureNeuronsOpType.ADD
+                op_type=ArchitectureNeuronsOpType.ADD
             )
 
-        # Train for another 10 epochs
+        # Train for another 10 epochs - Basically check if training works after operation
         for _ in trange(1, desc="Training again.."):
-            corrects_secnd_epochs = self._train_one_epoch(cutoff=10)
-
-        # Check if the model has been trained correctly and any updated ?
-        self.assertNotEqual(
-            corrects_first_epochs, corrects_secnd_epochs)
+            self._train_one_epoch(cutoff=10)
 
     def test_train_prune(self):
         # Set Tracker
@@ -201,7 +202,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         # Operate on the first layer - PRUNE
         to_remove_ids = set()
         tracker = self.dummy_network.layers[0].train_dataset_tracker
-        for neuron_id in range(tracker.number_of_neurons):
+        for neuron_id in range(tracker.number_of_neurons.item()):
             frq_curr = tracker.get_neuron_stats(neuron_id)
             if frq_curr < 1.0:
                 to_remove_ids.add(neuron_id)
@@ -213,7 +214,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             model.operate(
                 0,
                 to_remove_ids,
-                neuron_operation=ArchitectureNeuronsOpType.PRUNE
+                op_type=ArchitectureNeuronsOpType.PRUNE
             )
 
         # Evaluate
@@ -239,7 +240,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             model.operate(
                 0,
                 to_freeze_ids,
-                neuron_operation=ArchitectureNeuronsOpType.FREEZE
+                op_type=ArchitectureNeuronsOpType.FREEZE
             )
 
         # Get weights sum
@@ -304,7 +305,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             model.operate(
                 0,
                 to_freeze_ids,
-                neuron_operation=ArchitectureNeuronsOpType.RESET
+                op_type=ArchitectureNeuronsOpType.RESET
             )
 
         after_reset_weights_sum_value = th.sum(

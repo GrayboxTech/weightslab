@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import torch as th
 
-from weightslab.models.monkey_patcher import monkey_patch
+from weightslab.models.monkey_patcher import monkey_patch_modules
 from weightslab.modules.modules_with_ops import \
     ArchitectureNeuronsOpType
 from weightslab.utils.tools import \
@@ -73,7 +73,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
 
         # Apply the required patch
         for layer in self.all_layers.values():
-            layer.apply(monkey_patch)
+            layer.apply(monkey_patch_modules)
 
     # --- CORE GENERIC HELPER ---
     def _test_operation_core(
@@ -120,7 +120,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 neuron_indices=neuron_indices,
                 is_incoming=False,
                 skip_initialization=False,
-                neuron_operation=op
+                op_type=op
             )
             #
             # 2. Check Final State
@@ -152,7 +152,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     neuron_indices=neuron_indices,
                     is_incoming=True,
                     skip_initialization=True,
-                    neuron_operation=op
+                    op_type=op
                 )
                 #
                 # 2. Check Final State
@@ -184,7 +184,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 neuron_indices=neuron_indices,
                 is_incoming=False,
                 skip_initialization=False,
-                neuron_operation=op
+                op_type=op
             )
             #
             # 2. Check Final State
@@ -216,7 +216,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     neuron_indices=neuron_indices,
                     is_incoming=True,
                     skip_initialization=True,
-                    neuron_operation=op
+                    op_type=op
                 )
                 #
                 # 2. Check Final State
@@ -247,7 +247,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
             layer_instance.operate(
                 neuron_indices=neuron_indices,
                 is_incoming=False,
-                neuron_operation=op
+                op_type=op
             )
             #
             # 2. Check Final State
@@ -288,7 +288,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
             layer_instance.operate(
                 neuron_indices=neuron_indices,
                 is_incoming=False,
-                neuron_operation=op
+                op_type=op
             )
             final_nb_trainable_parameters = \
                 get_layer_trainable_parameters_neuronwise(
@@ -307,7 +307,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
             layer_instance.operate(
                 neuron_indices={},
                 is_incoming=False,
-                neuron_operation=op
+                op_type=op
             )
             final_nb_trainable_parameters = \
                 get_layer_trainable_parameters_neuronwise(
@@ -325,7 +325,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
             layer_instance.operate(
                 neuron_indices={},
                 is_incoming=False,
-                neuron_operation=op
+                op_type=op
             )
             final_nb_trainable_parameters = \
                 get_layer_trainable_parameters_neuronwise(
@@ -346,7 +346,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 layer_instance.operate(
                     neuron_indices=neuron_indices,
                     is_incoming=True,
-                    neuron_operation=op
+                    op_type=op
                 )
                 #
                 # 2. Check Final State
@@ -388,7 +388,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                     neuron_indices=neuron_indices,
                     is_incoming=True,
                     skip_initialization=False,
-                    neuron_operation=op
+                    op_type=op
                 )
                 final_nb_trainable_parameters = \
                     get_layer_trainable_parameters_neuronwise(
@@ -407,7 +407,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 layer_instance.operate(
                     neuron_indices={},
                     is_incoming=True,
-                    neuron_operation=op
+                    op_type=op
                 )
                 final_nb_trainable_parameters = \
                     get_layer_trainable_parameters_neuronwise(
@@ -425,7 +425,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 layer_instance.operate(
                     neuron_indices={},
                     is_incoming=True,
-                    neuron_operation=op
+                    op_type=op
                 )
                 final_nb_trainable_parameters = \
                     get_layer_trainable_parameters_neuronwise(
@@ -445,7 +445,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
             layer_instance.operate(
                 neuron_indices={},
                 is_incoming=False,
-                neuron_operation=op
+                op_type=op
             )
             final_nb_trainable_parameters = \
                 get_layer_trainable_parameters_neuronwise(
@@ -465,7 +465,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 layer_instance.operate(
                     neuron_indices={},
                     is_incoming=False,
-                    neuron_operation=op
+                    op_type=op
                 )
                 final_nb_trainable_parameters = \
                     get_layer_trainable_parameters_neuronwise(

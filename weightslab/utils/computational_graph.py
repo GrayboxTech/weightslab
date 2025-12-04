@@ -1,12 +1,18 @@
+import tempfile
 import torch.nn as nn
+import torch as th
 import onnx
 import onnx.shape_inference
+import collections
+import logging
+
+
 from onnx import GraphProto
+from torch.fx import GraphModule
 from typing import Iterable, List, Tuple, Dict, Optional
 from copy import deepcopy
-import collections
 
-
+from weightslab.utils.tools import *
 from weightslab.utils.modules_dependencies import DepType
 from weightslab.utils.tools import (
     is_feature_producer,
@@ -14,7 +20,47 @@ from weightslab.utils.tools import (
     normalize_dicts,
 )
 
-def generate_mappings(
+
+# Get Global Logger
+logger = logging.getLogger(__name__)
+
+
+def _export_model_to_onnx_temp(
+    model: nn.Module,
+    dummy_input: th.Tensor,
+    opset_version: int = 17,
+) -> None:
+    """
+    Export a PyTorch model to ONNX format.
+
+    Args:
+        model: The PyTorch model to export
+        dummy_input: A sample input tensor for the model
+        opset_version: ONNX opset version to use (default: 16 for better compatibility)
+                      Use 16+ for models with AdaptiveAvgPool (VGG, ResNet, etc.)
+    """
+
+    onnx_file_path = tempfile.mkstemp(suffix='.onnx')[1]
+    try:
+        th.onnx.export(
+            model,
+            dummy_input,
+            onnx_file_path,
+            export_params=True,
+            opset_version=opset_version,
+            do_constant_folding=False,
+            input_names=['input'],
+            output_names=['output'],
+            verbose=False
+        )
+        logger.info(f"Model exported to {onnx_file_path} (opset {opset_version})")
+    except Exception as e:
+        logger.error(f"Failed to export model to ONNX: {e}. Please try with higher version of opset_version or without ONNX export.")
+        raise e
+    
+    return onnx_file_path
+
+def _generate_mappings(
     src_channels: Iterable[int],
     dst_channels: Iterable[int],
     dst_groups: Optional[int] = None,
@@ -97,12 +143,12 @@ def generate_mappings(
     elif len(src_channels) > len(dst_channels):
         # Case 2: Many-to-one (src > dst)
         # A "batch" of source neurons maps to a single dstination neuron.
-        if len(src_channels) % len(dst_channels) != 0:
-            raise ValueError(
-                f"Source channels ({src_channels}) must be perfectly \
-                 divisible by dstination channels ({dst_channels}) \
-                 for many-to-one mapping."
-            )
+        # if len(src_channels) % len(dst_channels) != 0:
+        #     raise ValueError(
+        #         f"Source channels ({src_channels}) must be perfectly \
+        #          divisible by dstination channels ({dst_channels}) \
+        #          for many-to-one mapping."
+        #     )
 
         # 1. Calculate the block size.
         # This determines how many linear layer neurons map to one convolution channel.
@@ -192,10 +238,9 @@ def generate_mappings(
             src_to_dst_mapping[src_idx] = connected_dst_neurons
     return src_to_dst_mapping, dst_to_src_mapping
 
-
 def _alias_from_tensor_name(tensor_name: str) -> Optional[str]:
     """
-    Extract the PyTorch module name from an ONNX tensor name.
+    Extract the Pyth module name from an ONNX tensor name.
     
     ONNX tensor names follow the pattern:
     - Simple: '/module_name/Operation_output_0' -> 'module_name'
@@ -242,9 +287,7 @@ def _alias_from_tensor_name(tensor_name: str) -> Optional[str]:
     
     return '.'.join(deduplicated)
 
-
-
-def get_onnx_shapes_map(onnx_file_path: str) -> Dict[str, Optional[Tuple[int, ...]]]:
+def _get_onnx_shapes_map(onnx_file_path: str) -> Dict[str, Optional[Tuple[int, ...]]]:
     """
     ONNX shape inference → tensor_name -> shape.
     """
@@ -278,438 +321,961 @@ def get_onnx_shapes_map(onnx_file_path: str) -> Dict[str, Optional[Tuple[int, ..
 
     return shapes_map
 
+def _clean_dependencies(
+    dependencies: List[Tuple[nn.Module, nn.Module, DepType]]
+) -> List[Tuple[nn.Module, nn.Module, DepType]]:
+    """Remove self-loops and duplicate dependency edges.
 
-def generate_graph_dependencies(
+    - Self-loops (where src is dst) are removed.
+    - Duplicate edges (same src object, same dst object, same DepType)
+    are removed, preserving the first occurrence order.
+
+    Args:
+        dependencies: List of tuples (src_module, dst_module, DepType).
+
+    Returns:
+        Cleaned list of dependencies.
+    """
+    seen = set()
+    cleaned = []
+    for src, dst, dep in dependencies:
+        # Remove self-loops
+        if src is dst:
+            continue
+        key = (id(src), id(dst), dep)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append((src, dst, dep))
+    return cleaned
+
+def _infer_dependency_type(
+    dst_mod: nn.Module,
+) -> DepType:
+    """
+    Infer dependency type by analyzing module structure only - NO HARDCODING.
+    
+    Pure introspection: Check if module has learnable weight parameters.
+    If it has 2D+ weight matrix, it CAN transform dimensions independently -> INCOMING
+    If it has only 1D parameters or no weights, it CANNOT -> SAME
+    
+    Args:
+        dst_mod: Module to analyze
+        
+    Returns:
+        DepType.INCOMING or DepType.SAME
+    """
+    try:
+        # Check ALL parameters of the module
+        has_2dp_weight = False
+        
+        for _, param in dst_mod.named_parameters(recurse=False):
+            if param is None:
+                continue
+            
+            param_dim = param.dim()
+            
+            # Found a 2D+ parameter (weight matrix) -> can transform
+            if param_dim >= 2:
+                has_2dp_weight = True
+                break
+            
+        
+        # Decision (no hardcoding):
+        # 2D+ weight = transformation capability = INCOMING
+        # Only 1D params or no params = no transformation = SAME
+        
+        if has_2dp_weight:
+            return DepType.INCOMING
+        else:
+            return DepType.SAME
+            
+    except Exception:
+        # Safe fallback
+        return DepType.SAME
+
+def generate_graph_dependencies_from_torchfx(
+        model: nn.Module,
+        graph: GraphModule,
+) -> \
+            List[Tuple[nn.Module, nn.Module, DepType]]:
+    """
+        Infers dependencies from the traced graph, explicitly marking
+        structuralSAME and INCOMING constraints.
+    """
+    dependencies = []
+
+    # Map to store the last *structural module* (instance) that produced the
+    # output for a given node.
+    # This map is crucial for implementing the "pass-through" logic for
+    # non-structural layers.
+    node_to_module = {}
+    bypass = []
+
+    # Iterate over the nodes in the graph to find sources
+    for node in graph.nodes:
+        bypassed = False
+        current_module = None
+        if node.op == 'call_module':
+            # Get current module from node
+            current_module = get_module_by_name(model, node.target)
+            current_layer_type = current_module.layer_type if hasattr(current_module, 'layer_type') else -1
+
+            # If the current module is a multi-input layer, flag as bypass
+            if node.name in bypass:
+                # bypass strategy for recursive update dependencies,
+                # like bypass = true for __add__ but false for cat;
+                # and cnt for neurons mapping src / dst
+                current_module.bypass = 0
+
+            # Find the input source node that came from a tracked module
+            source_node = next(
+                (arg for arg in node.args if isinstance(arg, th.fx.Node)),
+                None
+            )
+            source_modules = node_to_module.get(source_node) if source_node \
+                else None
+
+            # --- 1. Dependency Creation (from last Structural Module to
+            # current Structural Module) ---
+            # A dependency edge (A -> B) is only created if B (current_module)
+            # is a structural layer.
+            is_dst_structural = is_feature_producer(current_module)
+            is_learnable = is_module_learnable(current_module)
+            has_layer_type = hasattr(current_module, 'layer_type')
+            if source_modules:
+                for source_module in source_modules:
+                    if source_module is not None and \
+                            (has_layer_type or is_dst_structural or is_learnable):
+                        # 1.1. Determine Dependency Type based on Shape
+                        # (for Pruning)
+                        dep_type = DepType.INCOMING
+                        source_out_channels = get_feature_channel_size(
+                            source_node
+                        )
+                        dst_out_channels = get_feature_channel_size(node)
+
+                        # 1.2. Check if current module should be target SAME
+                        # path. It's a specific case where current module has
+                        # in==out shapes
+                        # Check for SAME constraint (requires source to be a
+                        # producer)
+                        if current_layer_type == 1 and \
+                            source_out_channels is not None and \
+                                dst_out_channels is not None:
+                            if hasattr(current_module, 'wl_same_flag'):
+                                dep_type = DepType.SAME
+                        else:
+                            dep_type = DepType.SAME
+                            # current_module.bypass = 1
+
+                        # 1.3. Append the dependency
+                        # (Structural Source -> Structural dstination)
+                        dependencies.append(
+                            (
+                                source_module,
+                                current_module,
+                                dep_type
+                            )
+                        )
+                        if hasattr(current_module, 'bypass'):
+                            source_module.src_bypass = 1
+
+            # --- 2. Update Tracking Map (Only track Structural Modules
+            # or pass through) ---
+            # Structural Modules are producers (Conv, Linear) or
+            # size-constrainers (BN)
+            if current_layer_type >= 1 or is_learnable:
+                node_to_module[node] = make_safelist(current_module)
+            elif source_node and source_node in node_to_module:
+                # Pass through: For stateless layers (ReLU, MaxPool), point
+                # back to their actual source
+                node_to_module[node] = make_safelist(
+                    node_to_module[source_node]
+                )
+            else:
+                # Fallback (e.g., first node)
+                node_to_module[node] = make_safelist(
+                    current_module
+                )  # Fallback to current module if source isn't tracked
+
+        # --- Handle General Merge Operations (Any call_function with multiple
+        # module inputs) ---
+        elif node.op == 'call_function' or node.op == "call_method":
+            # add next steps bypass if op. change next input dimension
+            # (e.g., cat)
+            if 'cat' in node.name or 'cat_' in node.name:
+                bypass.append(str(node.next))
+                # bypassed = True
+
+            # 1. Identify all source modules that feed into this function node
+            # TODO (GP): Find recursive approach to do that, if there are
+            # TODO (GP): cat of cat of cat, should be nested list also ?
+            # TODO (GP): e.g., cat([conv1, conv2, cat([conv3, cat([conv4,
+            # TODO (GP): conv5])])])])
+            source_modules_ = []  # Collect modules to check for single input
+            source_nodes = []  # Collect nodes to check for single input
+            for arg in node.args:
+                if not isinstance(arg, list):
+                    arg = make_safelist(arg)
+                for _arg in arg:
+                    if isinstance(_arg, th.fx.Node):
+                        source_nodes.append(_arg)
+                        source_modules = node_to_module.get(_arg)
+                        if source_modules is not None:
+                            for ind in range(len(source_modules)):
+                                source_modules_.append(source_modules[ind])
+                    elif isinstance(_arg, (tuple, set, list)):
+                        for __arg in _arg:
+                            if isinstance(__arg, th.fx.Node):
+                                source_nodes.append(__arg)
+                                source_modules = node_to_module.get(__arg)
+                                if source_modules is not None:
+                                    for ind in range(len(source_modules)):
+                                        source_modules_.append(source_modules[ind])
+
+            # Remove duplicates while preserving the order/identity
+            distinct_source_modules = source_modules_
+
+            # 2. Check for multi-branch constraint
+            # (e.g., residual merge, element-wise merge)
+            # If two or more *different* modules feed into the function,
+            # they impose a SAME constraint.
+            if len(distinct_source_modules) >= 2:
+                # Apply bidirectional SAME constraint between all pairs
+                # of modules that merge at this function node.
+                # This covers th.add, th.mul, etc.
+                for i in range(len(distinct_source_modules)):
+                    for j in range(i + 1, len(distinct_source_modules)):
+                        mod_a = distinct_source_modules[i]
+                        mod_b = distinct_source_modules[j]
+                        if not bypassed:
+                            dependencies.append((mod_a, mod_b, DepType.REC))
+
+            # 3. Update the module map for the function node's output
+            # (i.e., intelligent pass-through)
+            if len(distinct_source_modules) == 1:
+                # Single-input stateless function (e.g., th.sigmoid, view):
+                # pass through the source
+                node_to_module[node] = distinct_source_modules
+            elif len(distinct_source_modules) >= 2:
+                # Multi-input merge: The function output should be tracked as
+                # dependent on the first module in the merge
+                node_to_module[node] = distinct_source_modules
+            else:
+                node_to_module[node] = None  # Placeholder or constant input
+
+    # Clean dependencies (remove duplicates and self-loops)
+    dependencies = _clean_dependencies(dependencies)
+    
+    return dependencies
+
+def generate_layer_dependencies_from_onnx(
     model: nn.Module,
-    graph: GraphProto,
-    indexing_neurons: bool = True,
-    onnx_shapes_map: Dict[str, Optional[Tuple[int, ...]]] = None,
+    dummy_input: Optional[th.Tensor] = None,
 ) -> List[Tuple[nn.Module, nn.Module, DepType]]:
     """
-    Pure ONNX version that:
-    1) Traverses ONNX graph to produce raw (src_mod, dst_mod, DepType) edges for ALL modules.
-    2) Bridges over non-ID modules (e.g. MaxPool, ReLU) so that final deps only connect
-       neuron-aware modules (modules with get_module_id).
-    3) Optionally (if indexing_neurons=True) builds neuron-level mappings
-       between neuron-aware modules (i.e., modules that implement `get_neurons`).
+    Generate a simplified list of layer dependencies from an ONNX graph.
+    
+    This function analyzes the ONNX computational graph to identify how layers
+    are connected and how neuron count changes propagate through the network.
+    
+    Args:
+        onnx_file_path: Path to the ONNX model file
+        model: The Pyth model corresponding to the ONNX file
+        
+    Returns:
+        List of tuples (layer1_module, layer2_module, dependency_type) where:
+        - layer1_name: Name of the source layer
+        - layer2_name: Name of the destination layer  
+        - dependency_type: DepType.SAME or DepType.INCOMING
+            - SAME: Output neuron changes in layer1 propagate to both input AND output of layer2
+                   (e.g., Conv2d -> BatchNorm2d, BatchNorm2d -> ReLU)
+            - INCOMING: Output neuron changes in layer1 only affect input of layer2
+                       (e.g., ReLU -> Conv2d, Conv2d -> Conv2d)
+    
+    Example:
+        For a CNN: input > Conv2d > BatchNorm2d > ReLU > Conv2d > output
+        
+        Returns:
+        [
+            ('conv1', 'bn1', DepType.SAME),       # Conv output = BN input/output
+            ('bn1', 'relu', DepType.SAME),         # BN output = ReLU input/output  
+            ('relu', 'conv2', DepType.INCOMING),   # ReLU output = Conv2 input only
+        ]
+        
+    Note:
+        Enable DEBUG logging to see detailed processing information:
+        >>> import logging
+        >>> logging.basicConfig(level=logging.DEBUG)
     """
-
-    name_to_module: Dict[str, nn.Module] = dict(model.named_modules())
-
-    # Map tensor -> producing ONNX node
+    
+    # First generate the onnx file from the model temporarily
+    onnx_file_path = _export_model_to_onnx_temp(model, dummy_input=th.randn(model.input_shape) if dummy_input is None else dummy_input)
+    
+    # Load ONNX model and get shape information
+    try:
+        onnx_model = onnx.load(onnx_file_path)
+        onnx_shapes_map = _get_onnx_shapes_map(onnx_file_path)
+        graph = onnx_model.graph
+    except Exception as e:
+        raise RuntimeError(f"Failed to load ONNX model from {onnx_file_path}: {e}")
+    
+    all_modules = dict(model.named_modules())
+    # Filter to only leaf modules (actual operation layers, not containers)
+    name_to_module: Dict[str, nn.Module] = {
+        name: mod for name, mod in all_modules.items() 
+        if hasattr(mod, 'is_leaf') and mod.is_leaf
+    }
+    module_to_name: Dict[nn.Module, str] = {m: n for n, m in name_to_module.items()}
+    
+    logger.debug(f"Available leaf modules in model: {sorted([k for k in name_to_module.keys() if k])}")
+    
+    # Map tensor outputs to their producing nodes
     producer_for_tensor: Dict[str, onnx.NodeProto] = {}
     tensor_to_mod: Dict[str, nn.Module] = {}
-
-    for node in graph.node: 
+    
+    for node in graph.node:
         for out_name in node.output:
             producer_for_tensor[out_name] = node
-
-            # Try to see if this tensor belongs directly to a module
+            
+            # Try to associate tensor with a module
             alias = _alias_from_tensor_name(out_name)
-            if alias is not None and alias in name_to_module:
+            if alias and alias in name_to_module:
                 tensor_to_mod[out_name] = name_to_module[alias]
+                logger.debug(f"Tensor {out_name[:40]} -> module {alias} (via alias)")
             else:
-                # Fallback: try to extract module name from node name or weight parameters
-                # This handles cases where output tensor has no proper name (e.g., '13' for fc layer)
+                # Fallback: extract from node name or weight parameters
                 module_name = None
                 
-                # Try node.name first (e.g., '/fc/Gemm' -> 'fc')
                 if node.name and node.name.startswith('/'):
                     parts = node.name[1:].split('/')
-                    if len(parts) >= 1:
-                        # For '/fc/Gemm', parts = ['fc', 'Gemm']
-                        # Join all parts except the last (operation name)
-                        if len(parts) > 1:
-                            module_name = '.'.join(parts[:-1])
-                        else:
-                            module_name = parts[0]
+                    if len(parts) > 1:
+                        module_name = '.'.join(parts[:-1])
+                    else:
+                        module_name = parts[0]
                 
-                # If that didn't work, try extracting from weight parameter names
+                # For BatchNorm and other ops with parameters, check all inputs
                 if not module_name or module_name not in name_to_module:
                     for inp in node.input:
-                        # Look for patterns like 'fc.weight', 'fc.bias', 'block1.conv1.weight'
-                        if '.weight' in inp or '.bias' in inp:
-                            module_name = inp.rsplit('.', 1)[0]  # Remove '.weight' or '.bias'
-                            break
+                        if any(param in inp for param in ['.weight', '.bias', '.running_mean', '.running_var', '.num_batches_tracked']):
+                            # Extract module name progressively
+                            inp_parts = inp.split('.')
+                            for i in range(len(inp_parts)-1, 0, -1):
+                                potential_name = '.'.join(inp_parts[:i])
+                                if potential_name in name_to_module:
+                                    module_name = potential_name
+                                    break
+                            if module_name:
+                                break
                 
-                # If we found a valid module name, map it
                 if module_name and module_name in name_to_module:
                     tensor_to_mod[out_name] = name_to_module[module_name]
-
-
+                    logger.debug(f"Tensor {out_name[:40]} -> module {module_name} (via parameters)")
     
+    # Helper to get channel count from tensor
+    def get_channel_count(tensor_name: str) -> Optional[int]:
+        """Get channel count from ONNX shape or node attributes"""
+        # Try shape inference first
+        if onnx_shapes_map:
+            shape = onnx_shapes_map.get(tensor_name)
+            if shape and len(shape) >= 2:
+                return shape[1]  # NCHW format, C is dimension 1
+        
+        # Fallback to node attributes
+        producer = producer_for_tensor.get(tensor_name)
+        if producer:
+            if producer.op_type == 'Conv' and len(producer.input) >= 2:
+                weight_name = producer.input[1]
+                for init in graph.initializer:
+                    if init.name == weight_name and len(init.dims) >= 1:
+                        return init.dims[0]  # out_channels
+            
+            elif producer.op_type == 'Gemm' and len(producer.input) >= 2:
+                weight_name = producer.input[1]
+                for init in graph.initializer:
+                    if init.name == weight_name and len(init.dims) >= 1:
+                        return init.dims[0]  # out_features
+            
+            elif producer.op_type == 'BatchNormalization' and len(producer.input) >= 2:
+                weight_name = producer.input[1]
+                for init in graph.initializer:
+                    if init.name == weight_name and len(init.dims) >= 1:
+                        return init.dims[0]  # num_features
+        
+        return None
+    
+    # Helper to recursively find module for a tensor
     mod_cache: Dict[str, Optional[nn.Module]] = {}
-
-    def module_for_tensor_name(tname: str) -> Optional[nn.Module]:
-        """
-        Given any tensor name in the ONNX graph, walk backwards through its producers
-        until we find the nearest nn.Module that produced something in that chain.
-        """
+    
+    def module_for_tensor(tname: str) -> Optional[nn.Module]:
+        """Walk backwards through producers to find the module that created this tensor"""
         if tname in mod_cache:
             return mod_cache[tname]
-
+        
         # Direct hit: this tensor is an output we've already associated to a module
         if tname in tensor_to_mod:
             mod_cache[tname] = tensor_to_mod[tname]
             return tensor_to_mod[tname]
-
-        # Otherwise, see which node produced this tensor
+        
+        # Try to find the producer of this tensor
         prod = producer_for_tensor.get(tname)
         if prod is None:
+            # This might be a graph input - check if it's produced by any earlier node
+            # by looking at all nodes and their outputs
             mod_cache[tname] = None
             return None
-
-        # Recursively walk through the producer's inputs
+        
+        # Walk backwards through all inputs of the producer
         for inp in prod.input:
-            up_mod = module_for_tensor_name(inp)
+            # Skip parameters
+            if any(param in inp for param in ['.weight', '.bias', '.running_mean', '.running_var', '.num_batches_tracked']):
+                continue
+            
+            up_mod = module_for_tensor(inp)
             if up_mod is not None:
                 mod_cache[tname] = up_mod
                 return up_mod
-
+        
         mod_cache[tname] = None
         return None
-
-
-    def module_for_alias(alias: Optional[str]) -> Optional[nn.Module]:
-        if alias is None:
-            return None
-        return name_to_module.get(alias, None)
-
     
-    def get_channels_from_node_attributes(node: onnx.NodeProto) -> Optional[int]:
-        """
-        Extract output channel count from ONNX node attributes.
-        Works for Conv, Gemm (Linear), and BatchNormalization nodes.
-        
-        Returns:
-            Number of output channels/features, or None if cannot be determined
-        """
-        try:
-            if node.op_type == 'Conv':
-                # Conv weight shape: [out_channels, in_channels, kernel_h, kernel_w]
-                # Weight is usually the second input
-                if len(node.input) >= 2:
-                    weight_name = node.input[1]
-                    # Look for weight in graph initializers
-                    for init in graph.initializer:
-                        if init.name == weight_name:
-                            if len(init.dims) >= 1:
-                                return init.dims[0]  # out_channels
-            
-            elif node.op_type == 'Gemm':
-                # Gemm (Linear) weight shape: [out_features, in_features]
-                # Weight is usually the second input
-                if len(node.input) >= 2:
-                    weight_name = node.input[1]
-                    for init in graph.initializer:
-                        if init.name == weight_name:
-                            if len(init.dims) >= 1:
-                                return init.dims[0]  # out_features
-            
-            elif node.op_type == 'BatchNormalization':
-                # BatchNorm weight/bias shape: [num_features]
-                # Weight is usually the second input (scale parameter)
-                if len(node.input) >= 2:
-                    weight_name = node.input[1]
-                    for init in graph.initializer:
-                        if init.name == weight_name:
-                            if len(init.dims) >= 1:
-                                return init.dims[0]  # num_features
-        
-        except Exception:
-            pass
-        
-        return None
-
-    def chan_for_tensor(tname: str) -> Optional[int]:
-        """
-        Get channel count for a tensor using hybrid approach:
-        1. Try ONNX shape inference (from onnx_shapes_map)
-        2. Fallback: extract from node attributes if this is a node output
-        """
-        # Method 1: Try shape inference
-        if onnx_shapes_map is not None:
-            shape = onnx_shapes_map.get(tname)
-            if shape and len(shape) >= 2:
-                # assume NCHW, C is dim 1
-                return shape[1]
-        
-        # Method 2: Fallback - extract from node that produces this tensor
-        producer_node = producer_for_tensor.get(tname)
-        if producer_node is not None:
-            channels = get_channels_from_node_attributes(producer_node)
-            if channels is not None:
-                return channels
-        
-        return None
-
-
-
-    raw_edges: List[Tuple[nn.Module, nn.Module, DepType]] = []      # ALL module edges (for bridging)
-    filtered_edges: List[Tuple[nn.Module, nn.Module, DepType]] = [] # only structural/learnable dst (optional)
-
-    # Create module_to_name mapping for REC filtering
-    module_to_name = {m: n for n, m in name_to_module.items()}
-
-    for node in graph.node:
-        # ---- STEP 1: Find source modules from node.inputs ----
-        src_modules: List[nn.Module] = []
-        src_tensors_for_shape: List[str] = []
-
-        for inp in node.input:
-            src_mod = module_for_tensor_name(inp)  # <--- NEW: deep mapping
-            if src_mod is not None:
-                src_modules.append(src_mod)
-                src_tensors_for_shape.append(inp)
-
-        # If no source modules, nothing to do for this node
-        if not src_modules:
-            continue
-
-        # ---- STEP 2: Handle merge ops (REC) purely based on src_modules ----
-        op_type = node.op_type
-        is_merge = op_type in ("Add", "Sum", "Concat")
-        if is_merge and len(src_modules) >= 2:
-            # Helper to get top-level block name (e.g., "layer1" from "model.layer1.0.bn1")
-            def get_top_level_block(module_name: str) -> str:
-                parts = module_name.split('.')
-                # Skip "model" prefix if present, return next part
-                if len(parts) > 1 and parts[0] == 'model':
-                    return parts[1] if len(parts) > 1 else ""
-                return parts[0] if parts else ""
-            
-            for i in range(len(src_modules)):
-                for j in range(i + 1, len(src_modules)):
-                    mod_a = src_modules[i]
-                    mod_b = src_modules[j]
-                    
-                    # Get module names
-                    name_a = module_to_name.get(mod_a, "")
-                    name_b = module_to_name.get(mod_b, "")
-                    
-                    # Only create REC if modules are in the same top-level block
-                    # This prevents layer1.bn1 from being connected to layer2.downsample.bn
-                    block_a = get_top_level_block(name_a)
-                    block_b = get_top_level_block(name_b)
-                    
-                    print(f"[DEBUG REC FILTER] Merge op {op_type}: {name_a} (block={block_a}) vs {name_b} (block={block_b})")
-                    
-                    if block_a and block_b and block_a == block_b:
-                        print(f"[DEBUG REC FILTER] ✓ Creating REC dependency (same block)")
-                        raw_edges.append((mod_a, mod_b, DepType.REC))
-                        filtered_edges.append((mod_a, mod_b, DepType.REC))
-                    else:
-                        print(f"[DEBUG REC FILTER] ✗ Skipping REC dependency (different blocks or empty)")
-
-        # ---- STEP 3: Try to find destination module from node.outputs ----
-        dst_alias = None
-        dst_tensor_for_shape = None
-        for out_name in node.output:
-            a = _alias_from_tensor_name(out_name)
-            if a is not None and a in name_to_module:
-                dst_alias = a
-                dst_tensor_for_shape = out_name
-                break
-
-        dst_mod = module_for_alias(dst_alias)
-        if dst_mod is None:
-            # e.g. Add/Concat/Relu that isn't directly tied to a module.
-            # We have already captured REC edges above if this is a merge op.
-            continue
-
-        dst_is_structural = is_feature_producer(dst_mod)
-        dst_is_learnable = is_module_learnable(dst_mod)
-
-        dst_c = chan_for_tensor(dst_tensor_for_shape) if dst_tensor_for_shape else None
-
-        # ---- STEP 4: SAME / INCOMING edges as before ----
-        for src_mod, src_tname in zip(src_modules, src_tensors_for_shape):
-            dep_type = DepType.INCOMING
-            src_c = chan_for_tensor(src_tname) if src_tname else None
-
-            if src_c is not None and dst_c is not None and src_c == dst_c:
-                dep_type = DepType.SAME
-
-            raw_edges.append((src_mod, dst_mod, dep_type))
-
-            if dst_is_structural or dst_is_learnable:
-                filtered_edges.append((src_mod, dst_mod, dep_type))
-
-
-        # ---- REC edges between branches for merge ops ----
-        op_type = node.op_type
-        is_merge = op_type in ("Add", "Sum", "Concat")
-        if is_merge and len(src_modules) >= 2:
-            # Helper to get top-level block name (same as above)
-            def get_top_level_block(module_name: str) -> str:
-                parts = module_name.split('.')
-                if len(parts) > 1 and parts[0] == 'model':
-                    return parts[1] if len(parts) > 1 else ""
-                return parts[0] if parts else ""
-            
-            for i in range(len(src_modules)):
-                for j in range(i + 1, len(src_modules)):
-                    mod_a = src_modules[i]
-                    mod_b = src_modules[j]
-                    
-                    # Get module names
-                    name_a = module_to_name.get(mod_a, "")
-                    name_b = module_to_name.get(mod_b, "")
-                    
-                    # Only create REC if modules are in the same top-level block
-                    block_a = get_top_level_block(name_a)
-                    block_b = get_top_level_block(name_b)
-                    
-                    print(f"[DEBUG REC FILTER 2] Merge op {op_type}: {name_a} (block={block_a}) vs {name_b} (block={block_b})")
-                    
-                    if block_a and block_b and block_a == block_b:
-                        print(f"[DEBUG REC FILTER 2] ✓ Creating REC dependency (same block)")
-                        raw_edges.append((mod_a, mod_b, DepType.REC))
-                        filtered_edges.append((mod_a, mod_b, DepType.REC))
-                    else:
-                        print(f"[DEBUG REC FILTER 2] ✗ Skipping REC dependency (different blocks or empty)")
-
-        # DEBUG: print raw connectivity before bridging
-    print("\n[DEBUG] RAW EDGES FROM ONNX:")
-    for src_mod, dst_mod, dep_type in raw_edges:
-        sname = module_to_name.get(src_mod, f"<?{type(src_mod).__name__}>")
-        dname = module_to_name.get(dst_mod, f"<?{type(dst_mod).__name__}>")
-        print(f"  {dep_type.name:8} {sname:15} -> {dname:15}")
-
-    # ---- 1.5 BRIDGING over non-ID modules (use RAW edges) ----
-
-    def is_id_module(m: nn.Module) -> bool:
-        # Modules that are monkey-patched / neuron-aware and have IDs
-        return hasattr(m, "get_module_id")
-
-    out_edges: Dict[nn.Module, List[Tuple[nn.Module, DepType]]] = collections.defaultdict(list)
-    for src_mod, dst_mod, dep_type in raw_edges:
-        out_edges[src_mod].append((dst_mod, dep_type))
-
-    bridged_deps: List[Tuple[nn.Module, nn.Module, DepType]] = []
+    # Build dependency list
+    dependencies: List[Tuple[str, str, DepType]] = []
     seen_edges = set()
-
-    for src_mod in name_to_module.values():
-        if not is_id_module(src_mod):
-            continue
-
-        # BFS from src_mod through non-ID modules
-        queue = [src_mod]
-        visited: set[nn.Module] = set()
-
-        while queue:
-            cur = queue.pop(0)
-            if cur in visited:
+    
+    logger.debug(f"Processing {len(graph.node)} ONNX nodes...")
+    
+    for node in graph.node:
+        logger.debug(f"\nNode: {node.op_type} | name: {node.name}")
+        logger.debug(f"  Inputs: {node.input[:3]}")  # Show first 3 inputs
+        logger.debug(f"  Outputs: {node.output}")
+        
+        # Find source modules from inputs
+        src_modules = []
+        src_tensors = []
+        
+        for inp in node.input:
+            # Skip constant/initializer inputs (weights, biases, etc.)
+            if any(param in inp for param in ['.weight', '.bias', '.running_mean', '.running_var', '.num_batches_tracked']):
+                logger.debug(f"  Skipping parameter input: {inp[:50]}")
                 continue
-            visited.add(cur)
-
-            for nxt, dep_type in out_edges.get(cur, []):
-                if nxt is src_mod:
-                    continue
-
-                if is_id_module(nxt):
-                    key = (id(src_mod), id(nxt), dep_type)
-                    if key not in seen_edges:
-                        seen_edges.add(key)
-                        bridged_deps.append((src_mod, nxt, dep_type))
-                else:
-                    # Non-ID module (e.g., MaxPool, ReLU): keep walking
-                    queue.append(nxt)
-
-    # ---- 2. NEURON-LEVEL MAPPING (optional) ----
-
-    if not indexing_neurons:
-        return bridged_deps
-
-    for (src_mod, dst_mod, edge_label) in bridged_deps:
-        recursive_dep = edge_label == DepType.REC  # residual / multi-branch
-
-        # Only build neuron mappings if BOTH modules are neuron-aware.
-        if not hasattr(src_mod, "get_neurons") or not hasattr(dst_mod, "get_neurons"):
+                
+            src_mod = module_for_tensor(inp)
+            if src_mod is not None and src_mod not in src_modules:
+                src_modules.append(src_mod)
+                src_tensors.append(inp)
+                src_name = module_to_name.get(src_mod, "<??>")
+                logger.debug(f"  Found source: {src_name} (from tensor: {inp[:50]})")
+            else:
+                logger.debug(f"  Could not find source module for input: {inp[:50]}")
+        
+        if not src_modules:
+            logger.debug(f"  -> No source modules found, skipping")
             continue
+        
+        # Handle merge operations (Add, Sub, Sum, Concat, Mul, Div) - create REC dependencies between branches
+        is_merge = node.op_type.capitalize() in ("Add", "Sub", "Sum", "Concat", "Mul", "Div")
+        is_concat = "Concat" in node.op_type.capitalize() or "Cat" in node.op_type.capitalize()
+        
+        if is_merge:
+            logger.debug(f"  Detected merge operation: {node.op_type} with {len(src_modules)} source modules")
+            logger.debug(f"  Source modules: {[module_to_name.get(m, '?') for m in src_modules]}")
+        
+        if is_merge and len(src_modules) >= 2:
+            # Create REC dependencies between all pairs of source modules
+            # These modules must have matching output dimensions for the merge to work
+            for i in range(len(src_modules)):
+                for j in range(i + 1, len(src_modules)):
+                    mod_a = src_modules[i]
+                    mod_b = src_modules[j]
+                    
+                    name_a = module_to_name.get(mod_a, "")
+                    name_b = module_to_name.get(mod_b, "")
+                    
+                    if not name_a or not name_b:
+                        continue
+                    
+                    # Get channel counts for both modules to verify they match
+                    tensor_a = src_tensors[i]
+                    tensor_b = src_tensors[j]
+                    channels_a = get_channel_count(tensor_a)
+                    channels_b = get_channel_count(tensor_b)
+                    
+                    logger.debug(f"  Checking REC: {name_a} (ch={channels_a}) <-> {name_b} (ch={channels_b})")
+                    
+                    # For Add/Sub/Mul/Div, channels must match
+                    # For Concat, channels can differ (concatenated along channel dim)
+                    create_rec = False
+                    if is_concat:
+                        create_rec = True  # Always create REC for concat
+                    elif channels_a is not None and channels_b is not None and channels_a == channels_b:
+                        create_rec = True  # Channels match for Add/Sub/etc
+                    elif channels_a is None or channels_b is None:
+                        # Can't verify channels, but merge operation requires compatibility
+                        create_rec = True
+                    
+                    if create_rec:
+                        # Add bidirectional REC edges
+                        edge_key_ab = (name_a, name_b)
+                        edge_key_ba = (name_b, name_a)
+                        
+                        if edge_key_ab not in seen_edges:
+                            logger.debug(f"  ✓ Adding REC dependency: {name_a} <-> {name_b}")
+                            dependencies.append((mod_a, mod_b, DepType.REC))
+                            seen_edges.add(edge_key_ab)
+                        
+                        if edge_key_ba not in seen_edges:
+                            dependencies.append((mod_b, mod_a, DepType.REC))
+                            seen_edges.add(edge_key_ba)
+                    else:
+                        logger.debug(f"  ✗ Skipping REC dependency (channel mismatch: {channels_a} vs {channels_b})")
+        
+        # Find destination module from outputs
+        # First try: direct alias from output tensor name
+        dst_mod = None
+        dst_tensor = None
+        
+        for out_name in node.output:
+            alias = _alias_from_tensor_name(out_name)
+            if alias and alias in name_to_module:
+                dst_mod = name_to_module[alias]
+                dst_tensor = out_name
+                logger.debug(f"  Found dest (method 1 - alias): {alias}")
+                break
+        
+        # Second try: For ops that correspond to nn.Module, extract module from node itself
+        if dst_mod is None:
+            # Try to extract module name from the node itself
+            if node.name and node.name.startswith('/'):
+                parts = node.name[1:].split('/')
+                # For ops like '/bn1/BatchNormalization', we want 'bn1'
+                if len(parts) >= 2:
+                    # The module name is typically everything except the last part (op type)
+                    potential_names = [
+                        '.'.join(parts[:-1]),  # e.g., 'model.bn1' from '/model/bn1/BatchNormalization'
+                        parts[-2] if len(parts) >= 2 else parts[0],  # e.g., 'bn1' from above
+                    ]
+                    for pname in potential_names:
+                        if pname in name_to_module:
+                            dst_mod = name_to_module[pname]
+                            if node.output:
+                                dst_tensor = node.output[0]
+                            logger.debug(f"  Found dest (method 2 - node name): {pname}")
+                            break
+            
+            # Third try: For weight-based ops (Conv, Gemm, BatchNorm), check input parameters
+            if dst_mod is None:
+                for inp in node.input:
+                    if any(param in inp for param in ['.weight', '.bias', '.running_mean', '.running_var', '.num_batches_tracked']):
+                        # Try progressive path building for nested modules
+                        inp_parts = inp.split('.')
+                        for i in range(len(inp_parts)-1, 0, -1):
+                            potential_name = '.'.join(inp_parts[:i])
+                            if potential_name in name_to_module:
+                                dst_mod = name_to_module[potential_name]
+                                if node.output:
+                                    dst_tensor = node.output[0]
+                                logger.debug(f"  Found dest (method 3 - params): {potential_name} (from {inp})")
+                                break
+                        if dst_mod:
+                            break
+        
+        if dst_mod is None:
+            logger.debug(f"  -> No destination module found, skipping")
+            continue
+        
+        # Set bypass flag for Concat operations
+        # The destination module after a Concat needs bypass=0 to track channel offset
+        if is_concat and len(src_modules) >= 2:
+            if not hasattr(dst_mod, 'bypass'):
+                dst_mod.bypass = 0
+                logger.debug(f"  Setting bypass=0 for module after Concat: {module_to_name.get(dst_mod, '?')}")
+        
+        # Determine dependency type for each source -> destination connection
+        for src_mod, src_tensor in zip(src_modules, src_tensors):
+            # Skip self-connections
+            if src_mod is dst_mod:
+                continue
+            
+            src_name = module_to_name.get(src_mod, "")
+            dst_name = module_to_name.get(dst_mod, "")
+            
+            # Skip empty names
+            if not src_name or not dst_name:
+                continue
+            
+            # Skip if already seen
+            edge_key = (src_name, dst_name)
+            if edge_key in seen_edges:
+                continue
+            
+            # Get current channel counts
+            src_channels = get_channel_count(src_tensor)
+            dst_channels = get_channel_count(dst_tensor) if dst_tensor else None
+            
+            logger.debug(f"Analyzing dependency {src_name} -> {dst_name}")
+            logger.debug(f"  Source channels: {src_channels}, Destination channels: {dst_channels}")
+            
+            # Use helper function to infer dependency type
+            dep_type = _infer_dependency_type(dst_mod)
 
-        # 2.1 Determine number of neurons for each side
-        if not hasattr(src_mod, "wl_transposed"):
-            src_n = src_mod.get_neurons(attr_name="out_neurons")
-        else:
-            src_n = src_mod.get_neurons(attr_name="in_neurons")
+            # Set SAME Flag for modules if applicable
+            if dep_type == DepType.SAME:
+                dst_mod.wl_same_flag = True
+            
+            # Set src_bypass flag if destination has bypass attribute
+            if hasattr(dst_mod, 'bypass'):
+                src_mod.src_bypass = 1
+                logger.debug(f"  Setting src_bypass=1 for source module: {src_name}")
 
-        if (not recursive_dep) and (not hasattr(dst_mod, "wl_transposed")):
-            dst_n = dst_mod.get_neurons(attr_name="in_neurons")
-        else:
-            dst_n = dst_mod.get_neurons(attr_name="out_neurons")
+            logger.debug(f"  ✓ Adding dependency: {src_name} -> {dst_name} [{dep_type.name}]")
+            
+            dependencies.append((src_mod, dst_mod, dep_type))
+            seen_edges.add(edge_key)
+    
+    logger.info(f"Found {len(dependencies)} total dependencies")
 
-        source_out_channels = range(src_n)
-        dst_in_channels = range(dst_n)
+    # Clean dependencies (remove duplicates and self-loops)
+    dependencies = _clean_dependencies(dependencies)
+    
+    return dependencies
 
-        # Multi-input bypass (e.g. cat) handling if you still use dst_mod.bypass
-        if hasattr(dst_mod, "bypass"):
+
+def generate_index_maps(
+    dependencies: List[Tuple[nn.Module, nn.Module, DepType]]
+) -> Dict[str, Dict[str, th.Tensor]]:
+    """
+    Generate index mapping tensors for all layer dependencies.
+
+    Args:
+        dependencies: List of tuples (layer1_module, layer2_module, dependency_type)
+    
+    Returns:
+        Updated dependencies with index mapping tensors for neuron correspondences.
+    """
+
+    for edge in dependencies: 
+        # Get src and dst modules and type
+        src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]
+        recursive_dep = edge_label == DepType.REC  # A recursive dependency ?
+
+        # 1.1. Determine the number of neurons in each direction
+        # # Src - First will always be != None and int
+        src_nb_neurons = src_mod.get_neurons(attr_name='out_neurons') if \
+            not hasattr(src_mod, 'wl_transposed') \
+            else src_mod.get_neurons(attr_name='in_neurons')
+        source_out_channels = range(src_nb_neurons)
+        # # Dst
+        dst_nb_neurons = dst_mod.get_neurons(attr_name='in_neurons') if not recursive_dep \
+            and not hasattr(dst_mod, 'wl_transposed') \
+            else dst_mod.get_neurons(attr_name='out_neurons')
+        if dst_nb_neurons is None:
+            dst_nb_neurons = src_nb_neurons
+            dst_mod.set_neurons(
+                'in_neurons' if not recursive_dep and not hasattr(dst_mod, 'wl_transposed') else 'out_neurons',
+                dst_nb_neurons
+            )  # So next will have neurons
+            dst_mod_out_neurons = dst_mod.get_neurons(
+                'in_neurons' if not (not recursive_dep and not hasattr(dst_mod, 'wl_transposed')) else 'out_neurons'
+            )
+            if dst_mod_out_neurons is None:
+                dst_mod.set_neurons(
+                    'in_neurons' if not (not recursive_dep and not hasattr(dst_mod, 'wl_transposed')) else 'out_neurons',
+                    dst_nb_neurons
+                )
+        dst_in_channels = range(dst_nb_neurons)
+
+        # # For multi-input / one output layers (e.g., Cat)
+        if hasattr(dst_mod, 'bypass'):
             dst_in_channels = range(
                 dst_mod.bypass,
-                dst_mod.bypass + len(source_out_channels)
+                len(source_out_channels) + dst_mod.bypass
             )
             dst_mod.bypass += len(source_out_channels)
 
-        # 2.2 Generate mappings, taking groups into account if present
-        groups = None
-        if hasattr(dst_mod, "groups"):
-            groups = dst_mod.groups
-        elif hasattr(src_mod, "groups"):
-            groups = src_mod.groups
+        # 1.2. Generate mappings tnsr for src and dst layers
+        groups = dst_mod.groups if hasattr(dst_mod, 'groups') else (
+            src_mod.groups
+        ) if hasattr(src_mod, 'groups') else None
+        src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = \
+            _generate_mappings(
+                source_out_channels,
+                dst_in_channels,
+                dst_groups=(len(dst_in_channels) // groups) if groups is
+                not None else None,
+                src_groups=len(source_out_channels) // groups if groups is
+                not None else None
+            )
 
-        if groups is not None:
-            dst_groups = len(dst_in_channels) // groups
-            src_groups = len(source_out_channels) // groups
-        else:
-            dst_groups = None
-            src_groups = None
-
-        src_to_dst_mapping_tnsr, dst_to_src_mapping_tnsr = generate_mappings(
-            source_out_channels,
-            dst_in_channels,
-            dst_groups=dst_groups,
-            src_groups=src_groups,
-        )
-
-        # 2.3 Register mappings on dst_mod and src_mod
+        # 1.3 Update neurons mapping tensors
+        # # Update edge dst node with neurons mapping tensor
         if not recursive_dep:
-            # dst: child, src: parent
+            # should be_ reverse mapping
             dst_mod.dst_to_src_mapping_tnsrs.update(
-                {src_mod.get_name_wi_id(): dst_to_src_mapping_tnsr}
+                {
+                    src_mod.get_name_wi_id():
+                        dst_to_src_mapping_tnsr
+                }
             )
-            if not hasattr(dst_mod, "bypass"):
-                dst_mod.related_src_to_dst_mapping_tnsrs.update(
-                    {dst_mod.get_name_wi_id(): deepcopy(src_to_dst_mapping_tnsr)}
-                )
+            # # Update edge child and parent node with neurons mapping tensor
+            dst_mod.related_src_to_dst_mapping_tnsrs.update(
+                {
+                    dst_mod.get_name_wi_id():
+                        deepcopy(src_to_dst_mapping_tnsr)
+                } if not hasattr(dst_mod, 'bypass') else {}
+            )
             dst_mod.dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.dst_to_src_mapping_tnsrs)
-            dst_mod.related_src_to_dst_mapping_tnsrs = normalize_dicts(
-                dst_mod.related_src_to_dst_mapping_tnsrs
-            )
+            dst_mod.related_src_to_dst_mapping_tnsrs = normalize_dicts(dst_mod.related_src_to_dst_mapping_tnsrs)
+
         else:
-            # recursive: roles are swapped logically
+            # Recursive dependency: src & dst are reversed
+            # here for mapping logic
             dst_mod.src_to_dst_mapping_tnsrs.update(
-                {src_mod.get_name_wi_id(): dst_to_src_mapping_tnsr}
+                {
+                    src_mod.get_name_wi_id():
+                        dst_to_src_mapping_tnsr
+                }
+
             )
-            if not hasattr(dst_mod, "bypass"):
-                dst_mod.related_dst_to_src_mapping_tnsrs.update(
-                    {dst_mod.get_name_wi_id(): deepcopy(src_to_dst_mapping_tnsr)}
-                )
+            # # Update edge child and parent node with neurons mapping tensor
+            dst_mod.related_dst_to_src_mapping_tnsrs.update(
+                {
+                    dst_mod.get_name_wi_id():
+                        deepcopy(src_to_dst_mapping_tnsr)
+                } if not hasattr(dst_mod, 'bypass') else {}
+            )  # Child equivalent here
             dst_mod.src_to_dst_mapping_tnsrs = normalize_dicts(dst_mod.src_to_dst_mapping_tnsrs)
-            dst_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(
-                dst_mod.related_dst_to_src_mapping_tnsrs
-            )
+            dst_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.related_dst_to_src_mapping_tnsrs)
 
-        # src_mod side (always)
+        # # Update edge src node with neurons mapping tensor
         src_mod.src_to_dst_mapping_tnsrs.update(
-            {dst_mod.get_name_wi_id(): src_to_dst_mapping_tnsr}
+            {
+                dst_mod.get_name_wi_id():
+                    src_to_dst_mapping_tnsr
+            }
         )
-        if not hasattr(src_mod, "bypass"):
-            src_mod.related_dst_to_src_mapping_tnsrs.update(
-                {src_mod.get_name_wi_id(): deepcopy(dst_to_src_mapping_tnsr)}
-            )
+        src_mod.related_dst_to_src_mapping_tnsrs.update(
+            {
+                src_mod.get_name_wi_id():
+                    deepcopy(dst_to_src_mapping_tnsr)
+            } if not hasattr(src_mod, 'bypass') else {}
+        )
         src_mod.src_to_dst_mapping_tnsrs = normalize_dicts(src_mod.src_to_dst_mapping_tnsrs)
-        src_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(
-            src_mod.related_dst_to_src_mapping_tnsrs
-        )
+        src_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(src_mod.related_dst_to_src_mapping_tnsrs)
 
-    return bridged_deps
+    return dependencies
+    
+if __name__ == '__main__':
+    """
+    Test script for generate_layer_dependencies_from_onnx function.
+
+    This demonstrates how to extract layer dependencies from an ONNX model,
+    including support for REC (residual/recursive) dependencies.
+    """
+    # Enable debug logging
+    logging.basicConfig(
+        level=logging.DEBUG,  # Set to DEBUG to see detailed merge operation detection
+        format='%(levelname)s - %(message)s'
+    )
+    logger.setLevel(logging.DEBUG)
+
+    import torch.nn as nn
+    from weightslab.utils.computational_graph import generate_layer_dependencies_from_onnx
+    from weightslab.utils.modules_dependencies import DepType
+
+
+    # Test 1: Simple CNN without residual connections
+    class SimpleCNN(nn.Module):
+        def __init__(self):
+            super(SimpleCNN, self).__init__()
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
+            self.bn1 = nn.BatchNorm2d(64)
+            self.relu1 = nn.ReLU()
+            self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+            self.bn2 = nn.BatchNorm2d(128)
+            self.relu2 = nn.ReLU()
+            self.pool = nn.MaxPool2d(2, 2)
+            self.fc1 = nn.Linear(128 * 16 * 16, 256)
+            self.relu3 = nn.ReLU()
+            self.fc2 = nn.Linear(256, 10)
+        
+        def forward(self, x):
+            x = self.conv1(x)
+            x = self.bn1(x)
+            x = self.relu1(x)
+            x = self.conv2(x)
+            x = self.bn2(x)
+            x = self.relu2(x)
+            x = self.pool(x)
+            x = x.view(x.size(0), -1)
+            x = self.fc1(x)
+            x = self.relu3(x)
+            x = self.fc2(x)
+            return x
+
+
+    # Test 2: Model with residual block (REC dependencies)
+    class ResidualBlock(nn.Module):
+        """Simple residual block with skip connection using Add operation"""
+        def __init__(self, channels):
+            super(ResidualBlock, self).__init__()
+            self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+            self.bn1 = nn.BatchNorm2d(channels)
+            self.relu = nn.ReLU()
+            self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+            self.bn2 = nn.BatchNorm2d(channels)
+        
+        def forward(self, x):
+            identity = x
+            
+            out = self.conv1(x)
+            out = self.bn1(out)
+            out = self.relu(out)
+            out = self.conv2(out)
+            out = self.bn2(out)
+            
+            # Residual connection using Add operation (creates REC dependency)
+            out = out + identity
+            out = th.relu(out)
+            
+            return out
+
+
+    class ModelWithResidual(nn.Module):
+        def __init__(self):
+            super(ModelWithResidual, self).__init__()
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
+            self.bn1 = nn.BatchNorm2d(64)
+            self.relu1 = nn.ReLU()
+            self.residual = ResidualBlock(64)
+            self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        
+        def forward(self, x):
+            x = self.conv1(x)
+            x = self.bn1(x)
+            x = self.relu1(x)
+            x = self.residual(x)
+            x = self.conv2(x)
+            return x
+
+
+    # Test both models
+    test_residual = True  # Set to False to test only SimpleCNN
+    
+    print("="*80)
+    print("TESTING LAYER DEPENDENCY EXTRACTION")
+    print("="*80)
+    
+    # Test 1: Simple CNN
+    print("\n" + "="*80)
+    print("TEST 1: Simple CNN (no residual connections)")
+    print("="*80)
+    
+    model1 = SimpleCNN()
+    model1.eval()
+    
+    dummy_input1 = th.randn(1, 3, 32, 32)
+    onnx_path1 = "simple_cnn.onnx"
+    
+    print("\nExporting SimpleCNN to ONNX...")
+    th.onnx.export(
+        model1,
+        dummy_input1,
+        onnx_path1,
+        export_params=True,
+        opset_version=11,
+        do_constant_folding=False,
+        input_names=['input'],
+        output_names=['output']
+    )
+    print(f"Model exported to {onnx_path1}")
+    
+    dependencies1 = generate_layer_dependencies_from_onnx(model1, dummy_input1)
+    
+    print(f"\nFound {len(dependencies1)} dependencies:")
+    for src_module, dst_module, dep_type in dependencies1:
+        # Get module names for display
+        src_name = next((name for name, mod in model1.named_modules() if mod is src_module), str(src_module))
+        dst_name = next((name for name, mod in model1.named_modules() if mod is dst_module), str(dst_module))
+        dep_str = f"{dep_type.name:8s}"
+        print(f"  [{src_name:20s}] --{dep_str}--> [{dst_name:20s}]")
+    
+    
+    # Test 2: Model with residual connections
+    if test_residual:
+        print("\n\n" + "="*80)
+        print("TEST 2: Model with Residual Block (REC dependencies)")
+        print("="*80)
+        
+        model2 = ModelWithResidual()
+        model2.eval()
+        
+        dummy_input2 = th.randn(1, 3, 32, 32)
+        onnx_path2 = "model_with_residual.onnx"
+        
+        print("\nExporting ModelWithResidual to ONNX...")
+        th.onnx.export(
+            model2,
+            dummy_input2,
+            onnx_path2,
+            export_params=True,
+            opset_version=11,
+            do_constant_folding=False,
+            input_names=['input'],
+            output_names=['output']
+        )
+        print(f"Model exported to {onnx_path2}")
+        
+        dependencies2 = generate_layer_dependencies_from_onnx(model2, dummy_input2)
+        
+        # Separate by type
+        same_deps = [(s, d) for s, d, t in dependencies2 if t == DepType.SAME]
+        incoming_deps = [(s, d) for s, d, t in dependencies2 if t == DepType.INCOMING]
+        rec_deps = [(s, d) for s, d, t in dependencies2 if t == DepType.REC]
+        
+        print(f"\nFound {len(dependencies2)} total dependencies:")
+        
+        print(f"\n  SAME Dependencies ({len(same_deps)}):")
+        for src, dst in same_deps:
+            src_name = next((name for name, mod in model2.named_modules() if mod is src), str(src))
+            dst_name = next((name for name, mod in model2.named_modules() if mod is dst), str(dst))
+            print(f"    [{src_name:30s}] --SAME-----> [{dst_name:30s}]")
+        
+        print(f"\n  INCOMING Dependencies ({len(incoming_deps)}):")
+        for src, dst in incoming_deps:
+            src_name = next((name for name, mod in model2.named_modules() if mod is src), str(src))
+            dst_name = next((name for name, mod in model2.named_modules() if mod is dst), str(dst))
+            print(f"    [{src_name:30s}] --INCOMING-> [{dst_name:30s}]")
+        
+        print(f"\n  REC Dependencies ({len(rec_deps)}):")
+        for src, dst in rec_deps:
+            src_name = next((name for name, mod in model2.named_modules() if mod is src), str(src))
+            dst_name = next((name for name, mod in model2.named_modules() if mod is dst), str(dst))
+            print(f"    [{src_name:30s}] <--REC----> [{dst_name:30s}]")
+    print("""
+SAME Dependencies:
+  - Changing output neurons of source layer affects BOTH input AND output of destination
+  - Examples: Conv2d -> BatchNorm2d, BatchNorm2d -> ReLU, Linear -> BatchNorm1d
+  - Use case: Passthrough/normalization layers that preserve neuron count
+
+INCOMING Dependencies:
+  - Changing output neurons of source layer affects ONLY input of destination
+  - Examples: ReLU -> Conv2d, Conv2d -> Conv2d, Linear -> Linear
+  - Use case: Transforming layers that can independently change output size
+
+REC (Recursive/Residual) Dependencies:
+  - Bidirectional constraint between layers in skip/residual connections
+  - Examples: Residual blocks (Add operation), Skip connections (Concat)
+  - Use case: Layers that must maintain matching neuron counts for merging
+  - Detected from: Add, Sub, Sum, Concat, Mul, Div operations in ONNX graph
+
+Example: ResNet-style block
+  Conv1 -> BN1 -> ReLU -> Conv2 -> BN2 -> [Add with identity] -> ReLU
+                                      ↑
+                                  identity (skip connection)
+  
+  Result: BN2 <--REC--> Conv1  (both must have same channels for Add)
+    """)
+
+
