@@ -490,6 +490,8 @@ class LayerWiseOperations(NeuronWiseOperations):
             n_neurons = self.get_neurons(
                 attr_name="in_neurons" if is_incoming else "out_neurons"
             )
+            if n_neurons is None:
+                return None, None
             mapped_indexs = {i: [i] for i in range(n_neurons)}
 
         # --- Map logical indices to original indices (reversed order) ---
@@ -695,6 +697,8 @@ class LayerWiseOperations(NeuronWiseOperations):
                     is_incoming=is_incoming,
                     **kwargs
                 )
+            if neuron_indices is None:
+                return
         else:
             original_neuron_indices = neuron_indices
 
@@ -813,15 +817,15 @@ class LayerWiseOperations(NeuronWiseOperations):
             parent_name=kwargs.get('current_parent_name', None),
             child_name=kwargs.get('current_child_name', None)
         ) if len(neuron_indices) == 1 else len(neuron_indices)
-        if is_incoming == transposed:
-            tensors = (nb_neurons, in_out_neurons // group_size)
-        else:
-            tensors = (in_out_neurons, nb_neurons // group_size)
 
         # TODO (GP): fix hardcoding layers op. 1d vs 2d
         # TODO (GP): maybe with a one way upgrade from learnable tensors.
         # Weights
         if hasattr(self, "weight") and self.weight is not None:
+            if is_incoming == transposed:
+                tensors = (nb_neurons, in_out_neurons // group_size)
+            else:
+                tensors = (in_out_neurons, nb_neurons // group_size)
             # # Handle n-dims kernels like with conv{n}d
             if hasattr(self, "kernel_size") and self.kernel_size:
                 added_weights = th.zeros(
@@ -951,13 +955,14 @@ class LayerWiseOperations(NeuronWiseOperations):
         # Outcoming neurons
         if not is_incoming:
             # Update neurons count
-            self.set_neurons(
-                attr_name='out_neurons',
-                new_value=self.set_neurons(
-                    self.super_out_name,
-                    self.get_neurons(self.super_out_name) + nb_neurons
+            if self.get_neurons(self.super_out_name) is not None:
+                self.set_neurons(
+                    attr_name='out_neurons',
+                    new_value=self.set_neurons(
+                        self.super_out_name,
+                        self.get_neurons(self.super_out_name) + nb_neurons
+                    )
                 )
-            )
 
             # Update the src2dst mapping dictionary
             # # Get dependencies
@@ -1067,18 +1072,20 @@ class LayerWiseOperations(NeuronWiseOperations):
             if dependency != DepType.SAME:
                 # We don't need to update here if already done before
                 # for same flag layers (e.g., batchnorm).
-                self.set_neurons(
-                    attr_name='in_neurons',
-                    new_value=self.set_neurons(
-                        self.super_in_name,
-                        self.get_neurons(self.super_in_name) + nb_neurons
-                    )
-                )  # Update neurons count
+                if self.get_neurons(self.super_in_name) is not None:
+                    self.set_neurons(
+                        attr_name='in_neurons',
+                        new_value=self.set_neurons(
+                            self.super_in_name,
+                            self.get_neurons(self.super_in_name) + nb_neurons
+                        )
+                    )  # Update neurons count
             elif dependency == DepType.SAME:
-                self.set_neurons(
-                    attr_name='in_neurons',
-                    new_value=self.get_neurons(self.super_out_name)
-                )  # Update neurons count
+                if self.get_neurons(self.super_out_name) is not None:
+                    self.set_neurons(
+                        attr_name='in_neurons',
+                        new_value=self.get_neurons(self.super_out_name)
+                    )  # Update neurons count
 
             # By default get deps name from current relation
             deps_names = list(self.dst_to_src_mapping_tnsrs.keys())

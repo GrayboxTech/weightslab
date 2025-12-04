@@ -142,7 +142,7 @@ def create_inference_test(ModelClass):
         model = ModelInterface(
             model,
             dummy_input=dummy_input,
-            print_graph=False, 
+            print_graph=False,  
             use_onnx=True if 'VGG' not in ModelClass.__name__ else False
         )
         model.to(DEVICE)
