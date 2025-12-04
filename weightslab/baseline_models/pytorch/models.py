@@ -5,16 +5,14 @@
     batch normalization, and max pooling that are useful to stress test
     our neuron operations.
 """
-import os
 import warnings; warnings.filterwarnings("ignore")
 import torch
-import inspect
 import logging
-import importlib
 import torch.nn as nn
 import torchvision.models as models
+import torchvision.transforms as T
 
-from typing import Callable, Type
+from typing import Callable, Tuple, List
 from torch.nn import functional as F
 
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
@@ -1645,221 +1643,481 @@ class UNet3D(nn.Module):
         return logits
 
 
+class TinyYOLO(nn.Module):
+    """
+    Tiny YOLO-like single-class detector (all-in-one class).
+
+    Outputs tensor shape (N, S, S, B*5 + C) where:
+      - for each cell and each box: tx, ty, tw, th, conf
+      - plus class logits/prob (here C=1 by default)
+
+    decode/predict helpers are provided as methods of this class.
+    """
+
+    def __init__(self, S: int = 7, B: int = 2, C: int = 1, image_size: int = 224):
+        """
+        S: grid size (SxS)
+        B: boxes per cell
+        C: number of classes (1 for single class)
+        image_size: input image size (square) used for inference preprocessing / visualization
+        """
+        super().__init__()
+        self.S = S
+        self.B = B
+        self.C = C
+        self.image_size = image_size
+        self.input_shape = (1, 3, image_size, image_size)
+
+        # Tiny backbone: conv stack -> feature map of size (N, feat_ch, S, S)
+        # We make sure adaptive pooling yields SxS.
+        self.backbone = nn.Sequential(
+            self._conv_bn_act(3, 16, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(16, 32, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(32, 64, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(64, 128, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(128, 256, 3, 1, 1),
+            nn.AdaptiveAvgPool2d((S, S)),
+        )
+
+        # head: project features -> (B*5 + C) channels
+        out_ch = B * 5 + C
+        self.head = nn.Sequential(
+            self._conv_bn_act(256, 512, 3, 1, 1),
+            nn.Conv2d(512, out_ch, kernel_size=1)
+        )
+
+        # ImageNet normalization (used on input images)
+        self.preprocess = T.Compose([
+            T.Resize((image_size, image_size)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet mean/std
+                        std=[0.229, 0.224, 0.225]),
+        ])
+
+    @staticmethod
+    def _conv_bn_act(in_ch, out_ch, k=3, s=1, p=1):
+        return nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.LeakyReLU(0.1, inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (N, 3, H, W)
+        returns: (N, S, S, B*5 + C)
+        """
+        feat = self.backbone(x)
+        out = self.head(feat)
+        out = out.permute(0, 2, 3, 1).contiguous()
+        return out
+
+    def decode_preds(self, pred: torch.Tensor, conf_thresh: float = 0.25) -> List[List[Tuple[float, float, float, float, float, int]]]:
+        """
+        Decode raw predictions into boxes per image.
+
+        pred: (N, S, S, B*5 + C)
+        returns: list length N, each element is a list of boxes (x1,y1,x2,y2,score,class)
+                 coordinates normalized in [0,1] relative to image width & height.
+        """
+        device = pred.device
+        N, S, _, _ = pred.shape
+        boxes_per_image = []
+
+        # prepare grid coords
+        grid_y, grid_x = torch.meshgrid(torch.arange(S, device=device), torch.arange(S, device=device))
+        grid_x = grid_x.float()
+        grid_y = grid_y.float()
+
+        for i in range(N):
+            img_pred = pred[i]  # S x S x (B*5 + C)
+            img_boxes = []
+
+            # class score per cell (for single class we use sigmoid)
+            if self.C == 1:
+                cls_score = torch.sigmoid(img_pred[..., -1])  # (S, S)
+            else:
+                cls_logits = img_pred[..., self.B * 5:]
+                cls_score_all = F.softmax(cls_logits, dim=-1)
+                # take score for class 0 ("cat") by default
+                cls_score = cls_score_all[..., 0]
+
+            # iterate boxes
+            for b in range(self.B):
+                offset = b * 5
+                tx = torch.sigmoid(img_pred[..., offset + 0])
+                ty = torch.sigmoid(img_pred[..., offset + 1])
+                tw = img_pred[..., offset + 2].exp()
+                th = img_pred[..., offset + 3].exp()
+                conf = torch.sigmoid(img_pred[..., offset + 4])
+
+                # center coordinates normalized
+                cx = (grid_x + tx) / S
+                cy = (grid_y + ty) / S
+                # width/height normalized (simple scheme, no anchors)
+                w = tw / S
+                h = th / S
+
+                final_conf = conf * cls_score  # class-aware confidence
+
+                mask = final_conf > conf_thresh
+                if mask.any():
+                    cx_m = cx[mask]
+                    cy_m = cy[mask]
+                    w_m = w[mask]
+                    h_m = h[mask]
+                    conf_m = final_conf[mask]
+
+                    x1 = (cx_m - 0.5 * w_m).clamp(0.0, 1.0)
+                    y1 = (cy_m - 0.5 * h_m).clamp(0.0, 1.0)
+                    x2 = (cx_m + 0.5 * w_m).clamp(0.0, 1.0)
+                    y2 = (cy_m + 0.5 * h_m).clamp(0.0, 1.0)
+
+                    for xi, yi, xj, yj, cf in zip(x1.tolist(), y1.tolist(), x2.tolist(), y2.tolist(), conf_m.tolist()):
+                        img_boxes.append((xi, yi, xj, yj, cf, 0))
+
+            boxes_per_image.append(img_boxes)
+        return boxes_per_image
+
+    @staticmethod
+    def nms(boxes: List[Tuple[float, float, float, float, float, int]], iou_thresh: float = 0.5) -> List[Tuple[float, float, float, float, float, int]]:
+        """
+        Simple class-agnostic NMS on boxes list of (x1,y1,x2,y2,score,cls).
+        Returns list of kept boxes.
+        """
+        if not boxes:
+            return []
+        # convert to tensors for convenience
+        boxes_arr = torch.tensor([b[:4] for b in boxes], dtype=torch.float32)
+        scores = torch.tensor([b[4] for b in boxes], dtype=torch.float32)
+        order = scores.argsort(descending=True)
+        keep = []
+        suppressed = torch.zeros(len(boxes), dtype=torch.bool)
+        for idx in order.tolist():
+            if suppressed[idx]:
+                continue
+            keep.append(boxes[idx])
+            # suppress IoU > thresh
+            box_i = boxes_arr[idx]
+            xi1, yi1, xi2, yi2 = box_i
+            area_i = (xi2 - xi1).clamp(min=0) * (yi2 - yi1).clamp(min=0)
+            for j in order.tolist():
+                if j == idx or suppressed[j]:
+                    continue
+                box_j = boxes_arr[j]
+                xj1, yj1, xj2, yj2 = box_j
+                inter_x1 = max(xi1.item(), xj1.item())
+                inter_y1 = max(yi1.item(), yj1.item())
+                inter_x2 = min(xi2.item(), xj2.item())
+                inter_y2 = min(yi2.item(), yj2.item())
+                inter_w = max(0.0, inter_x2 - inter_x1)
+                inter_h = max(0.0, inter_y2 - inter_y1)
+                inter = inter_w * inter_h
+                area_j = (xj2 - xj1).clamp(min=0) * (yj2 - yj1).clamp(min=0)
+                union = area_i + area_j - inter
+                if union <= 0:
+                    continue
+                iou = inter / union
+                if iou > iou_thresh:
+                    suppressed[j] = True
+        return keep
+
+
 # Get the list of all model classes to parametrize the test
 ALL_MODEL_CLASSES = [
-    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
+    TinyYOLO, FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
 ]
 # TODO (GP):
 #   - Currently, TinyUNet_Straightforward operations (prune at least) is not working because the index mapping is not working as upsample wi. factor 2 or more is not considered in the mapping and in the graph generally.
 # Harcoded solution will be to check, and if one layer btw BN3 and CN8 is a upsampling, with multiply the mapping by the factor i.e., factor of 2, CN8 dst_to_src{'BN3': {0: [0,]*factor, 1: [1,]*factor]}.
  
+ 
 if __name__ == "__main__":
-    from weightslab.backend.model_interface import ModelInterface
-    from weightslab.utils.logs import print, setup_logging
+    # from weightslab.backend.model_interface import ModelInterface
+    # from weightslab.utils.logs import print, setup_logging
 
-    # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
-    class MobileNet_v3(nn.Module):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
+    # # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
+    # class MobileNet_v3(nn.Module):
+    #     def __init__(self, *args, **kwargs):
+    #         super().__init__(*args, **kwargs)
 
-            # Set input shape
-            self.input_shape = (1, 3, 224, 224)
+    #         # Set input shape
+    #         self.input_shape = (1, 3, 224, 224)
 
-            # Get the pre-trained VGG-13
-            self.model = models.mobilenet_v3_large(
-                weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
-            )
+    #         # Get the pre-trained VGG-13
+    #         self.model = models.mobilenet_v3_large(
+    #             weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
+    #         )
 
-        def forward(self, input):
-            return self.model(input)
-    class MobileNetV3Tiny(nn.Module):
-        """
-        Implémentation 'Toy' du MobileNetV3 encapsulée en une seule classe.
-        Contient les blocs HSwish, SELayer et InvertedResidual comme classes internes.
-        """
+    #     def forward(self, input):
+    #         return self.model(input)
+    # class MobileNetV3Tiny(nn.Module):
+    #     """
+    #     Implémentation 'Toy' du MobileNetV3 encapsulée en une seule classe.
+    #     Contient les blocs HSwish, SELayer et InvertedResidual comme classes internes.
+    #     """
         
-        # --- 1. Activation Hard-Swish (h-swish) ---
-        class HSwish(nn.Module):
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                # Hard-Swish: x * ReLU6(x + 3) / 6
-                return x * nn.functional.relu6(x + 3., inplace=True) / 6.
+    #     # --- 1. Activation Hard-Swish (h-swish) ---
+    #     class HSwish(nn.Module):
+    #         def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #             # Hard-Swish: x * ReLU6(x + 3) / 6
+    #             return x * nn.functional.relu6(x + 3., inplace=True) / 6.
 
-        # --- 2. Squeeze-and-Excitation Layer (SE) ---
-        class SELayer(nn.Module):
-            def __init__(self, channel: int, reduction: int = 4):
-                super().__init__()
-                # Calcul du nombre de canaux "squeeze" (doit être un multiple de 8)
-                squeeze_channels = max(1, channel // reduction)
-                self.avg_pool = nn.AdaptiveAvgPool2d(1)
-                self.fc = nn.Sequential(
-                    nn.Conv2d(channel, squeeze_channels, 1, 1, 0),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(squeeze_channels, channel, 1, 1, 0),
-                    # Utilise Hard-Sigmoid: ReLU6(x + 3) / 6
-                    nn.Hardsigmoid(inplace=True)
-                )
+    #     # --- 2. Squeeze-and-Excitation Layer (SE) ---
+    #     class SELayer(nn.Module):
+    #         def __init__(self, channel: int, reduction: int = 4):
+    #             super().__init__()
+    #             # Calcul du nombre de canaux "squeeze" (doit être un multiple de 8)
+    #             squeeze_channels = max(1, channel // reduction)
+    #             self.avg_pool = nn.AdaptiveAvgPool2d(1)
+    #             self.fc = nn.Sequential(
+    #                 nn.Conv2d(channel, squeeze_channels, 1, 1, 0),
+    #                 nn.ReLU(inplace=True),
+    #                 nn.Conv2d(squeeze_channels, channel, 1, 1, 0),
+    #                 # Utilise Hard-Sigmoid: ReLU6(x + 3) / 6
+    #                 nn.Hardsigmoid(inplace=True)
+    #             )
 
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                out = self.avg_pool(x)
-                out = self.fc(out)
-                return x * out
+    #         def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #             out = self.avg_pool(x)
+    #             out = self.fc(out)
+    #             return x * out
 
-        # --- 3. Inverted Residual Block ---
-        class InvertedResidual(nn.Module):
-            def __init__(self, inp: int, hidden: int, oup: int, kernel_size: int,
-                        stride: int, use_se: bool, activation_fn: Callable[[], nn.Module]):
-                super().__init__()
-                assert stride in [1, 2]
-                self.use_res_connect = stride == 1 and inp == oup
+    #     # --- 3. Inverted Residual Block ---
+    #     class InvertedResidual(nn.Module):
+    #         def __init__(self, inp: int, hidden: int, oup: int, kernel_size: int,
+    #                     stride: int, use_se: bool, activation_fn: Callable[[], nn.Module]):
+    #             super().__init__()
+    #             assert stride in [1, 2]
+    #             self.use_res_connect = stride == 1 and inp == oup
 
-                NormLayer = nn.BatchNorm2d 
+    #             NormLayer = nn.BatchNorm2d 
 
-                layers = []
+    #             layers = []
 
-                # 1x1 Convolution pour l'expansion
-                if inp != hidden:
-                    layers.extend([
-                        nn.Conv2d(inp, hidden, 1, 1, 0, bias=False),
-                        NormLayer(hidden),
-                        activation_fn()
-                    ])
+    #             # 1x1 Convolution pour l'expansion
+    #             if inp != hidden:
+    #                 layers.extend([
+    #                     nn.Conv2d(inp, hidden, 1, 1, 0, bias=False),
+    #                     NormLayer(hidden),
+    #                     activation_fn()
+    #                 ])
                     
-                layers.extend([
-                    nn.Conv2d(hidden, hidden, kernel_size, stride, (kernel_size - 1) // 2,
-                            groups=hidden, bias=False),
-                    NormLayer(hidden),
-                    activation_fn()
-                ])
+    #             layers.extend([
+    #                 nn.Conv2d(hidden, hidden, kernel_size, stride, (kernel_size - 1) // 2,
+    #                         groups=hidden, bias=False),
+    #                 NormLayer(hidden),
+    #                 activation_fn()
+    #             ])
 
-                # Squeeze-and-Excitation (SE)
-                if use_se:
-                    # La SELayer doit être instanciée de la classe interne de MobileNetV3Tiny
-                    # On triche un peu ici car self.SELayer n'est pas directement accessible, 
-                    # mais dans ce contexte, si on le sort, ça marche mieux pour l'encapsulation.
-                    # Pour l'exemple, nous allons assumer que SELayer est accessible dans l'espace de nom.
-                    # NOTE: Pour la production, il est souvent préférable de définir les blocs séparément.
-                    # Pour respecter la demande, nous devons appeler la classe SE par son nom.
-                    layers.append(MobileNetV3Tiny.SELayer(hidden))
+    #             # Squeeze-and-Excitation (SE)
+    #             if use_se:
+    #                 # La SELayer doit être instanciée de la classe interne de MobileNetV3Tiny
+    #                 # On triche un peu ici car self.SELayer n'est pas directement accessible, 
+    #                 # mais dans ce contexte, si on le sort, ça marche mieux pour l'encapsulation.
+    #                 # Pour l'exemple, nous allons assumer que SELayer est accessible dans l'espace de nom.
+    #                 # NOTE: Pour la production, il est souvent préférable de définir les blocs séparément.
+    #                 # Pour respecter la demande, nous devons appeler la classe SE par son nom.
+    #                 layers.append(MobileNetV3Tiny.SELayer(hidden))
 
-                # 1x1 Convolution pour la projection (sans activation)
-                layers.extend([
-                    nn.Conv2d(hidden, oup, 1, 1, 0, bias=False),
-                    NormLayer(oup)
-                ])
+    #             # 1x1 Convolution pour la projection (sans activation)
+    #             layers.extend([
+    #                 nn.Conv2d(hidden, oup, 1, 1, 0, bias=False),
+    #                 NormLayer(oup)
+    #             ])
 
-                self.conv = nn.Sequential(*layers)
+    #             self.conv = nn.Sequential(*layers)
 
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                if self.use_res_connect:
-                    return x + self.conv(x)
-                else:
-                    return self.conv(x)
+    #         def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #             if self.use_res_connect:
+    #                 return x + self.conv(x)
+    #             else:
+    #                 return self.conv(x)
 
-        # --- Constructeur de MobileNetV3Tiny ---
-        def __init__(self, num_classes: int = 10):
-            super().__init__()
-            self.input_shape = (1, 3, 64, 64)
-            # Références aux classes internes pour la configuration
-            self.HS = MobileNetV3Tiny.HSwish
-            self.IRB = MobileNetV3Tiny.InvertedResidual
-            self.ReLU = nn.ReLU6
+    #     # --- Constructeur de MobileNetV3Tiny ---
+    #     def __init__(self, num_classes: int = 10):
+    #         super().__init__()
+    #         self.input_shape = (1, 3, 64, 64)
+    #         # Références aux classes internes pour la configuration
+    #         self.HS = MobileNetV3Tiny.HSwish
+    #         self.IRB = MobileNetV3Tiny.InvertedResidual
+    #         self.ReLU = nn.ReLU6
             
-            # Configuration simplifiée (inspirée de MobileNetV3-Small)
-            # inp, hidden, oup, k, s, se, nl (activation)
-            inverted_residual_setting = [
-                [16, 16, 16, 3, 2, True, self.ReLU],  
-                [16, 72, 24, 3, 2, False, self.ReLU], 
-                [24, 88, 24, 3, 1, False, self.ReLU],
-                [24, 96, 40, 5, 2, True, self.HS],   
-                [40, 240, 40, 5, 1, True, self.HS],
-                [40, 240, 40, 5, 1, True, self.HS],
-            ]
+    #         # Configuration simplifiée (inspirée de MobileNetV3-Small)
+    #         # inp, hidden, oup, k, s, se, nl (activation)
+    #         inverted_residual_setting = [
+    #             [16, 16, 16, 3, 2, True, self.ReLU],  
+    #             [16, 72, 24, 3, 2, False, self.ReLU], 
+    #             [24, 88, 24, 3, 1, False, self.ReLU],
+    #             [24, 96, 40, 5, 2, True, self.HS],   
+    #             [40, 240, 40, 5, 1, True, self.HS],
+    #             [40, 240, 40, 5, 1, True, self.HS],
+    #         ]
             
-            # Couche initiale
-            self.features = [
-                nn.Sequential(
-                    nn.Conv2d(3, 16, 3, 2, 1, bias=False),
-                    nn.BatchNorm2d(16),
-                    self.HS()
-                )
-            ]
+    #         # Couche initiale
+    #         self.features = [
+    #             nn.Sequential(
+    #                 nn.Conv2d(3, 16, 3, 2, 1, bias=False),
+    #                 nn.BatchNorm2d(16),
+    #                 self.HS()
+    #             )
+    #         ]
             
-            # Empilement des blocs InvertedResidual
-            input_channel = 16
-            for t, h, c, k, s, se, nl in inverted_residual_setting:
-                output_channel = c
-                self.features.append(
-                    self.IRB(input_channel, h, output_channel, k, s, se, nl)
-                )
-                input_channel = output_channel
+    #         # Empilement des blocs InvertedResidual
+    #         input_channel = 16
+    #         for t, h, c, k, s, se, nl in inverted_residual_setting:
+    #             output_channel = c
+    #             self.features.append(
+    #                 self.IRB(input_channel, h, output_channel, k, s, se, nl)
+    #             )
+    #             input_channel = output_channel
                 
-            # Dernières couches
-            last_conv_out = 576
+    #         # Dernières couches
+    #         last_conv_out = 576
             
-            self.features.append(
-                nn.Sequential(
-                    nn.Conv2d(input_channel, last_conv_out, 1, 1, 0, bias=False),
-                    nn.BatchNorm2d(last_conv_out),
-                    self.HS()
-                )
-            )
+    #         self.features.append(
+    #             nn.Sequential(
+    #                 nn.Conv2d(input_channel, last_conv_out, 1, 1, 0, bias=False),
+    #                 nn.BatchNorm2d(last_conv_out),
+    #                 self.HS()
+    #             )
+    #         )
 
-            self.features = nn.Sequential(*self.features)
-            self.avgpool = nn.AdaptiveAvgPool2d(1)
+    #         self.features = nn.Sequential(*self.features)
+    #         self.avgpool = nn.AdaptiveAvgPool2d(1)
 
-            # Couche de classification
-            self.classifier = nn.Sequential(
-                nn.Linear(last_conv_out, 1280),
-                self.HS(),
-                nn.Dropout(0.2),
-                nn.Linear(1280, num_classes)
-            )
+    #         # Couche de classification
+    #         self.classifier = nn.Sequential(
+    #             nn.Linear(last_conv_out, 1280),
+    #             self.HS(),
+    #             nn.Dropout(0.2),
+    #             nn.Linear(1280, num_classes)
+    #         )
 
-        # --- Méthode Forward ---
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            x = self.features(x)
-            x = self.avgpool(x)
-            x = torch.flatten(x, 1)
-            x = self.classifier(x)
-            return x
+    #     # --- Méthode Forward ---
+    #     def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #         x = self.features(x)
+    #         x = self.avgpool(x)
+    #         x = torch.flatten(x, 1)
+    #         x = self.classifier(x)
+    #         return x
 
-    # Setup prints
-    setup_logging('DEBUG')
-    print('Hello World')
+    # # Setup prints
+    # setup_logging('DEBUG')
+    # print('Hello World')
 
-    # 0. Get the model
-    model = ResNet18()
-    print(model)
+    # # 0. Get the model
+    # model = ResNet18()
+    # print(model)
 
-    # 2. Create a dummy input and transform it
-    dummy_input = torch.randn(model.input_shape)
+    # # 2. Create a dummy input and transform it
+    # dummy_input = torch.randn(model.input_shape)
 
-    # 3. Test the model inference
-    model(dummy_input)
+    # # 3. Test the model inference
+    # model(dummy_input)
 
-    # --- Example ---
-    model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
-    print(f'Inference results {model(dummy_input)}')  # infer
-    print(model)
+    # # --- Example ---
+    # model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
+    # print(f'Inference results {model(dummy_input)}')  # infer
+    # print(model)
 
-    # Model Operations
-    # # # Test: add neurons
-    # print("--- Test: Add Neurons ---")
-    # model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
-    # model_op_neurons(model, op=)
-    with model as m:
-        m.operate(1, {-1}, op_type=1)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(1, {-14, -2}, op_type=2)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(1, {-14, -2}, op_type=3)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(1, {-14, -2}, op_type=4)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(3, {-1}, op_type=1)
-    model(dummy_input)  # Inference test
-    print(f'Inference test of the modified model is:\n{model(dummy_input)}')
+    # # Model Operations
+    # # # # Test: add neurons
+    # # print("--- Test: Add Neurons ---")
+    # # model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
+    # # model_op_neurons(model, op=)
+    # with model as m:
+    #     m.operate(1, {-1}, op_type=1)
+    # model(dummy_input)  # Inference test
+    # with model as m:
+    #     m.operate(1, {-14, -2}, op_type=2)
+    # model(dummy_input)  # Inference test
+    # with model as m:
+    #     m.operate(1, {-14, -2}, op_type=3)
+    # model(dummy_input)  # Inference test
+    # with model as m:
+    #     m.operate(1, {-14, -2}, op_type=4)
+    # model(dummy_input)  # Inference test
+    # with model as m:
+    #     m.operate(3, {-1}, op_type=1)
+    # model(dummy_input)  # Inference test
+    # print(f'Inference test of the modified model is:\n{model(dummy_input)}')
+
+    # Test YOLO Model
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+    def download_image(url: str) -> Image.Image:
+        """Download an image and return a PIL.Image."""
+        try:
+            import requests
+        except Exception as e:
+            raise RuntimeError("requests library is required to download sample image") from e
+        
+        # Add User-Agent header to bypass Wikimedia restrictions
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        r = requests.get(url, timeout=10, headers=headers)
+        r.raise_for_status()
+        return Image.open(io.BytesIO(r.content)).convert("RGB")
+
+    SAMPLE_CAT_URL = "https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg"
+    print("No image provided, downloading a sample cat image...")
+    img = download_image(SAMPLE_CAT_URL)
+    input_name = "sample_cat"
+
+    # Build model and load weights if provided
+    model = TinyYOLO(S=7, B=2, C=1, image_size=224).to('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    preprocess = model.preprocess
+    img_resized = img.resize((224, 224))
+    input_tensor = preprocess(img_resized).unsqueeze(0).to('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Forward
+    with torch.no_grad():
+        pred = model(input_tensor)  # (1, S, S, B*5 + C)
+        boxes_list = model.decode_preds(pred, conf_thresh=0.25)
+        # boxes_list[0] is list of candidate boxes for this image
+        candidates = boxes_list[0]
+        kept = TinyYOLO.nms(candidates, iou_thresh=0.5)
+
+    # Print results
+    if not kept:
+        print("No boxes found above confidence threshold.")
+    else:
+        print("Detections (normalized coords):")
+        for (x1, y1, x2, y2, score, cls) in kept:
+            print(f"  [{x1:.3f}, {y1:.3f}, {x2:.3f}, {y2:.3f}] score={score:.3f} class={cls}")
+
+    # Save visualization
+    out_file = f"./out_{input_name}.png"
+    vis_img = img.copy()
+
+    def visualize_and_save(img_pil: Image.Image, boxes: List[Tuple[float, float, float, float, float, int]], out_path: str = None):
+        """
+        Draw boxes (normalized coords) on PIL image and save.
+        boxes: list of (x1,y1,x2,y2,score,cls) with coords in [0,1]
+        """
+        draw = ImageDraw.Draw(img_pil)
+        w, h = img_pil.size
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+        for (x1, y1, x2, y2, score, cls) in boxes:
+            xy = (x1 * w, y1 * h, x2 * w, y2 * h)
+            draw.rectangle(xy, outline="red", width=2)
+            label = f"cat {score:.2f}"
+            text_xy = (xy[0] + 3, xy[1] + 3)
+            if font:
+                draw.text(text_xy, label, fill="red", font=font)
+            else:
+                draw.text(text_xy, label, fill="red")
+        img_pil.save(out_path) if out_path else None
+
+    visualize_and_save(vis_img, kept, out_path=out_file)
+    print(f"Visualization saved to: {out_file}")
