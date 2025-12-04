@@ -6,7 +6,7 @@ import torch
 import logging
 import traceback
 import numpy as np
-import pandas as pd  # <- needed for data service
+import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc

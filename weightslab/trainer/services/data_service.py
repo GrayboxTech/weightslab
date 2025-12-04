@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 import weightslab.proto.experiment_service_pb2 as pb2
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
 
 class EditableDatasetAdapter(Dataset):
@@ -282,7 +283,6 @@ class DataService:
             def _dataset_to_df(dataset_or_loader, origin: str) -> pd.DataFrame:
                 """Convert a dataset/loader into a DataFrame usable by the UI."""
                 raw_ds = dataset_or_loader
-                # logger.info(f"DEBUG: Unwrapping {type(raw_ds)} for {origin}")
                 while True:
                     if hasattr(raw_ds, "wrapped_dataset"):
                         new_ds = raw_ds.wrapped_dataset
@@ -329,7 +329,7 @@ class DataService:
                 # This prevents OOM and timeouts with large datasets
                 if not records and hasattr(raw_ds, "samples") and hasattr(raw_ds, "targets"):
                     try:
-                        logger.info(f"Using ImageFolder fast path for {origin} with {len(raw_ds)} samples")
+                        logger.debug(f"Using ImageFolder fast path for {origin} with {len(raw_ds)} samples")
                         for i in range(len(raw_ds)):
                             records.append(
                                 {
@@ -435,8 +435,8 @@ class DataService:
             if "deny_listed" not in self._all_datasets_df.columns:
                 self._all_datasets_df["deny_listed"] = False
 
-            logger.info(f"Created combined DataFrame with {len(self._all_datasets_df)} samples")
-            logger.info(f"DataFrame columns: {list(self._all_datasets_df.columns)}")
+            logger.debug(f"Created combined DataFrame with {len(self._all_datasets_df)} samples")
+            logger.debug(f"DataFrame columns: {list(self._all_datasets_df.columns)}")
 
             # Optional: external agent (weights_studio integration)
             try:
@@ -450,17 +450,14 @@ class DataService:
                 # weights_studio location: /Users/.../v0/weights_studio
                 weights_studio_path = os.path.join(repo_root, "weights_studio")
 
-                print(weights_studio_path)
-
                 if os.path.isdir(weights_studio_path) and weights_studio_path not in sys.path:
                     sys.path.append(weights_studio_path)
 
-                from agent import DataManipulationAgent
-                import agent
+                from agent.agent import DataManipulationAgent
+                import agent.agent as agent
 
-                logger.info(f"DEBUG: agent module loaded from: {agent.__file__}")
                 self._agent = DataManipulationAgent(self._all_datasets_df)
-                logger.info("Data service initialized successfully with agent")
+                logger.debug("Data service initialized successfully with agent")
 
             except ImportError as e:
                 logger.warning(f"DataManipulationAgent not available: {e}")
@@ -574,7 +571,7 @@ class DataService:
             # Debug: tag distribution before any query is applied
             try:
                 if "tags" in source_df.columns:
-                    logger.info(
+                    logger.debug(
                         "[ApplyDataQuery] source_df tags value_counts before query: %s",
                         source_df["tags"].value_counts().to_dict()
                     )
@@ -597,7 +594,7 @@ class DataService:
 
                 if func == "df.query":
                     expr = params.get("expr", "")
-                    logger.info(
+                    logger.debug(
                         "[ApplyDataQuery] Applying df.query with expr=%r on df shape=%s",
                         expr, source_df.shape
                     )
@@ -605,7 +602,7 @@ class DataService:
                     message = f"Applied query: {expr}"
                 else:
                     # For other operations delegate to agent.apply_operation
-                    logger.info(
+                    logger.debug(
                         "[ApplyDataQuery] Applying operation %s on df shape=%s",
                         func, source_df.shape
                     )
@@ -614,7 +611,7 @@ class DataService:
             else:
                 # Structured query supplied directly by UI
                 expr = request.query
-                logger.info(
+                logger.debug(
                     "[ApplyDataQuery] Applying structured df.query with expr=%r on df shape=%s",
                     expr, source_df.shape
                 )
@@ -669,7 +666,7 @@ class DataService:
         # Always work with a view that has up-to-date runtime stats
         view_df = self._with_runtime_sample_statistics(self._all_datasets_df)
 
-        logger.info(f"Current view DataFrame has {len(view_df)} total samples")
+        logger.debug(f"Current view DataFrame has {len(view_df)} total samples")
 
         try:
             if request.start_index < 0 or request.records_cnt <= 0:
@@ -804,7 +801,7 @@ class DataService:
                     )
                 )
 
-            logger.info(
+            logger.debug(
                 f"Successfully created {len(data_records)} data records from "
                 f"{len(df_slice)} dataframe rows"
             )
@@ -883,7 +880,7 @@ class DataService:
                 try:
                     self._all_datasets_df.loc[mask, request.stat_name] = value
                 except Exception as e:
-                    logger.info(
+                    logger.debug(
                         f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
                     )
 
@@ -896,7 +893,7 @@ class DataService:
                     (self._all_datasets_df["sample_id"].isin(ids))
                     & (self._all_datasets_df["origin"].isin(origins))
                 ]
-                logger.info(
+                logger.debug(
                     "[DEBUG EditDataSample] Updated rows:\n%s",
                     debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
                 )
@@ -905,13 +902,13 @@ class DataService:
                     tagged = self._all_datasets_df[
                         self._all_datasets_df["tags"] == request.string_value
                     ]
-                    logger.info(
+                    logger.debug(
                         "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
                         request.string_value,
                         len(tagged),
                     )
             except Exception as e:
-                logger.info(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
+                logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
 
         # ---------------------------------------------------------------------
         # 3) Keep the optional agent in sync
