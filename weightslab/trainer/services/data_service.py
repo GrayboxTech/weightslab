@@ -654,6 +654,11 @@ class DataService:
         if self._all_datasets_df is None:
             logger.debug("Initializing data service (first call)")
             self._initialize_data_service()
+        else:
+            try:
+                self._refresh_data_stats()
+            except Exception as e:
+                logger.warning(f"Failed to refresh dynamic stats before GetDataSamples: {e}")
 
         if self._all_datasets_df is None:
             logger.error("Data service initialization failed - no dataframe available")
