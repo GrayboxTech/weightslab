@@ -17,44 +17,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
 
-"""
-class DataService:
-    def __init__():
-        self.tdata: SampleTrackingDatasetWrapper = ...
-        self.edata: SampleTrackingDatasetWrapper = ...
-
-        self.alldf: pd.DataFrame | None = None
-
-    def _pull_signals_from_dataset_into_df(self):
-        if not self.alldf:
-            self.alldf = pd.concat([self.tdata.df(), self.edata.df()])
-        if self._if_partial_update_required():
-            # traverse all_df
-            # update samples with the fresh signals
-            pass
-        return self.alldf
-
-    def GetSamples(self, rqst):
-        data_records = []
-        for sample in self._pull_signals_from_dataset_into_df()[
-                rqst.start_index: rqst.start_index + rqst.sample_number]:
-            data_records.append(DataRecord.from_sample(sample))
-        return pb.SamplesResponse(data_records)
-
-    def EditSamples(self, rqst):
-        for sample_id, sample_origin in zip(
-                rqst.sample_ids, rqst.sample_origins):
-            dataset = self.tdata if sample_origin == "train" else self.edata
-            dataset.set(rqst.sample_id, rqst.stat_name, rqst.new_stat_value)
-
-    def ApplyQuery(self, rqst):
-        if self._all_df_should_be_refreshed():
-            self._pull_signals_from_dataset_into_df()
-
-        self.alldf = self.agent.apply_query(self.alldf, rqst.query)
-"""
-
-
 def _get_stat_from_row(row, stat_name):
     """Extract stat from dataframe row and convert to DataStat message."""
     value = row.get(stat_name)
@@ -112,12 +74,9 @@ class DataService:
         logger.info("DataService initialized.")
 
     def _pull_into_all_data_view_df(self):
-        # We could maintain an efficient synchronized structure that pulls only
-        # the rows with updates.
-        
-        # implement logic for skipping the full regen if not necessary
-        # if not self.dirty()
-        #     return
+        """Pulls data from train and test loaders into a single DataFrame for all data view."""
+
+        # TODO: implement logic for skipping the full regen if not necessary... if not self.dirty()
 
         tstats = _get_stats(self._trn_loader, "train")
         estats = _get_stats(self._tst_loader, "test")
