@@ -300,8 +300,9 @@ def tensor_to_bytes(tensor, mean=None, std=None):
     img.save(buf, format='jpeg', quality=85)
     return buf.getvalue()
 
-def load_raw_image(dataset, index):
-
+def load_raw_image(dataset, index: int = None, id: int = None) -> Image.Image:
+    if index is None and id is not None:
+        index = dataset.unique_id_to_index[id]
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
     if hasattr(wrapped, "images") and isinstance(wrapped.images, list):
         img_path = wrapped.images[index]

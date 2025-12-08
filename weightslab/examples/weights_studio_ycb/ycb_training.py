@@ -145,10 +145,10 @@ if __name__ == "__main__":
         serving_grpc=True,
         n_workers_grpc=6,
         port_grpc=50051,
-        serving_cli=False,  # no CLI TCP server, no extra terminal
+        serving_cli=True,  # no CLI TCP server, no extra terminal
         host_cli="127.0.0.1",
         port_cli=0,
-        launch_cli=False,
+        launch_cli=True ,
     )
 
     # 2) Load hyperparameters (from YAML if present)
@@ -292,19 +292,7 @@ if __name__ == "__main__":
         name="test_metric/mlt_metric",
         log=True,
     )
-
-    # 6) HARD-UNPAUSE global training state so guard_training_context can't block
-    try:
-        pause_controller.resume()
-        # In case resume() has a bug / race, force the internals too
-        if hasattr(pause_controller, "_paused"):
-            pause_controller._paused = False
-        if hasattr(pause_controller, "_event"):
-            pause_controller._event.set()
-        print(">>> Forced training to RUN state (pause_controller).")
-    except Exception as e:
-        print(f">>> Failed to force unpause: {e}")
-
+    
     print("=" * 60)
     print("🚀 STARTING TRAINING")
     print(f"📈 Total steps: {max_steps}")

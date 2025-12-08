@@ -94,7 +94,6 @@ class DataLoaderInterface:
                 (self._reset_iterator, {})
             )
 
-
             # store kwargs so we can recreate dataloader if needed
             self._dl_build_kwargs = dict(
                 batch_size=batch_size,

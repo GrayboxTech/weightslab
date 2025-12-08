@@ -93,6 +93,7 @@ class SampleStatsEx(str, Enum):
     PREDICTION_RAW = "prediction_raw"
     TARGET = "target"
     SAMPLE_ID = "sample_id" 
+    INDEX = "index"
     # SAMPLE_CRC = "sample_crc" #potential
     # AVAILABLE = "available"
     DENY_LISTED = "deny_listed"
@@ -174,6 +175,7 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_RAW.value: -1e9,
                     SampleStatsEx.PREDICTION_LOSS.value: -1,
                     SampleStatsEx.DENY_LISTED.value: False,
+                    SampleStatsEx.INDEX.value: sample_index,
                 }
             )
 
@@ -325,7 +327,6 @@ class DataSampleTrackingWrapper(Dataset):
                              f"expected: {SampleStatsEx.ALL()}")
 
     def _update_index_to_index(self):
-
         if self._map_updates_hook_fns:
             for (map_update_hook_fn, map_update_hook_fn_params) \
                     in self._map_updates_hook_fns:
@@ -797,7 +798,7 @@ class DataSampleTrackingWrapper(Dataset):
         return self._getitem_raw(index)
 
     def _getitem_raw(self, index: int = None, id: int = None):
-        if id is not None:
+        if index is None and id is not None:
             index = self.unique_id_to_index[id]
         data = self.wrapped_dataset[index]
         if len(data) == 2:

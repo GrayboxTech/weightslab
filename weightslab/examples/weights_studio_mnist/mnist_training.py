@@ -12,14 +12,13 @@ import yaml
 import weightslab as wl
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
-from torchvision import datasets, transforms, models
+from torchvision import datasets, transforms
 
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
-    guard_testing_context,
-    pause_controller,
+    guard_testing_context
 )
 os.environ["GRPC_VERBOSITY"] = "debug"
 
@@ -109,7 +108,7 @@ if __name__ == "__main__":
     parameters = parameters or {}
     # ---- sensible defaults / normalization ----
     parameters.setdefault("experiment_name", "mnist_cnn")
-    parameters.setdefault("device", "auto")
+    parameters.setdefault("device", "auto")  
     parameters.setdefault("training_steps_to_do", 1000)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     # FORCE training to start in "running" mode
@@ -136,7 +135,7 @@ if __name__ == "__main__":
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
         # UI client settings
-        serving_ui=True,
+        serving_ui=False,
         root_directory=log_dir,
         
         # gRPC server settings
@@ -234,20 +233,6 @@ if __name__ == "__main__":
         flag="metric",
         name="test_metric/mlt_metric",
         log=True,
-    )
-
-    # Start WeightsLab services
-    wl.serve(
-        # UI client settings
-        serving_ui=True,
-        root_directory=log_dir,
-        
-        # gRPC server settings
-        serving_grpc=True,
-        n_workers_grpc=2,
-
-        # CLI server settings
-        serving_cli=True
     )
 
     print("=" * 60)
