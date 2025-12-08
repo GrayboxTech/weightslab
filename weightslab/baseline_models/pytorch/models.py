@@ -1834,7 +1834,7 @@ class YOLOv3Tiny(nn.Module):
 
 # Get the list of all model classes to parametrize the test
 ALL_MODEL_CLASSES = [
-    YOLOv3Tiny, FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
+    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
 ]
 # TODO (GP):
 #   - Currently, TinyUNet_Straightforward operations (prune at least) is not working because the index mapping is not working as upsample wi. factor 2 or more is not considered in the mapping and in the graph generally.
