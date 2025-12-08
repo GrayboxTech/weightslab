@@ -97,6 +97,8 @@ def get_layer_representation(layer) -> pb2.LayerRepresentation:
 def get_layer_representations(model):
     layer_representations = []
     for layer in model.layers:
+        if getattr(layer, 'wl_same_flag', False) or not hasattr(layer, 'weight'):
+            continue
         layer_representation = get_layer_representation(layer)
         if layer_representation is None:
             continue
