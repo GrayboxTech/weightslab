@@ -15,6 +15,7 @@ import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import pause_controller
 from .service_utils import load_raw_image
 from .agent import DataManipulationAgent
+from .tag_store import TagsStore
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -111,7 +112,9 @@ class DataService:
                 "DataService initialized without train_loader or test_loader.")
 
         self._root_log_dir = self._resolve_root_log_dir()
+        self._tags_store = TagsStore(self._root_log_dir)
         self._all_datasets_df = self._pull_into_all_data_view_df()
+        self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
 
         self._last_internals_update_time = time.time()
@@ -173,13 +176,53 @@ class DataService:
 
         # Pull stats from both datasets
         tstats = _get_stats(self._trn_loader, "train")
-        estats = _get_stats(self._tst_loader, "test")
+        estats = _get_stats(self._tst_loader, "eval")
         concat_df = pd.concat([tstats, estats])
         try:
             concat_df.set_index(["origin", "sample_id"], inplace=True)
         except KeyError as e:
             logger.warning(f"Failed to set index on concat_df: {e}")
         return concat_df
+    
+    def _load_existing_tags(self):
+        """Load all existing tags from HDF5 on startup and merge into dataframe."""
+        if self._all_datasets_df is None or self._all_datasets_df.empty:
+            return
+
+        try:
+            # Get all sample_ids
+            if isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                all_uids = self._all_datasets_df.index.get_level_values("sample_id").unique().tolist()
+            elif "sample_id" in self._all_datasets_df.columns:
+                all_uids = self._all_datasets_df["sample_id"].unique().tolist()
+            else:
+                return
+
+            # Load tags for all UIDs
+            tags_map = self._tags_store.load_tags(all_uids)
+            if not tags_map:
+                # Initialize empty tags column
+                if "tags" not in self._all_datasets_df.columns:
+                    self._all_datasets_df["tags"] = ""
+                return
+
+            # Initialize tags column if not present
+            if "tags" not in self._all_datasets_df.columns:
+                self._all_datasets_df["tags"] = ""
+
+            # Update dataframe with loaded tags (as comma-separated string)
+            for uid, tag_list in tags_map.items():
+                tags_str = ",".join(tag_list) if tag_list else ""
+                if isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                    mask = self._all_datasets_df.index.get_level_values("sample_id") == uid
+                    self._all_datasets_df.loc[mask, "tags"] = tags_str
+                elif "sample_id" in self._all_datasets_df.columns:
+                    mask = self._all_datasets_df["sample_id"] == uid
+                    self._all_datasets_df.loc[mask, "tags"] = tags_str
+
+            logger.info(f"Loaded existing tags for {len(tags_map)} UID(s) from {self._tags_store.path}")
+        except Exception as e:
+            logger.warning(f"Failed to load existing tags: {e}")
     
     def SlowUpdateInternals(self):
         current_time = time.time()
@@ -456,7 +499,7 @@ class DataService:
     def GetDataSamples(self, request, context):
         """
         Retrieve samples from the dataframe with their data statistics.
-        Uses the actual proto messages from data_service.proto
+        Only allowed when training is paused.
         """
         allowed, msg = self._interaction_allowed()
         if not allowed:
@@ -649,14 +692,17 @@ class DataService:
             self._agent.df = self._all_datasets_df
 
         # ------------------------------------------------------------------
-        # 4) Persist tag edits to the HDF5 store
+        # 4) Persist tag edits to the HDF5 store (auto-sync)
         # ------------------------------------------------------------------
         if request.stat_name == "tags" and request.samples_ids:
             try:
-                tag_map = {int(sid): request.string_value for sid in request.samples_ids}
-                self._tags_store.save_tags(tag_map)
+                for sid in request.samples_ids:
+                    # Parse comma-separated tags into list
+                    tags_str = request.string_value or ""
+                    tag_list = [t.strip() for t in tags_str.split(",") if t.strip()]
+                    self._tags_store.save_tags({int(sid): tag_list})
             except Exception as e:
-                logger.warning(f"Could not persist tags to store: {e}")
+                logger.warning(f"Could not persist tags to HDF5: {e}")
 
         return pb2.DataEditsResponse(
             success=True,

@@ -3,6 +3,9 @@ import torch as th
 import numpy as np
 import pandas as pd
 import random as rnd
+import os
+import threading
+from pathlib import Path
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
@@ -119,7 +122,17 @@ class _StateDictKeys(str, Enum):
 
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset):
+    def __init__(self, wrapped_dataset: Dataset, root_log_dir: Optional[str] = None):
+        # Setup H5 persistence path
+        self._root_log_dir = Path(root_log_dir) if root_log_dir else None
+        self._h5_path = None
+        self._h5_lock = threading.Lock()
+        if self._root_log_dir:
+            data_dir = self._root_log_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            self._h5_path = data_dir / "sample_stats.h5"
+            logger.info(f"[DataSampleTrackingWrapper] H5 persistence enabled at {self._h5_path}")
+        
         # First, generate UIDs and detect duplicates before wrapping
         logger.info(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
         self.unique_ids, self.unique_id_to_index = self._generate_unique_ids_parallel(wrapped_dataset)
@@ -165,27 +178,46 @@ class DataSampleTrackingWrapper(Dataset):
         self.dataframe = None
         self._map_updates_hook_fns = []
 
-        # Initialize per-sample stats
+        # Detect dataset split for H5 storage
+        original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
+        split = _detect_dataset_split(original_ds)
+        self._dataset_split = split  # Store for H5 filename
+        
+        # Load existing stats from H5 BEFORE initializing defaults
+        # This prevents overwriting saved state
+        loaded_from_h5 = False
+        if self._h5_path and self._h5_path.exists():
+            self._load_stats_from_h5()
+            loaded_from_h5 = True
+        
+        # Initialize per-sample stats (only for stats not already loaded from H5)
         for sample_index in range(len(self.wrapped_dataset)):
             uid = int(self.unique_ids[sample_index])
-            self.update_sample_stats(
-                uid,
-                {
+            # Only initialize if not already loaded from H5
+            if not loaded_from_h5 or uid not in self.sample_statistics[SampleStatsEx.PREDICTION_AGE]:
+                # Use _set_without_save to avoid triggering H5 saves during initialization
+                default_stats = {
                     SampleStatsEx.PREDICTION_AGE.value: -1,
                     SampleStatsEx.PREDICTION_RAW.value: -1e9,
                     SampleStatsEx.PREDICTION_LOSS.value: -1,
                     SampleStatsEx.DENY_LISTED.value: False,
                     SampleStatsEx.INDEX.value: sample_index,
+                    SampleStatsEx.TAGS.value: '',
                 }
-            )
+                # Directly set stats without triggering saves
+                for stat_name, stat_value in default_stats.items():
+                    if stat_value is not None:
+                        self.sample_statistics[stat_name][uid] = stat_value
+                # Handle encountered count
+                if uid in self.sample_statistics[SampleStatsEx.ENCOUNTERED]:
+                    self.sample_statistics[SampleStatsEx.ENCOUNTERED][uid] += 1
+                else:
+                    self.sample_statistics[SampleStatsEx.ENCOUNTERED][uid] = 1
 
         # Build index mapping
         self._update_index_to_index()
 
         # Register UIDs globally and warn about train/test overlaps
-        # Get the original dataset if this is a Subset
-        original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
-        split = _detect_dataset_split(original_ds)
         current_set = set(int(u) for u in self.unique_ids)
         # Check overlap with other splits
         other = 'test' if split == 'train' else 'train'
@@ -365,28 +397,39 @@ class DataSampleTrackingWrapper(Dataset):
                 raise Exception(f"Tried to update loss for discarded sample_id={sample_id}")
 
         self.sample_statistics[stat_name][sample_id] = stat_value
+        
+        # Auto-save critical stats to H5 (deny_listed and tags)
+        if self._h5_path and stat_name in [SampleStatsEx.DENY_LISTED.value, SampleStatsEx.TAGS.value]:
+            self._save_stats_to_h5()
 
-    def get(self, sample_id: int, stat_name: str, raw: bool = False) -> int | float | bool:
+    def get(self, sample_id: int, stat_name: str, raw: bool = False, index: int = None) -> int | float | bool:
         self._raise_if_invalid_stat_name(stat_name)
+
+        # Sanity check
+        # # Get corresponding sampleid and index
+        sample_id = self.unique_id_to_index[sample_id] if sample_id is None and index is not None else sample_id
+        index = self.unique_id_to_index[sample_id] if index is None and sample_id is not None else index
+        # #  
         if sample_id in self.sample_statistics[stat_name]:
             value = self.sample_statistics[stat_name][sample_id]
             if value is not None:
                 return value
+            
         if stat_name == SampleStatsEx.TARGET:
             if hasattr(self.wrapped_dataset, 'targets'):
                 if raw and self.idx_to_idx_remapp:
-                    sample_id  = self.idx_to_idx_remapp[sample_id]
-                value = self.wrapped_dataset.targets[self.unique_id_to_index[sample_id]]
+                    sample_id  = self.idx_to_idx_remapp[index]
+                value = self.wrapped_dataset.targets[index]
             else:
-                value = self[sample_id][2]  # 0 -> data; 1 -> index; 2 -> label;
                 if raw and self.idx_to_idx_remapp:
                     value = self._getitem_raw(id=sample_id)[2]
+                else:
+                    value = self[index][2]  # 0 -> data; 1 -> index; 2 -> label;
             self.sample_statistics[stat_name][sample_id] = value
-
         elif stat_name == SampleStatsEx.SAMPLE_ID:
             value = sample_id
             if raw:
-                value = self.idx_to_idx_remapp[sample_id]
+                value = self.idx_to_idx_remapp[index]
             self.sample_statistics[stat_name][sample_id] = value
         elif stat_name == SampleStatsEx.DENY_LISTED:
             # existing handling
@@ -580,6 +623,9 @@ class DataSampleTrackingWrapper(Dataset):
                 cnt += int(is_denied)
             self.denied_sample_cnt = cnt
         self._update_index_to_index()
+        # Save to H5 after bulk deny operations
+        if self._h5_path:
+            self._save_stats_to_h5()
 
     def allowlist_samples(self, allowlist_samples_ids: Set[int] | None):
         self.dataframe = None
@@ -598,6 +644,9 @@ class DataSampleTrackingWrapper(Dataset):
                     denied_cnt += 1
             self.denied_sample_cnt = denied_cnt
         self._update_index_to_index()
+        # Save to H5 after bulk allow operations
+        if self._h5_path:
+            self._save_stats_to_h5()
 
     def _get_denied_sample_ids(
         self,
@@ -625,10 +674,13 @@ class DataSampleTrackingWrapper(Dataset):
 
                 prediction_class = self.get(
                     sample_id, SampleStatsEx.PREDICTION_RAW.value, raw=True)
+            except (KeyError, IndexError) as e:
+                logger.error(f"Sample {sample_id}: Failed to get prediction - {type(e).__name__} {e}")
+            
+            try:
                 label = self.get(sample_id, SampleStatsEx.TARGET, raw=True)
-            except KeyError as e:
-                logger.error(f"Sample {sample_id}: KeyError {e}")
-                continue
+            except (KeyError, IndexError) as e:
+                logger.error(f"Sample {sample_id}: Failed to get label - {type(e).__name__} {e}")
 
             if predicate(
                     sample_id, prediction_age, prediction_loss,
@@ -818,4 +870,111 @@ class DataSampleTrackingWrapper(Dataset):
             if key in self.dense_stats_store:
                 return self.dense_stats_store[key].get(sample_id)
         return self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
+    
+    def _save_stats_to_h5(self):
+        """Save SampleStatsEx to H5 file for persistence across restarts."""
+        if not self._h5_path:
+            return
+        
+        with self._h5_lock:
+            try:
+                # Build a DataFrame with all UIDs and their stats
+                data = []
+                for uid in self.unique_ids:
+                    uid_int = int(uid)
+                    row = {'uid': uid_int}
+                    
+                    # Save all core stats with proper type handling
+                    for stat_name in SampleStatsEx.ALL():
+                        val = self.sample_statistics.get(stat_name, {}).get(uid_int)
+                        
+                        # Convert to appropriate type for HDF5
+                        if val is None:
+                            # Use appropriate default for missing values
+                            if stat_name == SampleStatsEx.DENY_LISTED.value:
+                                val = False
+                            elif stat_name == SampleStatsEx.TAGS.value:
+                                val = ''
+                            else:
+                                continue  # Skip None values for other stats
+                        elif isinstance(val, (np.integer, np.floating)):
+                            val = val.item()
+                        elif isinstance(val, np.bool_):
+                            val = bool(val)
+                        elif isinstance(val, bool):
+                            pass  # Already correct type
+                        elif isinstance(val, (int, float, str)):
+                            pass  # Already correct type
+                        else:
+                            # Skip complex types that can't be easily serialized
+                            continue
+                        
+                        row[stat_name] = val
+                    
+                    data.append(row)
+                
+                df = pd.DataFrame(data)
+                if df.empty:
+                    return
+                
+                # Ensure consistent types for HDF5
+                if 'deny_listed' in df.columns:
+                    df['deny_listed'] = df['deny_listed'].astype(bool)
+                if 'tags' in df.columns:
+                    df['tags'] = df['tags'].astype(str)
+                
+                # Save with HDFStore using fixed format (simpler than table format)
+                with pd.HDFStore(str(self._h5_path), mode='a') as store:
+                    key = f'/stats_{self._dataset_split}'
+                    store.put(key, df, format='fixed')
+                
+                logger.debug(f"[DataSampleTrackingWrapper] Saved stats to {self._h5_path}")
+            except Exception as e:
+                logger.error(f"[DataSampleTrackingWrapper] Failed to save stats to H5: {e}")
+    
+    def _load_stats_from_h5(self):
+        """Load SampleStatsEx from H5 file if it exists."""
+        if not self._h5_path or not self._h5_path.exists():
+            return
+        
+        with self._h5_lock:
+            try:
+                with pd.HDFStore(str(self._h5_path), mode='r') as store:
+                    key = f'/stats_{self._dataset_split}'
+                    if key not in store:
+                        logger.info(f"[DataSampleTrackingWrapper] No saved stats found for {self._dataset_split}")
+                        return
+                    
+                    df = store[key]
+                
+                logger.info(f"[DataSampleTrackingWrapper] Loading {len(df)} saved stats from {self._h5_path}")
+                
+                # Restore stats for each UID that exists in current dataset
+                current_uids = set(int(u) for u in self.unique_ids)
+                loaded_count = 0
+                
+                for _, row in df.iterrows():
+                    uid = int(row['uid'])
+                    if uid not in current_uids:
+                        continue  # Skip UIDs not in current dataset
+                    
+                    # Restore each stat
+                    for stat_name in SampleStatsEx.ALL():
+                        if stat_name in row and pd.notna(row[stat_name]):
+                            val = row[stat_name]
+                            # Don't trigger auto-save during load
+                            self.sample_statistics[stat_name][uid] = val
+                    
+                    loaded_count += 1
+                
+                # Update deny_listed count
+                self.denied_sample_cnt = sum(
+                    1 for uid in current_uids 
+                    if self.sample_statistics[SampleStatsEx.DENY_LISTED].get(uid, False)
+                )
+                
+                logger.info(f"[DataSampleTrackingWrapper] Loaded stats for {loaded_count} samples. "
+                          f"{self.denied_sample_cnt} samples are deny-listed.")
+            except Exception as e:
+                logger.error(f"[DataSampleTrackingWrapper] Failed to load stats from H5: {e}")
 

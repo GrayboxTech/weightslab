@@ -64,6 +64,7 @@ class DataLoaderInterface:
         register: bool = True,
         weak: bool = False,
         is_training: bool = False,
+        root_log_dir: Optional[str] = None,
         # kept for backwards compatibility; always use mutable sampler when we
         # build the DataLoader from a Dataset, but do not pass this to PyTorch.
         mutable_batch_sampler: bool = True,  # noqa: F841
@@ -83,13 +84,13 @@ class DataLoaderInterface:
         if isinstance(data_loader_or_dataset, DataLoader):
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
-            self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader)
+            self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader, root_log_dir=root_log_dir)
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
         else:
             # Dataset supplied: wrap and build our own DataLoader with a mutable batch sampler
-            self.tracked_dataset = DataSampleTrackingWrapper(data_loader_or_dataset)
+            self.tracked_dataset = DataSampleTrackingWrapper(data_loader_or_dataset, root_log_dir=root_log_dir)
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
