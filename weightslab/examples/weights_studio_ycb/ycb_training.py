@@ -24,9 +24,7 @@ from weightslab.components.global_monitoring import (
 logging.basicConfig(level=logging.ERROR)
 
 
-# ---------------------------------------------
 # Simple CNN for YCB (RGB 3xHxW, variable num_classes)
-# ---------------------------------------------
 class YCBCNN(nn.Module):
     def __init__(self, num_classes: int, image_size: int = 28):
         super().__init__()
@@ -68,9 +66,7 @@ class YCBCNN(nn.Module):
         return self._age
 
 
-# -----------------------------------------------------------------------------
 # Train / Test functions
-# -----------------------------------------------------------------------------
 def train(loader, model, optimizer, criterion_mlt, device="cpu"):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:
@@ -134,65 +130,46 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
     return loss.detach().cpu().item(), metric.detach().cpu().item()
 
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    start_time = time.time()
-
-    # 1) Start WeightsLab services (gRPC only, no CLI)
-    wl.serve(
-        serving_grpc=True,
-        n_workers_grpc=6,
-        port_grpc=50051,
-        serving_cli=False,  # no CLI TCP server, no extra terminal
-        host_cli="127.0.0.1",
-        port_cli=0,
-        launch_cli=False,
-    )
-
-    # 2) Load hyperparameters (from YAML if present)
-    parameters = {}
+    # --- 1) Load hyperparameters from YAML (if present) ---
     config_path = os.path.join(os.path.dirname(__file__), "ycb_training_config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
+    else:
+        parameters = {}
 
-    parameters = parameters or {}
-    # ---- sensible defaults / normalization ----
+    # Defaults
     parameters.setdefault("experiment_name", "ycb_cnn")
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 1000)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
-    # FORCE training to start in "running" mode
-    parameters["is_training"] = True
+    parameters["is_training"] = True  # start in running mode
+    parameters.setdefault("number_of_workers", 4)
 
     exp_name = parameters["experiment_name"]
 
-    # Device selection
+    # --- 2) Device selection ---
     if parameters.get("device", "auto") == "auto":
         parameters["device"] = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
     device = parameters["device"]
 
-    # Logging dir
+    # --- 3) Logging directory ---
     if not parameters.get("root_log_dir"):
         tmp_dir = tempfile.mkdtemp()
         parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
     log_dir = parameters["root_log_dir"]
-    tqdm_display = parameters.get("tqdm_display", True)
-    max_steps = parameters.get("training_steps_to_do", 1000)
-    eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
+    max_steps = parameters["training_steps_to_do"]
+    eval_every = parameters["eval_full_to_train_steps_ratio"]
 
-    # 3) Register components in the GLOBAL_LEDGER via watch_or_edit
-    # Logger
+    # --- 4) Register logger + hyperparameters ---
     logger = Logger()
     wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
 
-    # Hyperparameters (must use 'hyperparameters' flag for trainer services / UI)
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -201,71 +178,53 @@ if __name__ == "__main__":
         poll_interval=1.0,
     )
 
-    # -------------------------------------------------------------------------
-    # 4) Data (YCB train/val using ImageFolder, RGB)
-    # -------------------------------------------------------------------------
-    # Root with subfolders: train/<class>/..., val/<class>/...
+    # --- 5) Data (YCB train/val using ImageFolder, RGB) ---
     data_root = parameters.get("data", {}).get(
         "data_dir",
         os.path.join(parameters["root_log_dir"], "data", "ycb_datasets"),
     )
-
     train_dir = os.path.join(data_root, "train")
     val_dir = os.path.join(data_root, "val")
 
-    # Optional safety:
     if not os.path.isdir(train_dir):
         raise FileNotFoundError(f"Train dir not found: {train_dir}")
     if not os.path.isdir(val_dir):
         raise FileNotFoundError(f"Val dir not found: {val_dir}")
 
-    # RGB 3ximage_sizeximage_size, normalized roughly like MNIST but per channel
     image_size = parameters.get("image_size", 128)
-
     common_transform = transforms.Compose(
         [
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
-            transforms.ToTensor(),  # currently no normalization
+            transforms.ToTensor(),
         ]
     )
 
-    # Plain torchvision datasets — DataService will wrap them for tags/deny_listed
     _train_dataset = datasets.ImageFolder(root=train_dir, transform=common_transform)
     _test_dataset = datasets.ImageFolder(root=val_dir, transform=common_transform)
 
     num_classes = len(_train_dataset.classes)
-    print(f"Detected {num_classes} classes:")
-    print(_train_dataset.classes)
 
-    # Read data config in unified style: data.train_loader / data.test_loader
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
-
-    train_bs = train_cfg.get("batch_size", 16)
-    test_bs = test_cfg.get("batch_size", 16)
-    train_shuffle = train_cfg.get("train_shuffle", True)
-    test_shuffle = test_cfg.get("test_shuffle", False)
 
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
         name="train_loader",
-        batch_size=train_bs,
-        shuffle=train_shuffle,
+        batch_size=train_cfg.get("batch_size", 16),
+        shuffle=train_cfg.get("train_shuffle", True),
         is_training=True,
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
         flag="data",
         name="test_loader",
-        batch_size=test_bs,
-        shuffle=test_shuffle,
+        batch_size=test_cfg.get("batch_size", 16),
+        shuffle=test_cfg.get("test_shuffle", False),
     )
 
-    # -------------------------------------------------------------------------
-    # 5) Model & Optimizer (now that we know num_classes)
-    # -------------------------------------------------------------------------
+    # --- 6) Model, optimizer, losses, metric ---
     _model = YCBCNN(num_classes=num_classes, image_size=image_size)
     model = wl.watch_or_edit(_model, flag="model", name=exp_name, device=device)
 
@@ -273,7 +232,6 @@ if __name__ == "__main__":
     _optimizer = optim.Adam(model.parameters(), lr=lr)
     optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
 
-    # Losses & metric (watched objects – they log themselves)
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
@@ -293,17 +251,13 @@ if __name__ == "__main__":
         log=True,
     )
 
-    # 6) HARD-UNPAUSE global training state so guard_training_context can't block
-    try:
-        pause_controller.resume()
-        # In case resume() has a bug / race, force the internals too
-        if hasattr(pause_controller, "_paused"):
-            pause_controller._paused = False
-        if hasattr(pause_controller, "_event"):
-            pause_controller._event.set()
-        print(">>> Forced training to RUN state (pause_controller).")
-    except Exception as e:
-        print(f">>> Failed to force unpause: {e}")
+    # --- 7) Start WeightsLab services (UI + gRPC) ---
+    wl.serve(
+        serving_ui=True,
+        root_directory=log_dir,
+        serving_grpc=True,
+        n_workers_grpc=parameters.get("number_of_workers"),
+    )
 
     print("=" * 60)
     print("🚀 STARTING TRAINING")
@@ -312,17 +266,10 @@ if __name__ == "__main__":
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    train_range = (
-        tqdm.trange(max_steps, dynamic_ncols=True)
-        if tqdm_display
-        else range(max_steps)
-    )
-
-    for train_step in train_range:
-        # Train one step
+    # --- 8) Training loop ---
+    for train_step in tqdm.trange(max_steps, dynamic_ncols=True):
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
-        # Periodic full eval
         test_loss, test_metric = None, None
         if train_step % eval_every == 0:
             test_loss, test_metric = test(
@@ -333,7 +280,6 @@ if __name__ == "__main__":
                 device,
             )
 
-        # Verbose logging
         if train_step % 10 == 0 or test_loss is not None:
             status = f"[Step {train_step:5d}/{max_steps}] Train Loss: {train_loss:.4f}"
             if test_loss is not None:
@@ -343,11 +289,10 @@ if __name__ == "__main__":
             print(status)
 
     print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
 
-    # Keep the script running to serve requests for the UI
+    # Keep server alive for UI
     print("\nServer is still running. Press Ctrl+C to stop.")
     try:
         while True:
