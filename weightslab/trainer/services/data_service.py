@@ -175,18 +175,21 @@ class DataService:
 
     def ApplyDataQuery(self, request, context):
         """
-        Apply a query (structured or natural language) on the in-memory dataframe.
+        Apply a query on the in-memory dataframe.
+
+        Modes:
+          - request.query == ""  → just return counts, do not modify df
+          - request.query != ""  → always handled by the agent (natural language path)
 
         Counts returned:
-        - number_of_all_samples: all rows currently in the dataframe
-        - number_of_samples_in_the_loop: rows not deny_listed
-        - number_of_discarded_samples: rows with deny_listed == True
+          - number_of_all_samples: all rows currently in the dataframe
+          - number_of_samples_in_the_loop: rows not deny_listed
+          - number_of_discarded_samples: rows with deny_listed == True
         """
 
-        # Single authoritative df object (mutated in-place)
-        df = self._all_datasets_df
+        df = self._all_datasets_df  # authoritative DF, mutated in-place
 
-        # 1) No query → just return current counts, don't change df
+        # 1) No query: just report counts
         if request.query == "":
             return self._build_success_response(
                 df=df,
@@ -194,46 +197,42 @@ class DataService:
             )
 
         try:
-            # 2) Natural-language query (handled via agent)
-            if request.is_natural_language:
-                if self._agent is None:
-                    return pb2.DataQueryResponse(
-                        success=False,
-                        message="Natural language queries require agent (not available)",
-                    )
-
-                # Agent translates NL → operation spec
-                operation = self._agent.query(request.query) or {}
-                func = operation.get("function")  # e.g. 'df.query', 'df.sort_values', ...
-                params = operation.get("params", {}) or {}
-
-                # Agent-driven RESET has priority and returns immediately
-                if params.get("__agent_reset__"):
-                    logger.debug("[ApplyDataQuery] Agent requested reset")
-                    # Rebuild from datasets (the only place we replace the df object)
-                    self._all_datasets_df = self._pull_into_all_data_view_df()
-                    df = self._all_datasets_df
-                    return self._build_success_response(
-                        df=df,
-                        message="Reset view to base dataset",
-                    )
-
-                # All other agent-driven operations mutate df in-place
-                message = self._apply_agent_operation(df, func, params)
-
-            # 3) Structured query from UI (df.query expression)
-            else:
-                expr = request.query
+            # 2) All non-empty queries go through the agent
+            if not request.is_natural_language:
                 logger.debug(
-                    "[ApplyDataQuery] Applying structured df.query (in-place) with expr=%r on df shape=%s",
-                    expr, df.shape
+                    "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
+                    "treating query as natural language: %r",
+                    request.query,
                 )
-                kept = df.query(expr)
-                index_to_drop = df.index.difference(kept.index)
-                df.drop(index=index_to_drop, inplace=True)
-                message = f"Query [{request.query}] applied"
 
-            # 4) Return updated counts after mutation
+            if self._agent is None:
+                return pb2.DataQueryResponse(
+                    success=False,
+                    message="Natural language queries require agent (not available)",
+                )
+
+            # Agent translates query text → operation spec
+            operation = self._agent.query(request.query) or {}
+            func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
+            params = operation.get("params", {}) or {}
+
+            # 2a) Agent-driven RESET has highest priority
+            if params.get("__agent_reset__"):
+                logger.debug("[ApplyDataQuery] Agent requested reset")
+
+                # Rebuild from loaders; this is the only place we replace the df object
+                self._all_datasets_df = self._pull_into_all_data_view_df()
+                df = self._all_datasets_df
+
+                return self._build_success_response(
+                    df=df,
+                    message="Reset view to base dataset",
+                )
+
+            # 2b) All other agent operations mutate df in-place
+            message = self._apply_agent_operation(df, func, params)
+
+            # 3) Return updated counts after mutation
             return self._build_success_response(df=df, message=message)
 
         except Exception as e:
@@ -254,7 +253,7 @@ class DataService:
         """
         total_count = len(df)
         discarded_count = (
-            len(df[df.get("deny_listed", False) == True])
+            len(df[df.get("deny_listed", False) == True])  # noqa: E712
             if "deny_listed" in df.columns
             else 0
         )
