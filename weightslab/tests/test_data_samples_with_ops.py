@@ -254,7 +254,7 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
         self.losses = []
 
         for i in range(len(self.wrapped_dataset.wrapped_dataset)):
-            _, uid, label = self.wrapped_dataset._getitem_raw(i)
+            _, uid, label = self.wrapped_dataset._getitem_raw(index=i)
             loss = i / 60000  # artificial loss based on index, not UID
             self.wrapped_dataset.update_batch_sample_stats(
                 model_age=0, ids_batch=[uid],
