@@ -11,7 +11,7 @@ from torchvision import transforms
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from .service_utils import load_raw_image
-from .agent import DataManipulationAgent
+from .agent.agent import DataManipulationAgent
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -99,7 +99,6 @@ class DataService:
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
 
-
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
         row, request, df_columns = args
@@ -174,53 +173,28 @@ class DataService:
             logger.error(f"Error processing row for sample_id {row.get('sample_id', -1)}: {e}", exc_info=True)
             return None
 
-
     def ApplyDataQuery(self, request, context):
         """
         Apply a query (structured or natural language) on the in-memory dataframe.
 
-        - If request.query == "": just return counts.
-        - If is_natural_language: let the agent translate to an operation.
-        - Otherwise: treat query as a df.query expression.
+        Counts returned:
+        - number_of_all_samples: all rows currently in the dataframe
+        - number_of_samples_in_the_loop: rows not deny_listed
+        - number_of_discarded_samples: rows with deny_listed == True
         """
 
-        # Make sure we have a dataframe
-        if self._all_datasets_df is None:
-            try:
-                self._all_datasets_df = self._pull_into_all_data_view_df()
-            except Exception as e:
-                logger.error(f"ApplyDataQuery: could not build dataframe: {e}", exc_info=True)
-                return pb2.DataQueryResponse(
-                    success=False,
-                    message="Data service not available",
-                )
-
+        # Single authoritative df object (mutated in-place)
         df = self._all_datasets_df
 
-        # ---------------------------------------------------------------------
-        # 1) No query: just report counts
-        # ---------------------------------------------------------------------
+        # 1) No query → just return current counts, don't change df
         if request.query == "":
-            total_count = len(df)
-            discarded_count = (
-                len(df[df.get("deny_listed", False) == True])  # noqa: E712
-                if "deny_listed" in df.columns
-                else 0
-            )
-            in_loop_count = total_count - discarded_count
-
-            return pb2.DataQueryResponse(
-                success=True,
-                message=f"Current dataframe has {total_count} samples",
-                number_of_all_samples=total_count,
-                number_of_samples_in_the_loop=in_loop_count,
-                number_of_discarded_samples=discarded_count,
+            return self._build_success_response(
+                df=df,
+                message=f"Current dataframe has {len(df)} samples",
             )
 
         try:
-            # -----------------------------------------------------------------
-            # 2) Natural-language query (via agent)
-            # -----------------------------------------------------------------
+            # 2) Natural-language query (handled via agent)
             if request.is_natural_language:
                 if self._agent is None:
                     return pb2.DataQueryResponse(
@@ -228,84 +202,39 @@ class DataService:
                         message="Natural language queries require agent (not available)",
                     )
 
-                # Let the agent translate NL → operation spec
-                self._agent.df = df
+                # Agent translates NL → operation spec
                 operation = self._agent.query(request.query) or {}
-                func = operation.get("function")
+                func = operation.get("function")  # e.g. 'df.query', 'df.sort_values', ...
                 params = operation.get("params", {}) or {}
 
-                # Agent-driven reset
+                # Agent-driven RESET has priority and returns immediately
                 if params.get("__agent_reset__"):
                     logger.debug("[ApplyDataQuery] Agent requested reset")
-                    # Rebuild from datasets
+                    # Rebuild from datasets (the only place we replace the df object)
                     self._all_datasets_df = self._pull_into_all_data_view_df()
                     df = self._all_datasets_df
-
-                    total_count = len(df)
-                    discarded_count = (
-                        len(df[df.get("deny_listed", False) == True])  # noqa: E712
-                        if "deny_listed" in df.columns
-                        else 0
-                    )
-                    in_loop_count = total_count - discarded_count
-
-                    return pb2.DataQueryResponse(
-                        success=True,
+                    return self._build_success_response(
+                        df=df,
                         message="Reset view to base dataset",
-                        number_of_all_samples=total_count,
-                        number_of_samples_in_the_loop=in_loop_count,
-                        number_of_discarded_samples=discarded_count,
                     )
 
-                # df.query(expr) operation
-                if func == "df.query":
-                    expr = params.get("expr", "")
-                    logger.debug(
-                        "[ApplyDataQuery] Applying df.query with expr=%r on df shape=%s",
-                        expr, df.shape
-                    )
-                    self._all_datasets_df = df.query(expr)
-                    message = f"Applied query: {expr}"
-                else:
-                    # generic operation via agent
-                    logger.debug(
-                        "[ApplyDataQuery] Applying operation %s on df shape=%s",
-                        func, df.shape
-                    )
-                    self._all_datasets_df = self._agent.apply_operation(df, operation)
-                    message = f"Applied operation: {func}"
+                # All other agent-driven operations mutate df in-place
+                message = self._apply_agent_operation(df, func, params)
 
-            # -----------------------------------------------------------------
-            # 3) Structured query supplied directly by UI (df.query expression)
-            # -----------------------------------------------------------------
+            # 3) Structured query from UI (df.query expression)
             else:
                 expr = request.query
                 logger.debug(
-                    "[ApplyDataQuery] Applying structured df.query with expr=%r on df shape=%s",
+                    "[ApplyDataQuery] Applying structured df.query (in-place) with expr=%r on df shape=%s",
                     expr, df.shape
                 )
-                self._all_datasets_df = df.query(expr)
+                kept = df.query(expr)
+                index_to_drop = df.index.difference(kept.index)
+                df.drop(index=index_to_drop, inplace=True)
                 message = f"Query [{request.query}] applied"
 
-            # -----------------------------------------------------------------
-            # 4) Return updated counts
-            # -----------------------------------------------------------------
-            df = self._all_datasets_df
-            total_count = len(df)
-            discarded_count = (
-                len(df[df.get("deny_listed", False) == True])  # noqa: E712
-                if "deny_listed" in df.columns
-                else 0
-            )
-            in_loop_count = total_count - discarded_count
-
-            return pb2.DataQueryResponse(
-                success=True,
-                message=message,
-                number_of_all_samples=total_count,
-                number_of_samples_in_the_loop=in_loop_count,
-                number_of_discarded_samples=discarded_count,
-            )
+            # 4) Return updated counts after mutation
+            return self._build_success_response(df=df, message=message)
 
         except Exception as e:
             logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
@@ -313,6 +242,200 @@ class DataService:
                 success=False,
                 message=f"Failed to apply query: {str(e)}",
             )
+
+
+    def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
+        """
+        Centralized helper so every code path reports counts consistently.
+
+        - number_of_all_samples: all rows in df
+        - number_of_discarded_samples: rows with deny_listed == True (if column exists)
+        - number_of_samples_in_the_loop: rows not deny_listed
+        """
+        total_count = len(df)
+        discarded_count = (
+            len(df[df.get("deny_listed", False) == True])
+            if "deny_listed" in df.columns
+            else 0
+        )
+        in_loop_count = total_count - discarded_count
+
+        return pb2.DataQueryResponse(
+            success=True,
+            message=message,
+            number_of_all_samples=total_count,
+            number_of_samples_in_the_loop=in_loop_count,
+            number_of_discarded_samples=discarded_count,
+        )
+
+
+    def _apply_agent_operation(self, df, func: str, params: dict) -> str:
+        """
+        Apply an agent-described operation to df in-place.
+
+        Returns a short human-readable message describing what was applied.
+        """
+        # A) Agent-driven df.query → keep/filter rows via in-place drop
+        if func == "df.query":
+            expr = params.get("expr", "")
+            logger.debug(
+                "[ApplyDataQuery] Applying df.query (in-place) with expr=%r on df shape=%s",
+                expr, df.shape
+            )
+            kept = df.query(expr)
+            index_to_drop = df.index.difference(kept.index)
+            df.drop(index=index_to_drop, inplace=True)
+            return f"Applied query: {expr}"
+
+        # B) Other supported Pandas operations (drop, sort, head, tail, sample)
+        if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
+            func_name = func.replace("df.", "")
+
+            try:
+                # -------- DROP --------
+                if func_name == "drop" and "index" in params:
+                    index_expr = params["index"]
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.drop with index expression: %r",
+                        index_expr
+                    )
+                    index_to_drop = eval(index_expr, {"df": df, "np": np})
+                    df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: drop"
+
+                # ---- SORT_VALUES ----
+                if func_name == "sort_values":
+                    safe_params = params.copy()
+                    by = safe_params.get("by", [])
+                    if isinstance(by, str):
+                        by = [by]
+
+                    logger.debug(
+                        "[ApplyDataQuery] Preparing in-place sort_values on columns %s with params %s",
+                        by, safe_params
+                    )
+
+                    from pandas.api.types import (
+                        is_categorical_dtype,
+                        is_numeric_dtype,
+                        is_object_dtype,
+                    )
+
+                    # Sanitize sort columns so sort_values is less fragile
+                    for col in by:
+                        if col not in df.columns:
+                            continue
+
+                        s = df[col]
+
+                        # 1) Categorical → cast to str to avoid "categories must be unique"
+                        if is_categorical_dtype(s.dtype):
+                            logger.debug(
+                                "[ApplyDataQuery] Column %r is categorical; casting to str before sorting",
+                                col,
+                            )
+                            df[col] = s.astype(str)
+                            continue
+
+                        # 2) Object/string → try to interpret as numeric for better sorting
+                        if is_object_dtype(s.dtype) and not is_numeric_dtype(s.dtype):
+                            logger.debug(
+                                "[ApplyDataQuery] Column %r is object; attempting numeric conversion for sort",
+                                col,
+                            )
+                            converted = pd.to_numeric(s, errors="ignore")
+                            if is_numeric_dtype(converted.dtype):
+                                logger.debug(
+                                    "[ApplyDataQuery] Column %r converted to numeric dtype %s",
+                                    col, converted.dtype,
+                                )
+                                df[col] = converted
+
+                    safe_params["by"] = by
+                    safe_params["inplace"] = True
+
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.sort_values(inplace=True) with params=%s on df shape=%s",
+                        safe_params, df.shape
+                    )
+
+                    try:
+                        df.sort_values(**safe_params)
+                    except ValueError as e:
+                        # Fallback for categorical issues
+                        if "Categorical categories must be unique" in str(e):
+                            logger.warning(
+                                "[ApplyDataQuery] sort_values failed due to non-unique categorical "
+                                "categories; casting sort columns to str and retrying."
+                            )
+                            for col in by:
+                                if col in df.columns:
+                                    df[col] = df[col].astype(str)
+                            df.sort_values(**safe_params)
+                        else:
+                            raise
+
+                    return "Applied operation: sort_values"
+
+                # -------- HEAD --------
+                if func_name == "head":
+                    n = int(params.get("n", 5))
+                    logger.debug(
+                        "[ApplyDataQuery] Applying head (in-place) with n=%d on df shape=%s",
+                        n, df.shape
+                    )
+                    if n < len(df):
+                        index_to_keep = df.index[:n]
+                        index_to_drop = df.index.difference(index_to_keep)
+                        df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: head"
+
+                # -------- TAIL --------
+                if func_name == "tail":
+                    n = int(params.get("n", 5))
+                    logger.debug(
+                        "[ApplyDataQuery] Applying tail (in-place) with n=%d on df shape=%s",
+                        n, df.shape
+                    )
+                    if n < len(df):
+                        index_to_keep = df.index[-n:]
+                        index_to_drop = df.index.difference(index_to_keep)
+                        df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: tail"
+
+                # ------ SAMPLE -------
+                if func_name == "sample":
+                    logger.debug(
+                        "[ApplyDataQuery] Applying sample (in-place) with params=%s on df shape=%s",
+                        params, df.shape
+                    )
+                    # Support either n or frac; default to 50% if unspecified
+                    n = params.get("n")
+                    frac = params.get("frac")
+                    if n is not None:
+                        sampled = df.sample(n=int(n))
+                    elif frac is not None:
+                        sampled = df.sample(frac=float(frac))
+                    else:
+                        sampled = df.sample(frac=0.5)
+
+                    index_to_drop = df.index.difference(sampled.index)
+                    df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: sample"
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to apply agent operation {func_name} with params {params}: {e}",
+                    exc_info=True
+                )
+                return f"Failed to apply {func_name}: {e}"
+
+        # C) Unrecognized function: no-op, but log it
+        logger.warning(
+            "[ApplyDataQuery] Agent returned unrecognized function: %s. No operation applied.",
+            func
+        )
+        return "No operation applied"
 
     def GetDataSamples(self, request, context):
         """
@@ -372,8 +495,11 @@ class DataService:
                 data_records=[]
             )
 
+    
     def EditDataSample(self, request, context):
-        """Edit sample metadata (tags, deny_listed, etc.)."""
+        """
+        Edit sample metadata (tags, deny_listed, etc.).
+        """
 
         # Make sure dataframe + editable wrappers are initialized
         if self._all_datasets_df is None:
@@ -484,12 +610,6 @@ class DataService:
                     )
             except Exception as e:
                 logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
-
-        # ---------------------------------------------------------------------
-        # 3) Keep the optional agent in sync
-        # ---------------------------------------------------------------------
-        if self._agent is not None and self._all_datasets_df is not None:
-            self._agent.df = self._all_datasets_df
 
         return pb2.DataEditsResponse(
             success=True,
