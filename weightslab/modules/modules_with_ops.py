@@ -524,7 +524,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         self.device = args[0]
         for tracker in self.get_trackers():
             tracker.to(*args, **kwargs)
-
+        
     def register(
             self,
             activation_map: th.Tensor

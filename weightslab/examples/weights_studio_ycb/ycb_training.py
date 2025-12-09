@@ -143,7 +143,7 @@ if __name__ == "__main__":
     # 1) Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
         serving_grpc=True,
-        n_workers_grpc=6,
+        n_workers_grpc=None,
         port_grpc=50051,
         serving_cli=True,  # no CLI TCP server, no extra terminal
         host_cli="127.0.0.1",

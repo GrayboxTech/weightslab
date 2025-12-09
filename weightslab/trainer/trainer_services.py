@@ -54,21 +54,21 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # -------------------------------------------------------------------------
     def GetSamples(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetSamples({request})")
-        return self._exp_service.model_service.get_samples(request)
+        return self._exp_service.model_service.GetSamples(request, context)
 
     # -------------------------------------------------------------------------
     # Weights inspection
     # -------------------------------------------------------------------------
     def GetWeights(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetWeights({request})")
-        return self._exp_service.model_service.get_weights(request)
+        return self._exp_service.model_service.GetWeights(request, context)
 
     # -------------------------------------------------------------------------
     # Activations
     # -------------------------------------------------------------------------
     def GetActivations(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetActivations({request})")
-        return self._exp_service.model_service.get_activations(request)
+        return self._exp_service.model_service.GetActivations(request, context)
 
     # -------------------------------------------------------------------------
     # Data service helpers + RPCs (for weights_studio UI)
@@ -100,7 +100,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
 # -----------------------------------------------------------------------------
-def grpc_serve(n_workers_grpc: int = 4, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
+def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
     """Configure trainer services such as gRPC server.
 
     Args:

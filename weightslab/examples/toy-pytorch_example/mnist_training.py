@@ -9,9 +9,10 @@ import torch.nn as nn
 import weightslab as wl
 import torch.optim as optim
 import yaml
+import itertools
 
 from torchvision import datasets, transforms
-from torch.utils.data import Dataset, ConcatDataset
+from torch.utils.data import Subset
 from torchmetrics.classification import Accuracy
 
 from weightslab.utils.board import Dash as Logger
@@ -147,6 +148,7 @@ if __name__ == '__main__':
     # Wire more optional parameters
     log_dir = parameters.get('root_log_dir')
     tqdm_display = parameters.get('tqdm_display', True)
+    verbose = parameters.get('verbose', True)
 
     # ========================
     # Watch or Edit Components
@@ -159,7 +161,7 @@ if __name__ == '__main__':
 
     # Model
     _model = CNN()
-    model = wl.watch_or_edit(_model, flag='model', name='model', device=parameters.get('device', device))
+    model = wl.watch_or_edit(_model, flag='model', name='model', device=device)
 
     # Optimizer
     lr = parameters.get('optimizer', {}).get('lr', 0.01)
@@ -176,6 +178,9 @@ if __name__ == '__main__':
             transforms.Normalize((0.5,), (0.5,))
         ])
     )
+    # Limit to first 1000 images
+    _train_dataset = Subset(_train_dataset, range(min(1000, len(_train_dataset))))
+    
     _test_dataset = datasets.MNIST(
         root=os.path.join(parameters.get('root_log_dir'), 'data'),
         train=False,
@@ -185,59 +190,8 @@ if __name__ == '__main__':
             transforms.Normalize((0.5,), (0.5,))
         ])
     )
-
-    # --- Helpers to manipulate indices and data without copying transforms ---
-    class IndexMappingDataset(Dataset):
-        """Proxy dataset that remaps indices to a base dataset."""
-        def __init__(self, base_ds: Dataset, index_map: list[int]):
-            self.base = base_ds
-            self.index_map = index_map
-
-        def __len__(self):
-            return len(self.index_map)
-
-        def __getitem__(self, idx):
-            return self.base[self.index_map[idx]]
-
-    class TensorListDataset(Dataset):
-        """Simple dataset backed by in-memory lists of tensors and labels."""
-        def __init__(self, images, labels):
-            self.images = images
-            self.labels = labels
-
-        def __len__(self):
-            return len(self.images)
-
-        def __getitem__(self, idx):
-            return self.images[idx], self.labels[idx]
-
-    # --- Build train with duplicates: last 1000 equal to first 1000 ---
-    base_train_len = len(_train_dataset)
-    dup_k = min(1000, base_train_len)
-    train_index_map = list(range(base_train_len)) + list(range(dup_k))
-    _train_dataset = IndexMappingDataset(_train_dataset, train_index_map)
-
-    # --- Build test so last 100 equal to last 100 of train (after duplication) ---
-    base_test_len = len(_test_dataset)
-    tail_n = min(100, len(_train_dataset))
-
-    # 1) First part: original test minus last 100 slots
-    head_len = max(0, base_test_len - tail_n)
-    test_head = IndexMappingDataset(_test_dataset, list(range(head_len)))
-
-    # 2) Tail from train's last 100 samples (post-dup)
-    tail_images, tail_labels = [], []
-    start_tail = len(_train_dataset) - tail_n
-    for i in range(start_tail, start_tail + tail_n):
-        img, lbl = _train_dataset[i]
-        tail_images.append(img)
-        tail_labels.append(lbl)
-    test_tail = TensorListDataset(tail_images, tail_labels)
-
-    # 3) Final test is concatenation
-    _test_dataset = ConcatDataset([test_head, test_tail])
-    
-
+    # Limit to first 1000 images
+    _test_dataset = Subset(_test_dataset, range(min(1000, len(_test_dataset))))
     train_bs = parameters.get('data', {}).get('train_dataset', {}).get('batch_size', 16)
     test_bs = parameters.get('data', {}).get('test_dataset', {}).get('batch_size', 16)
     train_shuffle = parameters.get('data', {}).get('train_dataset', {}).get('train_shuffle', True)
@@ -272,15 +226,14 @@ if __name__ == '__main__':
         # UI client settings
         serving_ui=True,
         root_directory=log_dir,
-        
+
         # gRPC server settings
         serving_grpc=True,
-        n_workers_grpc=2,
+        n_workers_grpc=None,
 
         # CLI server settings
         serving_cli=True
     )
-
 
     print("=" * 60)
     print("🚀 STARTING TRAINING")
@@ -295,22 +248,33 @@ if __name__ == '__main__':
     max_steps = parameters.get('training_steps_to_do', 6666)
     train_range = range(max_steps)
     if tqdm_display:
-        train_range = tqdm.trange(max_steps, dynamic_ncols=True)
+        train_range = tqdm.tqdm(itertools.count(), desc="Training")
+    else:
+        train_range = itertools.count()
+    test_loss, test_metric = None, None
     for train_step in train_range:
         # Train
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Test
-        test_loss, test_metric = None, None
-        if train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
+        if train_step == 0 or train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
             test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device)
 
         # Verbose
-        print(
-            f"Step {train_step}/{max_steps}: " +
-            f"| Train Loss: {train_loss:.4f} " +
-            (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
-            (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
-        )
+        if verbose and not tqdm_display:
+            print(
+                f"Training.. " +
+                f"Step {train_step}/{max_steps}: " +
+                f"| Train Loss: {train_loss:.4f} " +
+                (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
+                (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
+            )
+        elif tqdm_display:
+            train_range.set_description(f"Step {train_step}")
+            train_range.set_postfix(
+                train_loss=f"{train_loss:.4f}",
+                test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
+                acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
+            )
     print(f"--- Training completed in {time.time() - start_time:.2f} seconds ---")
     print(f"Log directory: {log_dir}")

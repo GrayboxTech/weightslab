@@ -182,6 +182,7 @@ class ModelInterface(NetworkWithOps):
                         if latest:
                             # best-effort load into ledger-registered objects
                             self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
+                            self.to(device)  # ensure model on correct device after load
                     except Exception:
                         pass
             except Exception:

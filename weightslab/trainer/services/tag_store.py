@@ -18,14 +18,18 @@ logger = logging.getLogger(__name__)
 
 
 class TagsStore:
-    """HDF5 tag store with support for multiple tags per UID."""
+    """HDF5 tag store with support for multiple tags per UID.
+    
+    Now unified with sample_stats.h5 - both use the same file at
+    root_log_dir/data/sample_stats.h5 with a 'tags' table.
+    """
 
-    def __init__(self, root_log_dir: Path, filename: str = "tags.h5"):
+    def __init__(self, root_log_dir: Path, filename: str = "sample_stats.h5"):
         self.root_log_dir = Path(root_log_dir) / "data"
         self.root_log_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.root_log_dir / filename
         self._lock = threading.RLock()
-        logger.info(f"TagsStore initialized at {self.path}")
+        logger.info(f"TagsStore initialized at {self.path} (unified with DataSampleTrackingWrapper)")
 
     def load_tags(self, uids: Iterable[int]) -> Dict[int, List[str]]:
         """Load tags for the specified UIDs from HDF5.
@@ -57,7 +61,7 @@ class TagsStore:
         result = {}
         for row in df.itertuples():
             uid = int(row.uid)
-            tags_str = str(row.tags) if hasattr(row, 'tags') else ""
+            tags_str = str(row.tags_list) if hasattr(row, 'tags_list') else ""
             # Parse comma-separated tags
             tag_list = [t.strip() for t in tags_str.split(",") if t.strip()]
             result[uid] = tag_list
@@ -76,7 +80,7 @@ class TagsStore:
         # Convert tag lists to comma-separated strings
         df = pd.DataFrame({
             "uid": [int(k) for k in tag_map.keys()],
-            "tags": [",".join(v) if v else "" for v in tag_map.values()],
+            "tags_list": [",".join(v) if v else "" for v in tag_map.values()],
         })
 
         with self._lock:
@@ -91,7 +95,7 @@ class TagsStore:
                 # Append new/updated entries
                 store.append("tags", df, format="table", data_columns=["uid"])
 
-        logger.info(f"Saved tags for {len(tag_map)} UID(s) to {self.path}")
+        logger.info(f"Saved tags for {len(tag_map)} UID(s) to unified {self.path}")
 
     def add_tags(self, uid: int, tags_to_add: List[str]) -> None:
         """Add tags to a UID without removing existing ones."""

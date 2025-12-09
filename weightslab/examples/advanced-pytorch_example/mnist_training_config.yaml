@@ -16,10 +16,6 @@ tqdm_display: true
 # fresh runs or debugging).
 skip_loading: true
 
-# Number of train steps between evaluation runs (or evaluation scheduling
-# parameter used by the example script). Smaller values => more frequent evals.
-eval_steps: 50
-
 
 # ----- Experiment identity and scheduling -----
 

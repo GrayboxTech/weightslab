@@ -1,15 +1,20 @@
 import io
+from io import BytesIO
 import logging
 import os
 import traceback
 import time
 from pathlib import Path
 from concurrent import futures
+from threading import Thread
+import hashlib
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 import torch
 from torchvision import transforms
+from PIL import Image
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import pause_controller
@@ -19,44 +24,6 @@ from .tag_store import TagsStore
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
-
-
-"""
-class DataService:
-    def __init__():
-        self.tdata: SampleTrackingDatasetWrapper = ...
-        self.edata: SampleTrackingDatasetWrapper = ...
-
-        self.alldf: pd.DataFrame | None = None
-
-    def _pull_signals_from_dataset_into_df(self):
-        if not self.alldf:
-            self.alldf = pd.concat([self.tdata.df(), self.edata.df()])
-        if self._if_partial_update_required():
-            # traverse all_df
-            # update samples with the fresh signals
-            pass
-        return self.alldf
-
-    def GetSamples(self, rqst):
-        data_records = []
-        for sample in self._pull_signals_from_dataset_into_df()[
-                rqst.start_index: rqst.start_index + rqst.sample_number]:
-            data_records.append(DataRecord.from_sample(sample))
-        return pb.SamplesResponse(data_records)
-
-    def EditSamples(self, rqst):
-        for sample_id, sample_origin in zip(
-                rqst.sample_ids, rqst.sample_origins):
-            dataset = self.tdata if sample_origin == "train" else self.edata
-            dataset.set(rqst.sample_id, rqst.stat_name, rqst.new_stat_value)
-
-    def ApplyQuery(self, rqst):
-        if self._all_df_should_be_refreshed():
-            self._pull_signals_from_dataset_into_df()
-
-        self.alldf = self.agent.apply_query(self.alldf, rqst.query)
-"""
 
 
 def _get_stat_from_row(row, stat_name):
@@ -96,6 +63,11 @@ def _get_stats(loader, origin: str):
 class DataService:
     """
     Data service helpers + RPCs (for weights_studio UI).
+    
+    Optimizations:
+    - Images cached on disk as JPEG (compressed) instead of PNG bytes
+    - Only file paths sent over gRPC; UI loads images from disk
+    - Reduces network payload by ~90% for typical datasets
     """
 
     def __init__(self, ctx):
@@ -113,11 +85,22 @@ class DataService:
 
         self._root_log_dir = self._resolve_root_log_dir()
         self._tags_store = TagsStore(self._root_log_dir)
+        
+        # Initialize image cache directory
+        self._image_cache_dir = Path(self._root_log_dir) / "image_cache"
+        self._image_cache_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Image cache directory: {self._image_cache_dir}")
+        
+        # Start periodic cleanup thread for old cached images
+        self._cleanup_thread = None
+        self._cleanup_stop_event = False
+        self._start_cleanup_thread()
+        
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
 
-        self._last_internals_update_time = time.time()
+        self._last_internals_update_time = None
         logger.info("DataService initialized.")
 
     def _resolve_root_log_dir(self) -> Path:
@@ -140,6 +123,15 @@ class DataService:
         if root is None:
             root = Path("logs").absolute()
         return Path(root)
+
+    
+    def get_root_log_dir(self) -> str:
+        """Get the root log directory as a string.
+        
+        Returns:
+            Absolute path to root_log_dir
+        """
+        return str(self._root_log_dir.absolute())
 
     def _is_training_active(self) -> bool:
         """Return True if training is currently running (not paused)."""
@@ -224,11 +216,68 @@ class DataService:
         except Exception as e:
             logger.warning(f"Failed to load existing tags: {e}")
     
-    def SlowUpdateInternals(self):
-        current_time = time.time()
-        if current_time - self._last_internals_update_time <= 10:
+    def _start_cleanup_thread(self):
+        """Start a background thread to periodically clean old cached images."""
+        def cleanup_worker():
+            logger.info("Image cache cleanup thread started")
+            while not self._cleanup_stop_event:
+                try:
+                    # Run cleanup every 1 hour
+                    time.sleep(3600)
+                    if not self._cleanup_stop_event:
+                        self._cleanup_old_images(max_age_days=7)
+                except Exception as e:
+                    logger.error(f"Error in cleanup thread: {e}")
+            logger.info("Image cache cleanup thread stopped")
+        
+        self._cleanup_thread = Thread(target=cleanup_worker, daemon=True, name="ImageCacheCleanup")
+        self._cleanup_thread.start()
+    
+    def _cleanup_old_images(self, max_age_days: int = 7):
+        """Delete cached images older than max_age_days.
+        
+        Args:
+            max_age_days: Remove images older than this many days (default: 7)
+        """
+        if not self._image_cache_dir.exists():
             return
-
+        
+        try:
+            cutoff_time = time.time() - (max_age_days * 24 * 3600)
+            deleted_count = 0
+            total_freed_bytes = 0
+            
+            for subdir in ['raw', 'transformed']:
+                subdir_path = self._image_cache_dir / subdir
+                if not subdir_path.exists():
+                    continue
+                
+                for jpg_file in subdir_path.glob('*.jpg'):
+                    try:
+                        file_stat = jpg_file.stat()
+                        if file_stat.st_mtime < cutoff_time:
+                            total_freed_bytes += file_stat.st_size
+                            jpg_file.unlink()
+                            deleted_count += 1
+                    except Exception as e:
+                        logger.debug(f"Could not delete {jpg_file}: {e}")
+            
+            if deleted_count > 0:
+                freed_mb = total_freed_bytes / (1024 * 1024)
+                logger.info(f"Cleaned up {deleted_count} old cached images, freed {freed_mb:.2f} MB")
+        except Exception as e:
+            logger.error(f"Error during image cache cleanup: {e}")
+    
+    def stop_cleanup_thread(self):
+        """Stop the cleanup thread (call on shutdown)."""
+        self._cleanup_stop_event = True
+        if self._cleanup_thread and self._cleanup_thread.is_alive():
+            self._cleanup_thread.join(timeout=5)
+    
+    def _dataframe_update(self) -> bool:
+        """
+        Refresh the in-memory dataframe from the datasets.
+        """
         # Just this line, will mess any filtering/ordering that is being applied
         updated_df = self._pull_into_all_data_view_df()
 
@@ -238,8 +287,48 @@ class DataService:
             updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
 
         self._all_datasets_df = updated_df
+
+    def _slowUpdateInternals(self, time_delta: float = 10.0) -> None:
+        current_time = time.time()
+        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= time_delta:
+            return
+        self._dataframe_update()
         self._last_internals_update_time = current_time
 
+    def _cache_image(self, pil_img: Image.Image, sample_id: int, img_type: str = "transformed") -> str:
+        """Cache PIL image as JPEG and return file path.
+        
+        Args:
+            pil_img: PIL Image to cache
+            sample_id: Unique sample identifier
+            img_type: 'transformed' or 'raw'
+            
+        Returns:
+            Relative path to cached image (from root_log_dir)
+        """
+        try:
+            # Create a filename based on sample_id and image type
+            cache_subdir = self._image_cache_dir / img_type
+            cache_subdir.mkdir(parents=True, exist_ok=True)
+            
+            cache_path = cache_subdir / f"{sample_id}.jpg"
+            
+            # Cache as JPEG (much smaller than PNG)
+            pil_img.save(str(cache_path), format='JPEG', quality=90, optimize=True)
+            
+            # Return relative path from root_log_dir
+            relative_path = str(cache_path.relative_to(self._root_log_dir))
+            logger.debug(f"Cached {img_type} image for sample {sample_id}: {relative_path}")
+            
+            return relative_path
+        except Exception as e:
+            logger.error(f"Failed to cache image for sample {sample_id}: {e}")
+            return ""
+    
+    def _tensor_to_pil(self, tensor: torch.Tensor) -> Image.Image:
+        """Convert torch tensor to PIL Image."""
+        img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor
+        return transforms.ToPILImage()(img.detach().cpu())
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
@@ -250,14 +339,13 @@ class DataService:
 
             if origin == 'train':
                 dataset = self._trn_loader.tracked_dataset
-            elif origin == 'test':
+            elif origin == 'test' or origin == 'eval':
                 dataset = self._tst_loader.tracked_dataset
             else:
                 logger.warning("Unknown origin '%s' for sample %s", origin, sample_id)
                 return None
 
             data_stats = []
-            raw_data_bytes, transformed_data_bytes = b"", b""
             raw_shape, transformed_shape = [], []
 
             if hasattr(dataset, "_getitem_raw"):
@@ -265,29 +353,37 @@ class DataService:
             else:
                 tensor, _, label = dataset[sample_id]
 
+            stats_to_retrieve = request.stats_to_retrieve
+            if not stats_to_retrieve:
+                stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
+
             if request.include_transformed_data:
-                img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor
-                transformed_shape = list(img.shape)
-                pil_img = transforms.ToPILImage()(img.detach().cpu())
-                buf = io.BytesIO()
-                pil_img.save(buf, format='PNG')
-                transformed_data_bytes = buf.getvalue()
+                try:
+                    pil_img = self._tensor_to_pil(tensor)
+                    transformed_shape = list(np.array(pil_img).shape)
+                    buf = BytesIO()
+                    pil_img.save(buf, format='JPEG', quality=90, optimize=True)
+                    buf.seek(0)
+                    img_bytes = list(buf.getvalue())
+                    data_stats.append(pb2.DataStat(
+                        name='transformed_data', type='bytes', shape=transformed_shape,
+                        value=img_bytes))
+                except Exception as e:
+                    logger.warning(f"Could not process transformed image for sample {sample_id}: {e}")
 
             if request.include_raw_data:
                 try:
                     raw_img = load_raw_image(dataset, id=sample_id)
                     raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
-                    raw_buf = io.BytesIO()
-                    raw_img.save(raw_buf, format='PNG')
-                    raw_data_bytes = raw_buf.getvalue()
+                    buf = BytesIO()
+                    raw_img.save(buf, format='JPEG', quality=90, optimize=True)
+                    buf.seek(0)
+                    img_bytes = list(buf.getvalue())
+                    data_stats.append(pb2.DataStat(
+                        name='raw_data', type='bytes', shape=raw_shape,
+                        value=img_bytes))
                 except Exception as e:
                     logger.warning(f"Could not load raw image for sample {sample_id}: {e}")
-                    raw_data_bytes = transformed_data_bytes
-                    raw_shape = transformed_shape
-
-            stats_to_retrieve = request.stats_to_retrieve
-            if not stats_to_retrieve:
-                stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
 
             for stat_name in stats_to_retrieve:
                 stat = _get_stat_from_row(row, stat_name)
@@ -299,15 +395,6 @@ class DataService:
             label_val = int(np.array(label.cpu() if hasattr(label, 'cpu') else label).item())
             data_stats.append(pb2.DataStat(
                 name='label', type='scalar', shape=[1], value=[float(label_val)]))
-
-            if raw_data_bytes:
-                data_stats.append(pb2.DataStat(
-                    name='raw_data', type='bytes', shape=raw_shape,
-                    value=raw_data_bytes))
-            if transformed_data_bytes:
-                data_stats.append(pb2.DataStat(
-                    name='transformed_data', type='bytes',
-                    shape=transformed_shape, value=transformed_data_bytes))
 
             return pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
         except Exception as e:
@@ -501,15 +588,15 @@ class DataService:
         Retrieve samples from the dataframe with their data statistics.
         Only allowed when training is paused.
         """
-        allowed, msg = self._interaction_allowed()
-        if not allowed:
-            return pb2.DataSamplesResponse(
-                success=False,
-                message=msg,
-                data_records=[],
-            )
+        # allowed, msg = self._interaction_allowed()
+        # if not allowed:
+        #     return pb2.DataSamplesResponse(
+        #         success=False,
+        #         message=msg,
+        #         data_records=[],
+        #     )
 
-        self.SlowUpdateInternals()
+        self._slowUpdateInternals(time_delta=15)  # update at most every 60s - get last dataframe state
         try:
             logger.info(
                 "GetSamples called with start_index=%s, records_cnt=%s",

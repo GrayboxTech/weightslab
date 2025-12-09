@@ -340,7 +340,7 @@ def load_raw_image(dataset, index):
 
 def _get_input_tensor_for_sample(dataset, sample_id, device):
     if hasattr(dataset, "_getitem_raw"):
-        tensor, _, _ = dataset._getitem_raw(sample_id)
+        tensor, _, _ = dataset._getitem_raw(id=sample_id)
     else:
         tensor, _ = dataset[sample_id]
 
@@ -358,7 +358,7 @@ def _get_input_tensor_for_sample(dataset, sample_id, device):
 def process_sample(sid, dataset, do_resize, resize_dims, experiment):
     try:
         if hasattr(dataset, "_getitem_raw"):
-            tensor, idx, label = dataset._getitem_raw(sid)
+            tensor, idx, label = dataset._getitem_raw(id=sid)
         else:
             tensor, idx, label = dataset[sid]
 

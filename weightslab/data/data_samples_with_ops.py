@@ -3,7 +3,6 @@ import torch as th
 import numpy as np
 import pandas as pd
 import random as rnd
-import os
 import threading
 from pathlib import Path
 
@@ -150,6 +149,7 @@ class DataSampleTrackingWrapper(Dataset):
                 kept_indices.append(idx)
         num_duplicates = len(self.unique_ids) - len(kept_indices)
         self.unique_ids = self.unique_ids[kept_indices]
+        self.unique_id_to_index = {uid: i for i, uid in enumerate(self.unique_ids)}
         if num_duplicates > 0:
             logger.warning(
                 f"[DataSampleTrackingWrapper] Found {num_duplicates} duplicate samples. "
@@ -157,7 +157,7 @@ class DataSampleTrackingWrapper(Dataset):
             )
             # Wrap the original dataset with Subset to only expose non-duplicate indices
             wrapped_dataset = Subset(wrapped_dataset, kept_indices)
-        
+            
         # Now proceed with initialization using the deduplicated dataset
         self.__name__ = wrapped_dataset.__name__ if hasattr(
             wrapped_dataset,
@@ -276,11 +276,8 @@ class DataSampleTrackingWrapper(Dataset):
                 logger.warning(f"Failed to generate ID for sample {idx}: {e}")
                 return idx, idx  # Fallback to index as ID
         
-        # Use ThreadPoolExecutor for I/O-bound data loading
-        # Adjust max_workers based on your system (typically CPU count)
-        max_workers = min(mp.cpu_count(), 8)
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Use ThreadPoolExecubased on your system (typically CPU count)
+        with ThreadPoolExecutor() as executor:
             # Submit all tasks
             futures = {executor.submit(compute_id, idx): idx for idx in range(n_samples)}
             
@@ -448,16 +445,16 @@ class DataSampleTrackingWrapper(Dataset):
         return value
 
     def get_prediction_age(self, sample_id: int) -> int:
-        return self.get(sample_id, SampleStatsEx.PREDICTION_AGE, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_AGE, raw=True)
 
     def get_prediction_loss(self, sample_id: int) -> float:
-        return self.get(sample_id, SampleStatsEx.PREDICTION_LOSS, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_LOSS, raw=True)
 
     def get_exposure_amount(self, sample_id: int) -> int:
-        return self.get(sample_id, SampleStatsEx.ENCOUNTERED, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.ENCOUNTERED, raw=True)
 
     def is_deny_listed(self, sample_id: int) -> bool:
-        return self.get(sample_id, SampleStatsEx.DENY_LISTED, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DENY_LISTED, raw=True)
 
     def update_sample_stats(self,
                             sample_id: int,
@@ -471,7 +468,7 @@ class DataSampleTrackingWrapper(Dataset):
         exposure_amount = 1
         if sample_id in self.sample_statistics[SampleStatsEx.ENCOUNTERED]:
             exposure_amount = 1 + \
-                self.get(sample_id, SampleStatsEx.ENCOUNTERED)
+                self.get(sample_id=sample_id, stat_name=SampleStatsEx.ENCOUNTERED)
         self.set(sample_id, SampleStatsEx.ENCOUNTERED.value, exposure_amount)
         if sample_id not in self.sample_statistics[SampleStatsEx.DENY_LISTED]:
             self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
@@ -673,12 +670,12 @@ class DataSampleTrackingWrapper(Dataset):
                 exposure_amount = self.get_exposure_amount(sample_id)
 
                 prediction_class = self.get(
-                    sample_id, SampleStatsEx.PREDICTION_RAW.value, raw=True)
+                    id=sample_id, stat_name=SampleStatsEx.PREDICTION_RAW.value, raw=True)
             except (KeyError, IndexError) as e:
                 logger.error(f"Sample {sample_id}: Failed to get prediction - {type(e).__name__} {e}")
             
             try:
-                label = self.get(sample_id, SampleStatsEx.TARGET, raw=True)
+                label = self.get(sample_id=sample_id, stat_name=SampleStatsEx.TARGET, raw=True)
             except (KeyError, IndexError) as e:
                 logger.error(f"Sample {sample_id}: Failed to get label - {type(e).__name__} {e}")
 
@@ -799,7 +796,7 @@ class DataSampleTrackingWrapper(Dataset):
                 if limit >= 0 and idx >= limit:
                     break
                 sample_id = int(sample_id)
-                stat_value = self.get(sample_id, stat_name, raw=True)
+                stat_value = self.get(sample_id=sample_id, stat_name=stat_name, raw=True)
                 data_frame.loc[sample_id, stat_name] = stat_value
 
         for ex_key in sorted(self._ex_columns_cache):
@@ -821,7 +818,7 @@ class DataSampleTrackingWrapper(Dataset):
                 break
             row = {}
             for stat_name in SampleStatsEx.ALL():
-                row[stat_name] = self.get(sample_id, stat_name)
+                row[stat_name] = self.get(sample_id=sample_id, stat_name=stat_name)
             for ex_key in self._ex_columns_cache:
                 v = self.sample_statistics_ex.get(ex_key, {}).get(sample_id)
                 if v is not None:
@@ -840,14 +837,16 @@ class DataSampleTrackingWrapper(Dataset):
             self.dataframe = self._get_stats_dataframe(limit=limit)
         return self.dataframe
 
-    def __getitem__(self, index: int,):
+    def __getitem__(self, index: int, id: int = None):
+        if index is None and id is not None:
+            index = self.unique_id_to_index[id]
         if self.idx_to_idx_remapp:
             try:
                 # This should keep indexes consistent during the data slicing.
                 index = self.idx_to_idx_remapp[index]
             except KeyError as err:
                 raise IndexError() from err
-        return self._getitem_raw(index)
+        return self._getitem_raw(index=index)
 
     def _getitem_raw(self, index: int = None, id: int = None):
         if index is None and id is not None:
@@ -869,8 +868,84 @@ class DataSampleTrackingWrapper(Dataset):
             key = f"pred/{task_name}"
             if key in self.dense_stats_store:
                 return self.dense_stats_store[key].get(sample_id)
-        return self.get(sample_id, SampleStatsEx.PREDICTION_RAW, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_RAW, raw=True)
     
+    def save_tags_to_h5(self, tag_map: Dict[int, list]) -> None:
+        """Save multiple tags per UID to the unified H5 file (tags table).
+        
+        Args:
+            tag_map: Dict mapping uid -> list of tags
+        """
+        if not self._h5_path or not tag_map:
+            return
+        
+        with self._h5_lock:
+            try:
+                # Convert tag lists to comma-separated strings for storage
+                df = pd.DataFrame({
+                    "uid": [int(k) for k in tag_map.keys()],
+                    "tags_list": [",".join(v) if v else "" for v in tag_map.values()],
+                })
+                
+                with pd.HDFStore(str(self._h5_path), mode='a', complevel=1, complib='blosc') as store:
+                    # Remove old entries for these UIDs if they exist
+                    if 'tags' in store:
+                        for uid in df['uid']:
+                            try:
+                                store.remove('tags', where=f'uid=={int(uid)}')
+                            except Exception:
+                                pass
+                    # Append new/updated entries
+                    store.append('tags', df, format='table', data_columns=['uid'])
+                
+                logger.debug(f"[DataSampleTrackingWrapper] Saved multi-tags for {len(tag_map)} UID(s) to {self._h5_path}")
+            except Exception as e:
+                logger.error(f"[DataSampleTrackingWrapper] Failed to save tags to H5: {e}")
+    
+    def load_tags_from_h5(self, uids: list) -> Dict[int, list]:
+        """Load multiple tags per UID from the unified H5 file.
+        
+        Args:
+            uids: List of UIDs to load tags for
+            
+        Returns:
+            Dict mapping uid -> list of tags (empty list if no tags)
+        """
+        if not self._h5_path or not self._h5_path.exists():
+            return {}
+        
+        ids = sorted({int(uid) for uid in (uids or [])})
+        if not ids:
+            return {}
+        
+        with self._h5_lock:
+            try:
+                with pd.HDFStore(str(self._h5_path), mode='r') as store:
+                    if 'tags' not in store:
+                        return {}
+                    
+                    # Stream-friendly: query only the requested UIDs
+                    try:
+                        where_clause = f"uid in {ids}"
+                        df = store.select('tags', where=where_clause)
+                    except Exception:
+                        # Fallback if query fails
+                        df = store.select('tags')
+                        df = df[df['uid'].isin(ids)]
+            except Exception as e:
+                logger.warning(f"Failed to load tags from H5: {e}")
+                return {}
+        
+        result = {}
+        for row in df.itertuples():
+            uid = int(row.uid)
+            tags_str = str(row.tags_list) if hasattr(row, 'tags_list') else ""
+            # Parse comma-separated tags
+            tag_list = [t.strip() for t in tags_str.split(",") if t.strip()]
+            result[uid] = tag_list
+        
+        return result
+
     def _save_stats_to_h5(self):
         """Save SampleStatsEx to H5 file for persistence across restarts."""
         if not self._h5_path:

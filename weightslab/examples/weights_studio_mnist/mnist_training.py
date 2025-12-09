@@ -140,7 +140,7 @@ if __name__ == "__main__":
         
         # gRPC server settings
         serving_grpc=True,
-        n_workers_grpc=2,
+        n_workers_grpc=None,
 
         # CLI server settings
         serving_cli=True
