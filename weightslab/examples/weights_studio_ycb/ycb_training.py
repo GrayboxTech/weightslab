@@ -266,7 +266,10 @@ if __name__ == "__main__":
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    # --- 8) Training loop ---
+    # --- 8) Resume training automatically ---
+    # pause_controller.resume()
+
+    # --- 9) Training loop ---
     for train_step in tqdm.trange(max_steps, dynamic_ncols=True):
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 

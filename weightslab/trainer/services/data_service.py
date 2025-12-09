@@ -135,6 +135,26 @@ class DataService:
                 try:
                     
                     raw_img = load_raw_image(dataset, sample_id)
+                    original_size = raw_img.size
+                    
+                    # Handle resize request
+                    # Negative values indicate percentage mode (e.g., -50 means 50% of original)
+                    # Positive values indicate absolute pixel dimensions
+                    # Zero means no resize
+                    if request.resize_width < 0 and request.resize_height < 0:
+                        # Percentage mode
+                        percent = abs(request.resize_width) / 100.0
+                        target_width = int(original_size[0] * percent)
+                        target_height = int(original_size[1] * percent)
+                        
+                        # Only resize if we're actually reducing size
+                        if target_width < original_size[0] or target_height < original_size[1]:
+                            raw_img = raw_img.resize((target_width, target_height))
+                    elif request.resize_width > 0 and request.resize_height > 0:
+                        # Absolute pixel mode - only resize if smaller than original to avoid upscaling
+                        if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
+                            raw_img = raw_img.resize((request.resize_width, request.resize_height))
+
                     raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
                     raw_buf = io.BytesIO()
                     raw_img.save(raw_buf, format='PNG')
