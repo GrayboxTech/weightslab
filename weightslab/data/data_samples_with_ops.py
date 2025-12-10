@@ -129,7 +129,7 @@ class DataSampleTrackingWrapper(Dataset):
         if self._root_log_dir:
             data_dir = self._root_log_dir / "data"
             data_dir.mkdir(parents=True, exist_ok=True)
-            self._h5_path = data_dir / "sample_stats.h5"
+            self._h5_path = data_dir / "data_with_ops.h5"
             logger.info(f"[DataSampleTrackingWrapper] H5 persistence enabled at {self._h5_path}")
         
         # First, generate UIDs and detect duplicates before wrapping

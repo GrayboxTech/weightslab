@@ -1,7 +1,7 @@
 """
 HDF5-backed tag storage for data annotations, keyed by UID.
 
-Tags are stored at {root_log_dir}/data/tags.h5 and support:
+Tags are stored at {root_log_dir}/data/data_with_ops.h5 and support:
 - Multiple tags per UID (stored as comma-separated string)
 - Auto-load on restart
 - Stream-friendly: loads only requested UIDs
@@ -18,13 +18,9 @@ logger = logging.getLogger(__name__)
 
 
 class TagsStore:
-    """HDF5 tag store with support for multiple tags per UID.
-    
-    Now unified with sample_stats.h5 - both use the same file at
-    root_log_dir/data/sample_stats.h5 with a 'tags' table.
-    """
+    """HDF5 tag store with support for multiple tags per UID."""
 
-    def __init__(self, root_log_dir: Path, filename: str = "sample_stats.h5"):
+    def __init__(self, root_log_dir: Path, filename: str = "data_with_ops.h5"):
         self.root_log_dir = Path(root_log_dir) / "data"
         self.root_log_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.root_log_dir / filename
