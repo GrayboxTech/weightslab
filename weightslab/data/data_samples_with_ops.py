@@ -88,7 +88,6 @@ def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
     return arr
 
 
-# TODO samplestats_extended
 class SampleStatsEx(str, Enum):
     PREDICTION_AGE = "prediction_age"
     PREDICTION_LOSS = "prediction_loss"
@@ -96,17 +95,25 @@ class SampleStatsEx(str, Enum):
     TARGET = "target"
     SAMPLE_ID = "sample_id" 
     INDEX = "index"
-    # SAMPLE_CRC = "sample_crc" #potential
-    # AVAILABLE = "available"
     DENY_LISTED = "deny_listed"
     ENCOUNTERED = "encountered"
     TAGS = "tags"
-    # METADATA = "metadata" 
-    # ANNOTATIONS = "annotations"
 
     @classmethod
     def ALL(cls):
         return list(map(lambda c: c.value, cls))
+
+
+# Which sample stats to auto-save to H5 upon update
+SAMPLES_STATS_TO_SAVE_TO_H5 = [
+    # SampleStatsEx.sample_id.value,  # Already saved as key uid in h5
+    SampleStatsEx.DENY_LISTED.value,
+    SampleStatsEx.TAGS.value,
+    SampleStatsEx.ENCOUNTERED.value,
+    SampleStatsEx.PREDICTION_LOSS.value,
+    SampleStatsEx.PREDICTION_AGE.value,
+    SampleStatsEx.PREDICTION_RAW.value,
+]
 
 
 # I just like it when the enum values have the same name leghts.
@@ -395,8 +402,8 @@ class DataSampleTrackingWrapper(Dataset):
 
         self.sample_statistics[stat_name][sample_id] = stat_value
         
-        # Auto-save critical stats to H5 (deny_listed and tags)
-        if self._h5_path and stat_name in [SampleStatsEx.DENY_LISTED.value, SampleStatsEx.TAGS.value]:
+        # Auto-save critical stats to H5 (deny_listed and tags only for now)
+        if self._h5_path and stat_name in SAMPLES_STATS_TO_SAVE_TO_H5:
             self._save_stats_to_h5()
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False, index: int = None) -> int | float | bool:
