@@ -235,13 +235,6 @@ if __name__ == '__main__':
         serving_cli=True
     )
 
-    print("=" * 60)
-    print("🚀 STARTING TRAINING")
-    print(f"📈 Total steps: {parameters.get('training_steps_to_do', 6666)}")
-    print(f"🔄 Evaluation every {parameters.get('eval_full_to_train_steps_ratio', 50)} steps")
-    print(f"💾 Logs will be saved to: {log_dir}")
-    print("=" * 60 + "\n")
-
     # ================
     # 6. Training Loop
     print("\nStarting Training...")
@@ -270,7 +263,7 @@ if __name__ == '__main__':
                 (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
             )
         elif tqdm_display:
-            train_range.set_description(f"Step {train_step}")
+            train_range.set_description(f"Step")
             train_range.set_postfix(
                 train_loss=f"{train_loss:.4f}",
                 test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",

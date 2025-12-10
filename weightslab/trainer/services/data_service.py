@@ -1,4 +1,3 @@
-import io
 from io import BytesIO
 import logging
 import os
@@ -6,8 +5,6 @@ import traceback
 import time
 from pathlib import Path
 from concurrent import futures
-from threading import Thread
-import hashlib
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -20,7 +17,6 @@ import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import pause_controller
 from .service_utils import load_raw_image
 from .agent import DataManipulationAgent
-from .tag_store import TagsStore
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -64,10 +60,7 @@ class DataService:
     """
     Data service helpers + RPCs (for weights_studio UI).
     
-    Optimizations:
-    - Images cached on disk as JPEG (compressed) instead of PNG bytes
-    - Only file paths sent over gRPC; UI loads images from disk
-    - Reduces network payload by ~90% for typical datasets
+    Images are sent over gRPC as bytes (JPEG) for simplicity and correctness.
     """
 
     def __init__(self, ctx):
@@ -84,17 +77,6 @@ class DataService:
                 "DataService initialized without train_loader or test_loader.")
 
         self._root_log_dir = self._resolve_root_log_dir()
-        self._tags_store = TagsStore(self._root_log_dir)
-        
-        # Initialize image cache directory
-        self._image_cache_dir = Path(self._root_log_dir) / "image_cache"
-        self._image_cache_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Image cache directory: {self._image_cache_dir}")
-        
-        # Start periodic cleanup thread for old cached images
-        self._cleanup_thread = None
-        self._cleanup_stop_event = False
-        self._start_cleanup_thread()
         
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
@@ -124,7 +106,6 @@ class DataService:
             root = Path("logs").absolute()
         return Path(root)
 
-    
     def get_root_log_dir(self) -> str:
         """Get the root log directory as a string.
         
@@ -177,7 +158,7 @@ class DataService:
         return concat_df
     
     def _load_existing_tags(self):
-        """Load all existing tags from HDF5 on startup and merge into dataframe."""
+        """Load all existing tags from tracked dataset on startup and merge into dataframe."""
         if self._all_datasets_df is None or self._all_datasets_df.empty:
             return
 
@@ -190,21 +171,38 @@ class DataService:
             else:
                 return
 
-            # Load tags for all UIDs
-            tags_map = self._tags_store.load_tags(all_uids)
-            if not tags_map:
+            # Get tracked datasets to load tags
+            trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
+            tst_tracked = self._tst_loader.tracked_dataset if self._tst_loader else None
+            
+            if not trn_tracked and not tst_tracked:
                 # Initialize empty tags column
                 if "tags" not in self._all_datasets_df.columns:
                     self._all_datasets_df["tags"] = ""
                 return
-
+            
             # Initialize tags column if not present
             if "tags" not in self._all_datasets_df.columns:
                 self._all_datasets_df["tags"] = ""
 
-            # Update dataframe with loaded tags (as comma-separated string)
-            for uid, tag_list in tags_map.items():
-                tags_str = ",".join(tag_list) if tag_list else ""
+            # Load tags from tracked datasets
+            loaded_count = 0
+            for uid in all_uids:
+                tags_str = ""
+                # Try to get tags from train dataset first, then test
+                if trn_tracked:
+                    tags = trn_tracked.sample_statistics.get("tags", {}).get(int(uid), "")
+                    if tags:
+                        tags_str = tags
+                        loaded_count += 1
+                        
+                if not tags_str and tst_tracked:
+                    tags = tst_tracked.sample_statistics.get("tags", {}).get(int(uid), "")
+                    if tags:
+                        tags_str = tags
+                        loaded_count += 1
+                
+                # Update dataframe with loaded tags
                 if isinstance(self._all_datasets_df.index, pd.MultiIndex):
                     mask = self._all_datasets_df.index.get_level_values("sample_id") == uid
                     self._all_datasets_df.loc[mask, "tags"] = tags_str
@@ -212,67 +210,9 @@ class DataService:
                     mask = self._all_datasets_df["sample_id"] == uid
                     self._all_datasets_df.loc[mask, "tags"] = tags_str
 
-            logger.info(f"Loaded existing tags for {len(tags_map)} UID(s) from {self._tags_store.path}")
+            logger.info(f"Loaded existing tags for {loaded_count} UID(s) from tracked dataset(s)")
         except Exception as e:
             logger.warning(f"Failed to load existing tags: {e}")
-    
-    def _start_cleanup_thread(self):
-        """Start a background thread to periodically clean old cached images."""
-        def cleanup_worker():
-            logger.info("Image cache cleanup thread started")
-            while not self._cleanup_stop_event:
-                try:
-                    # Run cleanup every 1 hour
-                    time.sleep(3600)
-                    if not self._cleanup_stop_event:
-                        self._cleanup_old_images(max_age_days=7)
-                except Exception as e:
-                    logger.error(f"Error in cleanup thread: {e}")
-            logger.info("Image cache cleanup thread stopped")
-        
-        self._cleanup_thread = Thread(target=cleanup_worker, daemon=True, name="ImageCacheCleanup")
-        self._cleanup_thread.start()
-    
-    def _cleanup_old_images(self, max_age_days: int = 7):
-        """Delete cached images older than max_age_days.
-        
-        Args:
-            max_age_days: Remove images older than this many days (default: 7)
-        """
-        if not self._image_cache_dir.exists():
-            return
-        
-        try:
-            cutoff_time = time.time() - (max_age_days * 24 * 3600)
-            deleted_count = 0
-            total_freed_bytes = 0
-            
-            for subdir in ['raw', 'transformed']:
-                subdir_path = self._image_cache_dir / subdir
-                if not subdir_path.exists():
-                    continue
-                
-                for jpg_file in subdir_path.glob('*.jpg'):
-                    try:
-                        file_stat = jpg_file.stat()
-                        if file_stat.st_mtime < cutoff_time:
-                            total_freed_bytes += file_stat.st_size
-                            jpg_file.unlink()
-                            deleted_count += 1
-                    except Exception as e:
-                        logger.debug(f"Could not delete {jpg_file}: {e}")
-            
-            if deleted_count > 0:
-                freed_mb = total_freed_bytes / (1024 * 1024)
-                logger.info(f"Cleaned up {deleted_count} old cached images, freed {freed_mb:.2f} MB")
-        except Exception as e:
-            logger.error(f"Error during image cache cleanup: {e}")
-    
-    def stop_cleanup_thread(self):
-        """Stop the cleanup thread (call on shutdown)."""
-        self._cleanup_stop_event = True
-        if self._cleanup_thread and self._cleanup_thread.is_alive():
-            self._cleanup_thread.join(timeout=5)
     
     def _dataframe_update(self) -> bool:
         """
@@ -295,36 +235,6 @@ class DataService:
         self._dataframe_update()
         self._last_internals_update_time = current_time
 
-    def _cache_image(self, pil_img: Image.Image, sample_id: int, img_type: str = "transformed") -> str:
-        """Cache PIL image as JPEG and return file path.
-        
-        Args:
-            pil_img: PIL Image to cache
-            sample_id: Unique sample identifier
-            img_type: 'transformed' or 'raw'
-            
-        Returns:
-            Relative path to cached image (from root_log_dir)
-        """
-        try:
-            # Create a filename based on sample_id and image type
-            cache_subdir = self._image_cache_dir / img_type
-            cache_subdir.mkdir(parents=True, exist_ok=True)
-            
-            cache_path = cache_subdir / f"{sample_id}.jpg"
-            
-            # Cache as JPEG (much smaller than PNG)
-            pil_img.save(str(cache_path), format='JPEG', quality=90, optimize=True)
-            
-            # Return relative path from root_log_dir
-            relative_path = str(cache_path.relative_to(self._root_log_dir))
-            logger.debug(f"Cached {img_type} image for sample {sample_id}: {relative_path}")
-            
-            return relative_path
-        except Exception as e:
-            logger.error(f"Failed to cache image for sample {sample_id}: {e}")
-            return ""
-    
     def _tensor_to_pil(self, tensor: torch.Tensor) -> Image.Image:
         """Convert torch tensor to PIL Image."""
         img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor
@@ -408,29 +318,35 @@ class DataService:
 
         sample_ids = [int(sid) for sid in df_slice["sample_id"].tolist()]
         try:
-            tags_map = self._tags_store.load_tags(sample_ids)
+            # Get tracked datasets to load tags
+            trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
+            tst_tracked = self._tst_loader.tracked_dataset if self._tst_loader else None
         except Exception as e:
-            logger.warning(f"Could not load tags from store: {e}")
-            return df_slice
-
-        if not tags_map:
+            logger.warning(f"Could not access tracked datasets: {e}")
             return df_slice
 
         if "tags" not in df_slice.columns:
             df_slice["tags"] = ""
 
         # Update the returned slice and the long-lived dataframe (only for these rows)
-        for sid, tag in tags_map.items():
-            df_slice.loc[df_slice["sample_id"] == sid, "tags"] = tag
+        for sid in sample_ids:
+            tag_str = ""
+            # Try to get tags from train dataset first, then test
+            if trn_tracked:
+                tag_str = trn_tracked.sample_statistics.get("tags", {}).get(sid, "")
+            if not tag_str and tst_tracked:
+                tag_str = tst_tracked.sample_statistics.get("tags", {}).get(sid, "")
+            
+            df_slice.loc[df_slice["sample_id"] == sid, "tags"] = tag_str
             try:
                 if isinstance(self._all_datasets_df.index, pd.MultiIndex) and {
                     "origin", "sample_id"
                 }.issubset(set(self._all_datasets_df.index.names or [])):
                     idx_mask = self._all_datasets_df.index.get_level_values("sample_id") == sid
-                    self._all_datasets_df.loc[idx_mask, "tags"] = tag
+                    self._all_datasets_df.loc[idx_mask, "tags"] = tag_str
                 elif "sample_id" in self._all_datasets_df.columns:
                     mask = self._all_datasets_df["sample_id"] == sid
-                    self._all_datasets_df.loc[mask, "tags"] = tag
+                    self._all_datasets_df.loc[mask, "tags"] = tag_str
             except Exception:
                 continue
 
@@ -445,13 +361,6 @@ class DataService:
         - If is_natural_language: let the agent translate to an operation.
         - Otherwise: treat query as a df.query expression.
         """
-
-        allowed, msg = self._interaction_allowed()
-        if not allowed:
-            return pb2.DataQueryResponse(
-                success=False,
-                message=msg,
-            )
 
         # Make sure we have a dataframe
         if self._all_datasets_df is None:
@@ -655,13 +564,6 @@ class DataService:
     def EditDataSample(self, request, context):
         """Edit sample metadata (tags, deny_listed, etc.)."""
 
-        allowed, msg = self._interaction_allowed()
-        if not allowed:
-            return pb2.DataEditsResponse(
-                success=False,
-                message=msg,
-            )
-
         # Make sure dataframe + editable wrappers are initialized
         if self._all_datasets_df is None:
             self._initialize_data_service()
@@ -779,17 +681,19 @@ class DataService:
             self._agent.df = self._all_datasets_df
 
         # ------------------------------------------------------------------
-        # 4) Persist tag edits to the HDF5 store (auto-sync)
+        # 4) Persist tag edits to the tracked dataset (auto-sync to H5)
         # ------------------------------------------------------------------
         if request.stat_name == "tags" and request.samples_ids:
             try:
                 for sid in request.samples_ids:
-                    # Parse comma-separated tags into list
                     tags_str = request.string_value or ""
-                    tag_list = [t.strip() for t in tags_str.split(",") if t.strip()]
-                    self._tags_store.save_tags({int(sid): tag_list})
+                    # Save to both train and test tracked datasets
+                    if self._trn_loader and hasattr(self._trn_loader.tracked_dataset, 'set'):
+                        self._trn_loader.tracked_dataset.set(int(sid), "tags", tags_str)
+                    if self._tst_loader and hasattr(self._tst_loader.tracked_dataset, 'set'):
+                        self._tst_loader.tracked_dataset.set(int(sid), "tags", tags_str)
             except Exception as e:
-                logger.warning(f"Could not persist tags to HDF5: {e}")
+                logger.warning(f"Could not persist tags to tracked dataset: {e}")
 
         return pb2.DataEditsResponse(
             success=True,

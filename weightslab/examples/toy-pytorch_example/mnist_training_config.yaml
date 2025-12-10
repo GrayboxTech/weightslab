@@ -39,7 +39,6 @@ experiment_dump_to_train_steps_ratio: 5000
 # Whether to skip loading the latest checkpoint at initialization.
 skip_checkpoint_load: false
 
-use_cached_image_paths: true
 
 # ----- Data configuration -----
 # Configure datasets and dataloaders. Each dataset entry maps to fields that

@@ -9,15 +9,15 @@ resettable iterator and a safe `next_batch()` helper.
 
 It also supports:
 - a mutable batch sampler for runtime batch-size changes
+- masked sampling that automatically excludes deny-listed samples during iteration
 - global pause control
 - registration in a global ledger and dynamic batch-size updates based on
   hyperparameters
 """
-
+import logging
 from typing import Any, Iterator, Optional
 
-import torch as th  # noqa: F401
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data import RandomSampler, SequentialSampler
 
 from weightslab.components.global_monitoring import pause_controller
@@ -27,6 +27,56 @@ from weightslab.backend.ledgers import (
     get_hyperparams,
     list_hyperparams,
 )
+
+
+# Get Global Logger
+logger = logging.getLogger(__name__)
+
+
+class MaskedSampler(Sampler):
+    """A sampler that filters out deny-listed samples from iteration.
+    
+    Wraps a base sampler (e.g., RandomSampler, SequentialSampler) and
+    skips indices that correspond to deny-listed samples in the dataset.
+    
+    This allows the DataLoader to dynamically exclude samples without
+    rebuilding the dataset or sampler.
+    """
+    
+    def __init__(self, base_sampler: Sampler, tracked_dataset: DataSampleTrackingWrapper):
+        """Initialize the masked sampler.
+        
+        Args:
+            base_sampler: The underlying sampler (RandomSampler, SequentialSampler, etc.)
+            tracked_dataset: A DataSampleTrackingWrapper with deny-listed samples
+        """
+        self.base_sampler = base_sampler
+        self.tracked_dataset = tracked_dataset
+    
+    def __iter__(self):
+        """Iterate over non-deny-listed indices."""
+        # Build a set of deny-listed UIDs for fast lookup
+        deny_listed_uids = {
+            uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
+            if is_denied
+        }
+        
+        # Iterate through base sampler, yielding only non-denied indices
+        for idx in self.base_sampler:
+            uid = int(self.tracked_dataset.unique_ids[idx])
+            if uid not in deny_listed_uids:
+                yield idx
+    
+    def __len__(self):
+        """Return the number of non-deny-listed samples."""
+        # Count non-denied samples
+        deny_listed_uids = {
+            uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
+            if is_denied
+        }
+        total = len(self.base_sampler)
+        denied_count = len(deny_listed_uids)
+        return max(0, total - denied_count)
 
 
 class DataLoaderInterface:
@@ -42,6 +92,15 @@ class DataLoaderInterface:
     If the wrapped dataset provides `as_records()` we delegate to it; otherwise
     `as_records()` will raise `AttributeError`.
 
+    **Deny-listed Sample Handling:**
+    When using a DataSampleTrackingWrapper, deny-listed samples are automatically
+    excluded from batches during iteration via the MaskedSampler. This allows
+    you to dynamically filter samples at train/eval time without rebuilding
+    the dataset:
+    
+        dataset.denylist_samples({sample_id_1, sample_id_2, ...})
+        # Next iteration will skip these samples automatically
+    
     Public API:
     - __iter__, __len__, __next__
     - next_batch(), reset_iterator()
@@ -65,14 +124,10 @@ class DataLoaderInterface:
         weak: bool = False,
         is_training: bool = False,
         root_log_dir: Optional[str] = None,
-        # kept for backwards compatibility; always use mutable sampler when we
-        # build the DataLoader from a Dataset, but do not pass this to PyTorch.
-        mutable_batch_sampler: bool = True,  # noqa: F841
         **kwargs,
     ) -> None:
         # Strip out our own kwargs so they don't get passed to DataLoader
         kwargs = dict(kwargs)
-        kwargs.pop("mutable_batch_sampler", None)
 
         # Normalize inputs
         self.dataset: Dataset | DataLoader = data_loader_or_dataset
@@ -82,6 +137,10 @@ class DataLoaderInterface:
         self._dl_build_kwargs: Optional[dict] = None
 
         if isinstance(data_loader_or_dataset, DataLoader):
+            logger.warning(
+                "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !!"
+                "Otherwise, prefer passing a Dataset and let the interface build the DataLoader."
+                )
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
             self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader, root_log_dir=root_log_dir)
@@ -112,6 +171,9 @@ class DataLoaderInterface:
                 if shuffle
                 else SequentialSampler(self.tracked_dataset)
             )
+            
+            # Wrap base sampler with MaskedSampler to skip deny-listed samples
+            masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
 
             # Inner class: mutable batch sampler
             class MutableBatchSampler:
@@ -145,7 +207,7 @@ class DataLoaderInterface:
                         raise TypeError("len not supported for this sampler")
 
             mbs = MutableBatchSampler(
-                base_sampler, batch_size=batch_size, drop_last=drop_last
+                masked_sampler, batch_size=batch_size, drop_last=drop_last
             )
             self._mutable_batch_sampler = mbs
 
@@ -414,9 +476,11 @@ class DataLoaderInterface:
                         if shuffle
                         else SequentialSampler(self.tracked_dataset)
                     )
+                    # Wrap with MaskedSampler to skip deny-listed samples
+                    masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
                     mbs_cls = type(self._mutable_batch_sampler)
                     mbs = mbs_cls(
-                        base_sampler, batch_size=batch_size, drop_last=drop_last
+                        masked_sampler, batch_size=batch_size, drop_last=drop_last
                     )
                     self._mutable_batch_sampler = mbs
                     self.dataloader = DataLoader(

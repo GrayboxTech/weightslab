@@ -1498,7 +1498,7 @@ def _parse_chw(s):
             return None
         import re
         m = re.match(r'^\s*(\d+)\s*[x×]\s*(\d+)\s*[x×]\s*(\d+)\s*$', s, re.I)
-        from flask import Response, request, abort, jsonify, send_file
+        from flask import Response, request, abort, jsonify
         C, H, W = map(int, m.groups())
         return (C, H, W)
 
@@ -2509,25 +2509,6 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
                 'success': False,
                 'error': str(e)
             }), 500
-
-
-    def make_grid_skeleton(num_cells, origin, img_size):
-        cells = []
-        for i in range(num_cells):
-            cells.append(html.Div([
-                html.Img(
-                    id={'type':'sample-img-el', 'origin': origin, 'slot': i},  
-                    src="", loading="lazy", decoding="async",
-                    width=img_size, height=img_size,
-                    style={'width': f'{img_size}px', 'height': f'{img_size}px', 'border':'1px solid #ccc'}
-                ),
-                html.Div(id={'type':'sample-img-label', 'origin': origin, 'slot': i}, style={'fontSize':'11px', 'textAlign':'center'})
-            ], style={'display':'flex','flexDirection':'column','alignItems':'center'}))
-        return html.Div(children=cells, id={'type':'grid', 'origin':origin}, style={
-            'display':'grid',
-            'gridTemplateColumns': f'repeat({isqrt(num_cells)}, 1fr)',
-            'gap': '4px'
-        })
 
     def fetch_server_state_and_update_ui_state():
         while True:
