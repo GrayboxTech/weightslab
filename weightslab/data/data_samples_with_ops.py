@@ -222,7 +222,7 @@ class DataSampleTrackingWrapper(Dataset):
                 SampleStatsEx.PREDICTION_LOSS.value: -1,
                 SampleStatsEx.DENY_LISTED.value: False,
                 SampleStatsEx.INDEX.value: sample_index,
-                SampleStatsEx.TAGS.value: 'N&A',
+                SampleStatsEx.TAGS.value: '',
                 SampleStatsEx.ENCOUNTERED.value: 1,
                 SampleStatsEx.SAMPLE_ID.value: uid,
                 SampleStatsEx.TARGET.value: None,
@@ -923,8 +923,6 @@ class DataSampleTrackingWrapper(Dataset):
             index = self.unique_id_to_index[id]
         if index is not None and id is None:
             id = self.unique_ids[index]
-        if self.sample_statistics['deny_listed'][id]:
-            raise IndexError(f"Sample with index {index} and id {id} is deny-listed.")
         return self._getitem_raw(index=index)
 
     def __len__(self):

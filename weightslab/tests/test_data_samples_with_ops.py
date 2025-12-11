@@ -673,7 +673,7 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds2.get(uids[0], SampleStatsEx.TAGS.value), "outlier,mislabeled")
         self.assertEqual(ds2.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
         # Other samples should have default empty tags
-        self.assertEqual(ds2.get(uids[2], SampleStatsEx.TAGS.value), 'N&A')
+        self.assertEqual(ds2.get(uids[2], SampleStatsEx.TAGS.value), '')
 
     def test_h5_persistence_all_stats(self):
         """Test that all SAMPLES_STATS_TO_SAVE_TO_H5 persist and only changed UIDs are saved."""
@@ -746,7 +746,7 @@ class TestH5Persistence(unittest.TestCase):
         
         # Verify unchanged UIDs have default values (not saved/loaded from H5)
         # These should be initialized with defaults, not loaded
-        self.assertEqual(ds2.get(uids[3], SampleStatsEx.TAGS.value), 'N&A')
+        self.assertEqual(ds2.get(uids[3], SampleStatsEx.TAGS.value), '')
         self.assertEqual(ds2.get(uids[3], SampleStatsEx.PREDICTION_AGE.value), -1)
         self.assertFalse(ds2.get(uids[3], SampleStatsEx.DENY_LISTED.value))
 
