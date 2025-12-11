@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from concurrent import futures
 from datetime import datetime, timedelta
-
+from threading import RLock
 import numpy as np
 import pandas as pd
 import torch
@@ -68,7 +68,7 @@ class DataService:
 
         # init references to the context components
         self._ctx.ensure_components()
-
+        self.df_lock = RLock()
         self._trn_loader = self._ctx.components.get("train_loader")
         self._tst_loader = self._ctx.components.get("test_loader")
 
@@ -296,8 +296,19 @@ class DataService:
         current_time = time.time()
         if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= time_delta:
             return
-        self._dataframe_update()
-        self._last_internals_update_time = current_time
+        
+        # Only execute if we can acquire lock without blocking
+        if self.df_lock.acquire(blocking=False):
+            try:
+                # Double-check timestamp after acquiring lock (in case another thread just updated)
+                current_time = time.time()
+                if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= time_delta:
+                    return
+                
+                self._dataframe_update()
+                self._last_internals_update_time = current_time
+            finally:
+                self.df_lock.release()
 
     def _tensor_to_pil(self, tensor: torch.Tensor) -> Image.Image:
         """Convert torch tensor to PIL Image."""
@@ -597,7 +608,7 @@ class DataService:
         Only allowed when training is paused.
         """
 
-        self._slowUpdateInternals(time_delta=15)  # update at most every 60s - get last dataframe state
+        self._slowUpdateInternals(time_delta=15)
         try:
             logger.info(
                 "GetSamples called with start_index=%s, records_cnt=%s",

@@ -487,6 +487,7 @@ class DataSampleTrackingWrapper(Dataset):
         
         # Immediate save for certain stats
         if self._h5_path and stat_name in SAMPLES_STATS_IMMEDIATE_SAVING_TO_H5:
+            logger.debug(f"Immediately saving stat '{stat_name}' for sample_id={sample_id} to H5 from {prev_value} to {stat_value}")
             self._save_pending_stats_to_h5()
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False, index: int = None) -> int | float | bool:

@@ -1416,8 +1416,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         """
 
         logger.debug(
-            f"{self.get_name()}[{self.get_module_id()}].freeze {neuron_indices}",
-            level='DEBUG'
+            f"{self.get_name()}[{self.get_module_id()}].freeze {neuron_indices}"
         )
 
         # Process neuron indices
@@ -1479,8 +1478,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         """
 
         logger.debug(
-            f"{self.get_name()}[{self.get_module_id()}].reset {neuron_indices}",
-            level='DEBUG'
+            f"{self.get_name()}[{self.get_module_id()}].reset {neuron_indices}"
         )
 
         # Process neuron indices

@@ -144,7 +144,6 @@ class DataLoaderInterface:
             compute_hash: Whether to compute hashes for samples in tracking wrapper.
             **kwargs: Additional kwargs passed to DataLoader if a Dataset is provided.
         """
-        
         # Strip out our own kwargs so they don't get passed to DataLoader
         kwargs = dict(kwargs)
 

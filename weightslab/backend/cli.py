@@ -436,7 +436,7 @@ def _server_loop(host: str, port: int):
     try:
         while True:
             conn, addr = srv.accept()
-            t = threading.Thread(target=_client_handler, args=(conn, addr), daemon=True)
+            t = threading.Thread(target=_client_handler, args=(conn, addr), name='cli_serving_loop', daemon=True)
             t.start()
     finally:
         try:

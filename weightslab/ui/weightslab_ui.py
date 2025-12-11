@@ -2527,7 +2527,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             time.sleep(0.5)  # Update every 0.5 second - adjust as needed
 
     consistency_thread = threading.Thread(
-        target=fetch_server_state_and_update_ui_state, daemon=True)
+        target=fetch_server_state_and_update_ui_state, name='fetch_server_state_and_update_ui_state', daemon=True)
     consistency_thread.start()
 
     def retrieve_training_statuses():
@@ -2535,7 +2535,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         for status in stub.StreamStatus(pb2.Empty()):
             ui_state.update_metrics_from_server(status)
     status_thread = threading.Thread(
-        target=retrieve_training_statuses, daemon=True)
+        target=retrieve_training_statuses, name='retrieve_training_statuses', daemon=True)
     status_thread.start()
 
     @app.callback(

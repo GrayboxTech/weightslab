@@ -196,8 +196,8 @@ if __name__ == '__main__':
     test_bs = parameters.get('data', {}).get('test_dataset', {}).get('batch_size', 16)
     train_shuffle = parameters.get('data', {}).get('train_dataset', {}).get('train_shuffle', True)
     test_shuffle = parameters.get('data', {}).get('test_dataset', {}).get('test_shuffle', False)
-    train_loader = wl.watch_or_edit(_train_dataset, flag='data', name='train_loader', batch_size=train_bs, shuffle=train_shuffle, is_training=True)
-    test_loader = wl.watch_or_edit(_test_dataset, flag='data', name='test_loader', batch_size=test_bs, shuffle=test_shuffle)
+    train_loader = wl.watch_or_edit(_train_dataset, flag='data', name='train_loader', batch_size=train_bs, shuffle=train_shuffle, is_training=True, compute_hash=False)
+    test_loader = wl.watch_or_edit(_test_dataset, flag='data', name='test_loader', batch_size=test_bs, shuffle=test_shuffle, compute_hash=False)
 
     # ====================
     # 4. Define criterions

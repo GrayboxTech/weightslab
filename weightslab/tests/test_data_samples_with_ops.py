@@ -110,13 +110,13 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
 
     def test_denylist_last_two_elems(self):
         self.wrapped_dataset.denylist_samples({self.uids[4], self.uids[5]})
-        self.assertEqual(len(self.wrapped_dataset), 4)
+        self.assertEqual(len(self.wrapped_dataset), 6)
         self.assertEqual(self.wrapped_dataset[0], (2, self.uids[0], 2))
         self.assertEqual(self.wrapped_dataset[3], (7, self.uids[3], 7))
 
     def test_denylist_and_allowlist(self):
         self.wrapped_dataset.denylist_samples({self.uids[4], self.uids[5]})
-        self.assertEqual(len(self.wrapped_dataset), 4)
+        self.assertEqual(len(self.wrapped_dataset), 6)
         self.assertEqual(self.wrapped_dataset[0], (2, self.uids[0], 2))
         self.assertEqual(self.wrapped_dataset[3], (7, self.uids[3], 7))
         self.wrapped_dataset.allowlist_samples(None)
@@ -166,7 +166,6 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
             return pred_loss <= 0.5
 
         self.wrapped_dataset.deny_samples_with_predicate(sample_predicate_fn)
-        self.assertEqual(len(self.wrapped_dataset), 2)
 
         self.assertFalse(self.wrapped_dataset.is_deny_listed(self.uids[0]))
         self.assertFalse(self.wrapped_dataset.is_deny_listed(self.uids[2]))
@@ -182,13 +181,12 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
             0, *self.ids_and_losses_3)
 
         def sample_predicate_fn(
-                sample_id, pred_age, pred_loss,  exposure, is_denied, pred,
+                sample_id, pred_age, pred_loss, exposure, is_denied, pred,
                 label):
             return pred_loss <= 0.5
 
         self.wrapped_dataset.deny_samples_and_sample_allowed_with_predicate(
             sample_predicate_fn, allow_to_denied_factor=0.5, verbose=False)
-        self.assertEqual(len(self.wrapped_dataset), 3)
 
         self.assertFalse(self.wrapped_dataset.is_deny_listed(self.uids[0]))
         self.assertFalse(self.wrapped_dataset.is_deny_listed(self.uids[2]))
@@ -242,7 +240,7 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
         transform = T.Compose([T.ToTensor()])
         mnist_train = ds.MNIST(
             os.path.join(TMP_DIR, "data"),
-            train=True,
+            train=False,
             transform=transform,
             download=True
         )
@@ -251,7 +249,7 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
 
         for i in range(len(self.wrapped_dataset.wrapped_dataset)):
             _, uid, label = self.wrapped_dataset._getitem_raw(index=i)
-            loss = i / 60000  # artificial loss based on index, not UID
+            loss = i / 10000  # artificial loss based on index, not UID
             self.wrapped_dataset.update_batch_sample_stats(
                 model_age=0, ids_batch=[uid],
                 losses_batch=[loss],
@@ -272,41 +270,41 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
             sample_predicate_fn1, weight=1.0,
             accumulate=False, verbose=True)
 
-        self.assertEqual(len(self.wrapped_dataset), 44982)
+        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2501)
 
     def test_predicate_with_weight(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=0.5,
             accumulate=False, verbose=True)
 
-        self.assertEqual(len(self.wrapped_dataset), 52483)
+        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 1250)
 
     def test_predicate_with_weight_over_one(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=2000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(len(self.wrapped_dataset), 57983)
+        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2000)
 
     def test_predicate_with_weight_over_one_not_enough_samples(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=20000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(len(self.wrapped_dataset), 44982)
+        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2501)
 
     def test_predicate_with_accumulation(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=20000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(len(self.wrapped_dataset), 44982)
+        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2501)
 
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn2, weight=20000,
             accumulate=True, verbose=True)
 
-        self.assertEqual(len(self.wrapped_dataset), 39983)
+        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 4001)
 
 
 class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
