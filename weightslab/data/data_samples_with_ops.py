@@ -143,7 +143,7 @@ class _StateDictKeys(str, Enum):
 
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset, root_log_dir: Optional[str] = None):
+    def __init__(self, wrapped_dataset: Dataset, root_log_dir: Optional[str] = None, compute_hash: bool = True):
         # Setup H5 persistence path
         self._root_log_dir = Path(root_log_dir) if root_log_dir else self._resolve_root_log_dir()
         self._h5_path = None
@@ -158,11 +158,12 @@ class DataSampleTrackingWrapper(Dataset):
         self.iteration_counter = 0
 
         # First, generate UIDs and detect duplicates before wrapping
-        logger.info(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
-        start_time = time.time()
-        self.unique_ids, self.unique_id_to_index = self._generate_unique_ids_parallel(wrapped_dataset)
-        elapsed_time = time.time() - start_time
-        logger.info(f"Generated {len(self.unique_ids)} unique IDs in {elapsed_time:.2f} seconds ({len(self.unique_ids)/elapsed_time:.1f} samples/sec)")
+        logger.debug(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
+
+        # Generate unique IDs
+        self._generate_uids(
+            wrapped_dataset, compute_hash=compute_hash
+        )
 
         # Detect duplicates and keep only first occurrences
         seen_uid: Dict[int, int] = {}
@@ -262,6 +263,24 @@ class DataSampleTrackingWrapper(Dataset):
             self.idx_to_idx_remapp == other.idx_to_idx_remapp and \
             self.denied_sample_cnt == other.denied_sample_cnt and \
             self.sample_statistics == other.sample_statistics
+
+    def _generate_uids(self, wrapped_dataset: Dataset, compute_hash: bool = True):
+        """
+        Generate unique IDs for all samples in parallel using array_id_2bytes.
+        Returns a numpy array of uint64 IDs.
+        """
+        start_time = time.time()
+        if compute_hash:
+            self.unique_ids, self.unique_id_to_index = self._generate_unique_ids_parallel(wrapped_dataset)
+            elapsed_time = time.time() - start_time
+            logger.debug(f"Generated {len(self.unique_ids)} unique IDs in {elapsed_time:.2f} seconds ({len(self.unique_ids)/elapsed_time:.1f} samples/sec)")
+        else:
+            # Use simple indexing instead of hash generation
+            n_samples = len(wrapped_dataset)
+            self.unique_ids = np.arange(n_samples, dtype=np.int32)
+            self.unique_id_to_index = {int(i): i for i in range(n_samples)}
+            elapsed_time = time.time() - start_time
+            logger.debug(f"Using index-based UIDs for {n_samples} samples (skipped hash generation, took {elapsed_time:.4f}s)")
 
     def _resolve_root_log_dir(self) -> Optional[Path]:
         """Resolve root log directory from hyperparams if not provided."""
