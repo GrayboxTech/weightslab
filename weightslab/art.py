@@ -14,8 +14,8 @@ def get_git_info():
         version = subprocess.check_output(['git', 'describe', '--tags', '--always'], cwd='../').strip().decode('utf-8')
         
         return branch, version, commit_hash
-    except subprocess.CalledProcessError:
-        print('Git Not Found or not a git repository.')
+    except subprocess.CalledProcessError as e:
+        print(f'Git Not Found or not a git repository: {e}')
         return None, None, None
 
 

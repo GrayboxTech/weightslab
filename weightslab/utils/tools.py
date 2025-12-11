@@ -1,3 +1,4 @@
+import io
 import yaml
 import types
 import inspect
@@ -7,6 +8,9 @@ import torch as th
 import torch.nn as nn
 import numpy as np
 import random
+import xxhash
+
+from typing import Union
 from copy import deepcopy
 from typing import Optional, List, Any, Type, Callable, Dict
 from torch.fx import Node
@@ -542,3 +546,86 @@ def load_config_from_yaml(filepath: str) -> Dict:
     except yaml.YAMLError as e:
         logger.error(f"Error loading YAML file: {e}. Using default parameters.")
         return {}
+    
+
+def _npy_bytes(arr: np.ndarray) -> bytes:
+    """Serialize array to .npy in memory (deterministic, includes dtype+shape)."""
+    buf = io.BytesIO()
+    # allow_pickle=False to avoid pickle metadata and ensure deterministic representation
+    np.save(buf, arr, allow_pickle=False)
+    return buf.getvalue()
+
+
+def _canonical_raw_bytes(arr: np.ndarray) -> bytes:
+    """Produce a canonical raw-bytes representation:
+       - C contiguous
+       - native endianness
+       - dtype+shape are NOT included (caller must include them if needed)
+       - does not canonicalize NaN bit patterns (only semantic NaNs),
+         so prefer npy serialization for full safety.
+    """
+    a = np.ascontiguousarray(arr)
+    # make sure dtype is native-endian
+    if a.dtype.byteorder not in ('=', '|'):
+        a = a.byteswap().newbyteorder()
+    return a.tobytes()
+
+
+def array_id_2bytes(
+    arr: np.ndarray,
+    *,
+    include_shape_dtype: bool = True,
+    use_npy_serialization: bool = True,
+    return_hex: bool = False,
+    tronc_1byte: bool = True,
+    hex_upper: bool = False,
+) -> Union[str, int, bytes]:
+    """
+    Generate an 8-byte ID for a numpy array.
+
+    Parameters:
+    - arr: numpy array
+    - method:
+        - "sha256" or "sha256-trunc": compute SHA-256 and take first 8 bytes.
+        - "xxh64": use xxhash.xxh64 (faster, non-crypto) if available.
+    - include_shape_dtype: if True, include shape and dtype in the hashed input
+      (recommended so arrays with same raw bytes but different shape/dtype are distinct).
+    - use_npy_serialization: if True, use np.save(.npy) serialization as the input to hash.
+      If False, hash raw canonical bytes (faster, but less safe in some edge cases).
+    - return_hex: return 16-char hex string if True, else returns int.
+    - hex_upper: if True and return_hex True, hex will be uppercase.
+
+    Returns:
+    - 16-char hex-string (default) or integer (0..2**64-1) or raw bytes if you change code.
+    """
+    if use_npy_serialization:
+        data = _npy_bytes(arr)
+    else:
+        parts = []
+        if include_shape_dtype:
+            # Include a stable textual header for shape and dtype to avoid ambiguity
+            parts.append(f"{arr.shape};{str(arr.dtype)};".encode("utf-8"))
+        parts.append(_canonical_raw_bytes(arr))
+        data = b"".join(parts)
+
+    h = xxhash.xxh64()
+    h.update(data)
+    digest8 = h.digest()  # 8 bytes
+
+    if return_hex:
+        hexs = digest8.hex()
+        return hexs.upper() if hex_upper else hexs
+    else:
+        # big-endian integer
+        if tronc_1byte:
+            return int.from_bytes(digest8, byteorder="big", signed=False) % (10**8)
+        else:
+            return int.from_bytes(digest8, byteorder="big", signed=False)
+
+
+# Example usage
+if __name__ == "__main__":
+    import numpy as np
+    img = np.random.randint(0, 256, size=(4096, 4096, 3), dtype=np.uint8)  # big image
+    id_int = array_id_2bytes(img)  # default -> 16 hex chars
+    print("8-byte id (int):", id_int)

@@ -365,7 +365,7 @@ class CheckpointManager(object):
                 return
 
             self.prnt_id = checkpoint_id_or_path
-            ckpt_dict = th.load(path)
+            ckpt_dict = th.load(path, weights_only=False)
         except Exception as e:
             _logger.error(f"Could not load checkpoint due to {str(e)}")
             return

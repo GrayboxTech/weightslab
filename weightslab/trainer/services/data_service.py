@@ -1,19 +1,25 @@
 import io
-import logging
-import traceback
 import time
-from concurrent import futures
+import torch
+import logging
+import os
+import traceback
 import threading
 
 import numpy as np
 import pandas as pd
-import torch
-from torchvision import transforms
 
 import weightslab.proto.experiment_service_pb2 as pb2
-from .service_utils import load_raw_image
-from .agent.agent import DataManipulationAgent
 
+from pathlib import Path
+from concurrent import futures
+from torchvision import transforms
+from weightslab.components.global_monitoring import pause_controller
+from weightslab.trainer.services.service_utils import load_raw_image
+from weightslab.trainer.services.agent import DataManipulationAgent
+
+
+# Get global logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
@@ -45,6 +51,8 @@ def _get_stat_from_row(row, stat_name):
 
 def _get_stats(loader, origin: str):
     """Extract dataset statistics from a loader."""
+    if loader is None or not hasattr(loader, "tracked_dataset"):
+        return pd.DataFrame()
     df = pd.DataFrame(loader.tracked_dataset.as_records())
     df["origin"] = origin
     return df
@@ -53,6 +61,8 @@ def _get_stats(loader, origin: str):
 class DataService:
     """
     Data service helpers + RPCs (for weights_studio UI).
+    
+    Images are sent over gRPC as bytes (JPEG) for simplicity and correctness.
     """
 
     def __init__(self, ctx):
@@ -61,7 +71,7 @@ class DataService:
 
         # init references to the context components
         self._ctx.ensure_components()
-
+        self.df_lock = threading.RLock()
         self._trn_loader = self._ctx.components.get("train_loader")
         self._tst_loader = self._ctx.components.get("test_loader")
 
@@ -69,37 +79,155 @@ class DataService:
             logger.error(
                 "DataService initialized without train_loader or test_loader.")
 
+        self._root_log_dir = self._resolve_root_log_dir()
+        
         self._all_datasets_df = self._pull_into_all_data_view_df()
+        self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
 
-        self._last_internals_update_time = time.time()
+        self._last_internals_update_time = None
         logger.info("DataService initialized.")
 
+    def _resolve_root_log_dir(self) -> Path:
+        """Resolve root log directory from hyperparams/env, fallback to ./logs."""
+        root = None
+        try:
+            hp = self._ctx.components.get("hyperparams")
+            if hp is not None and hasattr(hp, "get"):
+                hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if isinstance(hp_dict, dict):
+                    root = (
+                        hp_dict.get("root_log_dir")
+                        or hp_dict.get("root_directory")
+                        or hp_dict.get("root")
+                    )
+        except Exception:
+            root = None
+
+        root = root or os.getenv("WEIGHTSLAB_ROOT_LOG_DIR")
+        if root is None:
+            root = Path("logs").absolute()
+        return Path(root)
+
+    def get_root_log_dir(self) -> str:
+        """Get the root log directory as a string.
+        
+        Returns:
+            Absolute path to root_log_dir
+        """
+        return str(self._root_log_dir.absolute())
+
+    def is_agent_available(self) -> bool:
+        """
+        Check if the agent (Ollama) is available for natural language queries.
+        
+        Returns:
+            bool: True if agent is available, False otherwise
+        """
+        if self._agent is None:
+            return False
+        try:
+            return self._agent.is_ollama_available()
+        except Exception as e:
+            logger.debug(f"Error checking agent availability: {e}")
+            return False
+
+    def _is_training_active(self) -> bool:
+        """Return True if training is currently running (not paused)."""
+        try:
+            hp = self._ctx.components.get("hyperparams")
+            if hp is not None and hasattr(hp, "get"):
+                hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if isinstance(hp_dict, dict):
+                    flag = hp_dict.get("is_training")
+                    if flag is not None:
+                        return bool(flag)
+        except Exception:
+            pass
+        # Fall back to pause controller state if hyperparams missing
+        try:
+            return not pause_controller.is_paused()
+        except Exception:
+            return True
+
+    def _interaction_allowed(self):
+        if self._is_training_active():
+            return False, "Training is running; pause to browse or edit data."
+        return True, ""
+
     def _pull_into_all_data_view_df(self):
-        """Pulls data from train and test loaders into a single DataFrame for all data view."""
+        """Pull stats from both loaders into a single indexed dataframe."""
+        # Sanity check
+        if self._trn_loader is None:
+            self._trn_loader = self._ctx.components.get("train_loader")
+        if self._tst_loader is None:
+            self._tst_loader = self._ctx.components.get("test_loader")
 
-        # TODO: implement logic for skipping the full regen if not necessary... if not self.dirty()
-
+        # Pull stats from both datasets (skip if empty)
+        dfs_to_concat = []
         tstats = _get_stats(self._trn_loader, "train")
-        estats = _get_stats(self._tst_loader, "test")
-        concat_df = pd.concat([tstats, estats])
-        concat_df.set_index(["origin", "sample_id"], inplace=True)
+        if not tstats.empty:
+            dfs_to_concat.append(tstats)
+        
+        estats = _get_stats(self._tst_loader, "eval")
+        if not estats.empty:
+            dfs_to_concat.append(estats)
+        
+        if not dfs_to_concat:
+            return pd.DataFrame()
+        
+        # Efficient concat with minimal copying
+        concat_df = pd.concat(dfs_to_concat, ignore_index=False, sort=False)
+        
+        try:
+            concat_df.set_index(["origin", "sample_id"], inplace=True)
+        except KeyError as e:
+            logger.warning(f"Failed to set index on concat_df: {e}")
+        
         return concat_df
-
-    def SlowUpdateInternals(self):
-        current_time = time.time()
-        if current_time - self._last_internals_update_time <= 10:
+    
+    def _load_existing_tags(self):
+        """Load all existing tags from tracked dataset on startup and merge into dataframe."""
+        if self._all_datasets_df is None or self._all_datasets_df.empty:
             return
 
-        # Just this line, will mess any filtering/ordering that is being applied
-        updated_df = self._pull_into_all_data_view_df()
+        try:
+            # Initialize tags column if not present
+            if "tags" not in self._all_datasets_df.columns:
+                self._all_datasets_df["tags"] = ""
 
-        # Order the rows in updated_df the order in self._all_datasets_df but 
-        # also make sure that we only keep the rows that are in self._all_datasets_df
-        updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
-
-        self._all_datasets_df = updated_df
-        self._last_internals_update_time = current_time
+            # Get tracked datasets to load tags
+            trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
+            tst_tracked = self._tst_loader.tracked_dataset if self._tst_loader else None
+            
+            if not trn_tracked and not tst_tracked:
+                return
+            
+            # Build unified tag lookup dict (faster than per-row lookups)
+            tag_dict = {}
+            if trn_tracked:
+                tag_dict.update(trn_tracked.sample_statistics.get("tags", {}))
+            if tst_tracked:
+                tag_dict.update(tst_tracked.sample_statistics.get("tags", {}))
+            
+            if not tag_dict:
+                return
+            
+            # Vectorized update: use map for efficiency
+            if isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                # For MultiIndex, map from sample_id level
+                sample_ids = self._all_datasets_df.index.get_level_values("sample_id")
+                self._all_datasets_df["tags"] = sample_ids.map(lambda sid: tag_dict.get(int(sid), "")).fillna("")
+            else:
+                # For regular columns
+                self._all_datasets_df["tags"] = self._all_datasets_df["sample_id"].map(
+                    lambda sid: tag_dict.get(int(sid), "")
+                ).fillna("")
+            
+            loaded_count = sum(1 for v in tag_dict.values() if v)
+            logger.info(f"Loaded existing tags for {loaded_count} UID(s) from tracked dataset(s)")
+        except Exception as e:
+            logger.warning(f"Failed to load existing tags: {e}")
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
@@ -456,11 +584,76 @@ class DataService:
             func
         )
         return "No operation applied"
+    
+    def _hydrate_tags_for_slice(self, df_slice: pd.DataFrame) -> pd.DataFrame:
+        """Load tags for the provided slice only and update in-memory views."""
+        if df_slice is None or df_slice.empty or "sample_id" not in df_slice.columns:
+            return df_slice
+
+        try:
+            # Get tracked datasets to load tags
+            trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
+            tst_tracked = self._tst_loader.tracked_dataset if self._tst_loader else None
+        except Exception as e:
+            logger.warning(f"Could not access tracked datasets: {e}")
+            return df_slice
+
+        if "tags" not in df_slice.columns:
+            df_slice["tags"] = ""
+
+        # Build tag lookup dict from tracked datasets (avoid repeated dict lookups in loop)
+        tag_dict = {}
+        if trn_tracked:
+            tag_dict.update(trn_tracked.sample_statistics.get("tags", {}))
+        if tst_tracked:
+            tag_dict.update(tst_tracked.sample_statistics.get("tags", {}))
+
+        # Vectorized update: use map instead of iterating with .loc
+        df_slice["tags"] = df_slice["sample_id"].map(lambda sid: tag_dict.get(int(sid), "")).fillna("")
+
+        # Update main dataframe in one vectorized operation
+        if self._all_datasets_df is not None:
+            try:
+                if isinstance(self._all_datasets_df.index, pd.MultiIndex) and {
+                    "origin", "sample_id"
+                }.issubset(set(self._all_datasets_df.index.names or [])):
+                    # For MultiIndex, update matching rows
+                    sample_id_level = self._all_datasets_df.index.get_level_values("sample_id")
+                    mask = sample_id_level.isin(df_slice["sample_id"].values)
+                    for sid in df_slice["sample_id"].unique():
+                        tag_val = df_slice[df_slice["sample_id"] == sid]["tags"].iloc[0]
+                        idx_mask = sample_id_level == sid
+                        self._all_datasets_df.loc[idx_mask, "tags"] = tag_val
+                elif "sample_id" in self._all_datasets_df.columns:
+                    # For regular columns, update using isin (faster than loop)
+                    mask = self._all_datasets_df["sample_id"].isin(df_slice["sample_id"].values)
+                    self._all_datasets_df.loc[mask, "tags"] = self._all_datasets_df.loc[mask, "sample_id"].map(
+                        lambda sid: tag_dict.get(int(sid), "")
+                    )
+            except Exception as e:
+                logger.debug(f"[_hydrate_tags_for_slice] Could not update main dataframe: {e}")
+
+        return df_slice
+
+    def SlowUpdateInternals(self):
+        current_time = time.time()
+        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+            return
+
+        # Just this line, will mess any filtering/ordering that is being applied
+        updated_df = self._pull_into_all_data_view_df()
+
+        # Order the rows in updated_df the order in self._all_datasets_df but 
+        # also make sure that we only keep the rows that are in self._all_datasets_df
+        updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
+
+        self._all_datasets_df = updated_df
+        self._last_internals_update_time = current_time
 
     def GetDataSamples(self, request, context):
         """
         Retrieve samples from the dataframe with their data statistics.
-        Uses the actual proto messages from data_service.proto
+        Only allowed when training is paused.
         """
         try:
             logger.info(
@@ -483,6 +676,9 @@ class DataService:
                 end_index = request.start_index + request.records_cnt
                 df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
 
+            # Load tags only for the displayed slice (stream-friendly)
+            df_slice = self._hydrate_tags_for_slice(df_slice)
+
             if df_slice.empty:
                 logger.warning("No samples found at index %s", request.start_index)
                 return pb2.DataSamplesResponse(
@@ -494,12 +690,16 @@ class DataService:
             logger.info(
                 "Retrieving samples from %s to %s", request.start_index, end_index)
 
-            # Build the data records list in parallel
+            # Build the data records list in parallel with optimized worker count
             data_records = []
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
-            with futures.ThreadPoolExecutor() as executor:
-                results = executor.map(self._process_sample_row, tasks)
+            # Use more workers for I/O-bound image processing (CPU count * 2)
+            import os
+            max_workers = min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8)
+            
+            with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = executor.map(self._process_sample_row, tasks, timeout=30)
                 data_records = [res for res in results if res is not None]
 
             logger.info("Retrieved %s data records", len(data_records))
@@ -633,6 +833,21 @@ class DataService:
                         )
                 except Exception as e:
                     logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
+
+        # ------------------------------------------------------------------
+        # 4) Persist tag edits to the tracked dataset (auto-sync to H5)
+        # ------------------------------------------------------------------
+        if request.stat_name == "tags" and request.samples_ids:
+            try:
+                for sid in request.samples_ids:
+                    tags_str = request.string_value or ""
+                    # Save to both train and test tracked datasets
+                    if self._trn_loader and hasattr(self._trn_loader.tracked_dataset, 'set'):
+                        self._trn_loader.tracked_dataset.set(int(sid), "tags", tags_str)
+                    if self._tst_loader and hasattr(self._tst_loader.tracked_dataset, 'set'):
+                        self._tst_loader.tracked_dataset.set(int(sid), "tags", tags_str)
+            except Exception as e:
+                logger.warning(f"Could not persist tags to tracked dataset: {e}")
 
         return pb2.DataEditsResponse(
             success=True,

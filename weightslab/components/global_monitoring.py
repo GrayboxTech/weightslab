@@ -33,7 +33,7 @@ class PauseController:
         set_hyperparam(None, 'is_training', False)
     
     def resume(self):
-        print('Training resumed.')
+        print('\nTraining resumed.')
         self._event.set()
         set_hyperparam(None, 'is_training', True)
 

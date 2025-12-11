@@ -14,8 +14,12 @@ def load_raw_image(dataset, index):
         img_path = wrapped.files[index]
         img = Image.open(img_path)
         return img.convert("RGB")
-    elif hasattr(wrapped, "data"):
-        np_img = wrapped.data[index]
+    elif hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
+        if hasattr(wrapped, "dataset"):
+            wrapped_data = wrapped.dataset.base.data if hasattr(wrapped.dataset, "base") else wrapped.dataset.data
+        else:
+            wrapped_data = wrapped.data
+        np_img = wrapped_data[index]
         if hasattr(np_img, 'numpy'):
             np_img = np_img.numpy()  
         if np_img.ndim == 2:
@@ -24,7 +28,6 @@ def load_raw_image(dataset, index):
             return Image.fromarray(np_img.astype(np.uint8), mode="RGB")
         else:
             raise ValueError(f"Unsupported image shape: {np_img.shape}")
-
     elif hasattr(wrapped, "samples") or hasattr(wrapped, "imgs"):
         if hasattr(wrapped, "samples"):
             img_path, _ = wrapped.samples[index]
@@ -32,6 +35,5 @@ def load_raw_image(dataset, index):
             img_path, _ = wrapped.imgs[index]
         img = Image.open(img_path)
         return img.convert("L") if img.mode in ["1", "L", "I;16", "I"] else img.convert("RGB")
-
     else:
         raise ValueError("Dataset type not supported for raw image extraction.")

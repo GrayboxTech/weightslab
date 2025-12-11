@@ -524,7 +524,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         self.device = args[0]
         for tracker in self.get_trackers():
             tracker.to(*args, **kwargs)
-
+        
     def register(
             self,
             activation_map: th.Tensor
@@ -1416,8 +1416,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         """
 
         logger.debug(
-            f"{self.get_name()}[{self.get_module_id()}].freeze {neuron_indices}",
-            level='DEBUG'
+            f"{self.get_name()}[{self.get_module_id()}].freeze {neuron_indices}"
         )
 
         # Process neuron indices
@@ -1479,8 +1478,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         """
 
         logger.debug(
-            f"{self.get_name()}[{self.get_module_id()}].reset {neuron_indices}",
-            level='DEBUG'
+            f"{self.get_name()}[{self.get_module_id()}].reset {neuron_indices}"
         )
 
         # Process neuron indices
