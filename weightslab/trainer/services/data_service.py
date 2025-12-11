@@ -114,6 +114,21 @@ class DataService:
         """
         return str(self._root_log_dir.absolute())
 
+    def is_agent_available(self) -> bool:
+        """
+        Check if the agent (Ollama) is available for natural language queries.
+        
+        Returns:
+            bool: True if agent is available, False otherwise
+        """
+        if self._agent is None:
+            return False
+        try:
+            return self._agent.is_ollama_available()
+        except Exception as e:
+            logger.debug(f"Error checking agent availability: {e}")
+            return False
+
     def _is_training_active(self) -> bool:
         """Return True if training is currently running (not paused)."""
         try:

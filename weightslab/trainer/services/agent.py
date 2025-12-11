@@ -521,22 +521,28 @@ class DataManipulationAgent:
     def _check_ollama_health(self):
         """Check if Ollama is running and accessible."""
         _LOGGER.info("Checking Ollama health...")
+        if self.is_ollama_available():
+            _LOGGER.info("Ollama is running and accessible.")
+            return
+        else:
+            _LOGGER.error(f"Ollama is not accessible at http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}")
+
+    def is_ollama_available(self) -> bool:
+        """
+        Check if Ollama is currently available and accessible.
+        
+        Returns:
+            bool: True if Ollama is running and accessible, False otherwise
+        """
         os.environ['OLLAMA_HOST'] = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
         try:
-            response = requests.get(f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/tags", timeout=5)
-            if response.status_code == 200:
-                models = response.json().get('models', [])
-                _LOGGER.info("Ollama is running with models: %s", [m.get('name') for m in models])
-                if not any('llama3.2:1b' == m.get('name', '') for m in models):
-                    _LOGGER.warning(
-                        "llama3.2:1b model not found in Ollama. Available models: %s",
-                        [m.get('name') for m in models]
-                    )
-            else:
-                _LOGGER.error("Ollama health check failed with status: %s", response.status_code)
-        except requests.RequestException as e:
-            _LOGGER.error(f"Ollama is not accessible at http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}: %s", e)
-            raise DataAgentError("Ollama service is not running. Please start Ollama first.") from e
+            response = requests.get(
+                f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/tags",
+                timeout=2
+            )
+            return response.status_code == 200
+        except requests.RequestException:
+            return False
 
     def _is_safe_expression(self, expr: str) -> bool:
         """
