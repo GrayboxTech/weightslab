@@ -320,9 +320,9 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         # Init Variables
         self.stamp = time.time()
         self.base_ds = _TINY_DUMMY_DATASET
-        self.ds = DataSampleTrackingWrapper(self.base_ds)
+        self.wrapped_dataset = DataSampleTrackingWrapper(self.base_ds)
         # Extract actual UIDs
-        self.uids = [int(uid) for uid in self.ds.unique_ids]
+        self.uids = [int(uid) for uid in self.wrapped_dataset.unique_ids]
 
     def tearDown(self):
         """
@@ -335,12 +335,12 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
 
     def test_update_sample_stats_ex_scalars(self):
         # set a few extended scalar stats for different samples
-        self.ds.update_sample_stats_ex(self.uids[0], {"loss/classification": 0.7, "loss/reconstruction": 1.3})
-        self.ds.update_sample_stats_ex(self.uids[3], {"loss/classification": 0.1, "neuron2.3avg": 0.42})
-        self.ds.update_sample_stats_ex(self.uids[5], {"text/tag": "ok"})
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[0], {"loss/classification": 0.7, "loss/reconstruction": 1.3})
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[3], {"loss/classification": 0.1, "neuron2.3avg": 0.42})
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[5], {"text/tag": "ok"})
 
         # ensure dataframe has the new columns and values
-        df = self.ds.get_dataframe()
+        df = self.wrapped_dataset.get_dataframe()
         self.assertIn("loss/classification", df.columns)
         self.assertIn("loss/reconstruction", df.columns)
         self.assertIn("neuron2.3avg", df.columns)
@@ -353,7 +353,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         self.assertEqual(df.loc[self.uids[5], "text/tag"], "ok")
 
         # as_records should also include the extended keys
-        recs = self.ds.as_records()
+        recs = self.wrapped_dataset.as_records()
         rec0 = next(r for r in recs if r[SampleStatsEx.SAMPLE_ID.value] == self.uids[0])
         self.assertIn("loss/classification", rec0)
         self.assertIn("loss/reconstruction", rec0)
@@ -361,17 +361,17 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
     def test_update_sample_stats_ex_dense_and_downsampling(self):
         # create a dense 2D mask 128x128 -> should be downsampled to 64x64 (ceil(128/96)=2)
         dense_mask = (np.arange(128*128).reshape(128, 128) % 3).astype(np.int32)
-        self.ds.update_sample_stats_ex(self.uids[2], {"pred/seg": dense_mask})
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[2], {"pred/seg": dense_mask})
 
-        arr = self.ds.get_dense_stat(self.uids[2], "pred/seg")
+        arr = self.wrapped_dataset.get_dense_stat(self.uids[2], "pred/seg")
         self.assertIsNotNone(arr)
         self.assertIsInstance(arr, np.ndarray)
         self.assertEqual(arr.shape, (64, 64))  # downsampled
 
         # 3D channels-first array (C,H,W)
         dense_cf = np.zeros((2, 100, 140), dtype=np.float32)
-        self.ds.update_sample_stats_ex(self.uids[4], {"pred/recon": dense_cf})
-        arr2 = self.ds.get_dense_stat(self.uids[4], "pred/recon")
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[4], {"pred/recon": dense_cf})
+        arr2 = self.wrapped_dataset.get_dense_stat(self.uids[4], "pred/recon")
         self.assertEqual(arr2.shape, (2, 50, 70))
 
     def test_update_sample_stats_ex_batch_mixed(self):
@@ -383,7 +383,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         # dense predictions (N,H,W)
         dense_batch = np.random.randint(0, 2, size=(4, 64, 64), dtype=np.int64)
 
-        self.ds.update_sample_stats_ex_batch(
+        self.wrapped_dataset.update_sample_stats_ex_batch(
             ids,
             {
                 "loss/classification": per_sample_cls,
@@ -393,7 +393,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
             }
         )
 
-        df = self.ds.get_dataframe()
+        df = self.wrapped_dataset.get_dataframe()
         self.assertIn("loss/classification", df.columns)
         self.assertIn("loss/reconstruction", df.columns)
         # spot check values
@@ -401,20 +401,20 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         self.assertAlmostEqual(df.loc[self.uids[3], "loss/reconstruction"], float(per_sample_rec[3]), places=6)
 
         # logits stored as lists
-        self.assertIsInstance(self.ds.sample_statistics_ex["pred/logits"][self.uids[0]], list)
-        self.assertEqual(len(self.ds.sample_statistics_ex["pred/logits"][self.uids[0]]), 5)
+        self.assertIsInstance(self.wrapped_dataset.sample_statistics_ex["pred/logits"][self.uids[0]], list)
+        self.assertEqual(len(self.wrapped_dataset.sample_statistics_ex["pred/logits"][self.uids[0]]), 5)
 
         # dense present via accessor
-        d0 = self.ds.get_dense_stat(self.uids[0], "pred/seg")
+        d0 = self.wrapped_dataset.get_dense_stat(self.uids[0], "pred/seg")
         self.assertIsInstance(d0, np.ndarray)
         # should be <= 64x64 (may be same size since max_hw=96)
         self.assertEqual(d0.shape, (64, 64))
 
     def test_state_dict_roundtrip_with_extended(self):
         # populate ex + dense
-        self.ds.update_sample_stats_ex(self.uids[1], {"loss/combined": 2.5, "note": "hello"})
-        self.ds.update_sample_stats_ex(self.uids[1], {"pred/seg": np.ones((120, 120), dtype=np.uint8)})
-        state = self.ds.state_dict()
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[1], {"loss/combined": 2.5, "note": "hello"})
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[1], {"pred/seg": np.ones((120, 120), dtype=np.uint8)})
+        state = self.wrapped_dataset.state_dict()
 
         # load into a fresh wrapper
         ds2 = DataSampleTrackingWrapper(self.base_ds)
@@ -433,20 +433,20 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
 
     def test_backward_compat_load_core_only(self):
         # simulate a legacy state_dict where 'sample_statistics' is the core dict (no "core/ex/dense" nesting)
-        legacy = self.ds.state_dict()
-        legacy["sample_statistics"] = self.ds.sample_statistics  # flatten to legacy
+        legacy = self.wrapped_dataset.state_dict()
+        legacy["sample_statistics"] = self.wrapped_dataset.sample_statistics  # flatten to legacy
         # fresh wrapper should accept and initialize ex/dense empty
         ds3 = DataSampleTrackingWrapper(self.base_ds)
         ds3.load_state_dict(legacy)
-        self.assertEqual(ds3.sample_statistics, self.ds.sample_statistics)
+        self.assertEqual(ds3.sample_statistics, self.wrapped_dataset.sample_statistics)
         self.assertEqual(ds3.sample_statistics_ex, {})
         self.assertEqual(ds3.dense_stats_store, {})
 
     def test_get_dataframe_includes_extended_columns(self):
         # add ex stats for a couple of samples
-        self.ds.update_sample_stats_ex(self.uids[0], {"loss/a": 0.11, "k": 1})
-        self.ds.update_sample_stats_ex(self.uids[2], {"loss/a": 0.99, "k": 2})
-        df = self.ds.get_dataframe()
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[0], {"loss/a": 0.11, "k": 1})
+        self.wrapped_dataset.update_sample_stats_ex(self.uids[2], {"loss/a": 0.99, "k": 2})
+        df = self.wrapped_dataset.get_dataframe()
         self.assertIn("loss/a", df.columns)
         self.assertIn("k", df.columns)
         self.assertAlmostEqual(df.loc[self.uids[0], "loss/a"], 0.11, places=6)
@@ -571,7 +571,7 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         
         # Run 3 epochs
         all_uids_seen = []
-        for epoch in range(3):
+        for _ in range(3):
             for batch in loader:
                 batch_uid = batch[1].item()
                 all_uids_seen.append(batch_uid)
