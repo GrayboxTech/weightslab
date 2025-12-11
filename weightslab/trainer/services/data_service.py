@@ -138,23 +138,34 @@ class DataService:
         return True, ""
 
     def _pull_into_all_data_view_df(self):
-        # We could maintain an efficient synchronized structure that pulls only
-        # the rows with updates.
-
+        """Pull stats from both loaders into a single indexed dataframe."""
         # Sanity check
         if self._trn_loader is None:
             self._trn_loader = self._ctx.components.get("train_loader")
         if self._tst_loader is None:
             self._tst_loader = self._ctx.components.get("test_loader")
 
-        # Pull stats from both datasets
+        # Pull stats from both datasets (skip if empty)
+        dfs_to_concat = []
         tstats = _get_stats(self._trn_loader, "train")
+        if not tstats.empty:
+            dfs_to_concat.append(tstats)
+        
         estats = _get_stats(self._tst_loader, "eval")
-        concat_df = pd.concat([tstats, estats])
+        if not estats.empty:
+            dfs_to_concat.append(estats)
+        
+        if not dfs_to_concat:
+            return pd.DataFrame()
+        
+        # Efficient concat with minimal copying
+        concat_df = pd.concat(dfs_to_concat, ignore_index=False, sort=False)
+        
         try:
             concat_df.set_index(["origin", "sample_id"], inplace=True)
         except KeyError as e:
             logger.warning(f"Failed to set index on concat_df: {e}")
+        
         return concat_df
     
     def _load_existing_tags(self):
@@ -163,70 +174,108 @@ class DataService:
             return
 
         try:
-            # Get all sample_ids
-            if isinstance(self._all_datasets_df.index, pd.MultiIndex):
-                all_uids = self._all_datasets_df.index.get_level_values("sample_id").unique().tolist()
-            elif "sample_id" in self._all_datasets_df.columns:
-                all_uids = self._all_datasets_df["sample_id"].unique().tolist()
-            else:
-                return
+            # Initialize tags column if not present
+            if "tags" not in self._all_datasets_df.columns:
+                self._all_datasets_df["tags"] = ""
 
             # Get tracked datasets to load tags
             trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
             tst_tracked = self._tst_loader.tracked_dataset if self._tst_loader else None
             
             if not trn_tracked and not tst_tracked:
-                # Initialize empty tags column
-                if "tags" not in self._all_datasets_df.columns:
-                    self._all_datasets_df["tags"] = ""
                 return
             
-            # Initialize tags column if not present
-            if "tags" not in self._all_datasets_df.columns:
-                self._all_datasets_df["tags"] = ""
-
-            # Load tags from tracked datasets
-            loaded_count = 0
-            for uid in all_uids:
-                tags_str = ""
-                # Try to get tags from train dataset first, then test
-                if trn_tracked:
-                    tags = trn_tracked.sample_statistics.get("tags", {}).get(int(uid), "")
-                    if tags:
-                        tags_str = tags
-                        loaded_count += 1
-                        
-                if not tags_str and tst_tracked:
-                    tags = tst_tracked.sample_statistics.get("tags", {}).get(int(uid), "")
-                    if tags:
-                        tags_str = tags
-                        loaded_count += 1
-                
-                # Update dataframe with loaded tags
-                if isinstance(self._all_datasets_df.index, pd.MultiIndex):
-                    mask = self._all_datasets_df.index.get_level_values("sample_id") == uid
-                    self._all_datasets_df.loc[mask, "tags"] = tags_str
-                elif "sample_id" in self._all_datasets_df.columns:
-                    mask = self._all_datasets_df["sample_id"] == uid
-                    self._all_datasets_df.loc[mask, "tags"] = tags_str
-
+            # Build unified tag lookup dict (faster than per-row lookups)
+            tag_dict = {}
+            if trn_tracked:
+                tag_dict.update(trn_tracked.sample_statistics.get("tags", {}))
+            if tst_tracked:
+                tag_dict.update(tst_tracked.sample_statistics.get("tags", {}))
+            
+            if not tag_dict:
+                return
+            
+            # Vectorized update: use map for efficiency
+            if isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                # For MultiIndex, map from sample_id level
+                sample_ids = self._all_datasets_df.index.get_level_values("sample_id")
+                self._all_datasets_df["tags"] = sample_ids.map(lambda sid: tag_dict.get(int(sid), "")).fillna("")
+            else:
+                # For regular columns
+                self._all_datasets_df["tags"] = self._all_datasets_df["sample_id"].map(
+                    lambda sid: tag_dict.get(int(sid), "")
+                ).fillna("")
+            
+            loaded_count = sum(1 for v in tag_dict.values() if v)
             logger.info(f"Loaded existing tags for {loaded_count} UID(s) from tracked dataset(s)")
         except Exception as e:
             logger.warning(f"Failed to load existing tags: {e}")
     
     def _dataframe_update(self) -> bool:
         """
-        Refresh the in-memory dataframe from the datasets.
+        Incrementally refresh the in-memory dataframe from the datasets.
+        Only updates columns that actually changed (deny_listed, losses, etc).
+        Preserves filtering/ordering and tags edits.
         """
-        # Just this line, will mess any filtering/ordering that is being applied
-        updated_df = self._pull_into_all_data_view_df()
+        if self._all_datasets_df is None or self._all_datasets_df.empty:
+            self._all_datasets_df = self._pull_into_all_data_view_df()
+            return
 
-        # Order the rows in updated_df the order in self._all_datasets_df but 
-        # also make sure that we only keep the rows that are in self._all_datasets_df
-        if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-            updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
+        try:
+            # Sanity check loaders
+            if self._trn_loader is None:
+                self._trn_loader = self._ctx.components.get("train_loader")
+            if self._tst_loader is None:
+                self._tst_loader = self._ctx.components.get("test_loader")
 
-        self._all_datasets_df = updated_df
+            # Get updated stats from both datasets (minimal - just the changing columns)
+            tstats = _get_stats(self._trn_loader, "train")
+            estats = _get_stats(self._tst_loader, "eval")
+            
+            if tstats.empty and estats.empty:
+                return
+
+            # Columns that change during training (losses, predictions, etc.)
+            # but preserve user-edited columns (tags, deny_listed)
+            preserve_cols = {"tags", "deny_listed"}
+            
+            for origin, stats_df in [("train", tstats), ("eval", estats)]:
+                if stats_df.empty:
+                    continue
+                
+                for _, row in stats_df.iterrows():
+                    sample_id = int(row.get("sample_id", -1))
+                    if sample_id < 0:
+                        continue
+                    
+                    try:
+                        if isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                            # MultiIndex: (origin, sample_id)
+                            idx = (origin, sample_id)
+                            if idx in self._all_datasets_df.index:
+                                # Update only non-preserved columns
+                                for col in row.index:
+                                    if col not in ["origin", "sample_id"] and col not in preserve_cols:
+                                        self._all_datasets_df.loc[idx, col] = row[col]
+                        else:
+                            # Regular index: update by mask
+                            mask = (
+                                (self._all_datasets_df["origin"] == origin)
+                                & (self._all_datasets_df["sample_id"] == sample_id)
+                            )
+                            if mask.any():
+                                for col in row.index:
+                                    if col not in ["origin", "sample_id"] and col not in preserve_cols:
+                                        self._all_datasets_df.loc[mask, col] = row[col]
+                    except Exception as e:
+                        logger.debug(f"Could not update row {origin}/{sample_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Incremental dataframe update failed, falling back to full refresh: {e}")
+            # Fallback: full refresh
+            updated_df = self._pull_into_all_data_view_df()
+            if self._all_datasets_df is not None and not self._all_datasets_df.empty:
+                updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
+            self._all_datasets_df = updated_df
 
     def _slowUpdateInternals(self, time_delta: float = 10.0) -> None:
         current_time = time.time()
@@ -247,62 +296,88 @@ class DataService:
             origin = row.get('origin', 'unknown')
             sample_id = int(row.get('sample_id', 0))
 
+            # Cache dataset lookup
             if origin == 'train':
-                dataset = self._trn_loader.tracked_dataset
-            elif origin == 'test' or origin == 'eval':
-                dataset = self._tst_loader.tracked_dataset
+                dataset = self._trn_loader.tracked_dataset if self._trn_loader else None
+            elif origin in ('test', 'eval'):
+                dataset = self._tst_loader.tracked_dataset if self._tst_loader else None
             else:
                 logger.warning("Unknown origin '%s' for sample %s", origin, sample_id)
                 return None
 
+            if dataset is None:
+                return None
+
             data_stats = []
-            raw_shape, transformed_shape = [], []
 
-            if hasattr(dataset, "_getitem_raw"):
-                tensor, _, label = dataset._getitem_raw(id=sample_id)
+            # Only load images if requested
+            if not request.include_transformed_data and not request.include_raw_data:
+                # Skip image loading entirely - just get metadata stats
+                if hasattr(dataset, "_getitem_raw"):
+                    _, _, label = dataset._getitem_raw(id=sample_id)
+                else:
+                    _, _, label = dataset[sample_id]
             else:
-                tensor, _, label = dataset[sample_id]
+                if hasattr(dataset, "_getitem_raw"):
+                    tensor, _, label = dataset._getitem_raw(id=sample_id)
+                else:
+                    tensor, _, label = dataset[sample_id]
 
+                if request.include_transformed_data and tensor is not None:
+                    try:
+                        pil_img = self._tensor_to_pil(tensor)
+                        transformed_shape = list(np.array(pil_img).shape)
+                        buf = BytesIO()
+                        # Reduced quality and disabled optimize for speed (quality=75, optimize=False)
+                        pil_img.save(buf, format='JPEG', quality=75, optimize=False)
+                        buf.seek(0)
+                        img_bytes = list(buf.getvalue())
+                        data_stats.append(pb2.DataStat(
+                            name='transformed_data', type='bytes', shape=transformed_shape,
+                            value=img_bytes))
+                    except Exception as e:
+                        logger.warning(f"Could not process transformed image for sample {sample_id}: {e}")
+
+                if request.include_raw_data:
+                    try:
+                        raw_img = load_raw_image(dataset, id=sample_id)
+                        raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
+                        buf = BytesIO()
+                        # Reduced quality and disabled optimize for speed (quality=75, optimize=False)
+                        raw_img.save(buf, format='JPEG', quality=75, optimize=False)
+                        buf.seek(0)
+                        img_bytes = list(buf.getvalue())
+                        data_stats.append(pb2.DataStat(
+                            name='raw_data', type='bytes', shape=raw_shape,
+                            value=img_bytes))
+                    except Exception as e:
+                        logger.warning(f"Could not load raw image for sample {sample_id}: {e}")
+
+            # Get metadata stats requested
             stats_to_retrieve = request.stats_to_retrieve
             if not stats_to_retrieve:
                 stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
-
-            if request.include_transformed_data:
-                try:
-                    pil_img = self._tensor_to_pil(tensor)
-                    transformed_shape = list(np.array(pil_img).shape)
-                    buf = BytesIO()
-                    pil_img.save(buf, format='JPEG', quality=90, optimize=True)
-                    buf.seek(0)
-                    img_bytes = list(buf.getvalue())
-                    data_stats.append(pb2.DataStat(
-                        name='transformed_data', type='bytes', shape=transformed_shape,
-                        value=img_bytes))
-                except Exception as e:
-                    logger.warning(f"Could not process transformed image for sample {sample_id}: {e}")
-
-            if request.include_raw_data:
-                try:
-                    raw_img = load_raw_image(dataset, id=sample_id)
-                    raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
-                    buf = BytesIO()
-                    raw_img.save(buf, format='JPEG', quality=90, optimize=True)
-                    buf.seek(0)
-                    img_bytes = list(buf.getvalue())
-                    data_stats.append(pb2.DataStat(
-                        name='raw_data', type='bytes', shape=raw_shape,
-                        value=img_bytes))
-                except Exception as e:
-                    logger.warning(f"Could not load raw image for sample {sample_id}: {e}")
 
             for stat_name in stats_to_retrieve:
                 stat = _get_stat_from_row(row, stat_name)
                 if stat is not None:
                     data_stats.append(stat)
 
+            # Add origin stat
             data_stats.append(pb2.DataStat(
                 name='origin', type='string', shape=[1], value_string=origin))
-            label_val = int(np.array(label.cpu() if hasattr(label, 'cpu') else label).item())
+            
+            # Add label stat (avoid double conversion)
+            try:
+                if hasattr(label, 'cpu'):
+                    label_val = int(label.cpu().item())
+                elif hasattr(label, 'item'):
+                    label_val = int(label.item())
+                else:
+                    label_val = int(label)
+            except Exception:
+                label_val = 0
+                
             data_stats.append(pb2.DataStat(
                 name='label', type='scalar', shape=[1], value=[float(label_val)]))
 
@@ -316,7 +391,6 @@ class DataService:
         if df_slice is None or df_slice.empty or "sample_id" not in df_slice.columns:
             return df_slice
 
-        sample_ids = [int(sid) for sid in df_slice["sample_id"].tolist()]
         try:
             # Get tracked datasets to load tags
             trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
@@ -328,27 +402,37 @@ class DataService:
         if "tags" not in df_slice.columns:
             df_slice["tags"] = ""
 
-        # Update the returned slice and the long-lived dataframe (only for these rows)
-        for sid in sample_ids:
-            tag_str = ""
-            # Try to get tags from train dataset first, then test
-            if trn_tracked:
-                tag_str = trn_tracked.sample_statistics.get("tags", {}).get(sid, "")
-            if not tag_str and tst_tracked:
-                tag_str = tst_tracked.sample_statistics.get("tags", {}).get(sid, "")
-            
-            df_slice.loc[df_slice["sample_id"] == sid, "tags"] = tag_str
+        # Build tag lookup dict from tracked datasets (avoid repeated dict lookups in loop)
+        tag_dict = {}
+        if trn_tracked:
+            tag_dict.update(trn_tracked.sample_statistics.get("tags", {}))
+        if tst_tracked:
+            tag_dict.update(tst_tracked.sample_statistics.get("tags", {}))
+
+        # Vectorized update: use map instead of iterating with .loc
+        df_slice["tags"] = df_slice["sample_id"].map(lambda sid: tag_dict.get(int(sid), "")).fillna("")
+
+        # Update main dataframe in one vectorized operation
+        if self._all_datasets_df is not None:
             try:
                 if isinstance(self._all_datasets_df.index, pd.MultiIndex) and {
                     "origin", "sample_id"
                 }.issubset(set(self._all_datasets_df.index.names or [])):
-                    idx_mask = self._all_datasets_df.index.get_level_values("sample_id") == sid
-                    self._all_datasets_df.loc[idx_mask, "tags"] = tag_str
+                    # For MultiIndex, update matching rows
+                    sample_id_level = self._all_datasets_df.index.get_level_values("sample_id")
+                    mask = sample_id_level.isin(df_slice["sample_id"].values)
+                    for sid in df_slice["sample_id"].unique():
+                        tag_val = df_slice[df_slice["sample_id"] == sid]["tags"].iloc[0]
+                        idx_mask = sample_id_level == sid
+                        self._all_datasets_df.loc[idx_mask, "tags"] = tag_val
                 elif "sample_id" in self._all_datasets_df.columns:
-                    mask = self._all_datasets_df["sample_id"] == sid
-                    self._all_datasets_df.loc[mask, "tags"] = tag_str
-            except Exception:
-                continue
+                    # For regular columns, update using isin (faster than loop)
+                    mask = self._all_datasets_df["sample_id"].isin(df_slice["sample_id"].values)
+                    self._all_datasets_df.loc[mask, "tags"] = self._all_datasets_df.loc[mask, "sample_id"].map(
+                        lambda sid: tag_dict.get(int(sid), "")
+                    )
+            except Exception as e:
+                logger.debug(f"[_hydrate_tags_for_slice] Could not update main dataframe: {e}")
 
         return df_slice
 
@@ -497,13 +581,6 @@ class DataService:
         Retrieve samples from the dataframe with their data statistics.
         Only allowed when training is paused.
         """
-        # allowed, msg = self._interaction_allowed()
-        # if not allowed:
-        #     return pb2.DataSamplesResponse(
-        #         success=False,
-        #         message=msg,
-        #         data_records=[],
-        #     )
 
         self._slowUpdateInternals(time_delta=15)  # update at most every 60s - get last dataframe state
         try:
@@ -538,12 +615,16 @@ class DataService:
             logger.info(
                 "Retrieving samples from %s to %s", request.start_index, end_index)
 
-            # Build the data records list in parallel
+            # Build the data records list in parallel with optimized worker count
             data_records = []
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
-            with futures.ThreadPoolExecutor() as executor:
-                results = executor.map(self._process_sample_row, tasks)
+            # Use more workers for I/O-bound image processing (CPU count * 2)
+            import os
+            max_workers = min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8)
+            
+            with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = executor.map(self._process_sample_row, tasks, timeout=30)
                 data_records = [res for res in results if res is not None]
 
             logger.info("Retrieved %s data records", len(data_records))
