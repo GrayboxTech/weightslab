@@ -3,6 +3,7 @@ import logging
 import traceback
 import time
 from concurrent import futures
+import threading
 
 import numpy as np
 import pandas as pd
@@ -56,6 +57,7 @@ class DataService:
 
     def __init__(self, ctx):
         self._ctx = ctx
+        self._lock = threading.Lock()
 
         # init references to the context components
         self._ctx.ensure_components()
@@ -206,61 +208,61 @@ class DataService:
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
+        with self._lock:
+            df = self._all_datasets_df  # authoritative DF, mutated in-place
 
-        df = self._all_datasets_df  # authoritative DF, mutated in-place
-
-        # 1) No query: just report counts
-        if request.query == "":
-            return self._build_success_response(
-                df=df,
-                message=f"Current dataframe has {len(df)} samples",
-            )
-
-        try:
-            # 2) All non-empty queries go through the agent
-            if not request.is_natural_language:
-                logger.debug(
-                    "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
-                    "treating query as natural language: %r",
-                    request.query,
-                )
-
-            if self._agent is None:
-                return pb2.DataQueryResponse(
-                    success=False,
-                    message="Natural language queries require agent (not available)",
-                )
-
-            # Agent translates query text → operation spec
-            operation = self._agent.query(request.query) or {}
-            func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
-            params = operation.get("params", {}) or {}
-
-            # 2a) Agent-driven RESET has highest priority
-            if params.get("__agent_reset__"):
-                logger.debug("[ApplyDataQuery] Agent requested reset")
-
-                # Rebuild from loaders; this is the only place we replace the df object
-                self._all_datasets_df = self._pull_into_all_data_view_df()
-                df = self._all_datasets_df
-
+            # 1) No query: just report counts
+            if request.query == "":
                 return self._build_success_response(
                     df=df,
-                    message="Reset view to base dataset",
+                    message=f"Current dataframe has {len(df)} samples",
                 )
 
-            # 2b) All other agent operations mutate df in-place
-            message = self._apply_agent_operation(df, func, params)
+            try:
+                # 2) All non-empty queries go through the agent
+                if not request.is_natural_language:
+                    logger.debug(
+                        "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
+                        "treating query as natural language: %r",
+                        request.query,
+                    )
 
-            # 3) Return updated counts after mutation
-            return self._build_success_response(df=df, message=message)
+                if self._agent is None:
+                    return pb2.DataQueryResponse(
+                        success=False,
+                        message="Natural language queries require agent (not available)",
+                    )
 
-        except Exception as e:
-            logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
-            return pb2.DataQueryResponse(
-                success=False,
-                message=f"Failed to apply query: {str(e)}",
-            )
+                # Agent translates query text → operation spec
+                operation = self._agent.query(request.query) or {}
+                func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
+                params = operation.get("params", {}) or {}
+
+                # 2a) Agent-driven RESET has highest priority
+                if params.get("__agent_reset__"):
+                    logger.debug("[ApplyDataQuery] Agent requested reset")
+
+                    # Rebuild from loaders; this is the only place we replace the df object
+                    self._all_datasets_df = self._pull_into_all_data_view_df()
+                    df = self._all_datasets_df
+
+                    return self._build_success_response(
+                        df=df,
+                        message="Reset view to base dataset",
+                    )
+
+                # 2b) All other agent operations mutate df in-place
+                message = self._apply_agent_operation(df, func, params)
+
+                # 3) Return updated counts after mutation
+                return self._build_success_response(df=df, message=message)
+
+            except Exception as e:
+                logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
+                return pb2.DataQueryResponse(
+                    success=False,
+                    message=f"Failed to apply query: {str(e)}",
+                )
 
 
     def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
@@ -297,13 +299,12 @@ class DataService:
         # A) Agent-driven df.query → keep/filter rows via in-place drop
         if func == "df.query":
             expr = params.get("expr", "")
-            logger.debug(
-                "[ApplyDataQuery] Applying df.query (in-place) with expr=%r on df shape=%s",
-                expr, df.shape
-            )
+            print(f"[DEBUG] ENTERED df.query branch with expr={expr}")
+            before = len(df)
             kept = df.query(expr)
-            index_to_drop = df.index.difference(kept.index)
-            df.drop(index=index_to_drop, inplace=True)
+            print(f"[DEBUG] df.query kept {len(kept)} rows out of {before}")
+            df.drop(index=df.index.difference(kept.index), inplace=True)
+            print(f"[DEBUG] AFTER DROP df_len={len(df)}")
             return f"Applied query: {expr}"
 
         # B) Other supported Pandas operations (drop, sort, head, tail, sample)
@@ -461,7 +462,6 @@ class DataService:
         Retrieve samples from the dataframe with their data statistics.
         Uses the actual proto messages from data_service.proto
         """
-        self.SlowUpdateInternals()
         try:
             logger.info(
                 "GetSamples called with start_index=%s, records_cnt=%s",
@@ -477,8 +477,11 @@ class DataService:
                 )
 
             # Get the requested slice of the dataframe
-            end_index = request.start_index + request.records_cnt
-            df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
+            # Protect the update and slice with the lock
+            with self._lock:
+                self.SlowUpdateInternals()
+                end_index = request.start_index + request.records_cnt
+                df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
 
             if df_slice.empty:
                 logger.warning("No samples found at index %s", request.start_index)
@@ -574,61 +577,62 @@ class DataService:
         # ---------------------------------------------------------------------
         # 2) Mirror edits into the in-memory DataFrame (used by the UI / agent)
         # ---------------------------------------------------------------------
-        if self._all_datasets_df is not None:
-            # If origin/sample_id are in the index, use index levels
-            uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
+        with self._lock:
+            if self._all_datasets_df is not None:
+                # If origin/sample_id are in the index, use index levels
+                uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
 
-            for sid, origin in zip(request.samples_ids, request.sample_origins):
-                value = (
-                    request.string_value
-                    if request.stat_name == "tags"
-                    else request.bool_value
-                )
-
-                try:
-                    if uses_multiindex and set(self._all_datasets_df.index.names) >= {"origin", "sample_id"}:
-                        # MultiIndex: select rows by index
-                        idx = (origin, sid)
-                        # (use .loc on the index tuple directly)
-                        self._all_datasets_df.loc[idx, request.stat_name] = value
-                    else:
-                        # Fallback: origin / sample_id as columns
-                        mask = (
-                            (self._all_datasets_df["sample_id"] == sid)
-                            & (self._all_datasets_df["origin"] == origin)
-                        )
-                        self._all_datasets_df.loc[mask, request.stat_name] = value
-
-                except Exception as e:
-                    logger.debug(
-                        f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
+                for sid, origin in zip(request.samples_ids, request.sample_origins):
+                    value = (
+                        request.string_value
+                        if request.stat_name == "tags"
+                        else request.bool_value
                     )
 
-            # Debug AFTER the updates
-            try:
-                ids = list(request.samples_ids)
-                origins = list(request.sample_origins)
+                    try:
+                        if uses_multiindex and set(self._all_datasets_df.index.names) >= {"origin", "sample_id"}:
+                            # MultiIndex: select rows by index
+                            idx = (origin, sid)
+                            # (use .loc on the index tuple directly)
+                            self._all_datasets_df.loc[idx, request.stat_name] = value
+                        else:
+                            # Fallback: origin / sample_id as columns
+                            mask = (
+                                (self._all_datasets_df["sample_id"] == sid)
+                                & (self._all_datasets_df["origin"] == origin)
+                            )
+                            self._all_datasets_df.loc[mask, request.stat_name] = value
 
-                debug_rows = self._all_datasets_df[
-                    (self._all_datasets_df["sample_id"].isin(ids))
-                    & (self._all_datasets_df["origin"].isin(origins))
-                ]
-                logger.debug(
-                    "[DEBUG EditDataSample] Updated rows:\n%s",
-                    debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
-                )
+                    except Exception as e:
+                        logger.debug(
+                            f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
+                        )
 
-                if request.stat_name == "tags":
-                    tagged = self._all_datasets_df[
-                        self._all_datasets_df["tags"] == request.string_value
+                # Debug AFTER the updates
+                try:
+                    ids = list(request.samples_ids)
+                    origins = list(request.sample_origins)
+
+                    debug_rows = self._all_datasets_df[
+                        (self._all_datasets_df["sample_id"].isin(ids))
+                        & (self._all_datasets_df["origin"].isin(origins))
                     ]
                     logger.debug(
-                        "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
-                        request.string_value,
-                        len(tagged),
+                        "[DEBUG EditDataSample] Updated rows:\n%s",
+                        debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
                     )
-            except Exception as e:
-                logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
+
+                    if request.stat_name == "tags":
+                        tagged = self._all_datasets_df[
+                            self._all_datasets_df["tags"] == request.string_value
+                        ]
+                        logger.debug(
+                            "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
+                            request.string_value,
+                            len(tagged),
+                        )
+                except Exception as e:
+                    logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
 
         return pb2.DataEditsResponse(
             success=True,
