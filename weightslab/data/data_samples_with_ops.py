@@ -456,8 +456,14 @@ class DataSampleTrackingWrapper(Dataset):
             else:
                 self.idx_to_idx_remapp[idx - delta] = idx
 
-    def set(self, sample_id: int, stat_name: str, stat_value):
+    def set(self, sample_id: int, stat_name: str, stat_value, raw: bool = True):
         self.dataframe = None
+
+        # When raw=False, remap sample_id from dataloader index to original sample_id
+        # Only remap if the key exists, otherwise sample_id is already the original ID
+        if not raw and self.idx_to_idx_remapp and sample_id in self.idx_to_idx_remapp:
+            sample_id = self.idx_to_idx_remapp[sample_id]
+        
         self._raise_if_invalid_stat_name(stat_name)
         prev_value = self.sample_statistics[stat_name].get(sample_id, None)
 
@@ -547,15 +553,23 @@ class DataSampleTrackingWrapper(Dataset):
 
     def update_sample_stats(self,
                             sample_id: int,
-                            sample_stats: Dict[str, None]):
+                            sample_stats: Dict[str, None],
+                            raw: bool = True):
         self.dataframe = None
+        
+        # Remap sample_id if raw=False and the key exists in the remap
+        # If key doesn't exist, sample_id is already the original ID
+        actual_sample_id = sample_id
+        if not raw and self.idx_to_idx_remapp and sample_id in self.idx_to_idx_remapp:
+            actual_sample_id = self.idx_to_idx_remapp[sample_id]
+        
         self._sanity_check_columns(sample_stats_dict=sample_stats)
         for stat_name, stat_value in sample_stats.items():
             if stat_value is not None:
-                self.set(sample_id, stat_name, stat_value)
+                self.set(actual_sample_id, stat_name, stat_value)
 
         exposure_amount = 1
-        if sample_id in self.sample_statistics[SampleStatsEx.ENCOUNTERED]:
+        if actual_sample_id in self.sample_statistics[SampleStatsEx.ENCOUNTERED]:
             exposure_amount = 1 + \
                 self.get(sample_id=sample_id, stat_name=SampleStatsEx.ENCOUNTERED)
         self.set(sample_id, SampleStatsEx.ENCOUNTERED.value, exposure_amount)
@@ -563,7 +577,7 @@ class DataSampleTrackingWrapper(Dataset):
             self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
         self.set(sample_id=sample_id, stat_name=SampleStatsEx.SAMPLE_ID, stat_value=sample_id)
 
-    def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None):
+    def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None, raw: bool = False):
         self.dataframe = None
         if predct_batch is None:
             predct_batch = [None] * len(ids_batch)
