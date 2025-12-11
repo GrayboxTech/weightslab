@@ -20,34 +20,114 @@ logger.setLevel(logging.WARNING)
 
 def _get_stat_from_row(row, stat_name):
     """Extract stat from dataframe row and convert to DataStat message."""
-    value = row.get(stat_name)
-    
-    if value is None or pd.isna(value):
+    if stat_name not in row:
         return None
-    
+
+    value = row[stat_name]
+
     # Helper for creating DataStat messages
     def make_stat(type_, shape, **kwargs):
         return pb2.DataStat(name=stat_name, type=type_, shape=shape, **kwargs)
-    
-    if isinstance(value, (int, float)):
-        return make_stat("scalar", [1], value=[float(value)])
-    
+
+    # 1) Fast-path: None
+    if value is None:
+        return None
+
+    # Detect array-like first
+    is_array_like = isinstance(value, (np.ndarray, list, tuple)) or isinstance(value, torch.Tensor)
+
+    # 2) NaN handling ONLY for non-array-like values
+    if not is_array_like:
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            # Some objects don't like pd.isna, just ignore
+            pass
+
+    # 3) torch.Tensor -> numpy
+    if isinstance(value, torch.Tensor):
+        try:
+            value = value.detach().cpu().numpy()
+        except Exception:
+            return None
+
+    # 4) numpy arrays -> array stat
+    if isinstance(value, np.ndarray):
+        # 0-dim array -> scalar
+        if value.ndim == 0:
+            v = float(value.item())
+            return make_stat("scalar", [], value=[v])
+
+        a = value
+        # NOTE: if you ever need to cap size, you could do it here:
+        # if a.size > MAX_ALLOWED:
+        #     a = a.reshape(-1)[:MAX_ALLOWED]
+        return make_stat(
+            "array",
+            list(a.shape),
+            value=a.ravel().astype(float).tolist(),
+        )
+
+    # 5) list/tuple -> treat as 1D array
+    if isinstance(value, (list, tuple)):
+        a = np.asarray(value)
+        if a.ndim == 0:
+            v = float(a.item())
+            return make_stat("scalar", [], value=[v])
+        return make_stat(
+            "array",
+            list(a.shape),
+            value=a.ravel().astype(float).tolist(),
+        )
+
+    # 6) scalars
+    if isinstance(value, (int, float, bool, np.integer, np.floating, np.bool_)):
+        return make_stat("scalar", [], value=[float(value)])
+
+    # 7) strings
     if isinstance(value, str):
         return make_stat("string", [1], value_string=value)
-    
-    if isinstance(value, (list, np.ndarray)):
-        a = np.asarray(value)
-        return make_stat(
-            "array", list(a.shape), value=a.flatten().astype(float).tolist())
-    
-    return None
 
+    # 8) Fallback: stringify
+    return make_stat("string", [1], value_string=str(value)[:512])
 
 def _get_stats(loader, origin: str):
     """Extract dataset statistics from a loader."""
     df = pd.DataFrame(loader.tracked_dataset.as_records())
     df["origin"] = origin
     return df
+
+def _infer_task_type_from_label(label, default="classification"):
+    """
+    Heuristic: guess task type based on label shape / dtype.
+
+    - 0D or size==1 → classification-like
+    - 2D integer mask → segmentation-like
+    - 3D 1-channel integer tensor → segmentation-like
+    - otherwise → fall back to default
+    """
+    try:
+        arr = label.cpu().numpy() if hasattr(label, "cpu") else np.asarray(label)
+    except Exception:
+        return default
+
+    # Scalar / single element → treat as classification
+    if arr.ndim == 0 or arr.size == 1:
+        return "classification"
+
+    # 2D integer-ish → very likely segmentation mask
+    if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
+        return "segmentation"
+
+    # 3D with a single channel can also be a mask (1, H, W) or (H, W, 1)
+    if arr.ndim == 3:
+        if arr.shape[0] == 1 or arr.shape[-1] == 1:
+            if np.issubdtype(arr.dtype, np.integer):
+                return "segmentation"
+
+    # Anything else: keep the caller's default guess
+    return default
 
 
 class DataService:
@@ -135,25 +215,21 @@ class DataService:
 
             if request.include_raw_data:
                 try:
-                    
                     raw_img = load_raw_image(dataset, sample_id)
                     original_size = raw_img.size
-                    
-                    # Handle resize request
-                    # Negative values indicate percentage mode (e.g., -50 means 50% of original)
-                    # Positive values indicate absolute pixel dimensions
-                    # Zero means no resize
+
+                    # Resize logic:
+                    # - width/height < 0 → percentage of original
+                    # - width/height > 0 → absolute, but only downscale
+                    # - 0 → no resize
                     if request.resize_width < 0 and request.resize_height < 0:
-                        # Percentage mode
                         percent = abs(request.resize_width) / 100.0
                         target_width = int(original_size[0] * percent)
                         target_height = int(original_size[1] * percent)
-                        
-                        # Only resize if we're actually reducing size
+
                         if target_width < original_size[0] or target_height < original_size[1]:
                             raw_img = raw_img.resize((target_width, target_height))
                     elif request.resize_width > 0 and request.resize_height > 0:
-                        # Absolute pixel mode - only resize if smaller than original to avoid upscaling
                         if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
                             raw_img = raw_img.resize((request.resize_width, request.resize_height))
 
@@ -175,11 +251,70 @@ class DataService:
                 if stat is not None:
                     data_stats.append(stat)
 
+            base_task_type = getattr(
+                dataset,
+                "task_type",
+                getattr(self._ctx.components.get("model"), "task_type", "classification"),
+            )
+            task_type = _infer_task_type_from_label(label, default=base_task_type)
+
+            # Expose origin and task_type as stats
             data_stats.append(pb2.DataStat(
                 name='origin', type='string', shape=[1], value_string=origin))
-            label_val = int(np.array(label.cpu() if hasattr(label, 'cpu') else label).item())
+
             data_stats.append(pb2.DataStat(
-                name='label', type='scalar', shape=[1], value=[float(label_val)]))
+                name='task_type', type='string', shape=[1], value_string=str(task_type)))
+
+            # Encode label safely depending on task_type  (GT mask / label)
+            label_arr = np.array(label.cpu() if hasattr(label, 'cpu') else label)
+
+            if task_type == "segmentation":
+                # Treat label as segmentation mask → array stat
+                data_stats.append(pb2.DataStat(
+                    name='label',
+                    type='array',
+                    shape=list(label_arr.shape),
+                    value=label_arr.astype(float).ravel().tolist(),
+                ))
+            else:
+                # Classification / other scalar-like labels
+                label_arr = np.asarray(label_arr)
+                if label_arr.size == 1:
+                    label_val = float(label_arr.reshape(-1)[0])
+                    data_stats.append(pb2.DataStat(
+                        name='label',
+                        type='scalar',
+                        shape=[1],
+                        value=[label_val],
+                    ))
+                else:
+                    # Fallback for non-scalar labels in non-segmentation tasks
+                    data_stats.append(pb2.DataStat(
+                        name='label',
+                        type='array',
+                        shape=list(label_arr.shape),
+                        value=label_arr.astype(float).ravel().tolist(),
+                    ))
+
+            # Predicted mask for segmentation (if available)
+            if task_type == "segmentation" and hasattr(dataset, "get_prediction_mask"):
+                try:
+                    pred_mask = dataset.get_prediction_mask(sample_id)
+                    if pred_mask is not None:
+                        pred_arr = np.asarray(
+                            pred_mask.cpu() if hasattr(pred_mask, "cpu") else pred_mask
+                        )
+
+                        data_stats.append(pb2.DataStat(
+                            name='pred_mask',
+                            type='array',
+                            shape=list(pred_arr.shape),
+                            value=pred_arr.astype(float).ravel().tolist(),
+                        ))
+                except Exception as e:
+                    logger.warning(
+                        f"Could not get prediction mask for sample {sample_id}: {e}"
+                    )
 
             if raw_data_bytes:
                 data_stats.append(pb2.DataStat(
