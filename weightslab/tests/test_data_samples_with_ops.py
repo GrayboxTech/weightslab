@@ -454,154 +454,6 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         self.assertEqual(df.loc[self.uids[0], "k"], 1)
         self.assertEqual(df.loc[self.uids[2], "k"], 2)
 
-
-class TestH5Persistence(unittest.TestCase):
-    """Test H5 persistence of SampleStatsEx across restarts."""
-
-    def setUp(self):
-        self.test_dir = tempfile.mkdtemp()
-        self.base_ds = DummyDataset()
-
-    def test_h5_persistence_deny_listed(self):
-        """Test that denied samples persist across restarts."""
-        # Create wrapper with H5 persistence
-        ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
-        # Get UIDs for testing
-        uids = [int(uid) for uid in ds1.unique_ids]
-        
-        # Deny first two samples
-        ds1.denylist_samples({uids[0], uids[1]})
-        
-        # Verify denied state
-        self.assertTrue(ds1.is_deny_listed(uids[0]))
-        self.assertTrue(ds1.is_deny_listed(uids[1]))
-        self.assertFalse(ds1.is_deny_listed(uids[2]))
-        self.assertEqual(ds1.denied_sample_cnt, 2)
-        
-        # Verify only changed UIDs are in pending set (before save)
-        # After denylist_samples, _save_pending_stats_to_h5 is called, so pending should be empty
-        self.assertEqual(len(ds1._h5_pending_uids), 0)
-        
-        # Create new wrapper (simulating restart)
-        ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
-        # Verify denied state persisted
-        self.assertTrue(ds2.is_deny_listed(uids[0]))
-        self.assertTrue(ds2.is_deny_listed(uids[1]))
-        self.assertFalse(ds2.is_deny_listed(uids[2]))
-        self.assertEqual(ds2.denied_sample_cnt, 2)
-
-    def test_h5_persistence_tags(self):
-        """Test that tags persist across restarts and only changed UIDs are saved."""
-        # Create wrapper with H5 persistence
-        ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
-        # Get UIDs for testing
-        uids = [int(uid) for uid in ds1.unique_ids]
-        
-        # Add tags to only first 2 samples
-        ds1.set(uids[0], SampleStatsEx.TAGS.value, "outlier,mislabeled")
-        ds1.set(uids[1], SampleStatsEx.TAGS.value, "edge_case")
-        
-        # Verify tags in memory
-        self.assertEqual(ds1.get(uids[0], SampleStatsEx.TAGS.value), "outlier,mislabeled")
-        self.assertEqual(ds1.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
-        
-        # Verify only changed UIDs are tracked (before manual save)
-        self.assertIn(uids[0], ds1._h5_pending_uids)
-        self.assertIn(uids[1], ds1._h5_pending_uids)
-        self.assertEqual(len(ds1._h5_pending_uids), 2)
-        
-        # Manually trigger save to clear pending
-        ds1._save_pending_stats_to_h5()
-        self.assertEqual(len(ds1._h5_pending_uids), 0)
-        
-        # Create new wrapper (simulating restart)
-        ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
-        # Verify only the 2 tagged samples persisted
-        self.assertEqual(ds2.get(uids[0], SampleStatsEx.TAGS.value), "outlier,mislabeled")
-        self.assertEqual(ds2.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
-        # Other samples should have default empty tags
-        self.assertEqual(ds2.get(uids[2], SampleStatsEx.TAGS.value), '')
-
-    def test_h5_persistence_all_stats(self):
-        """Test that all SAMPLES_STATS_TO_SAVE_TO_H5 persist and only changed UIDs are saved."""
-        from weightslab.data.data_samples_with_ops import SAMPLES_STATS_TO_SAVE_TO_H5
-        
-        # Create wrapper with H5 persistence
-        ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
-        # Get UIDs for testing
-        uids = [int(uid) for uid in ds1.unique_ids]
-        
-        # Update various stats for only first 3 samples (not all)
-        # Tags
-        ds1.set(uids[0], SampleStatsEx.TAGS.value, "test_tag")
-        # Encountered
-        ds1.set(uids[1], SampleStatsEx.ENCOUNTERED.value, 5)
-        # Prediction loss
-        ds1.set(uids[2], SampleStatsEx.PREDICTION_LOSS.value, 0.42)
-        # Prediction age
-        ds1.set(uids[0], SampleStatsEx.PREDICTION_AGE.value, 100)
-        # Prediction raw (simple scalar for testing)
-        ds1.set(uids[1], SampleStatsEx.PREDICTION_RAW.value, 3)
-        # Deny listed (already tested but include for completeness)
-        ds1.set(uids[2], SampleStatsEx.DENY_LISTED.value, True)
-        
-        # Verify in memory
-        self.assertEqual(ds1.get(uids[0], SampleStatsEx.TAGS.value), "test_tag")
-        self.assertEqual(ds1.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
-        self.assertEqual(ds1.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
-        self.assertEqual(ds1.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertEqual(ds1.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
-        self.assertTrue(ds1.get(uids[2], SampleStatsEx.DENY_LISTED.value))
-        
-        # Verify only changed UIDs are tracked (uids[0], uids[1], uids[2])
-        self.assertIn(uids[0], ds1._h5_pending_uids)
-        self.assertIn(uids[1], ds1._h5_pending_uids)
-        self.assertIn(uids[2], ds1._h5_pending_uids)
-        # Should only be 3 UIDs, not all of them
-        self.assertEqual(len(ds1._h5_pending_uids), 3)
-        # Other UIDs should NOT be in pending
-        for uid in uids[3:]:
-            self.assertNotIn(uid, ds1._h5_pending_uids)
-        
-        # Manually trigger save
-        ds1._save_pending_stats_to_h5()
-        self.assertEqual(len(ds1._h5_pending_uids), 0)
-        
-        # Create new wrapper (simulating restart)
-        ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
-        # Verify all stats persisted for changed UIDs
-        self.assertEqual(ds2.get(uids[0], SampleStatsEx.TAGS.value), "test_tag")
-        self.assertEqual(ds2.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
-        self.assertEqual(ds2.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
-        self.assertEqual(ds2.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertEqual(ds2.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
-        self.assertTrue(ds2.get(uids[2], SampleStatsEx.DENY_LISTED.value))
-        
-        # Verify unchanged UIDs have default values (not saved/loaded from H5)
-        # These should be initialized with defaults, not loaded
-        self.assertEqual(ds2.get(uids[3], SampleStatsEx.TAGS.value), '')
-        self.assertEqual(ds2.get(uids[3], SampleStatsEx.PREDICTION_AGE.value), -1)
-        self.assertFalse(ds2.get(uids[3], SampleStatsEx.DENY_LISTED.value))
-
-    def test_h5_without_root_log_dir(self):
-        """Test that wrapper works without H5 persistence."""
-        # Create wrapper without root_log_dir
-        ds = DataSampleTrackingWrapper(self.base_ds)
-        
-        # Should work normally, just no persistence
-        uids = [int(uid) for uid in ds.unique_ids]
-        ds.denylist_samples({uids[0]})
-        self.assertTrue(ds.is_deny_listed(uids[0]))
-        
-        # No H5 file should be created
-        self.assertIsNone(ds._h5_path)
-
     def test_masked_sampler_filters_denied_on_iteration(self):
         """Test that MaskedSampler properly filters denied samples during iteration."""
         from weightslab.backend.dataloader_interface import MaskedSampler
@@ -755,6 +607,161 @@ class TestH5Persistence(unittest.TestCase):
         # Should produce no batches
         batches = list(loader)
         self.assertEqual(len(batches), 0)
+
+
+class TestH5Persistence(unittest.TestCase):
+    """Test H5 persistence of SampleStatsEx across restarts."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.base_ds = DummyDataset()
+
+    def test_h5_persistence_deny_listed(self):
+        """Test that denied samples persist across restarts."""
+        # Create wrapper with H5 persistence
+        ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
+        
+        # Get UIDs for testing
+        uids = [int(uid) for uid in ds1.unique_ids]
+        
+        # Deny first two samples
+        ds1.denylist_samples({uids[0], uids[1]})
+        
+        # Verify denied state
+        self.assertTrue(ds1.is_deny_listed(uids[0]))
+        self.assertTrue(ds1.is_deny_listed(uids[1]))
+        self.assertFalse(ds1.is_deny_listed(uids[2]))
+        self.assertEqual(ds1.denied_sample_cnt, 2)
+        
+        # Verify only changed UIDs are in pending set (before save)
+        # After denylist_samples, _save_pending_stats_to_h5 is called, so pending should be empty
+        self.assertEqual(len(ds1._h5_pending_uids), 0)
+        
+        # Create new wrapper (simulating restart)
+        ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
+        
+        # Verify denied state persisted
+        self.assertTrue(ds2.is_deny_listed(uids[0]))
+        self.assertTrue(ds2.is_deny_listed(uids[1]))
+        self.assertFalse(ds2.is_deny_listed(uids[2]))
+        self.assertEqual(ds2.denied_sample_cnt, 2)
+
+    def test_h5_persistence_tags(self):
+        """Test that tags persist across restarts and only changed UIDs are saved."""
+        # Create wrapper with H5 persistence
+        ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
+        
+        # Get UIDs for testing
+        uids = [int(uid) for uid in ds1.unique_ids]
+        
+        # Add tags to only first 2 samples
+        ds1.set(uids[0], SampleStatsEx.TAGS.value, "outlier,mislabeled")
+        ds1.set(uids[1], SampleStatsEx.TAGS.value, "edge_case")
+        
+        # Verify tags in memory
+        self.assertEqual(ds1.get(uids[0], SampleStatsEx.TAGS.value), "outlier,mislabeled")
+        self.assertEqual(ds1.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
+        
+        # TAGS is in IMMEDIATE_SAVING_TO_H5, so it's saved immediately, not added to pending
+        # After immediate save, pending should be empty
+        self.assertEqual(len(ds1._h5_pending_uids), 0)
+        
+        # Create new wrapper (simulating restart)
+        ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
+        
+        # Verify only the 2 tagged samples persisted
+        self.assertEqual(ds2.get(uids[0], SampleStatsEx.TAGS.value), "outlier,mislabeled")
+        self.assertEqual(ds2.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
+        # Other samples should have default empty tags
+        self.assertEqual(ds2.get(uids[2], SampleStatsEx.TAGS.value), 'N&A')
+
+    def test_h5_persistence_all_stats(self):
+        """Test that all SAMPLES_STATS_TO_SAVE_TO_H5 persist and only changed UIDs are saved."""
+        from weightslab.data.data_samples_with_ops import SAMPLES_STATS_TO_SAVE_TO_H5
+        
+        # Create wrapper with H5 persistence
+        ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
+        
+        # Get UIDs for testing
+        uids = [int(uid) for uid in ds1.unique_ids]
+        
+        # Update various stats for only first 3 samples (not all)
+        # Encountered
+        ds1.set(uids[1], SampleStatsEx.ENCOUNTERED.value, 5)
+        # Prediction loss
+        ds1.set(uids[2], SampleStatsEx.PREDICTION_LOSS.value, 0.42)
+        # Prediction age
+        ds1.set(uids[0], SampleStatsEx.PREDICTION_AGE.value, 100)
+        # Prediction raw (simple scalar for testing)
+        ds1.set(uids[1], SampleStatsEx.PREDICTION_RAW.value, 3)
+        
+        # Verify only changed UIDs that trigger deferred saves are tracked
+        # DENY_LISTED and TAGS are in IMMEDIATE_SAVING, so they're saved right away
+        # ENCOUNTERED, PREDICTION_LOSS, PREDICTION_AGE, PREDICTION_RAW are deferred
+        # So pending should have uids[0], uids[1], uids[2] - but only for the deferred stats
+        # uids[0]: PREDICTION_AGE -> pending
+        # uids[1]: ENCOUNTERED, PREDICTION_RAW -> pending
+        # uids[2]: PREDICTION_LOSS -> pending
+        # Total: 3 UIDs with deferred saves
+        self.assertIn(uids[1], ds1._h5_pending_uids)
+        self.assertIn(uids[2], ds1._h5_pending_uids)
+        # Should only be 3 UIDs, not all of them
+        self.assertEqual(len(ds1._h5_pending_uids), 3)
+        # Other UIDs should NOT be in pending
+        for uid in uids[3:]:
+            self.assertNotIn(uid, ds1._h5_pending_uids)
+        
+        # # These operation will enforce saving everything to H5 
+        # Deny listed (already tested but include for completeness)
+        ds1.set(uids[2], SampleStatsEx.DENY_LISTED.value, True)
+        # Tags
+        ds1.set(uids[0], SampleStatsEx.TAGS.value, "test_tag")
+        # Check after these immediate saves, pending should still have the deferred ones
+        self.assertNotIn(uids[0], ds1._h5_pending_uids)
+        self.assertNotIn(uids[1], ds1._h5_pending_uids)
+        self.assertNotIn(uids[2], ds1._h5_pending_uids)
+
+        # Verify in memory
+        self.assertEqual(ds1.get(uids[0], SampleStatsEx.TAGS.value), "test_tag")
+        self.assertEqual(ds1.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
+        self.assertEqual(ds1.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
+        self.assertEqual(ds1.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
+        self.assertEqual(ds1.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
+        self.assertTrue(ds1.get(uids[2], SampleStatsEx.DENY_LISTED.value))
+        
+        # Manually trigger save
+        ds1._save_pending_stats_to_h5()
+        self.assertEqual(len(ds1._h5_pending_uids), 0)
+        
+        # Create new wrapper (simulating restart)
+        ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
+        
+        # Verify all stats persisted for changed UIDs
+        self.assertEqual(ds2.get(uids[0], SampleStatsEx.TAGS.value), "test_tag")
+        self.assertEqual(ds2.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
+        self.assertEqual(ds2.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
+        self.assertEqual(ds2.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
+        self.assertEqual(ds2.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
+        self.assertTrue(ds2.get(uids[2], SampleStatsEx.DENY_LISTED.value))
+        
+        # Verify unchanged UIDs have default values (not saved/loaded from H5)
+        # These should be initialized with defaults, not loaded
+        self.assertEqual(ds2.get(uids[3], SampleStatsEx.TAGS.value), 'N&A')
+        self.assertEqual(ds2.get(uids[3], SampleStatsEx.PREDICTION_AGE.value), -1)
+        self.assertFalse(ds2.get(uids[3], SampleStatsEx.DENY_LISTED.value))
+
+    def test_h5_without_root_log_dir(self):
+        """Test that wrapper works without H5 persistence."""
+        # Create wrapper without root_log_dir
+        ds = DataSampleTrackingWrapper(self.base_ds)
+        
+        # Should work normally, just no persistence
+        uids = [int(uid) for uid in ds.unique_ids]
+        ds.denylist_samples({uids[0]})
+        self.assertTrue(ds.is_deny_listed(uids[0]))
+        
+        # No H5 file should be created
+        self.assertIsNone(ds._h5_path)
 
 
 if __name__ == '__main__':
