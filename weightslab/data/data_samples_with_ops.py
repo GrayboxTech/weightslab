@@ -272,14 +272,14 @@ class DataSampleTrackingWrapper(Dataset):
         start_time = time.time()
         if compute_hash:
             self.unique_ids, self.unique_id_to_index = self._generate_unique_ids_parallel(wrapped_dataset)
-            elapsed_time = time.time() - start_time
+            elapsed_time = time.time() - start_time + 1e-8
             logger.debug(f"Generated {len(self.unique_ids)} unique IDs in {elapsed_time:.2f} seconds ({len(self.unique_ids)/elapsed_time:.1f} samples/sec)")
         else:
             # Use simple indexing instead of hash generation
             n_samples = len(wrapped_dataset)
             self.unique_ids = np.arange(n_samples, dtype=np.int32)
             self.unique_id_to_index = {int(i): i for i in range(n_samples)}
-            elapsed_time = time.time() - start_time
+            elapsed_time = time.time() - start_time + 1e-8
             logger.debug(f"Using index-based UIDs for {n_samples} samples (skipped hash generation, took {elapsed_time:.4f}s)")
 
     def _resolve_root_log_dir(self) -> Optional[Path]:
@@ -949,7 +949,7 @@ class DataSampleTrackingWrapper(Dataset):
 
     def __len__(self):
         # wrapped_dataset is already deduplicated, just subtract denied samples
-        return len(self.wrapped_dataset) - self.denied_sample_cnt
+        return len(self.wrapped_dataset)
     
     def _getitem_raw(self, index: int = None, id: int = None):
         if index is None and id is not None:
