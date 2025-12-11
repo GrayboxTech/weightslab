@@ -1,23 +1,25 @@
-from io import BytesIO
+import io
+import time
+import torch
 import logging
 import os
 import traceback
-import time
-from pathlib import Path
-from concurrent import futures
-from datetime import datetime, timedelta
-from threading import RLock
+import threading
+
 import numpy as np
 import pandas as pd
-import torch
-from torchvision import transforms
-from PIL import Image
 
 import weightslab.proto.experiment_service_pb2 as pb2
-from weightslab.components.global_monitoring import pause_controller
-from .service_utils import load_raw_image
-from .agent import DataManipulationAgent
 
+from pathlib import Path
+from concurrent import futures
+from torchvision import transforms
+from weightslab.components.global_monitoring import pause_controller
+from weightslab.trainer.services.service_utils import load_raw_image
+from weightslab.trainer.services.agent import DataManipulationAgent
+
+
+# Get global logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
@@ -65,10 +67,11 @@ class DataService:
 
     def __init__(self, ctx):
         self._ctx = ctx
+        self._lock = threading.Lock()
 
         # init references to the context components
         self._ctx.ensure_components()
-        self.df_lock = RLock()
+        self.df_lock = threading.RLock()
         self._trn_loader = self._ctx.components.get("train_loader")
         self._tst_loader = self._ctx.components.get("test_loader")
 
@@ -225,95 +228,6 @@ class DataService:
             logger.info(f"Loaded existing tags for {loaded_count} UID(s) from tracked dataset(s)")
         except Exception as e:
             logger.warning(f"Failed to load existing tags: {e}")
-    
-    def _dataframe_update(self) -> bool:
-        """
-        Incrementally refresh the in-memory dataframe from the datasets.
-        Only updates columns that actually changed (deny_listed, losses, etc).
-        Preserves filtering/ordering and tags edits.
-        """
-        if self._all_datasets_df is None or self._all_datasets_df.empty:
-            self._all_datasets_df = self._pull_into_all_data_view_df()
-            return
-
-        try:
-            # Sanity check loaders
-            if self._trn_loader is None:
-                self._trn_loader = self._ctx.components.get("train_loader")
-            if self._tst_loader is None:
-                self._tst_loader = self._ctx.components.get("test_loader")
-
-            # Get updated stats from both datasets (minimal - just the changing columns)
-            tstats = _get_stats(self._trn_loader, "train")
-            estats = _get_stats(self._tst_loader, "eval")
-            
-            if tstats.empty and estats.empty:
-                return
-
-            # Columns that change during training (losses, predictions, etc.)
-            # but preserve user-edited columns (tags, deny_listed)
-            preserve_cols = {"tags", "deny_listed"}
-            
-            for origin, stats_df in [("train", tstats), ("eval", estats)]:
-                if stats_df.empty:
-                    continue
-                
-                for _, row in stats_df.iterrows():
-                    sample_id = int(row.get("sample_id", -1))
-                    if sample_id < 0:
-                        continue
-                    
-                    try:
-                        if isinstance(self._all_datasets_df.index, pd.MultiIndex):
-                            # MultiIndex: (origin, sample_id)
-                            idx = (origin, sample_id)
-                            if idx in self._all_datasets_df.index:
-                                # Update only non-preserved columns
-                                for col in row.index:
-                                    if col not in ["origin", "sample_id"] and col not in preserve_cols:
-                                        self._all_datasets_df.loc[idx, col] = row[col]
-                        else:
-                            # Regular index: update by mask
-                            mask = (
-                                (self._all_datasets_df["origin"] == origin)
-                                & (self._all_datasets_df["sample_id"] == sample_id)
-                            )
-                            if mask.any():
-                                for col in row.index:
-                                    if col not in ["origin", "sample_id"] and col not in preserve_cols:
-                                        self._all_datasets_df.loc[mask, col] = row[col]
-                    except Exception as e:
-                        logger.debug(f"Could not update row {origin}/{sample_id}: {e}")
-        except Exception as e:
-            logger.warning(f"Incremental dataframe update failed, falling back to full refresh: {e}")
-            # Fallback: full refresh
-            updated_df = self._pull_into_all_data_view_df()
-            if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
-            self._all_datasets_df = updated_df
-
-    def _slowUpdateInternals(self, time_delta: float = 10.0) -> None:
-        current_time = time.time()
-        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= time_delta:
-            return
-        
-        # Only execute if we can acquire lock without blocking
-        if self.df_lock.acquire(blocking=False):
-            try:
-                # Double-check timestamp after acquiring lock (in case another thread just updated)
-                current_time = time.time()
-                if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= time_delta:
-                    return
-                
-                self._dataframe_update()
-                self._last_internals_update_time = current_time
-            finally:
-                self.df_lock.release()
-
-    def _tensor_to_pil(self, tensor: torch.Tensor) -> Image.Image:
-        """Convert torch tensor to PIL Image."""
-        img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor
-        return transforms.ToPILImage()(img.detach().cpu())
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
@@ -322,64 +236,64 @@ class DataService:
             origin = row.get('origin', 'unknown')
             sample_id = int(row.get('sample_id', 0))
 
-            # Cache dataset lookup
             if origin == 'train':
-                dataset = self._trn_loader.tracked_dataset if self._trn_loader else None
-            elif origin in ('test', 'eval'):
-                dataset = self._tst_loader.tracked_dataset if self._tst_loader else None
+                dataset = self._trn_loader.tracked_dataset
+            elif origin == 'test':
+                dataset = self._tst_loader.tracked_dataset
             else:
                 logger.warning("Unknown origin '%s' for sample %s", origin, sample_id)
                 return None
 
-            if dataset is None:
-                return None
-
             data_stats = []
+            raw_data_bytes, transformed_data_bytes = b"", b""
+            raw_shape, transformed_shape = [], []
 
-            # Only load images if requested
-            if not request.include_transformed_data and not request.include_raw_data:
-                # Skip image loading entirely - just get metadata stats
-                if hasattr(dataset, "_getitem_raw"):
-                    _, _, label = dataset._getitem_raw(id=sample_id)
-                else:
-                    _, _, label = dataset[sample_id]
+            if hasattr(dataset, "_getitem_raw"):
+                tensor, _, label = dataset._getitem_raw(sample_id)
             else:
-                if hasattr(dataset, "_getitem_raw"):
-                    tensor, _, label = dataset._getitem_raw(id=sample_id)
-                else:
-                    tensor, _, label = dataset[sample_id]
+                tensor, _, label = dataset[sample_id]
 
-                if request.include_transformed_data and tensor is not None:
-                    try:
-                        pil_img = self._tensor_to_pil(tensor)
-                        transformed_shape = list(np.array(pil_img).shape)
-                        buf = BytesIO()
-                        # Reduced quality and disabled optimize for speed (quality=75, optimize=False)
-                        pil_img.save(buf, format='JPEG', quality=75, optimize=False)
-                        buf.seek(0)
-                        img_bytes = list(buf.getvalue())
-                        data_stats.append(pb2.DataStat(
-                            name='transformed_data', type='bytes', shape=transformed_shape,
-                            value=img_bytes))
-                    except Exception as e:
-                        logger.warning(f"Could not process transformed image for sample {sample_id}: {e}")
+            if request.include_transformed_data:
+                img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor
+                transformed_shape = list(img.shape)
+                pil_img = transforms.ToPILImage()(img.detach().cpu())
+                buf = io.BytesIO()
+                pil_img.save(buf, format='PNG')
+                transformed_data_bytes = buf.getvalue()
 
-                if request.include_raw_data:
-                    try:
-                        raw_img = load_raw_image(dataset, id=sample_id)
-                        raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
-                        buf = BytesIO()
-                        # Reduced quality and disabled optimize for speed (quality=75, optimize=False)
-                        raw_img.save(buf, format='JPEG', quality=75, optimize=False)
-                        buf.seek(0)
-                        img_bytes = list(buf.getvalue())
-                        data_stats.append(pb2.DataStat(
-                            name='raw_data', type='bytes', shape=raw_shape,
-                            value=img_bytes))
-                    except Exception as e:
-                        logger.warning(f"Could not load raw image for sample {sample_id}: {e}")
+            if request.include_raw_data:
+                try:
+                    
+                    raw_img = load_raw_image(dataset, sample_id)
+                    original_size = raw_img.size
+                    
+                    # Handle resize request
+                    # Negative values indicate percentage mode (e.g., -50 means 50% of original)
+                    # Positive values indicate absolute pixel dimensions
+                    # Zero means no resize
+                    if request.resize_width < 0 and request.resize_height < 0:
+                        # Percentage mode
+                        percent = abs(request.resize_width) / 100.0
+                        target_width = int(original_size[0] * percent)
+                        target_height = int(original_size[1] * percent)
+                        
+                        # Only resize if we're actually reducing size
+                        if target_width < original_size[0] or target_height < original_size[1]:
+                            raw_img = raw_img.resize((target_width, target_height))
+                    elif request.resize_width > 0 and request.resize_height > 0:
+                        # Absolute pixel mode - only resize if smaller than original to avoid upscaling
+                        if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
+                            raw_img = raw_img.resize((request.resize_width, request.resize_height))
 
-            # Get metadata stats requested
+                    raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
+                    raw_buf = io.BytesIO()
+                    raw_img.save(raw_buf, format='PNG')
+                    raw_data_bytes = raw_buf.getvalue()
+                except Exception as e:
+                    logger.warning(f"Could not load raw image for sample {sample_id}: {e}")
+                    raw_data_bytes = transformed_data_bytes
+                    raw_shape = transformed_shape
+
             stats_to_retrieve = request.stats_to_retrieve
             if not stats_to_retrieve:
                 stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
@@ -389,29 +303,288 @@ class DataService:
                 if stat is not None:
                     data_stats.append(stat)
 
-            # Add origin stat
             data_stats.append(pb2.DataStat(
                 name='origin', type='string', shape=[1], value_string=origin))
-            
-            # Add label stat (avoid double conversion)
-            try:
-                if hasattr(label, 'cpu'):
-                    label_val = int(label.cpu().item())
-                elif hasattr(label, 'item'):
-                    label_val = int(label.item())
-                else:
-                    label_val = int(label)
-            except Exception:
-                label_val = 0
-                
+            label_val = int(np.array(label.cpu() if hasattr(label, 'cpu') else label).item())
             data_stats.append(pb2.DataStat(
                 name='label', type='scalar', shape=[1], value=[float(label_val)]))
+
+            if raw_data_bytes:
+                data_stats.append(pb2.DataStat(
+                    name='raw_data', type='bytes', shape=raw_shape,
+                    value=raw_data_bytes))
+            if transformed_data_bytes:
+                data_stats.append(pb2.DataStat(
+                    name='transformed_data', type='bytes',
+                    shape=transformed_shape, value=transformed_data_bytes))
 
             return pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
         except Exception as e:
             logger.error(f"Error processing row for sample_id {row.get('sample_id', -1)}: {e}", exc_info=True)
             return None
 
+    def ApplyDataQuery(self, request, context):
+        """
+        Apply a query on the in-memory dataframe.
+
+        Modes:
+          - request.query == ""  → just return counts, do not modify df
+          - request.query != ""  → always handled by the agent (natural language path)
+
+        Counts returned:
+          - number_of_all_samples: all rows currently in the dataframe
+          - number_of_samples_in_the_loop: rows not deny_listed
+          - number_of_discarded_samples: rows with deny_listed == True
+        """
+        with self._lock:
+            df = self._all_datasets_df  # authoritative DF, mutated in-place
+
+            # 1) No query: just report counts
+            if request.query == "":
+                return self._build_success_response(
+                    df=df,
+                    message=f"Current dataframe has {len(df)} samples",
+                )
+
+            try:
+                # 2) All non-empty queries go through the agent
+                if not request.is_natural_language:
+                    logger.debug(
+                        "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
+                        "treating query as natural language: %r",
+                        request.query,
+                    )
+
+                if self._agent is None:
+                    return pb2.DataQueryResponse(
+                        success=False,
+                        message="Natural language queries require agent (not available)",
+                    )
+
+                # Agent translates query text → operation spec
+                operation = self._agent.query(request.query) or {}
+                func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
+                params = operation.get("params", {}) or {}
+
+                # 2a) Agent-driven RESET has highest priority
+                if params.get("__agent_reset__"):
+                    logger.debug("[ApplyDataQuery] Agent requested reset")
+
+                    # Rebuild from loaders; this is the only place we replace the df object
+                    self._all_datasets_df = self._pull_into_all_data_view_df()
+                    df = self._all_datasets_df
+
+                    return self._build_success_response(
+                        df=df,
+                        message="Reset view to base dataset",
+                    )
+
+                # 2b) All other agent operations mutate df in-place
+                message = self._apply_agent_operation(df, func, params)
+
+                # 3) Return updated counts after mutation
+                return self._build_success_response(df=df, message=message)
+
+            except Exception as e:
+                logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
+                return pb2.DataQueryResponse(
+                    success=False,
+                    message=f"Failed to apply query: {str(e)}",
+                )
+
+
+    def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
+        """
+        Centralized helper so every code path reports counts consistently.
+
+        - number_of_all_samples: all rows in df
+        - number_of_discarded_samples: rows with deny_listed == True (if column exists)
+        - number_of_samples_in_the_loop: rows not deny_listed
+        """
+        total_count = len(df)
+        discarded_count = (
+            len(df[df.get("deny_listed", False) == True])  # noqa: E712
+            if "deny_listed" in df.columns
+            else 0
+        )
+        in_loop_count = total_count - discarded_count
+
+        return pb2.DataQueryResponse(
+            success=True,
+            message=message,
+            number_of_all_samples=total_count,
+            number_of_samples_in_the_loop=in_loop_count,
+            number_of_discarded_samples=discarded_count,
+        )
+
+
+    def _apply_agent_operation(self, df, func: str, params: dict) -> str:
+        """
+        Apply an agent-described operation to df in-place.
+
+        Returns a short human-readable message describing what was applied.
+        """
+        # A) Agent-driven df.query → keep/filter rows via in-place drop
+        if func == "df.query":
+            expr = params.get("expr", "")
+            print(f"[DEBUG] ENTERED df.query branch with expr={expr}")
+            before = len(df)
+            kept = df.query(expr)
+            print(f"[DEBUG] df.query kept {len(kept)} rows out of {before}")
+            df.drop(index=df.index.difference(kept.index), inplace=True)
+            print(f"[DEBUG] AFTER DROP df_len={len(df)}")
+            return f"Applied query: {expr}"
+
+        # B) Other supported Pandas operations (drop, sort, head, tail, sample)
+        if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
+            func_name = func.replace("df.", "")
+
+            try:
+                # -------- DROP --------
+                if func_name == "drop" and "index" in params:
+                    index_expr = params["index"]
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.drop with index expression: %r",
+                        index_expr
+                    )
+                    index_to_drop = eval(index_expr, {"df": df, "np": np})
+                    df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: drop"
+
+                # ---- SORT_VALUES ----
+                if func_name == "sort_values":
+                    safe_params = params.copy()
+                    by = safe_params.get("by", [])
+                    if isinstance(by, str):
+                        by = [by]
+
+                    logger.debug(
+                        "[ApplyDataQuery] Preparing in-place sort_values on columns %s with params %s",
+                        by, safe_params
+                    )
+
+                    from pandas.api.types import (
+                        is_categorical_dtype,
+                        is_numeric_dtype,
+                        is_object_dtype,
+                    )
+
+                    # Sanitize sort columns so sort_values is less fragile
+                    for col in by:
+                        if col not in df.columns:
+                            continue
+
+                        s = df[col]
+
+                        # 1) Categorical → cast to str to avoid "categories must be unique"
+                        if is_categorical_dtype(s.dtype):
+                            logger.debug(
+                                "[ApplyDataQuery] Column %r is categorical; casting to str before sorting",
+                                col,
+                            )
+                            df[col] = s.astype(str)
+                            continue
+
+                        # 2) Object/string → try to interpret as numeric for better sorting
+                        if is_object_dtype(s.dtype) and not is_numeric_dtype(s.dtype):
+                            logger.debug(
+                                "[ApplyDataQuery] Column %r is object; attempting numeric conversion for sort",
+                                col,
+                            )
+                            converted = pd.to_numeric(s, errors="ignore")
+                            if is_numeric_dtype(converted.dtype):
+                                logger.debug(
+                                    "[ApplyDataQuery] Column %r converted to numeric dtype %s",
+                                    col, converted.dtype,
+                                )
+                                df[col] = converted
+
+                    safe_params["by"] = by
+                    safe_params["inplace"] = True
+
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.sort_values(inplace=True) with params=%s on df shape=%s",
+                        safe_params, df.shape
+                    )
+
+                    try:
+                        df.sort_values(**safe_params)
+                    except ValueError as e:
+                        # Fallback for categorical issues
+                        if "Categorical categories must be unique" in str(e):
+                            logger.warning(
+                                "[ApplyDataQuery] sort_values failed due to non-unique categorical "
+                                "categories; casting sort columns to str and retrying."
+                            )
+                            for col in by:
+                                if col in df.columns:
+                                    df[col] = df[col].astype(str)
+                            df.sort_values(**safe_params)
+                        else:
+                            raise
+
+                    return "Applied operation: sort_values"
+
+                # -------- HEAD --------
+                if func_name == "head":
+                    n = int(params.get("n", 5))
+                    logger.debug(
+                        "[ApplyDataQuery] Applying head (in-place) with n=%d on df shape=%s",
+                        n, df.shape
+                    )
+                    if n < len(df):
+                        index_to_keep = df.index[:n]
+                        index_to_drop = df.index.difference(index_to_keep)
+                        df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: head"
+
+                # -------- TAIL --------
+                if func_name == "tail":
+                    n = int(params.get("n", 5))
+                    logger.debug(
+                        "[ApplyDataQuery] Applying tail (in-place) with n=%d on df shape=%s",
+                        n, df.shape
+                    )
+                    if n < len(df):
+                        index_to_keep = df.index[-n:]
+                        index_to_drop = df.index.difference(index_to_keep)
+                        df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: tail"
+
+                # ------ SAMPLE -------
+                if func_name == "sample":
+                    logger.debug(
+                        "[ApplyDataQuery] Applying sample (in-place) with params=%s on df shape=%s",
+                        params, df.shape
+                    )
+                    # Support either n or frac; default to 50% if unspecified
+                    n = params.get("n")
+                    frac = params.get("frac")
+                    if n is not None:
+                        sampled = df.sample(n=int(n))
+                    elif frac is not None:
+                        sampled = df.sample(frac=float(frac))
+                    else:
+                        sampled = df.sample(frac=0.5)
+
+                    index_to_drop = df.index.difference(sampled.index)
+                    df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: sample"
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to apply agent operation {func_name} with params {params}: {e}",
+                    exc_info=True
+                )
+                return f"Failed to apply {func_name}: {e}"
+
+        # C) Unrecognized function: no-op, but log it
+        logger.warning(
+            "[ApplyDataQuery] Agent returned unrecognized function: %s. No operation applied.",
+            func
+        )
+        return "No operation applied"
+    
     def _hydrate_tags_for_slice(self, df_slice: pd.DataFrame) -> pd.DataFrame:
         """Load tags for the provided slice only and update in-memory views."""
         if df_slice is None or df_slice.empty or "sample_id" not in df_slice.columns:
@@ -462,153 +635,26 @@ class DataService:
 
         return df_slice
 
+    def SlowUpdateInternals(self):
+        current_time = time.time()
+        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+            return
 
-    def ApplyDataQuery(self, request, context):
-        """
-        Apply a query (structured or natural language) on the in-memory dataframe.
+        # Just this line, will mess any filtering/ordering that is being applied
+        updated_df = self._pull_into_all_data_view_df()
 
-        - If request.query == "": just return counts.
-        - If is_natural_language: let the agent translate to an operation.
-        - Otherwise: treat query as a df.query expression.
-        """
+        # Order the rows in updated_df the order in self._all_datasets_df but 
+        # also make sure that we only keep the rows that are in self._all_datasets_df
+        updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
 
-        # Make sure we have a dataframe
-        if self._all_datasets_df is None:
-            try:
-                self._all_datasets_df = self._pull_into_all_data_view_df()
-            except Exception as e:
-                logger.error(f"ApplyDataQuery: could not build dataframe: {e}", exc_info=True)
-                return pb2.DataQueryResponse(
-                    success=False,
-                    message="Data service not available",
-                )
-
-        df = self._all_datasets_df
-
-        # ---------------------------------------------------------------------
-        # 1) No query: just report counts
-        # ---------------------------------------------------------------------
-        if request.query == "":
-            total_count = len(df)
-            discarded_count = (
-                len(df[df.get("deny_listed", False) == True])  # noqa: E712
-                if "deny_listed" in df.columns
-                else 0
-            )
-            in_loop_count = total_count - discarded_count
-
-            return pb2.DataQueryResponse(
-                success=True,
-                message=f"Current dataframe has {total_count} samples",
-                number_of_all_samples=total_count,
-                number_of_samples_in_the_loop=in_loop_count,
-                number_of_discarded_samples=discarded_count,
-            )
-
-        try:
-            # -----------------------------------------------------------------
-            # 2) Natural-language query (via agent)
-            # -----------------------------------------------------------------
-            if request.is_natural_language:
-                if self._agent is None:
-                    return pb2.DataQueryResponse(
-                        success=False,
-                        message="Natural language queries require agent (not available)",
-                    )
-
-                # Let the agent translate NL → operation spec
-                self._agent.df = df
-                operation = self._agent.query(request.query) or {}
-                func = operation.get("function")
-                params = operation.get("params", {}) or {}
-
-                # Agent-driven reset
-                if params.get("__agent_reset__"):
-                    logger.debug("[ApplyDataQuery] Agent requested reset")
-                    # Rebuild from datasets
-                    self._all_datasets_df = self._pull_into_all_data_view_df()
-                    df = self._all_datasets_df
-
-                    total_count = len(df)
-                    discarded_count = (
-                        len(df[df.get("deny_listed", False) == True])  # noqa: E712
-                        if "deny_listed" in df.columns
-                        else 0
-                    )
-                    in_loop_count = total_count - discarded_count
-
-                    return pb2.DataQueryResponse(
-                        success=True,
-                        message="Reset view to base dataset",
-                        number_of_all_samples=total_count,
-                        number_of_samples_in_the_loop=in_loop_count,
-                        number_of_discarded_samples=discarded_count,
-                    )
-
-                # df.query(expr) operation
-                if func == "df.query":
-                    expr = params.get("expr", "")
-                    logger.debug(
-                        "[ApplyDataQuery] Applying df.query with expr=%r on df shape=%s",
-                        expr, df.shape
-                    )
-                    self._all_datasets_df = df.query(expr)
-                    message = f"Applied query: {expr}"
-                else:
-                    # generic operation via agent
-                    logger.debug(
-                        "[ApplyDataQuery] Applying operation %s on df shape=%s",
-                        func, df.shape
-                    )
-                    self._all_datasets_df = self._agent.apply_operation(df, operation)
-                    message = f"Applied operation: {func}"
-
-            # -----------------------------------------------------------------
-            # 3) Structured query supplied directly by UI (df.query expression)
-            # -----------------------------------------------------------------
-            else:
-                expr = request.query
-                logger.debug(
-                    "[ApplyDataQuery] Applying structured df.query with expr=%r on df shape=%s",
-                    expr, df.shape
-                )
-                self._all_datasets_df = df.query(expr)
-                message = f"Query [{request.query}] applied"
-
-            # -----------------------------------------------------------------
-            # 4) Return updated counts
-            # -----------------------------------------------------------------
-            df = self._all_datasets_df
-            total_count = len(df)
-            discarded_count = (
-                len(df[df.get("deny_listed", False) == True])  # noqa: E712
-                if "deny_listed" in df.columns
-                else 0
-            )
-            in_loop_count = total_count - discarded_count
-
-            return pb2.DataQueryResponse(
-                success=True,
-                message=message,
-                number_of_all_samples=total_count,
-                number_of_samples_in_the_loop=in_loop_count,
-                number_of_discarded_samples=discarded_count,
-            )
-
-        except Exception as e:
-            logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
-            return pb2.DataQueryResponse(
-                success=False,
-                message=f"Failed to apply query: {str(e)}",
-            )
+        self._all_datasets_df = updated_df
+        self._last_internals_update_time = current_time
 
     def GetDataSamples(self, request, context):
         """
         Retrieve samples from the dataframe with their data statistics.
         Only allowed when training is paused.
         """
-
-        self._slowUpdateInternals(time_delta=15)
         try:
             logger.info(
                 "GetSamples called with start_index=%s, records_cnt=%s",
@@ -624,8 +670,11 @@ class DataService:
                 )
 
             # Get the requested slice of the dataframe
-            end_index = request.start_index + request.records_cnt
-            df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
+            # Protect the update and slice with the lock
+            with self._lock:
+                self.SlowUpdateInternals()
+                end_index = request.start_index + request.records_cnt
+                df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
 
             # Load tags only for the displayed slice (stream-friendly)
             df_slice = self._hydrate_tags_for_slice(df_slice)
@@ -668,8 +717,11 @@ class DataService:
                 data_records=[]
             )
 
+    
     def EditDataSample(self, request, context):
-        """Edit sample metadata (tags, deny_listed, etc.)."""
+        """
+        Edit sample metadata (tags, deny_listed, etc.).
+        """
 
         # Make sure dataframe + editable wrappers are initialized
         if self._all_datasets_df is None:
@@ -725,67 +777,62 @@ class DataService:
         # ---------------------------------------------------------------------
         # 2) Mirror edits into the in-memory DataFrame (used by the UI / agent)
         # ---------------------------------------------------------------------
-        if self._all_datasets_df is not None:
-            # If origin/sample_id are in the index, use index levels
-            uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
+        with self._lock:
+            if self._all_datasets_df is not None:
+                # If origin/sample_id are in the index, use index levels
+                uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
 
-            for sid, origin in zip(request.samples_ids, request.sample_origins):
-                value = (
-                    request.string_value
-                    if request.stat_name == "tags"
-                    else request.bool_value
-                )
-
-                try:
-                    if uses_multiindex and set(self._all_datasets_df.index.names) >= {"origin", "sample_id"}:
-                        # MultiIndex: select rows by index
-                        idx = (origin, sid)
-                        # (use .loc on the index tuple directly)
-                        self._all_datasets_df.loc[idx, request.stat_name] = value
-                    else:
-                        # Fallback: origin / sample_id as columns
-                        mask = (
-                            (self._all_datasets_df["sample_id"] == sid)
-                            & (self._all_datasets_df["origin"] == origin)
-                        )
-                        self._all_datasets_df.loc[mask, request.stat_name] = value
-
-                except Exception as e:
-                    logger.debug(
-                        f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
+                for sid, origin in zip(request.samples_ids, request.sample_origins):
+                    value = (
+                        request.string_value
+                        if request.stat_name == "tags"
+                        else request.bool_value
                     )
 
-            # Debug AFTER the updates
-            try:
-                ids = list(request.samples_ids)
-                origins = list(request.sample_origins)
+                    try:
+                        if uses_multiindex and set(self._all_datasets_df.index.names) >= {"origin", "sample_id"}:
+                            # MultiIndex: select rows by index
+                            idx = (origin, sid)
+                            # (use .loc on the index tuple directly)
+                            self._all_datasets_df.loc[idx, request.stat_name] = value
+                        else:
+                            # Fallback: origin / sample_id as columns
+                            mask = (
+                                (self._all_datasets_df["sample_id"] == sid)
+                                & (self._all_datasets_df["origin"] == origin)
+                            )
+                            self._all_datasets_df.loc[mask, request.stat_name] = value
 
-                debug_rows = self._all_datasets_df[
-                    (self._all_datasets_df["sample_id"].isin(ids))
-                    & (self._all_datasets_df["origin"].isin(origins))
-                ]
-                logger.debug(
-                    "[DEBUG EditDataSample] Updated rows:\n%s",
-                    debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
-                )
+                    except Exception as e:
+                        logger.debug(
+                            f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
+                        )
 
-                if request.stat_name == "tags":
-                    tagged = self._all_datasets_df[
-                        self._all_datasets_df["tags"] == request.string_value
+                # Debug AFTER the updates
+                try:
+                    ids = list(request.samples_ids)
+                    origins = list(request.sample_origins)
+
+                    debug_rows = self._all_datasets_df[
+                        (self._all_datasets_df["sample_id"].isin(ids))
+                        & (self._all_datasets_df["origin"].isin(origins))
                     ]
                     logger.debug(
-                        "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
-                        request.string_value,
-                        len(tagged),
+                        "[DEBUG EditDataSample] Updated rows:\n%s",
+                        debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
                     )
-            except Exception as e:
-                logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
 
-        # ---------------------------------------------------------------------
-        # 3) Keep the optional agent in sync
-        # ---------------------------------------------------------------------
-        if self._agent is not None and self._all_datasets_df is not None:
-            self._agent.df = self._all_datasets_df
+                    if request.stat_name == "tags":
+                        tagged = self._all_datasets_df[
+                            self._all_datasets_df["tags"] == request.string_value
+                        ]
+                        logger.debug(
+                            "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
+                            request.string_value,
+                            len(tagged),
+                        )
+                except Exception as e:
+                    logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
 
         # ------------------------------------------------------------------
         # 4) Persist tag edits to the tracked dataset (auto-sync to H5)
