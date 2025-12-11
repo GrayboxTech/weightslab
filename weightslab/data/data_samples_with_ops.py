@@ -1,3 +1,4 @@
+import time
 import logging
 import torch as th
 import numpy as np
@@ -158,8 +159,10 @@ class DataSampleTrackingWrapper(Dataset):
 
         # First, generate UIDs and detect duplicates before wrapping
         logger.info(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
+        start_time = time.time()
         self.unique_ids, self.unique_id_to_index = self._generate_unique_ids_parallel(wrapped_dataset)
-        logger.info(f"Generated {len(self.unique_ids)} unique IDs")
+        elapsed_time = time.time() - start_time
+        logger.info(f"Generated {len(self.unique_ids)} unique IDs in {elapsed_time:.2f} seconds ({len(self.unique_ids)/elapsed_time:.1f} samples/sec)")
 
         # Detect duplicates and keep only first occurrences
         seen_uid: Dict[int, int] = {}
@@ -181,7 +184,7 @@ class DataSampleTrackingWrapper(Dataset):
             )
             # Wrap the original dataset with Subset to only expose non-duplicate indices
             wrapped_dataset = Subset(wrapped_dataset, kept_indices)
-            
+
         # Now proceed with initialization using the deduplicated dataset
         self.__name__ = wrapped_dataset.__name__ if hasattr(
             wrapped_dataset,
