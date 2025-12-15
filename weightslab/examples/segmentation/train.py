@@ -271,7 +271,8 @@ if __name__ == "__main__":
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 500)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
-    parameters["is_training"] = True
+    parameters["is_training"] = lambda: not pause_controller.is_paused()
+
     parameters.setdefault("number_of_workers", 4)
     parameters.setdefault("num_classes", 6)      # adjust to your label set
     parameters.setdefault("ignore_index", 255)   # if you have void pixels
@@ -364,14 +365,81 @@ if __name__ == "__main__":
     _optimizer = optim.Adam(model.parameters(), lr=lr)
     optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
 
+    # --- Compute class weights to handle class imbalance ---
+    print("\n" + "=" * 60)
+    print("Computing class weights to address class imbalance...")
+    print("=" * 60)
+    
+    def compute_class_weights(dataset, num_classes, ignore_index=255, max_samples=1000):
+        """
+        Compute class weights based on inverse pixel frequency.
+        Rare classes get higher weights to balance the loss.
+        """
+        import numpy as np
+        from tqdm import tqdm
+        
+        class_counts = np.zeros(num_classes, dtype=np.float64)
+        
+        # Sample up to max_samples images to compute statistics
+        num_samples = min(len(dataset), max_samples)
+        print(f"Analyzing {num_samples} samples from dataset...")
+        
+        for idx in tqdm(range(num_samples), desc="Computing class weights"):
+            try:
+                # The dataset returns (img_t, mask_t)
+                _, label = dataset[idx] 
+                label_np = label.numpy() if hasattr(label, 'numpy') else np.array(label)
+                
+                # Count pixels for each class, excluding ignore_index
+                for c in range(num_classes):
+                    class_counts[c] += (label_np == c).sum()
+            except Exception as e:
+                print(f"Warning: Could not process sample {idx}: {e}")
+                continue
+        
+        # Avoid division by zero
+        class_counts = np.maximum(class_counts, 1)
+        
+        # Compute inverse frequency weights
+        total_pixels = class_counts.sum()
+        class_weights = total_pixels / (num_classes * class_counts)
+        
+        # Normalize so mean weight is 1.0
+        class_weights = class_weights / class_weights.mean()
+        
+        print("\nClass distribution and weights:")
+        print("-" * 60)
+        for c in range(num_classes):
+            percentage = (class_counts[c] / total_pixels) * 100
+            print(f"  Class {c}: {percentage:6.2f}% of pixels → weight: {class_weights[c]:.3f}")
+        print("-" * 60)
+        
+        return torch.FloatTensor(class_weights)
+    
+    # Compute weights from training dataset
+    class_weights = compute_class_weights(_train_dataset, num_classes, ignore_index, max_samples=500)
+    class_weights = class_weights.to(device)
+    
+    print(f"\nApplying class weights: {class_weights.cpu().numpy()}")
+    print("=" * 60 + "\n")
+
+    # Create weighted loss functions
     train_criterion_mlt = wl.watch_or_edit(
-        nn.CrossEntropyLoss(reduction="none", ignore_index=ignore_index),
+        nn.CrossEntropyLoss(
+            reduction="none", 
+            ignore_index=ignore_index,
+            weight=class_weights  # ← Class weights applied!
+        ),
         flag="loss",
         name="train_loss/mlt_loss",
         log=True,
     )
     test_criterion_mlt = wl.watch_or_edit(
-        nn.CrossEntropyLoss(reduction="none", ignore_index=ignore_index),
+        nn.CrossEntropyLoss(
+            reduction="none", 
+            ignore_index=ignore_index,
+            weight=class_weights  # ← Class weights applied!
+        ),
         flag="loss",
         name="test_loss/mlt_loss",
         log=True,
@@ -430,3 +498,22 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
+
+    import signal
+    import time
+    
+    # Flag to indicate if Ctrl+C was pressed
+    _stop_requested = False
+    
+    def _signal_handler(sig, frame):
+        global _stop_requested
+        print("\nCtrl+C detected. Shutting down gracefully...")
+        _stop_requested = True
+    
+    # Register the signal handler for Ctrl+C (SIGINT)
+    signal.signal(signal.SIGINT, _signal_handler)
+    
+    print("Press Ctrl+C to exit...")
+    while not _stop_requested:
+        time.sleep(0.1) # Small delay to prevent busy-waiting
+
