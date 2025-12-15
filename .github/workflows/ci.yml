@@ -30,12 +30,12 @@ jobs:
       - name: Lint with Ruff (unused, style, bugs)
         run: |
           # Common checks: unused imports/variables and runtime errors
-          ruff check . --select F401,F841,E9,F632,F722,F823 \
+          ruff check weightslab --select F401,F841,E9,F632,F722,F823 \
             --ignore E501
 
       - name: Pylint (errors only)
         run: |
-          pylint ./weightslab --disable=all \
+          pylint weightslab --disable=all \
             --ignore-patterns='.*ui\.py$,.*trainer.*\.py$,.*_pb2\.py$,.*_pb2_grpc\.py$'
 
       - name: Run unit tests (unittest)
