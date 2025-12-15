@@ -31,7 +31,7 @@ def get_requirements(file_path: pathlib.Path):
         return line
 
     def normalize_torch(dep: str) -> str:
-        if not (dep.startswith('torch') or dep.startswith('torchvision==')):
+        if not (dep.startswith('torch==') or dep.startswith('torchvision==')):
             return dep
         name, ver = dep.split('==', 1)
         # Strip build/variant suffixes from version (PEP 440 compliant for install_requires)
