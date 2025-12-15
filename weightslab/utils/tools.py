@@ -1,4 +1,5 @@
 import io
+import xxhash
 import yaml
 import types
 import inspect
@@ -8,11 +9,10 @@ import torch as th
 import torch.nn as nn
 import numpy as np
 import random
-import xxhash
 
 from typing import Union
 from copy import deepcopy
-from typing import Optional, List, Any, Type, Callable, Dict
+from typing import Optional, List, Any, Type, Callable, Dict, Union
 from torch.fx import Node
 
 
@@ -307,14 +307,14 @@ def get_original_torch_class(
     return replacement_map.get(custom_class)
 
 
-def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True):
+def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False):
     """
         Test function to iteratively update neurons for each layer,
         then test inference. Everything match ?
     """
     seed_everything(42) if rand else None  # Set seed for reproducibility
     n_layers = len(model.layers)
-    for n in range(n_layers-1, -1, -1):
+    for n in range(n_layers-1, 0, -1):
         if rand and th.rand(1) > 0.5 and layer_id is None and dummy_input is None:
             continue
         if layer_id is not None:
@@ -328,7 +328,7 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True)
         if op is None:
             with model as m:
                 logger.debug('Adding operation - 5 neurons added.')
-                m.operate(n, {0, 0, 0, 0, 0}, op_type=1)
+                m.operate(n, {0, 1}, op_type=1)
                 m(dummy_input) if dummy_input is not None else None
             with model as m:
                 logger.debug('Reseting operation - every neurons reset.')
@@ -340,7 +340,7 @@ def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=True)
                 m(dummy_input) if dummy_input is not None else None
             with model as m:
                 logger.debug('Pruning operation - first neuron removed.')
-                m.operate(n, {0, 1}, op_type=2)
+                m.operate(n, {0}, op_type=2)
                 m(dummy_input) if dummy_input is not None else None
         else:
             with model as m:
@@ -621,11 +621,3 @@ def array_id_2bytes(
             return int.from_bytes(digest8, byteorder="big", signed=False) % (10**8)
         else:
             return int.from_bytes(digest8, byteorder="big", signed=False)
-
-
-# Example usage
-if __name__ == "__main__":
-    import numpy as np
-    img = np.random.randint(0, 256, size=(4096, 4096, 3), dtype=np.uint8)  # big image
-    id_int = array_id_2bytes(img)  # default -> 16 hex chars
-    print("8-byte id (int):", id_int)

@@ -16,7 +16,6 @@ from weightslab.backend.ledgers import (
     register_model,
     list_models,
     list_hyperparams,
-    get_hyperparams,
     set_hyperparam,
 )
 

@@ -13,7 +13,6 @@ from .utils.logs import setup_logging
 
 logger = None
 try:
-	import logging
 	import os
 	
 	# Auto-initialize logging if not already configured

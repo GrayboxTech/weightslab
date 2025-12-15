@@ -192,7 +192,6 @@ def _resolve_hp_name() -> str | None:
     return None
 
 def _pause_hp_sync_loop(poll_interval: float = 0.5):
-    last_name = None
     while True:
         try:
             name = _resolve_hp_name()

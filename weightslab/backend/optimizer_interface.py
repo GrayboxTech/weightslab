@@ -1,4 +1,3 @@
-import os
 import torch
 import tempfile
 import weightslab as wl
@@ -7,7 +6,7 @@ from weightslab.backend.ledgers import register_optimizer
 
 
 class OptimizerInterface:
-    def __init__(self, optimizer_or_cls, params=None, name: str = None, register: bool = True, weak: bool = False, _kill: bool = False, **kwargs):
+    def __init__(self, optimizer_or_cls, params=None, name: str = None, register: bool = True, weak: bool = False, **kwargs):
         """Wrap a torch optimizer instance or instantiate one from a class.
 
         If `optimizer_or_cls` is an instance of `torch.optim.Optimizer` it is
