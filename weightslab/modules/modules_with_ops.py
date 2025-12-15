@@ -47,12 +47,6 @@ class LayerWiseOperations(NeuronWiseOperations):
         self.device = device
         self.tracking_mode = TrackingMode.DISABLED
 
-        # # Variables override from monkey patching
-        self.bias = None
-        self.kernel_size = None
-        self.groups = None
-        self.weight = None
-
         # IN/OUT neurons indexing & mapping dictionary
         self.src_to_dst_mapping_tnsrs = {}
         self.dst_to_src_mapping_tnsrs = {}
@@ -229,31 +223,6 @@ class LayerWiseOperations(NeuronWiseOperations):
             trackers.append(self.train_dataset_tracker)
             
         return trackers
-
-    # ---------------
-    # Abstract functions
-    def named_parameters(self):
-        """
-            Abstract method to get the named parameters of the module.
-        """
-        raise NotImplementedError(
-            "The 'named_parameters' method is override from monkey patching approach."
-        )
-    def register_module(self, name: str, module: nn.Module):
-        """
-            Abstract method to get the named parameters of the module.
-        """
-        raise NotImplementedError(
-            "The 'named_parameters' method is override from monkey patching approach."
-        )
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        """
-            Abstract method to load the state dict of the module.
-        """
-        raise NotImplementedError(
-            "The '_load_from_state_dict' method is override from monkey patching approach."
-        )
-    
 
     # ---------------
     # Utils Functions
@@ -1263,7 +1232,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # Get current weights indexs & group size
         neurons = set(range(in_out_neurons))
-        group_size = self.groups if hasattr(self, 'groups') and is_incoming \
+        group_size = self.groups if hasattr(self, 'groups') and self.groups is not None and is_incoming \
             else 1
 
         # Sanity check
@@ -1571,7 +1540,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             )
 
         # Get group size & reformat neuron indices
-        group_size = self.groups if hasattr(self, 'groups') and is_incoming \
+        group_size = self.groups if hasattr(self, 'groups') and self.groups is not None and is_incoming \
             else 1
         neuron_indices = [i//group_size for i in neuron_indices]
 
@@ -1625,7 +1594,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # Manage specific usecases
         # # Get group size
-        group_size = self.groups if hasattr(self, 'groups') else 1
+        group_size = self.groups if hasattr(self, 'groups') and self.groups is not None else 1
         # # Incoming Layer
         in_out_neurons = self.get_neurons(attr_name='out_neurons') if not is_incoming else \
             self.get_neurons(attr_name='in_neurons') // group_size

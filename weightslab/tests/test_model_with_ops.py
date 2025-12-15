@@ -127,7 +127,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         th.save(self.dummy_network.state_dict(), state_dict_file_path)
 
         # Load
-        state_dict = th.load(state_dict_file_path)
+        state_dict = th.load(state_dict_file_path, weights_only=False)
         replicated_model.load_state_dict(state_dict, strict=False)
         self.assertEqual(self.dummy_network, replicated_model)
 
@@ -153,7 +153,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         # Store
         state_dict_file_path = path.join(self.test_dir, 'mnist_model.txt')
         th.save(self.dummy_network.state_dict(), state_dict_file_path)
-        state_dict = th.load(state_dict_file_path)
+        state_dict = th.load(state_dict_file_path, weights_only=False)
 
         # Load
         replicated_model.load_state_dict(state_dict, strict=False)

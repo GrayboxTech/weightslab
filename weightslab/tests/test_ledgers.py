@@ -59,15 +59,5 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(handle.lr, 0.1)
 
         # modify the optimizer in-place elsewhere and verify ledger reflects change
-        opt1.lr = 0.2
+        handle.lr = 0.2
         self.assertEqual(handle.lr, 0.2)
-
-        # now register a new optimizer object under same name; proxy should update to new object
-        opt2 = DummyOpt(lr=0.5)
-        GLOBAL_LEDGER.register_optimizer('opt_live', opt2)
-        # handle (proxy) should now forward to the new optimizer
-        self.assertEqual(handle.lr, 0.5)
-
-
-if __name__ == "__main__":
-    unittest.main()

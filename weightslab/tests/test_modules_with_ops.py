@@ -459,7 +459,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
                 f"Final:{final_nb_trainable_parameters}"
             )
             # --- Incoming ---
-            if len(layer_instance.weight.shape) > 1:
+            if layer_instance.weight is not None and len(layer_instance.weight.shape) > 1:
                 # RESET must preserve the number of parameters
                 initial_weights_sum = layer_instance.weight.sum()
                 layer_instance.operate(
