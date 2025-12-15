@@ -169,6 +169,42 @@ Intent:
   "keep_frac": 0.8
 }}
 
+User: "sort by loss_class_2 descending"
+Intent:
+{{
+  "kind": "sort",
+  "conditions": null,
+  "sort_by": ["loss_class_2"],
+  "ascending": false,
+  "n": null,
+  "drop_frac": null,
+  "keep_frac": null
+}}
+
+User: "sort by loss_class_4 ascending"
+Intent:
+{{
+  "kind": "sort",
+  "conditions": null,
+  "sort_by": ["loss_class_4"],
+  "ascending": true,
+  "n": null,
+  "drop_frac": null,
+  "keep_frac": null
+}}
+
+User: "sort by mean_loss descending"
+Intent:
+{{
+  "kind": "sort",
+  "conditions": null,
+  "sort_by": ["mean_loss"],
+  "ascending": false,
+  "n": null,
+  "drop_frac": null,
+  "keep_frac": null
+}}
+
 User: "get first 50 rows"
 Intent:
 {{"kind": "head", "conditions": null, "sort_by": null, "ascending": null, "n": 50, "drop_frac": null, "keep_frac": null}}
