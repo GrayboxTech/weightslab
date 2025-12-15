@@ -1,6 +1,5 @@
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            raw = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+import os
+import pathlib
 
 
 def get_requirements(file_path: pathlib.Path):
@@ -8,6 +7,7 @@ def get_requirements(file_path: pathlib.Path):
     Read requirements.txt and optionally switch Torch variant between CPU and GPU.
 
     Control via environment variable:
+    """
     def sanitize(dep: str) -> str:
         # Drop any inline pip flags (e.g., '--extra-index-url ...')
         if ' --' in dep:
@@ -21,24 +21,16 @@ def get_requirements(file_path: pathlib.Path):
             version = dep.split('==', 1)[1].split('+', 1)[0]
             dep = f'torch=={version}'
         return dep
+    
+    variant = os.getenv('WEIGHTSLAB_TORCH_VARIANT', '').lower().strip()
+    with open(file_path, 'r', encoding='utf-8') as f:
+        raw = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-    deps = []
-    for dep in raw:
-        dep = sanitize(dep)
-        if variant == "cpu":
-            if dep.startswith("torch=="):
-                dep = dep.replace("torch==", "torch-cpu==")
-        elif variant == "gpu":
-            if dep.startswith("torch-cpu=="):
-                dep = dep.replace("torch-cpu==", "torch==")
-        deps.append(dep)
-
-    return deps
     if variant:
         variant = variant.lower().strip()
     # unreachable due to early returns; kept for clarity
     # return raw
-    if variant in {"cpu", "gpu"}:
+    if variant in {"cpu"}:
         converted = []
         for dep in raw:
             if variant == "cpu":
