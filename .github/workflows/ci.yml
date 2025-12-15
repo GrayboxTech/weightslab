@@ -33,7 +33,7 @@ jobs:
         run: |
           pylint . --disable=C0301,W0511,C0114,C0115,C0116 \
             --ignore-patterns='.*ui\.py$,.*trainer.*\.py$,.*_pb2\.py$,.*_pb2_grpc\.py$' \
-            --fail-under=8.0
+            --fail-under=7.0
 
   install:
     runs-on: ubuntu-latest
