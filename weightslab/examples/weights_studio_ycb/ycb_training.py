@@ -201,6 +201,7 @@ if __name__ == "__main__":
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
             transforms.PILToTensor(),
+            transforms.ConvertImageDtype(torch.float32),
         ]
     )
 
