@@ -1,5 +1,5 @@
-device: cpu
-root_log_dir: "/tmp/weightslab_mnist"
+device: cuda
+root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/weightslab_mnist"
 tqdm_display: true
 skip_loading: true
 
@@ -8,7 +8,7 @@ experiment_name: Exp_CNN_Test
 training_steps_to_do: 1000000
 eval_full_to_train_steps_ratio: 100
 experiment_dump_to_train_steps_ratio: 670000
-skip_checkpoint_load: false
+skip_checkpoint_load: true
 
 # start training immediately
 is_training: true
@@ -16,10 +16,10 @@ is_training: true
 data:
   train_loader:
     train_shuffle: true
-    batch_size: 64
+    batch_size: 16
   test_loader:
     test_shuffle: false
-    batch_size: 64
+    batch_size: 8
     drop_last: false
 
 optimizer:

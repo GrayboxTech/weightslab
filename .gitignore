@@ -4,6 +4,7 @@ dist/*
 weightslab/__pycache__/*
 tests/__pycache__/*
 __pycache__/*
+.DS_Store
 pkg_main.py
 .ruff_cache/*
 

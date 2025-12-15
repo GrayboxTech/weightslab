@@ -24,6 +24,7 @@ import collections
 import numpy as np
 import random
 import hashlib
+from pathlib import Path
 
 from dash import dcc
 from dash import html
@@ -35,7 +36,7 @@ from dash.dependencies import Output
 from dash.dependencies import State
 
 from typing import Tuple, Dict, List, Any
-from flask import Response, request, abort
+from flask import Response, request, abort, jsonify
 from enum import Enum
 from io import BytesIO
 from PIL import Image
@@ -677,7 +678,7 @@ class UIState:
 
         except Exception as e:
             logger.exception(
-                f"sample_update_failed on {e}",
+                "sample_update_failed",
                 extra={"origin": getattr(sample_statistics, "origin", None)}
             )
 
@@ -1153,7 +1154,7 @@ def get_layer_div(
     checklist_values = convert_checklist_to_df_head(checklist_values)
     try:
         neurons_view_df = format_values_df(layer_neurons_df[checklist_values])
-    except Exception:
+    except Exception as e:
         return no_update
 
     fetch_filters_toggle = html.Div(
@@ -1308,7 +1309,7 @@ def interactable_layers(
                     layer_row, layer_neurons_df, ui_state, checklist_values))
         except Exception as e:
             logger.exception(
-                f"layer_render_failed on {e}",
+                "layer_render_failed",
                 extra={"layer_id": int(layer_row.get("layer_id", -1))}
             )
             continue
@@ -1497,8 +1498,7 @@ def _parse_chw(s):
             return None
         import re
         m = re.match(r'^\s*(\d+)\s*[x×]\s*(\d+)\s*[x×]\s*(\d+)\s*$', s, re.I)
-        if not m:
-            return None
+        from flask import Response, request, abort, jsonify
         C, H, W = map(int, m.groups())
         return (C, H, W)
 
@@ -2116,7 +2116,7 @@ def render_images(ui_state: UIState, stub, sample_ids, origin,
                 imgs.append(clickable)
 
     except Exception as e:
-        logger.exception(f"sample_render_failed on {e}", extra={"origin": origin})
+        logger.exception("sample_render_failed", extra={"origin": origin})
         return no_update
 
 
@@ -2231,6 +2231,8 @@ def _png_data_uri_from_rgb(rgb: np.ndarray) -> str:
 def _tile_img_component(z: np.ndarray) -> html.Img:
     z = np.asarray(z, dtype=np.float32)
     rgb = _rwg_rgb_from_signed(z)
+
+    H, W = rgb.shape[0], rgb.shape[1]
 
     if z.ndim == 2 and z.shape[0] == 1:  # strip 1xN
         target_w = int(max(40, min(10 * z.shape[1], 600)))
@@ -2367,9 +2369,8 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     if not os.path.isdir(root_directory):
         try:
             os.makedirs(root_directory, exist_ok=True)
-            logger.info("created_root_directory", extra={"root_directory": root_directory})
         except Exception as e:
-            logger.error("root_directory_creation_failed", extra={"root_directory": root_directory, "error": str(e)})
+            logger.info("created_root_directory", extra={"root_directory": root_directory})
             sys.exit(1)
 
     channel = grpc.insecure_channel(
@@ -2480,23 +2481,34 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             print("img route error:", e)
             abort(404)
 
-    def make_grid_skeleton(num_cells, origin, img_size):
-        cells = []
-        for i in range(num_cells):
-            cells.append(html.Div([
-                html.Img(
-                    id={'type':'sample-img-el', 'origin': origin, 'slot': i},  
-                    src="", loading="lazy", decoding="async",
-                    width=img_size, height=img_size,
-                    style={'width': f'{img_size}px', 'height': f'{img_size}px', 'border':'1px solid #ccc'}
-                ),
-                html.Div(id={'type':'sample-img-label', 'origin': origin, 'slot': i}, style={'fontSize':'11px', 'textAlign':'center'})
-            ], style={'display':'flex','flexDirection':'column','alignItems':'center'}))
-        return html.Div(children=cells, id={'type':'grid', 'origin':origin}, style={
-            'display':'grid',
-            'gridTemplateColumns': f'repeat({isqrt(num_cells)}, 1fr)',
-            'gap': '4px'
-        })
+    @server.route("/api/root-log-dir")
+    def get_root_log_dir():
+        """REST endpoint to get the root log directory.
+        
+        Used by Weights Studio UI to resolve image paths.
+        Returns JSON with root_log_dir path.
+        """
+        try:
+            # Get root_log_dir from the gRPC stub's servicer
+            # The ExperimentServiceServicer has access to root_log_dir through its ExperimentService
+            root_log_dir = stub.ExperimentCommand(pb2.TrainerCommand(
+                get_hyper_parameters=False,
+                get_interactive_layers=False,
+            )).response  # This just gets command response, not what we want
+            
+            # Instead, try to get it from ui_state (root_directory was passed to main())
+            root_log_dir = root_directory
+            
+            return jsonify({
+                'success': True,
+                'root_log_dir': root_log_dir
+            })
+        except Exception as e:
+            logger.error(f"Error getting root_log_dir: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
 
     def fetch_server_state_and_update_ui_state():
         while True:
@@ -2515,7 +2527,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             time.sleep(0.5)  # Update every 0.5 second - adjust as needed
 
     consistency_thread = threading.Thread(
-        target=fetch_server_state_and_update_ui_state, daemon=True)
+        target=fetch_server_state_and_update_ui_state, name='fetch_server_state_and_update_ui_state', daemon=True)
     consistency_thread.start()
 
     def retrieve_training_statuses():
@@ -2523,7 +2535,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         for status in stub.StreamStatus(pb2.Empty()):
             ui_state.update_metrics_from_server(status)
     status_thread = threading.Thread(
-        target=retrieve_training_statuses, daemon=True)
+        target=retrieve_training_statuses, name='retrieve_training_statuses', daemon=True)
     status_thread.start()
 
     @app.callback(
@@ -3366,7 +3378,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             try:
                 df = df.sort_values(by=sort_info['cols'], ascending=sort_info['dirs'])
             except Exception as e:
-                logger.warning(f"Train table sort failed on {e}", extra={"query": str(query)})
+                logger.warning("Train table sort failed", extra={"query": str(query)})
 
 
         num_available_samples = (~df["Discarded"]).sum()
@@ -3408,7 +3420,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             try:
                 df = df.sort_values(by=sort_info['cols'], ascending=sort_info['dirs'])
             except Exception as e:
-                logger.warning(f"Eval table sort failed on {e}", extra={"query": str(query)})
+                logger.warning("Eval table sort failed", extra={"query": str(query)})
 
         num_available_samples = (~df["Discarded"]).sum()
         selected_count = len(eval_selected_ids or [])

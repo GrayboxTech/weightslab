@@ -2,23 +2,20 @@
 # Top-level keys describe runtime environment and experiment settings.
 
 # Device to run training on: 'cpu' or 'cuda'
-device: cpu
+device: cuda
 
 # Root directory where logs, checkpoints and other artifacts are stored.
 # Use a platform-appropriate path. If unset, a default under the current
 # working directory will be used.
-root_log_dir: "C:\\Users\\GUILLA~1\\Desktop\\trash\\tmpx71e1085"
+root_log_dir: "C:\\Users\\GUILLA~1\\Desktop\\trash\\v2testingweightslab"
 
 # Whether to show tqdm progress bars during training/evaluation.
 tqdm_display: true
+verbose: true
 
 # When true, skip loading pre-existing checkpoints at start-up (useful for
 # fresh runs or debugging).
 skip_loading: true
-
-# Number of train steps between evaluation runs (or evaluation scheduling
-# parameter used by the example script). Smaller values => more frequent evals.
-eval_steps: 50
 
 
 # ----- Experiment identity and scheduling -----
@@ -33,11 +30,11 @@ training_steps_to_do: 20000
 
 # Ratio used to compute how often a full evaluation run occurs relative to
 # training steps (example: eval every `training_steps / eval_full_to_train_steps_ratio`).
-eval_full_to_train_steps_ratio: 555
+eval_full_to_train_steps_ratio: 200
 
 # How often to dump checkpoints relative to training steps. Larger values
 # reduce checkpoint frequency.
-experiment_dump_to_train_steps_ratio: 67
+experiment_dump_to_train_steps_ratio: 5000
 
 # Whether to skip loading the latest checkpoint at initialization.
 skip_checkpoint_load: false
@@ -51,12 +48,12 @@ data:
     # Shuffle training data each epoch for stochasticity
     train_shuffle: true
     # Number of samples per batch for training
-    batch_size: 256
+    batch_size: 16
   test_loader:
     # Do not shuffle evaluation dataset
     test_shuffle: false
     # Batch size used during evaluation
-    batch_size: 256
+    batch_size: 16
     # Whether to drop the last incomplete batch during evaluation
     drop_last: false
 

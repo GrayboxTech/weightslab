@@ -18,6 +18,7 @@ service ExperimentService {
   rpc ApplyDataQuery (DataQueryRequest) returns (DataQueryResponse);
   rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
   rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
+  rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
 }
 
 
@@ -280,6 +281,8 @@ message DataSamplesRequest {
   bool include_transformed_data = 3;
   bool include_raw_data = 4;
   repeated string stats_to_retrieve = 5;
+  int32 resize_width = 6;
+  int32 resize_height = 7;
 }
 
 message DataStat {
@@ -318,6 +321,11 @@ message DataEditsRequest {
 
 message DataEditsResponse {
   bool success = 1;
+  string message = 2;
+}
+
+message AgentHealthResponse {
+  bool available = 1;
   string message = 2;
 }
 
