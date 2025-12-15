@@ -1099,35 +1099,3 @@ class TestMulSubMerges(DependencyPatternTest):
         rec_deps = [d for d in deps if d[2] == DepType.REC]
         self.assertGreater(len(rec_deps), 0)
         self.operate(self.model, self.dummy_input)
-
-
-if __name__ == '__main__':
-    # Run tests with verbose output
-    # unittest.main(verbosity=2)
-
-    # model = MinimalDepthwisePointwiseWithLinear()
-    # model.eval()
-    # dummy_input = torch.randn(1, 8, 16, 16)
-    # m = ModelInterface(model, dummy_input=dummy_input, use_onnx=True)
-    # model_op_neurons(m, dummy_input=dummy_input, op=1, layer_id=4, rand=False)
-    # model_op_neurons(m, dummy_input=dummy_input, op=2, layer_id=4, rand=False)
-
-
-    model = MinimalDepthwisePointwiseWithLinear()
-    model.eval()
-    dummy_input = torch.randn(1, 8, 16, 16)
-
-    model = ModelInterface(model, dummy_input=dummy_input, use_onnx=True)
-    print('here 2>>>'); print(model.layers[0].src_to_dst_mapping_tnsrs['BatchNorm2d_1'])
-    model_op_neurons(model, dummy_input=dummy_input, layer_id=2)
-    print('here 1>>>'); print(model.layers[0].src_to_dst_mapping_tnsrs['BatchNorm2d_1'])
-    model_op_neurons(model, dummy_input=dummy_input, layer_id=1)
-    print('here 0>>>'); print(model.layers[0].src_to_dst_mapping_tnsrs['BatchNorm2d_1'])
-
-
-    # Operation
-    for n in range(7, -1, -1):
-        model_op_neurons(model, dummy_input=dummy_input, op=3, layer_id=n, rand=False)
-        model_op_neurons(model, dummy_input=dummy_input, op=4, layer_id=n, rand=False)
-        model_op_neurons(model, dummy_input=dummy_input, op=2, layer_id=n, rand=False)
-    print("Completed model operations.")

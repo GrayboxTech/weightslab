@@ -39,12 +39,12 @@ def setup_logging(level, log_to_file=True):
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level.upper())
     console_handler.setFormatter(formatter)
-    
+
     # Get root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level.upper())
     root_logger.addHandler(console_handler)
-    
+
     # File handler - write to temp directory
     if log_to_file:
         # Create temp directory for logs if it doesn't exist
