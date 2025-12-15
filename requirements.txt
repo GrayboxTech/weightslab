@@ -1,8 +1,7 @@
 # List the packages and their exact versions
 torch==2.2.1
-torchvision==0.18.1
+torchvision==0.16.1
 torchmetrics==1.8.2
-torchaudio==2.2.1
 tensorboard==2.20
 MarkupSafe==2.1.5
 torchinfo==1.8.0
