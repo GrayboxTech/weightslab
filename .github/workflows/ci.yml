@@ -34,7 +34,7 @@ jobs:
       - name: Install project dependencies
         run: |
           export WEIGHTSLAB_TORCH_VARIANT="cpu"
-          python -m pip install .
+          python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Lint with Ruff (unused, style, bugs)
         run: |
