@@ -341,6 +341,8 @@ class DataSampleTrackingWrapper(Dataset):
                     sz = int(np.sqrt(sample_pred.size))
                     if sz * sz == sample_pred.size:
                         sample_pred = sample_pred.reshape((sz, sz))
+            
+            # Core stats (keep original behavior)
             self.update_sample_stats(
                 sample_identifier,
                 {
@@ -349,6 +351,68 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_LOSS.value: sample_loss
                 },
                 raw=raw)
+            
+            # Extended stats: Compute scalar loss summaries
+            # Works for both classification (scalar) and segmentation (array)
+            extended_stats = {}
+            
+            # Convert to numpy for consistent handling
+            loss_np = sample_loss if isinstance(sample_loss, np.ndarray) else np.array(sample_loss)
+            
+            # Scalar loss summaries
+            if loss_np.size > 1:
+                # Segmentation or multi-element loss
+                extended_stats["mean_loss"] = float(loss_np.mean())
+                extended_stats["max_loss"] = float(loss_np.max())
+                extended_stats["min_loss"] = float(loss_np.min())
+                extended_stats["std_loss"] = float(loss_np.std())
+                extended_stats["median_loss"] = float(np.median(loss_np))
+            else:
+                # Classification - single scalar loss
+                scalar_loss = float(loss_np.item() if hasattr(loss_np, 'item') else loss_np)
+                extended_stats["mean_loss"] = scalar_loss
+                extended_stats["max_loss"] = scalar_loss
+                extended_stats["min_loss"] = scalar_loss
+                extended_stats["std_loss"] = 0.0
+                extended_stats["median_loss"] = scalar_loss
+            
+            # Per-class statistics (if prediction is available)
+            if sample_pred is not None:
+                pred_np = sample_pred if isinstance(sample_pred, np.ndarray) else np.array(sample_pred)
+                
+                # For segmentation: compute per-class loss and distribution
+                if pred_np.ndim >= 2 and loss_np.size > 1:
+                    # Get unique classes in prediction
+                    unique_classes = np.unique(pred_np)
+                    extended_stats["num_classes_present"] = int(len(unique_classes))
+                    
+                    # Dominant class (most frequent)
+                    unique, counts = np.unique(pred_np, return_counts=True)
+                    dominant_idx = np.argmax(counts)
+                    extended_stats["dominant_class"] = int(unique[dominant_idx])
+                    extended_stats["dominant_class_ratio"] = float(counts[dominant_idx] / pred_np.size)
+                    
+                    # Per-class loss (for up to 10 most common classes to avoid explosion)
+                    if len(unique) <= 10:
+                        for class_id in unique[:10]:
+                            mask = (pred_np == class_id)
+                            if mask.any():
+                                class_loss = loss_np[mask].mean()
+                                extended_stats[f"loss_class_{int(class_id)}"] = float(class_loss)
+                    
+                    # Background ratio (assuming class 0 is background)
+                    if 0 in unique:
+                        background_ratio = float(counts[unique == 0][0] / pred_np.size)
+                        extended_stats["background_ratio"] = background_ratio
+                
+                # For classification: just store the predicted class
+                elif pred_np.size == 1:
+                    pred_class = int(pred_np.item() if hasattr(pred_np, 'item') else pred_np)
+                    extended_stats["predicted_class"] = pred_class
+            
+            # Update extended stats
+            if extended_stats:
+                self.update_sample_stats_ex(sample_identifier, extended_stats)
             
     def update_sample_stats_ex(
         self,
