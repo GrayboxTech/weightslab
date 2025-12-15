@@ -59,7 +59,6 @@ def get_requirements(file_path: pathlib.Path):
         dep = sanitize_line(dep)
         dep = normalize_torch(dep)
         deps.append(dep)
-
     return deps
 
 requirements = get_requirements(
