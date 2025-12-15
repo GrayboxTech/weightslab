@@ -16,7 +16,7 @@ def load_raw_image(dataset, index):
         return img.convert("RGB")
     elif hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
         if hasattr(wrapped, "dataset"):
-            wrapped_data = wrapped.dataset.base.data if hasattr(wrapped.dataset, "base") else wrapped.dataset.data
+            wrapped_data = wrapped.dataset.base.data if hasattr(wrapped.dataset, "base") else wrapped.dataset
         else:
             wrapped_data = wrapped.data
         np_img = wrapped_data[index]
