@@ -21,6 +21,8 @@ grpcio==1.76.0
 grpcio-tools==1.76.0
 protobuf==6.33
 numpy==1.24.1
+onnx==1.20.0
+onnxruntime==1.23.2
 xxhash==3.6.0
 
 # UI - List the packages and their exact versions

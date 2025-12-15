@@ -33,8 +33,6 @@ def monkey_patch_modules(module: nn.Module):
 
     # --- Step 0: Extract Input and Output Parameters from layers ---
     in_dim, out_dim, in_name, out_name = extract_in_out_params(module)
-    if in_dim is None and out_dim is None and in_name is None and out_name is None:
-        return module
 
     # --- Step 1: Inject Mixin Methods (As before) ---
     # # First, set layer type attribute
@@ -77,5 +75,6 @@ def monkey_patch_modules(module: nn.Module):
         )
         return output
     module.forward = types.MethodType(wrapped_forward, module)  # Monkey patch
+    module.is_leaf = True
 
     return module

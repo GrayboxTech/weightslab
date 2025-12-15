@@ -2,9 +2,15 @@ name: CI
 
 on:
   push:
+<<<<<<< HEAD
     branches: [ main, dev ]
   pull_request:
     branches: [ main, dev]
+=======
+    # branches: [ main, master ]
+  pull_request:
+    # branches: [ main, master ]
+>>>>>>> 7c7e202ba699f0c9a8954b7a32f069c792a7c1fd
 
 jobs:
   code-quality:

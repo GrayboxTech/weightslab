@@ -189,7 +189,7 @@ class TriggersTrackerClazzAndSampleIDTest(unittest.TestCase):
         )
         self.triggers_tracker.update(processed_activation_map)
         self.triggers_tracker.prune({0})
-        self.assertTrue(self.triggers_tracker.number_of_neurons == 1)
+        self.assertTrue(self.triggers_tracker.number_of_neurons.item() == 1)
 
         processed_activation_map = th.tensor([[5], [1]])
 
@@ -214,7 +214,7 @@ class TriggersTrackerClazzAndSampleIDTest(unittest.TestCase):
         )
         self.triggers_tracker.update(processed_activation_map)
         self.triggers_tracker.reset({1})
-        self.assertTrue(self.triggers_tracker.number_of_neurons == 2)
+        self.assertTrue(self.triggers_tracker.number_of_neurons.item() == 2)
 
         neuron0_stats = self.triggers_tracker.get_neuron_stats(0)
         self.assertListEqual(neuron0_stats[1], [12])
@@ -250,7 +250,7 @@ class TriggersTrackerClazzAndSampleIDTest(unittest.TestCase):
         )
         self.triggers_tracker.update(processed_activation_map)
         self.triggers_tracker.add_neurons(1)
-        self.assertTrue(self.triggers_tracker.number_of_neurons == 3)
+        self.assertTrue(self.triggers_tracker.number_of_neurons.item() == 3)
         with self.assertRaises(RuntimeError):
             self.triggers_tracker.update(processed_activation_map)
         processed_activation_map = th.tensor([[1, 8, 3], [0, 2, 4]])

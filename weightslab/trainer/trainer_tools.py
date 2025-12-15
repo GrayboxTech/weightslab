@@ -236,40 +236,21 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
             task_type=sample_stats.task_type,
         )
 
-        if is_multi_task:
-            preview_attached = False
-            for t in tasks:
-                loss_key, pred_key = f"loss/{t.name}", f"pred/{t.name}"
-                if loss_key in row:
-                    record.extra_fields.append(make_task_field(loss_key, float(np.array(row[loss_key]).reshape(-1)[0])))
-                if pred_key in row:
-                    arr = np.array(row[pred_key].detach().cpu() if hasattr(row[pred_key], "detach") else row[pred_key])
-                    if arr.ndim >= 2 and not preview_attached:
-                        record.prediction_raw = tensor_to_bytes(row[pred_key], mean=IM_MEAN, std=IM_STD)
-                        preview_attached = True
-                    elif arr.size == 1:
-                        record.extra_fields.append(make_task_field(pred_key, float(arr.reshape(-1)[0])))
-            
-            target = row.get("target", -1)
-            target_list = [int(target)] 
-            record.sample_label.extend(target_list)
-
-        else:
-            task_type = sample_stats.task_type
-            if task_type == "segmentation":
-                label = row.get("target")
-                if isinstance(label, str):
-                    target_list = _labels_from_mask_path_histogram(label, num_classes, ignore_index)
-                else:
-                    target_list = _class_ids(label, num_classes, ignore_index)
-                pred_list = _class_ids(row.get("prediction_raw"), num_classes, ignore_index)
+        task_type = sample_stats.task_type
+        if task_type == "segmentation":
+            label = row.get("target")
+            if isinstance(label, str):
+                target_list = _labels_from_mask_path_histogram(label, num_classes, ignore_index)
             else:
-                target = row.get("label", row.get("target", -1))
-                pred   = row.get("prediction_raw", -1)
-                target_list = [int(target)] if not isinstance(target, (list, np.ndarray)) else [int(np.array(target).item())]
-                pred_list   = [int(pred)]   if not isinstance(pred, (list, np.ndarray))   else [int(np.array(pred).item())]
-            record.sample_label.extend(target_list)
-            record.sample_prediction.extend(pred_list)
+                target_list = _class_ids(label, num_classes, ignore_index)
+            pred_list = _class_ids(row.get("prediction_raw"), num_classes, ignore_index)
+        else:
+            target = row.get("label", row.get("target", -1))
+            pred   = row.get("prediction_raw", -1)
+            target_list = [int(target)] if not isinstance(target, (list, np.ndarray)) else [int(np.array(target).item())]
+            pred_list   = [int(pred)]   if not isinstance(pred, (list, np.ndarray))   else [int(np.array(pred).item())]
+        record.sample_label.extend(target_list)
+        record.sample_prediction.extend(pred_list)
 
         sample_stats.records.append(record)
     return sample_stats
@@ -421,39 +402,6 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
                     pred_mask = dataset.get_prediction_mask(sid)
                     if pred_mask is not None:
                         pred_bytes = mask_to_png_bytes(pred_mask, num_classes=num_classes)
-            except Exception:
-                pred_bytes = b""
-
-        elif task_type == "reconstruction":
-            mask_bytes = raw_bytes if raw_bytes else transformed_bytes
-
-            try:
-                if hasattr(dataset, "get_prediction_mask"):
-                    recon = dataset.get_prediction_mask(sid, task_name = 'recon')
-                    if recon is not None:
-                        r = recon.detach().cpu() if isinstance(recon, torch.Tensor) else torch.tensor(recon)
-                        if r.ndim == 2:
-                            r = r.unsqueeze(0)
-                        pred_bytes = tensor_to_bytes(r, mean=IM_MEAN, std=IM_STD) 
-            except Exception:
-                pred_bytes = b""
-
-        elif task_type == "multi-task":
-            if isinstance(label, (list, np.ndarray)):
-                cls_label = int(np.array(label).item())
-            elif hasattr(label, 'cpu'):
-                cls_label = int(np.array(label.cpu()).item())
-            else:
-                cls_label = int(label)
-
-            try:
-                if hasattr(dataset, "get_prediction_mask"):
-                    recon = dataset.get_prediction_mask(sid, task_name = 'recon')  
-                    if recon is not None:
-                        r = recon.detach().cpu() if isinstance(recon, torch.Tensor) else torch.tensor(recon)
-                        if r.ndim == 2:
-                            r = r.unsqueeze(0)
-                        pred_bytes = tensor_to_bytes(r, mean=IM_MEAN, std=IM_STD)
             except Exception:
                 pred_bytes = b""
 

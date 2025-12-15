@@ -14,16 +14,6 @@ from torchvision import transforms as T
 from torchvision import datasets as ds
 
 from torch.utils.data import DataLoader
-from weightslab.backend.ledgers import (
-    register_model,
-    register_optimizer,
-    register_dataloader,
-    register_logger,
-    get_model,
-    get_optimizer,
-    get_dataloader
-)
-
 from weightslab.baseline_models.pytorch.models import FashionCNN
 from weightslab.components.checkpoint import CheckpointManager
 
