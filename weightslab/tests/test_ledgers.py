@@ -45,8 +45,6 @@ class LedgerTests(unittest.TestCase):
         self.assertNotIn("w", names)
 
     def test_optimizer_live_update_through_proxy(self):
-        # create a proxy placeholder by requesting before registration
-        proxy = GLOBAL_LEDGER.get_optimizer('opt_live')
         # define a simple optimizer-like object
         class DummyOpt:
             def __init__(self, lr):

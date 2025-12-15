@@ -15,17 +15,8 @@ from torchvision import datasets as ds
 from torchvision import transforms as T
 
 from weightslab.components.tracking import TrackingMode
-<<<<<<< HEAD
-<<<<<<< Updated upstream
-from weightslab.backend.watcher_editor import WatcherEditor
-=======
-from weightslab.weightslab.backend.model_interface import ModelInterface
->>>>>>> Stashed changes
-from weightslab.tests.torch_models import FashionCNN as Model
-=======
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
->>>>>>> 0e96a840a38a23e0de383561c870c80f9a33ae88
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 
