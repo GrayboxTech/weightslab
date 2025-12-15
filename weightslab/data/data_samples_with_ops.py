@@ -977,6 +977,9 @@ class DataSampleTrackingWrapper(Dataset):
         else:
             raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
 
+    def get_index_from_sample_id(self, sample_id: int) -> int:
+        return self.unique_id_to_index[sample_id]
+    
     def get_prediction_mask(self, sample_id, task_name=None):
         if task_name:
             key = f"pred/{task_name}"

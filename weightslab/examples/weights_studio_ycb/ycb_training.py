@@ -3,25 +3,27 @@ import time
 import tempfile
 import logging
 
+import yaml
 import tqdm
 import torch
+import itertools
 import torch.nn as nn
 import torch.optim as optim
-import yaml
 
 import weightslab as wl
 from torchvision import datasets, transforms
+from torch.utils.data import Subset
 from torchmetrics.classification import Accuracy
 
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
-    guard_testing_context,
-    pause_controller,
+    guard_testing_context
 )
 
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
+logging.getLogger("PIL").setLevel(logging.WARNING)
 
 
 # Simple CNN for YCB (RGB 3xHxW, variable num_classes)
@@ -98,7 +100,7 @@ def train(loader, model, optimizer, criterion_mlt, device="cpu"):
     return loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device):
+def test(loader, model, criterion_mlt, metric_mlt, device, loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
@@ -124,7 +126,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
             losses += torch.mean(loss_batch)
             metric_mlt.update(outputs, labels)
 
-    loss = losses / len(loader)
+    loss = losses / loader_len
     metric = metric_mlt.compute() * 100
 
     return loss.detach().cpu().item(), metric.detach().cpu().item()
@@ -161,7 +163,9 @@ if __name__ == "__main__":
         tmp_dir = tempfile.mkdtemp()
         parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
-
+    tqdm_display = parameters.get('tqdm_display', True)
+    tqdm_display_eval = parameters.get('tqdm_display_eval', True)
+    verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     max_steps = parameters["training_steps_to_do"]
     eval_every = parameters["eval_full_to_train_steps_ratio"]
@@ -196,14 +200,18 @@ if __name__ == "__main__":
         [
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
+            transforms.PILToTensor(),
         ]
     )
 
+    # Load subsample of datasets for quick testing
     _train_dataset = datasets.ImageFolder(root=train_dir, transform=common_transform)
+    _train_dataset = Subset(_train_dataset, list(range(min(1000, len(_train_dataset)))))
+    
     _test_dataset = datasets.ImageFolder(root=val_dir, transform=common_transform)
+    _test_dataset = Subset(_test_dataset, list(range(min(200, len(_test_dataset)))))
 
-    num_classes = len(_train_dataset.classes)
+    num_classes = len(datasets.ImageFolder(root=train_dir, transform=common_transform).classes)
 
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
@@ -215,6 +223,7 @@ if __name__ == "__main__":
         batch_size=train_cfg.get("batch_size", 16),
         shuffle=train_cfg.get("train_shuffle", True),
         is_training=True,
+        compute_hash=True
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -222,6 +231,7 @@ if __name__ == "__main__":
         name="test_loader",
         batch_size=test_cfg.get("batch_size", 16),
         shuffle=test_cfg.get("test_shuffle", False),
+        compute_hash=True
     )
 
     # --- 6) Model, optimizer, losses, metric ---
@@ -255,6 +265,7 @@ if __name__ == "__main__":
     wl.serve(
         serving_ui=True,
         root_directory=log_dir,
+        
         serving_grpc=True,
         n_workers_grpc=parameters.get("number_of_workers"),
     )
@@ -269,8 +280,15 @@ if __name__ == "__main__":
     # --- 8) Resume training automatically ---
     # pause_controller.resume()
 
-    # --- 9) Training loop ---
-    for train_step in tqdm.trange(max_steps, dynamic_ncols=True):
+    # ================
+    # 9. Training Loop
+    print("\nStarting Training...")
+    max_steps = parameters.get('training_steps_to_do', 6666)
+    train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
+    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display_eval else test_loader
+    test_loss, test_metric = None, None
+    for train_step in train_range:
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         test_loss, test_metric = None, None

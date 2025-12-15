@@ -20,11 +20,16 @@ def load_raw_image(dataset, index):
         else:
             wrapped_data = wrapped.data
         np_img = wrapped_data[index]
+        if isinstance(np_img, (list, tuple)):
+            np_img = np_img[0]
         if hasattr(np_img, 'numpy'):
             np_img = np_img.numpy()  
         if np_img.ndim == 2:
             return Image.fromarray(np_img.astype(np.uint8), mode="L")
         elif np_img.ndim == 3:
+            # Convert from channel-first (C, H, W) to channel-last (H, W, C) for PIL
+            if np_img.shape[0] in [1, 3, 4]:  # Likely channel-first
+                np_img = np.transpose(np_img, (1, 2, 0))
             return Image.fromarray(np_img.astype(np.uint8), mode="RGB")
         else:
             raise ValueError(f"Unsupported image shape: {np_img.shape}")

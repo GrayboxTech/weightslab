@@ -263,10 +263,10 @@ class DataService:
 
             if request.include_raw_data:
                 try:
-                    
-                    raw_img = load_raw_image(dataset, sample_id)
+                    index = dataset.get_index_from_sample_id(sample_id)
+                    raw_img = load_raw_image(dataset, index)
                     original_size = raw_img.size
-                    
+
                     # Handle resize request
                     # Negative values indicate percentage mode (e.g., -50 means 50% of original)
                     # Positive values indicate absolute pixel dimensions
