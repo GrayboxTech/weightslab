@@ -309,7 +309,7 @@ class NetworkWithOps(nn.Module):
         # # Go through child nodes
         for rec_dep_id in self._dep_manager.get_child_ids(
                 layer_id, DepType.REC):
-            print(f"[DEBUG REC] Layer {layer_id} has REC child {rec_dep_id}")
+            logger.debug(f"[DEBUG REC] Layer {layer_id} has REC child {rec_dep_id}")
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
             if rec_dep_id in _suppress_rec_ids or \
@@ -337,7 +337,7 @@ class NetworkWithOps(nn.Module):
         # # Go through parents nodes
         for same_dep_id in self._dep_manager.get_parent_ids(
                 layer_id, DepType.SAME):
-            print(f"[DEBUG SAME PARENT] Layer {layer_id} has SAME parent {same_dep_id}")
+            logger.debug(f"[DEBUG SAME PARENT] Layer {layer_id} has SAME parent {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
             if same_dep_id in _suppress_same_ids or \
@@ -360,7 +360,7 @@ class NetworkWithOps(nn.Module):
         # # Go through child nodes
         for same_dep_id in self._dep_manager.get_child_ids(
                 layer_id, DepType.SAME):
-            print(f"[DEBUG SAME CHILD] Layer {layer_id} has SAME child {same_dep_id}")
+            logger.debug(f"[DEBUG SAME CHILD] Layer {layer_id} has SAME child {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
             if same_dep_id in _suppress_same_ids or \
@@ -391,9 +391,9 @@ class NetworkWithOps(nn.Module):
         
         incoming_ids = self._dep_manager.get_child_ids(layer_id, DepType.INCOMING)
         if incoming_ids:
-            print(f"[DEBUG] {module.get_name_wi_id()} (ID: {layer_id}) has INCOMING children IDs: {incoming_ids}")
-            print(f"[DEBUG] Current visited_nodes: {self.visited_nodes}")
-            print(f"[DEBUG] Current _suppress_incoming_ids: {_suppress_incoming_ids}")
+            logger.debug(f"[DEBUG] {module.get_name_wi_id()} (ID: {layer_id}) has INCOMING children IDs: {incoming_ids}")
+            logger.debug(f"[DEBUG] Current visited_nodes: {self.visited_nodes}")
+            logger.debug(f"[DEBUG] Current _suppress_incoming_ids: {_suppress_incoming_ids}")
 
         for incoming_id in incoming_ids:
             # Get module with id incoming_id
@@ -406,11 +406,11 @@ class NetworkWithOps(nn.Module):
 
             # Avoid double expansion except for bypass nodes
             if incoming_id in self.visited_incoming_nodes and not bypass:
-                print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in visited_incoming_nodes")
+                logger.debug(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in visited_incoming_nodes")
                 continue
             if _suppress_incoming_ids and incoming_id \
                     in _suppress_incoming_ids:
-                print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in _suppress_incoming_ids")
+                logger.debug(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in _suppress_incoming_ids")
                 continue
 
             # Operate on module incoming neurons
