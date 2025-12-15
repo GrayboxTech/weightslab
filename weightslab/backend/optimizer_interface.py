@@ -1,4 +1,3 @@
-import os
 import torch
 import tempfile
 import weightslab as wl

@@ -677,7 +677,7 @@ class UIState:
 
         except Exception as e:
             logger.exception(
-                "sample_update_failed",
+                f"sample_update_failed on {e}",
                 extra={"origin": getattr(sample_statistics, "origin", None)}
             )
 
@@ -1153,7 +1153,7 @@ def get_layer_div(
     checklist_values = convert_checklist_to_df_head(checklist_values)
     try:
         neurons_view_df = format_values_df(layer_neurons_df[checklist_values])
-    except Exception as e:
+    except Exception:
         return no_update
 
     fetch_filters_toggle = html.Div(
@@ -1308,7 +1308,7 @@ def interactable_layers(
                     layer_row, layer_neurons_df, ui_state, checklist_values))
         except Exception as e:
             logger.exception(
-                "layer_render_failed",
+                f"layer_render_failed on {e}",
                 extra={"layer_id": int(layer_row.get("layer_id", -1))}
             )
             continue
@@ -2116,7 +2116,7 @@ def render_images(ui_state: UIState, stub, sample_ids, origin,
                 imgs.append(clickable)
 
     except Exception as e:
-        logger.exception("sample_render_failed", extra={"origin": origin})
+        logger.exception(f"sample_render_failed on {e}", extra={"origin": origin})
         return no_update
 
 
@@ -2231,8 +2231,6 @@ def _png_data_uri_from_rgb(rgb: np.ndarray) -> str:
 def _tile_img_component(z: np.ndarray) -> html.Img:
     z = np.asarray(z, dtype=np.float32)
     rgb = _rwg_rgb_from_signed(z)
-
-    H, W = rgb.shape[0], rgb.shape[1]
 
     if z.ndim == 2 and z.shape[0] == 1:  # strip 1xN
         target_w = int(max(40, min(10 * z.shape[1], 600)))
@@ -2369,8 +2367,9 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     if not os.path.isdir(root_directory):
         try:
             os.makedirs(root_directory, exist_ok=True)
-        except Exception as e:
             logger.info("created_root_directory", extra={"root_directory": root_directory})
+        except Exception as e:
+            logger.error("root_directory_creation_failed", extra={"root_directory": root_directory, "error": str(e)})
             sys.exit(1)
 
     channel = grpc.insecure_channel(
@@ -3367,7 +3366,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             try:
                 df = df.sort_values(by=sort_info['cols'], ascending=sort_info['dirs'])
             except Exception as e:
-                logger.warning("Train table sort failed", extra={"query": str(query)})
+                logger.warning(f"Train table sort failed on {e}", extra={"query": str(query)})
 
 
         num_available_samples = (~df["Discarded"]).sum()
@@ -3409,7 +3408,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             try:
                 df = df.sort_values(by=sort_info['cols'], ascending=sort_info['dirs'])
             except Exception as e:
-                logger.warning("Eval table sort failed", extra={"query": str(query)})
+                logger.warning(f"Eval table sort failed on {e}", extra={"query": str(query)})
 
         num_available_samples = (~df["Discarded"]).sum()
         selected_count = len(eval_selected_ids or [])

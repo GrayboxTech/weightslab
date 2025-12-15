@@ -68,8 +68,6 @@ def monkey_patch_modules(module: nn.Module):
     original_forward = module.forward
 
     def wrapped_forward(self, input):
-        print(f"[DEBUG] wrapped_forward in {self.__class__.__name__} | module: {repr(self)}")
-        print(f"[DEBUG]   input shape: {input.shape}")
         activation_map = original_forward(input)
         output = self.perform_layer_op(
             activation_map=activation_map,

@@ -12,14 +12,13 @@ import yaml
 import weightslab as wl
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
-from torchvision import datasets, transforms, models
+from torchvision import datasets, transforms
 
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
-    guard_testing_context,
-    pause_controller,
+    guard_testing_context
 )
 os.environ["GRPC_VERBOSITY"] = "debug"
 

@@ -12,7 +12,7 @@ import torch.nn as nn
 import torchvision.models as models
 import torchvision.transforms as T
 
-from typing import Callable, Tuple, List
+from typing import Tuple, List
 from torch.nn import functional as F
 
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor

@@ -404,8 +404,7 @@ class ModelInterface(NetworkWithOps):
             logger.info("--- Generated Graph Dependencies (FX Tracing) ---")
             or_dependencies = generate_graph_dependencies_from_torchfx(
                 self.model,
-                self.traced_model.graph,
-                indexing_neurons=False
+                self.traced_model.graph
             )
             plot_fx_graph_with_details(
                 self.traced_model,
@@ -439,19 +438,20 @@ class ModelInterface(NetworkWithOps):
         if not use_onnx:
 
             # Generate the dependencies
-            dependencies_with_ops = generate_graph_dependencies_from_torchfx(
+            self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
                 self.model,
                 self.traced_model.graph
             )
         else:
-            dependencies_with_ops = generate_layer_dependencies_from_onnx(
-                self.model, dummy_input=dummy_input
+            self.dependencies_with_ops = generate_layer_dependencies_from_onnx(
+                self.model,
+                dummy_input=dummy_input
             )
 
             # Patch the torch model with WeightsLab features
         
         self.mapped_dependencies_with_ops = generate_index_maps(
-            dependencies_with_ops
+            self.dependencies_with_ops
         )
 
         # Register the layers dependencies

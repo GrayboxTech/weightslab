@@ -5,6 +5,7 @@ weightslab/__pycache__/*
 tests/__pycache__/*
 __pycache__/*
 pkg_main.py
+.ruff_cache/*
 
 *.onnx
 *.pt

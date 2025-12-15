@@ -1,4 +1,3 @@
-import time
 import logging
 import numpy as np
 import torch as th
@@ -25,6 +24,7 @@ class NetworkWithOps(nn.Module):
         self.seen_samples = 0
         self.seen_batched_samples = 0
         self.visited_nodes = set()  # Memory trace of explored nodes
+        self.visited_incoming_nodes = set()  # Memory trace of explored nodes
         self.name = self._get_name()  # Name of the model
         self.linearized_layers = []
         self._architecture_change_hook_fns = []
@@ -193,7 +193,8 @@ class NetworkWithOps(nn.Module):
         """
         # Reset visited nodes memory
         self.visited_nodes = set()
-
+        self.visited_incoming_nodes = set()
+        
         # Call the recursive function
         self._operate(
             layer_id,
@@ -211,10 +212,6 @@ class NetworkWithOps(nn.Module):
         # Final hooking after operation
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
-        
-        # wait for all processes to sync - used for bkwd sync
-        th.cuda.synchronize() if th.cuda.is_available() else None
-        time.sleep(0.5)  # small sleep to ensure all ops are done
 
     def _operate(
         self,
@@ -250,8 +247,10 @@ class NetworkWithOps(nn.Module):
         :type dependency: Optional[Callable], optional
         :raises ValueError: [description]
         """
+
         logger.debug(f'Operate currently on neurons: {neuron_indices} ' +
               f'of layer id: {layer_id} with op_type: {op_type}')
+
         # Sanity check to see if layer exists
         if not isinstance(layer_id, int):
             raise ValueError(
@@ -262,9 +261,9 @@ class NetworkWithOps(nn.Module):
                 f"{op_type} has not been defined.")
         
         # Convert to index from back
-        print(f"[DEBUG OPERATE] Called with layer_id={layer_id}")
+        logger.debug(f"[DEBUG OPERATE] Called with layer_id={layer_id}")
         layer_id = self._reverse_indexing(layer_id, len(self.layers))
-        print(f"[DEBUG OPERATE] After _reverse_indexing, layer_id={layer_id}")
+        logger.debug(f"[DEBUG OPERATE] After _reverse_indexing, layer_id={layer_id}")
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.operate] No module with id {layer_id}")
@@ -276,8 +275,10 @@ class NetworkWithOps(nn.Module):
         # Sanity check to avoid redundancy
         # To be sure that nodes are updated only one time by pass
         bypass = hasattr(module, "bypass")
-        if layer_id in self.visited_nodes and not bypass:
-            return None
+        
+        # TOREMOVE
+        # if layer_id in self.visited_nodes and not bypass:
+        #     return None
 
         # ------------------------------------------------------------------- #
         # ------------------------- REC ------------------------------------- #
@@ -289,9 +290,7 @@ class NetworkWithOps(nn.Module):
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
             if rec_dep_id in _suppress_rec_ids or \
-                    rec_dep_id == layer_id:# or \
-                    # kwargs.get('current_child_name', None) == \
-                    # self._dep_manager.id_2_layer[rec_dep_id].get_name_wi_id():
+                    rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
 
@@ -314,9 +313,7 @@ class NetworkWithOps(nn.Module):
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
             if rec_dep_id in _suppress_rec_ids or \
-                    rec_dep_id == layer_id:# or \
-                    # kwargs.get('current_parent_name', None) == \
-                    # self._dep_manager.id_2_layer[rec_dep_id].get_name_wi_id():
+                    rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
 
@@ -344,9 +341,7 @@ class NetworkWithOps(nn.Module):
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
             if same_dep_id in _suppress_same_ids or \
-                    same_dep_id == layer_id: #or \
-                    # kwargs.get('current_child_name', None) == \
-                    # self._dep_manager.id_2_layer[same_dep_id].get_name_wi_id():
+                    same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
 
@@ -369,9 +364,7 @@ class NetworkWithOps(nn.Module):
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
             if same_dep_id in _suppress_same_ids or \
-                    same_dep_id == layer_id: # or \
-                    # kwargs.get('current_parent_name', None) == \
-                    # self._dep_manager.id_2_layer[same_dep_id].get_name_wi_id():
+                    same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
 
@@ -412,8 +405,8 @@ class NetworkWithOps(nn.Module):
             bypass = hasattr(incoming_module, "bypass")
 
             # Avoid double expansion except for bypass nodes
-            if incoming_id in self.visited_nodes and not bypass:
-                print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in visited_nodes")
+            if incoming_id in self.visited_incoming_nodes and not bypass:
+                print(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in visited_incoming_nodes")
                 continue
             if _suppress_incoming_ids and incoming_id \
                     in _suppress_incoming_ids:
@@ -433,7 +426,7 @@ class NetworkWithOps(nn.Module):
 
             # Keep visited node in mem. if it's a bypass node,
             # i.e., it's incoming from a cat layer for instance.
-            self.visited_nodes.add(incoming_id)
+            self.visited_incoming_nodes.add(incoming_id)
 
             # Save incoming children from layer_id
             updated_incoming_children.append(incoming_id)
@@ -501,7 +494,7 @@ class NetworkWithOps(nn.Module):
 
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
-        state = super().state_dict(destination, prefix, keep_vars)
+        state: dict = super().state_dict(destination, prefix, keep_vars)
         state[prefix + 'seen_samples'] = self.seen_samples
         state[prefix + 'tracking_mode'] = self.tracking_mode
         return state
@@ -536,161 +529,3 @@ class NetworkWithOps(nn.Module):
         if intermediary_outputs:
             return x, intermediaries
         return x
-
-
-if __name__ == "__main__":
-    print("This is the NetworkWithOps module.")
-    from weightslab.baseline_models.pytorch.models import TinyUNet_Straightforward
-    from weightslab.backend.model_interface import ModelInterface
-    from weightslab.utils.tools import model_op_neurons
-
-    DEVICE = 'cuda' if th.cuda.is_available() else 'cpu'
-
-    class TinyUNet_Straightforward(nn.Module):
-        """
-        Implémentation UNet ultra-minimaliste (1 niveau d'encodage/décodage)
-        utilisant l'interpolation pour l'upsampling.
-
-        Architecture:
-        Input (H, W) -> Enc1 -> Bottleneck -> Up1 -> Output (H, W)
-        """
-        def __init__(self, in_channels=1, out_classes=1):
-            super().__init__()
-
-            # Set input shape
-            self.input_shape = (1, 1, 256, 256)
-
-            # Hyperparamètres (Canaux à chaque étape)
-            # c[1]=8 (Encodage/Décodage), c[2]=16 (Bottleneck)
-            c = [in_channels, 8, 16]
-
-            # --- A. ENCODER (Down Path) ---
-            # 1. ENCODER 1: Conv -> 8 canaux (Génère le skip connection x1)
-            self.enc1 = nn.Sequential(
-                nn.Conv2d(c[0], c[1], kernel_size=3, padding=1),
-                nn.BatchNorm2d(c[1]),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(c[1], c[1], kernel_size=3, padding=1),
-                nn.BatchNorm2d(c[1]),
-                nn.ReLU(inplace=True)
-            )
-            self.pool1 = nn.MaxPool2d(2)  # Downsample 1
-
-            # --- B. BOTTLENECK ---
-            # 2. BOTTLENECK: Conv -> 16 canaux
-            self.bottleneck = nn.Sequential(
-                nn.Conv2d(c[1], c[2], kernel_size=3, padding=1),
-                nn.BatchNorm2d(c[2]),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(c[2], c[2], kernel_size=3, padding=1),
-                nn.BatchNorm2d(c[2]),
-                nn.ReLU(inplace=True)
-            )
-
-            # --- C. DECODER (Up Path) ---
-            # 3. UPSAMPLE 1 (Transition Bottleneck -> Up1)
-            # Interpolation du Bottleneck (16 -> 32)
-            scale_factor = 2
-            self.up_interp1 = nn.Upsample(
-                scale_factor=scale_factor,
-                mode='bilinear',
-                align_corners=True
-            )
-            # Dual conv after cat (In: 16 (bottleneck) + 8 (skip) = 24 -> Out: 8)
-            self.up_conv1 = nn.Sequential(
-                nn.Conv2d(c[2] + scale_factor * c[1], c[1], kernel_size=3, padding=1),
-                nn.BatchNorm2d(c[1]),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(c[1], c[1], kernel_size=3, padding=1),
-                nn.BatchNorm2d(c[1]),
-                nn.ReLU(inplace=True)
-            )
-
-            # --- D. OUTPUT ---
-            # 4. OUTPUT: Ramène à out_classes
-            self.out_conv = nn.Conv2d(c[1], out_classes, kernel_size=1)
-
-        def forward(self, x):
-            # 1. ENCODER
-            x1 = self.enc1(x)
-            p1 = self.pool1(x1)  # Skip x1
-
-            # 2. BOTTLENECK
-            bottleneck = self.bottleneck(p1)
-
-            # 3. DECODER 1: Interp + Concat (x1) + Conv
-            up_b = self.up_interp1(bottleneck)
-            merged1 = th.cat([x1, self.up_interp1(p1), up_b], dim=1)
-            d1 = self.up_conv1(merged1)
-
-            # 4. OUTPUT
-            logits = self.out_conv(d1)
-
-            return logits
-
-
-    def _test_inference(model, dummy_input, op=None):
-        import traceback
-        # Infer
-        try:
-            with th.no_grad():
-                model(dummy_input)
-        except Exception as e:
-            print(f"Error during inference: {e}")
-            traceback.print_exc()
-
-
-    # # Initialize model
-    model = TinyUNet_Straightforward()
-    # # Create dummy input tensor
-    dummy_input = th.randn(model.input_shape).to(DEVICE)
-    # # Interface the model
-    model = ModelInterface(
-        model,
-        dummy_input=dummy_input,
-        print_graph=False
-    )
-    model.to(DEVICE)
-    model.eval()
-    layer_id = len(model.layers) // 2  # Middle layer
-
-    # --- Forward Pass Testing ---
-    _test_inference(model, dummy_input)
-
-    print('----'*50)
-    print('Performing model parameters operations..')
-    # model_op_neurons(model, dummy_input=dummy_input, rand=False)
-
-    # if True:
-    #     n = 7
-    #     print(n)
-    #     with model as m:
-    #         print('Adding operation - 5 neurons added.')
-    #         m.operate(n, {-1, -1}, op_type=2)
-    #         m(dummy_input) if dummy_input is not None else None
-    if True:
-        n = 6
-        print(n)
-        with model as m:
-            print('Adding operation - 5 neurons added.')
-            m.operate(n, {-1, -1}, op_type=2)
-            m(dummy_input) if dummy_input is not None else None
-    len(m.layers[8].dst_to_src_mapping_tnsrs['BatchNorm2d_3']) == m.layers[3].out_neurons == m.layers[3].in_neurons
-    len(m.layers[8].dst_to_src_mapping_tnsrs['BatchNorm2d_7']) == m.layers[7].out_neurons == m.layers[7].in_neurons
-
-
-    # if True:
-    #     n = 3
-    #     print(n)
-    #     with model as m:
-    #         print('Adding operation - 5 neurons added.')
-    #         m.operate(n, {-1, -1}, op_type=2)
-    #         m(dummy_input) if dummy_input is not None else None
-    # if True:
-    #     n = 2
-    #     print(n)
-    #     with model as m:
-    #         print('Adding operation - 5 neurons added.')
-    #         m.operate(n, {-1, -1}, op_type=2)
-    #         m(dummy_input) if dummy_input is not None else None
-    print()

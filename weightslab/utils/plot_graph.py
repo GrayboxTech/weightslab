@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from typing import Tuple, List
 from torch.fx import GraphModule, Node
-from torch.fx.passes.shape_prop import ShapeProp, TensorMetadata
+from torch.fx.passes.shape_prop import TensorMetadata
 
 from weightslab.models.model_with_ops import DepType
 
@@ -149,6 +149,8 @@ def plot_fx_graph_with_details(
                 dest_node_name = module_to_fx_node.get(dest_mod)
 
                 if src_node_name and dest_node_name:
+                    label_text = ""
+
                     if dep_type == DepType.SAME:
                         # Sequential SAME constraint (e.g., Conv -> BN)
                         label_text = "SAME"
@@ -178,57 +180,3 @@ def plot_fx_graph_with_details(
         logger.debug(f'Graph rendered at {filename}')
     except graphviz.backend.execute.CalledProcessError as e:
         logger.error(f'No graph rendering as {e}')
-
-
-if __name__ == "__main__":
-    from weightslab.utils.tools import generate_graph_dependencies
-    from torch.fx import symbolic_trace, GraphModule, Node
-
-    print('Hello World')
-
-    # Define a standard model architecture
-    class FashionCNNSequential(nn.Module):
-        def __init__(self):
-            super().__init__()
-
-            # Feature Blocks (Same as before)
-            # Block 1
-            self.c1 = nn.Conv2d(1, 4, 3, padding=1)
-            self.b1 = nn.BatchNorm2d(4)
-            self.r1 = nn.ReLU()
-            self.m1 = nn.MaxPool2d(2)
-
-            # Block 2
-            self.c2 = nn.Conv2d(4, 4, 3)  # Default stride=1, no padding
-            self.b2 = nn.BatchNorm2d(4)
-            self.r2 = nn.ReLU()
-            self.m2 = nn.MaxPool2d(2)
-
-            # Classifier Block (Includes Flatten)
-            self.f3 = nn.Flatten()  # Automatically flattens to (B, CxHxW)
-            self.fc3 = nn.Linear(in_features=4 * 6 * 6, out_features=10)
-            self.s3 = nn.Softmax(dim=1)
-
-        def forward(self, x):
-            x = self.m1(self.r1(self.b1(self.c1(x))))
-            x = self.m2(self.r2(self.b2(self.c2(x))))
-            x = self.s3(self.fc3(self.f3(x)))
-            return x
-
-    model = FashionCNNSequential()
-    # 1. Trace the model and propagate tensor shapes:
-    # required for accurate 'output_shape'
-    traced_model = symbolic_trace(model)  # symbolic_trace(model)
-    dummy_input = th.randn(1, 1, 28, 28)
-    ShapeProp(traced_model).propagate(dummy_input)
-
-    # 2. Generate the dependencies
-    dependencies = generate_graph_dependencies(model, traced_model)
-
-    # 3. Plot the final graph
-    print("--- 3. Plotting Graph with Details ---")
-    plot_fx_graph_with_details(
-        traced_model=traced_model,
-        custom_dependencies=dependencies
-    )
-    print('Bye World')

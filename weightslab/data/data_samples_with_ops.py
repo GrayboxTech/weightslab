@@ -3,7 +3,6 @@ import torch as th
 import numpy as np
 import pandas as pd
 import random as rnd
-from collections import defaultdict
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
@@ -526,7 +525,7 @@ class DataSampleTrackingWrapper(Dataset):
     def deny_samples_with_predicate(self, predicate: SamplePredicateFn):
         self.dataframe = None
         denied_samples_ids = self._get_denied_sample_ids(predicate)
-        logger.info("denied samples with predicate ", len(denied_samples_ids))
+        logger.info(f"denied samples with predicate len: {len(denied_samples_ids)}")
         self.denylist_samples(denied_samples_ids)
 
     def deny_samples_and_sample_allowed_with_predicate(
