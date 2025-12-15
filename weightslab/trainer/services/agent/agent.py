@@ -110,8 +110,34 @@ class DataManipulationAgent:
         self.ctx = ctx
         df = ctx._all_datasets_df
 
+        # Include both regular columns AND index columns (e.g., sample_id, origin)
+        # so they can be used in queries
+        all_columns = df.columns.tolist()
+        if isinstance(df.index, pd.MultiIndex):
+            # Add index level names if using MultiIndex
+            all_columns.extend([name for name in df.index.names if name is not None])
+        elif df.index.name is not None:
+            # Add single index name if it exists
+            all_columns.append(df.index.name)
+        
+        # Add expected extended stats columns that will be populated during training
+        # This ensures the agent recognizes them even before they appear in the DataFrame
+        expected_extended_stats = [
+            "mean_loss", "max_loss", "min_loss", "std_loss", "median_loss",
+            "num_classes_present", "dominant_class", "dominant_class_ratio",
+            "background_ratio", "predicted_class"
+        ]
+        # Also add per-class loss columns (up to 10 classes)
+        for i in range(10):
+            expected_extended_stats.append(f"loss_class_{i}")
+        
+        # Add expected columns that aren't already in the DataFrame
+        for col in expected_extended_stats:
+            if col not in all_columns:
+                all_columns.append(col)
+
         self.df_schema = {
-            'columns': df.columns.tolist(),
+            'columns': all_columns,
             'dtypes': {str(k): str(v) for k, v in df.dtypes.to_dict().items()}
         }
         _LOGGER.info("Agent initialized with schema: columns=%s", self.df_schema['columns'])
@@ -137,6 +163,7 @@ class DataManipulationAgent:
             "age": {"age"},
             "label": {"label", "class", "target"},
             "origin": {"origin", "split", "dataset"},
+            "sample_id": {"sample_id", "id", "sample", "index"},
         }
 
     def _resolve_column(self, user_name: str) -> Optional[str]:
@@ -287,6 +314,14 @@ class DataManipulationAgent:
         if not conditions:
             return None
 
+        # Get the actual DataFrame to check if columns are in index
+        df = self.ctx._all_datasets_df
+        index_names = []
+        if isinstance(df.index, pd.MultiIndex):
+            index_names = [name for name in df.index.names if name is not None]
+        elif df.index.name is not None:
+            index_names = [df.index.name]
+
         parts = []
         for cond in conditions:
             # 1. Resolve column name safely
@@ -295,10 +330,19 @@ class DataManipulationAgent:
                 _LOGGER.warning("Skipping condition due to unresolvable column: %s", cond.column)
                 continue
 
-            # Handle columns with spaces/slashes for df.query
-            col_ref = resolved_col if re.match(r'^[\w]+$', resolved_col) else f"`{resolved_col}`"
+            # 2. Determine column reference
+            # For index columns and simple column names, use direct reference
+            # For columns with special chars, use backticks
+            is_index_col = resolved_col in index_names
+            
+            if re.match(r'^[\w]+$', resolved_col):
+                # Simple alphanumeric name - use as-is (works for both index and regular columns)
+                col_ref = resolved_col
+            else:
+                # Complex name with spaces/special chars - use backticks
+                col_ref = f"`{resolved_col}`"
 
-            # 2. Build expression based on operator
+            # 3. Build expression based on operator
             op = cond.op.lower()
             val = cond.value
             
