@@ -300,6 +300,7 @@ if __name__ == "__main__":
                 test_criterion_mlt,
                 test_metric_mlt,
                 device,
+                test_loader_len
             )
 
         if train_step % 10 == 0 or test_loss is not None:
