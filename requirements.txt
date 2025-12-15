@@ -21,7 +21,6 @@ grpcio==1.76.0
 grpcio-tools==1.76.0
 protobuf==6.33
 numpy==1.24.1
-pylint-4.0.4
 
 # UI - List the packages and their exact versions
 dash==2.17.1
