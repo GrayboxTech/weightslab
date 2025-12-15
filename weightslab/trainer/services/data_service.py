@@ -250,6 +250,11 @@ class DataService:
                 stat = _get_stat_from_row(row, stat_name)
                 if stat is not None:
                     data_stats.append(stat)
+                elif stat_name == "tags":
+                    # Always send tags, even if empty, so frontend shows it in metadata
+                    data_stats.append(pb2.DataStat(
+                        name="tags", type="string", shape=[1], value_string=""
+                    ))
 
             base_task_type = getattr(
                 dataset,
@@ -276,6 +281,26 @@ class DataService:
                     shape=list(label_arr.shape),
                     value=label_arr.astype(float).ravel().tolist(),
                 ))
+
+                try:
+                    # Prefer dataset attribute if available
+                    num_classes = getattr(dataset, "num_classes", None)
+                    if num_classes is None:
+                        # Fallback: infer from this label
+                        if label_arr.size > 0:
+                            max_id = int(label_arr.max())
+                            num_classes = max(1, max_id + 1)
+                        else:
+                            num_classes = 1
+
+                    data_stats.append(pb2.DataStat(
+                        name="num_classes",
+                        type="scalar",
+                        shape=[1],
+                        value=[float(num_classes)],
+                    ))
+                except Exception as e:
+                    logger.warning(f"Could not infer num_classes for sample {sample_id}: {e}")
             else:
                 # Classification / other scalar-like labels
                 label_arr = np.asarray(label_arr)
