@@ -147,7 +147,7 @@ class CheckpointManager(object):
              eval_loader_name: Optional[str] = None,
              experiment_name: Optional[str] = None,
              override_filepath: Optional[str] = None,
-             save_full_model: bool = True,
+             save_full_model: bool = False,
              ) -> int | str | None:
         """
         Dump a checkpoint using ledger-registered objects.

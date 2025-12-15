@@ -1521,7 +1521,8 @@ class LayerWiseOperations(NeuronWiseOperations):
             return
 
         logger.debug(
-            f"{self.get_name()}[{self.get_module_id()}].freeze {neuron_indices}")
+            f"{self.get_name()}[{self.get_module_id()}].freeze {neuron_indices}"
+        )
 
         # Process neuron indices
         neuron_indices = self._process_input_neurons_index(neuron_indices)

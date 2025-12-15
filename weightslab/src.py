@@ -152,8 +152,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 hps = list_hyperparams()
                 if hps:
                     # Get the first hyperparameters object (usually there's only one)
-                    hp_name = list(hps.keys())[0]
-                    hp_dict = hps[hp_name]
+                    if isinstance(hps, dict):
+                        hp_name = list(hps.keys())[0]
+                        hp_dict = hps[hp_name]
+                    else:
+                        hp_name = hps[0]
+                        hp_dict = get_hyperparams(hp_name)
                     if isinstance(hp_dict, dict) and 'root_log_dir' in hp_dict:
                         kwargs['root_log_dir'] = hp_dict['root_log_dir']
             except Exception:

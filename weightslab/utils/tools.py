@@ -10,6 +10,7 @@ import torch.nn as nn
 import numpy as np
 import random
 
+from typing import Union
 from copy import deepcopy
 from typing import Optional, List, Any, Type, Callable, Dict, Union
 from torch.fx import Node
@@ -620,11 +621,3 @@ def array_id_2bytes(
             return int.from_bytes(digest8, byteorder="big", signed=False) % (10**8)
         else:
             return int.from_bytes(digest8, byteorder="big", signed=False)
-
-
-# Example usage
-if __name__ == "__main__":
-    import numpy as np
-    img = np.random.randint(0, 256, size=(4096, 4096, 3), dtype=np.uint8)  # big image
-    id_int = array_id_2bytes(img)  # default -> 16 hex chars
-    print("8-byte id (int):", id_int)

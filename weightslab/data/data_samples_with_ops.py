@@ -12,6 +12,10 @@ from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.backend.ledgers import get_hyperparams
+<<<<<<< HEAD
+=======
+
+>>>>>>> 0eb4a849631a17ee421e6ab2c494e58df41b5fe4
 
 # Global logger
 logger = logging.getLogger(__name__)
@@ -976,6 +980,12 @@ class DataSampleTrackingWrapper(Dataset):
         else:
             raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
 
+    def get_index_from_sample_id(self, sample_id: int) -> int:
+        return self.unique_id_to_index[sample_id]
+    
+    def get_sample_id_at_index(self, index: int) -> int:
+        return int(self.unique_ids[index])
+    
     def get_prediction_mask(self, sample_id, task_name=None):
         if task_name:
             key = f"pred/{task_name}"

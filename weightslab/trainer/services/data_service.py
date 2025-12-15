@@ -234,11 +234,12 @@ class DataService:
         row, request, df_columns = args
         try:
             origin = row.get('origin', 'unknown')
+            # TODO (GP): should be index returned here not sample_id directly, wrong name
             sample_id = int(row.get('sample_id', 0))
 
             if origin == 'train':
                 dataset = self._trn_loader.tracked_dataset
-            elif origin == 'test':
+            elif origin == 'test' or origin == 'eval':
                 dataset = self._tst_loader.tracked_dataset
             else:
                 logger.warning("Unknown origin '%s' for sample %s", origin, sample_id)
@@ -249,7 +250,7 @@ class DataService:
             raw_shape, transformed_shape = [], []
 
             if hasattr(dataset, "_getitem_raw"):
-                tensor, _, label = dataset._getitem_raw(sample_id)
+                tensor, _, label = dataset._getitem_raw(id=sample_id)
             else:
                 tensor, _, label = dataset[sample_id]
 
@@ -263,8 +264,8 @@ class DataService:
 
             if request.include_raw_data:
                 try:
-                    
-                    raw_img = load_raw_image(dataset, sample_id)
+                    index = dataset.get_index_from_sample_id(sample_id)
+                    raw_img = load_raw_image(dataset, index)
                     original_size = raw_img.size
                     
                     # Handle resize request

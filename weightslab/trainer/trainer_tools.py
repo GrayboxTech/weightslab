@@ -390,7 +390,6 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
                 cls_label = int(np.array(label.cpu()).item())
             else:
                 cls_label = int(label)
-
         elif task_type == "segmentation":
             num_classes = getattr(dataset, "num_classes", 21)
             try:
