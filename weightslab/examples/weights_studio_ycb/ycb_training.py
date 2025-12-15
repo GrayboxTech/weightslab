@@ -9,8 +9,8 @@ import torch
 import itertools
 import torch.nn as nn
 import torch.optim as optim
-
 import weightslab as wl
+
 from torchvision import datasets, transforms
 from torch.utils.data import Subset
 from torchmetrics.classification import Accuracy
@@ -18,7 +18,8 @@ from torchmetrics.classification import Accuracy
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
-    guard_testing_context
+    guard_testing_context,
+    pause_controller
 )
 
 # Setup logging
@@ -207,11 +208,7 @@ if __name__ == "__main__":
 
     # Load subsample of datasets for quick testing
     _train_dataset = datasets.ImageFolder(root=train_dir, transform=common_transform)
-    _train_dataset = Subset(_train_dataset, list(range(min(1000, len(_train_dataset)))))
-    
     _test_dataset = datasets.ImageFolder(root=val_dir, transform=common_transform)
-    _test_dataset = Subset(_test_dataset, list(range(min(200, len(_test_dataset)))))
-
     num_classes = len(datasets.ImageFolder(root=train_dir, transform=common_transform).classes)
 
     train_cfg = parameters.get("data", {}).get("train_loader", {})
@@ -281,7 +278,7 @@ if __name__ == "__main__":
     print("=" * 60 + "\n")
 
     # --- 8) Resume training automatically ---
-    # pause_controller.resume()
+    pause_controller.resume()
 
     # ================
     # 9. Training Loop
