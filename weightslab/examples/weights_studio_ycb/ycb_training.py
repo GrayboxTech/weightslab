@@ -267,6 +267,8 @@ if __name__ == "__main__":
         serving_ui=True,
         root_directory=log_dir,
         
+        serving_cli=True,
+
         serving_grpc=True,
         n_workers_grpc=parameters.get("number_of_workers"),
     )

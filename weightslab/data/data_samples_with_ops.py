@@ -980,6 +980,9 @@ class DataSampleTrackingWrapper(Dataset):
     def get_index_from_sample_id(self, sample_id: int) -> int:
         return self.unique_id_to_index[sample_id]
     
+    def get_sample_id_at_index(self, index: int) -> int:
+        return int(self.unique_ids[index])
+    
     def get_prediction_mask(self, sample_id, task_name=None):
         if task_name:
             key = f"pred/{task_name}"

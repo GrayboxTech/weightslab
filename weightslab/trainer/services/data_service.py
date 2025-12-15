@@ -238,7 +238,7 @@ class DataService:
 
             if origin == 'train':
                 dataset = self._trn_loader.tracked_dataset
-            elif origin == 'test':
+            elif origin == 'test' or origin == 'eval':
                 dataset = self._tst_loader.tracked_dataset
             else:
                 logger.warning("Unknown origin '%s' for sample %s", origin, sample_id)
