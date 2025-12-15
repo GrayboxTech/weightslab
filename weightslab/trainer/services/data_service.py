@@ -249,7 +249,7 @@ class DataService:
             raw_shape, transformed_shape = [], []
 
             if hasattr(dataset, "_getitem_raw"):
-                tensor, _, label = dataset._getitem_raw(sample_id)
+                tensor, _, label = dataset._getitem_raw(id=sample_id)
             else:
                 tensor, _, label = dataset[sample_id]
 
