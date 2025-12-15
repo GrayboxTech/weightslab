@@ -31,7 +31,7 @@ def get_requirements(file_path: pathlib.Path):
         return line
 
     def normalize_torch(dep: str) -> str:
-        if not dep.startswith('torch==') and not dep.startswith('torch-cpu=='):
+        if not (dep.startswith('torch==') or dep.startswith('torchvision==')):
             return dep
         name, ver = dep.split('==', 1)
         # Strip build/variant suffixes from version (PEP 440 compliant for install_requires)
@@ -47,9 +47,7 @@ def get_requirements(file_path: pathlib.Path):
 
         # Select package name based on requested variant
         if variant == 'cpu':
-            name = 'torch-cpu'
-        elif variant == 'gpu':
-            name = 'torch'
+            base_ver += '+cpu'
         # else keep the original name from requirements.txt
 
         return f'{name}=={base_ver}'
@@ -59,6 +57,7 @@ def get_requirements(file_path: pathlib.Path):
         dep = sanitize_line(dep)
         dep = normalize_torch(dep)
         deps.append(dep)
+
     return deps
 
 requirements = get_requirements(
