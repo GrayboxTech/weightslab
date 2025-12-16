@@ -1,5 +1,5 @@
 device: cuda
-root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/ycb_datasets_arch"
+root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/ycb_datasets_arch_debug"
 tqdm_display: true
 skip_loading: true
 
