@@ -18,7 +18,8 @@ from torchmetrics.classification import Accuracy
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import \
     guard_training_context, \
-    guard_testing_context
+    guard_testing_context, \
+    pause_controller
 
 
 # Setup logging
@@ -90,7 +91,7 @@ def train(loader, model, optimizer, criterion_mlt, device):
     return loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device):
+def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     losses = 0.0
     metric_total = 0
     for (inputs, ids, labels) in loader:
@@ -113,7 +114,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
             # Compute signals
             losses = losses + torch.mean(losses_batch_mlt)
 
-    loss = losses / len(loader)    
+    loss = losses / test_loader_len
     metric_total = metric_mlt.compute() * 100
 
     # Returned signals detach from the computational graph
@@ -149,6 +150,7 @@ if __name__ == '__main__':
     log_dir = parameters.get('root_log_dir')
     tqdm_display = parameters.get('tqdm_display', True)
     verbose = parameters.get('verbose', True)
+    eval_every = parameters.get("eval_full_to_train_steps_ratio", 100)
 
     # ========================
     # Watch or Edit Components
@@ -178,9 +180,9 @@ if __name__ == '__main__':
             transforms.Normalize((0.5,), (0.5,))
         ])
     )
-    # Limit to first 1000 images
-    _train_dataset = Subset(_train_dataset, range(min(1000, len(_train_dataset))))
-    
+    # # Limit to first 1000 images
+    # _train_dataset = Subset(_train_dataset, range(min(1000, len(_train_dataset))))
+
     _test_dataset = datasets.MNIST(
         root=os.path.join(parameters.get('root_log_dir'), 'data'),
         train=False,
@@ -191,7 +193,8 @@ if __name__ == '__main__':
         ])
     )
     # Limit to first 1000 images
-    _test_dataset = Subset(_test_dataset, range(min(1000, len(_test_dataset))))
+    # _test_dataset = Subset(_test_dataset, range(min(1000, len(_test_dataset))))
+
     train_bs = parameters.get('data', {}).get('train_dataset', {}).get('batch_size', 16)
     test_bs = parameters.get('data', {}).get('test_dataset', {}).get('batch_size', 16)
     train_shuffle = parameters.get('data', {}).get('train_dataset', {}).get('train_shuffle', True)
@@ -235,15 +238,20 @@ if __name__ == '__main__':
         serving_cli=True
     )
 
+    # --- 6) Resume training automatically ---
+    pause_controller.resume()
+
+    print("=" * 60)
+    print("🚀 STARTING TRAINING")
+    print(f"🔄 Evaluation every {eval_every} steps")
+    print(f"💾 Logs will be saved to: {log_dir}")
+    print("=" * 60 + "\n")
+
     # ================
-    # 6. Training Loop
-    print("\nStarting Training...")
-    max_steps = parameters.get('training_steps_to_do', 6666)
-    train_range = range(max_steps)
-    if tqdm_display:
-        train_range = tqdm.tqdm(itertools.count(), desc="Training")
-    else:
-        train_range = itertools.count()
+    # 7. Training Loop
+    train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
+    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
     test_loss, test_metric = None, None
     for train_step in train_range:
         # Train
@@ -251,13 +259,13 @@ if __name__ == '__main__':
 
         # Test
         if train_step == 0 or train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
-            test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device)
+            test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
 
         # Verbose
         if verbose and not tqdm_display:
             print(
                 f"Training.. " +
-                f"Step {train_step}/{max_steps}: " +
+                f"Step {train_step}: " +
                 f"| Train Loss: {train_loss:.4f} " +
                 (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
                 (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
@@ -269,5 +277,6 @@ if __name__ == '__main__':
                 test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
                 acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
             )
+
     print(f"--- Training completed in {time.time() - start_time:.2f} seconds ---")
     print(f"Log directory: {log_dir}")

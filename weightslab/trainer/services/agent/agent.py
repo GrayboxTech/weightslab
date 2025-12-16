@@ -1,14 +1,14 @@
 import os
 import json
 import logging
-import pandas as pd
 import requests
 import difflib
 import re
+
 from dataclasses import dataclass
-from typing import Optional, List, Union, Any
-import numpy as np
+from typing import Optional, List, Union
 from .intent_prompt import INTENT_PROMPT
+
 
 logging.basicConfig(
     level=logging.INFO,

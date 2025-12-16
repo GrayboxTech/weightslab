@@ -6,9 +6,10 @@ import torch
 import numpy as np
 
 import weightslab.proto.experiment_service_pb2 as pb2
-from weightslab.trainer.trainer_tools import process_sample, _get_input_tensor_for_sample, get_layer_representation, get_layer_representations, get_data_set_representation
+from weightslab.trainer.trainer_tools import process_sample, _get_input_tensor_for_sample
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.components.global_monitoring import weightslab_rlock
+
 
 logger = logging.getLogger(__name__)
 

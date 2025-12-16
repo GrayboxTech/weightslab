@@ -329,7 +329,6 @@ class DataSampleTrackingWrapper(Dataset):
         Returns a numpy array of uint64 IDs.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import multiprocessing as mp
 
         dataset = self.wrapped_dataset if dataset is None else dataset
 
@@ -578,7 +577,7 @@ class DataSampleTrackingWrapper(Dataset):
             self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
         self.set(sample_id=sample_id, stat_name=SampleStatsEx.SAMPLE_ID, stat_value=sample_id)
 
-    def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None, raw: bool = False):
+    def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None):
         self.dataframe = None
         if predct_batch is None:
             predct_batch = [None] * len(ids_batch)
@@ -878,7 +877,7 @@ class DataSampleTrackingWrapper(Dataset):
     def deny_samples_with_predicate(self, predicate: SamplePredicateFn):
         self.dataframe = None
         denied_samples_ids = self._get_denied_sample_ids(predicate)
-        logger.info("denied samples with predicate ", len(denied_samples_ids))
+        logger.info(f"denied samples with predicate {len(denied_samples_ids)}")
         self.denylist_samples(denied_samples_ids)
 
     def deny_samples_and_sample_allowed_with_predicate(
@@ -1055,7 +1054,10 @@ class DataSampleTrackingWrapper(Dataset):
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_RAW, raw=True)
     
     def _save_pending_stats_to_h5(self):
-        """Save only changed stats from SAMPLES_STATS_TO_SAVE_TO_H5 for pending UIDs."""
+        """Save only changed stats from SAMPLES_STATS_TO_SAVE_TO_H5 for pending UIDs.
+        
+        UIDs are set as the unique index, so new data replaces old data with the same UID.
+        """
         if not self._h5_path or not self._h5_pending_uids:
             return
         
@@ -1101,71 +1103,71 @@ class DataSampleTrackingWrapper(Dataset):
                 
                 df = pd.DataFrame(data)
                 
-                # Ensure consistent types for HDF5 based on SAMPLES_STATS_TO_SAVE_TO_H5
-                # uid must be int64 to match existing table schema
-                df['uid'] = df['uid'].astype('int64')
+                # Set uid as unique index
+                df.set_index('uid', inplace=True)
                 
+                # Ensure consistent types for HDF5 based on SAMPLES_STATS_TO_SAVE_TO_H5
                 type_mapping = {
                     SampleStatsEx.DENY_LISTED.value: bool,
                     SampleStatsEx.TAGS.value: str,
                     SampleStatsEx.ENCOUNTERED.value: int,
                     SampleStatsEx.PREDICTION_AGE.value: int,
-                    SampleStatsEx.PREDICTION_LOSS.value: float,
-                    SampleStatsEx.PREDICTION_RAW.value: float,
+                    SampleStatsEx.PREDICTION_LOSS.value: float
                 }
                 
                 for stat_name, dtype in type_mapping.items():
                     if stat_name in df.columns:
                         df[stat_name] = df[stat_name].astype(dtype)
                 
-                # Remove old entries for these UIDs then append new ones
                 with pd.HDFStore(str(self._h5_path), mode='a') as store:
                     key = f'/stats_{self._dataset_split}'
-                    # Remove old entries for these UIDs
-                    if key in store:
-                        for uid in pending_uids:
-                            try:
-                                store.remove(key, where=f'uid=={uid}')
-                            except Exception:
-                                pass
-                    # Append new/updated entries with min_itemsize for string columns
-                    # This allows tags to be any reasonable length
-                    store.append(key, df, format='table', data_columns=['uid'],
-                                min_itemsize={'tags': 256})
+
+                    # Delete existing rows with UIDs we're updating, then append new data
+                    # This is more efficient than loading all + filtering + concatenating
+                    try:
+                        # Delete rows with UIDs in the new data (if table exists)
+                        store.remove(key, where=f'index in {list(df.index)}')
+                    except (KeyError, TypeError):
+                        # Table doesn't exist or delete syntax not supported, will create on append
+                        pass
+                    
+                    # Append new/updated data
+                    store.append(key, df, format='table', data_columns=True, min_itemsize={'tags': 256})
                 
                 logger.debug(f"[DataSampleTrackingWrapper] Saved {len(data)} changed stats to {self._h5_path}")
             except Exception as e:
                 logger.error(f"[DataSampleTrackingWrapper] Failed to save pending stats to H5: {e}")
 
     def _load_stats_from_h5(self):
-        """Load only SAMPLES_STATS_TO_SAVE_TO_H5 from H5 file if it exists."""
+        """Load only SAMPLES_STATS_TO_SAVE_TO_H5 from H5 file if it exists, filtered to current UIDs."""
         if not self._h5_path or not self._h5_path.exists():
             return
         
         with self._h5_lock:
             try:
+                current_uids = set(int(u) for u in self.unique_ids)
+                
                 with pd.HDFStore(str(self._h5_path), mode='r') as store:
                     key = f'/stats_{self._dataset_split}'
                     if key not in store:
                         logger.info(f"[DataSampleTrackingWrapper] No saved stats found for {self._dataset_split}")
                         return
                     
+                    # Load all rows then filter to current UIDs
                     df = store[key]
+                    df = df[df.index.isin(current_uids)]
                 
                 logger.info(f"[DataSampleTrackingWrapper] Loading {len(df)} saved stats from {self._h5_path}")
                 
-                # Restore stats for each UID that exists in current dataset
-                current_uids = set(int(u) for u in self.unique_ids)
+                # Restore stats for each UID
                 loaded_count = 0
                 
-                for _, row in df.iterrows():
-                    uid = int(row['uid'])
-                    if uid not in current_uids:
-                        continue  # Skip UIDs not in current dataset
+                for uid, row in df.iterrows():
+                    uid = int(uid)
                     
                     # Restore only stats in SAMPLES_STATS_TO_SAVE_TO_H5
                     for stat_name in SAMPLES_STATS_TO_SAVE_TO_H5:
-                        if stat_name in row and pd.notna(row[stat_name]):
+                        if stat_name in row.index and pd.notna(row[stat_name]):
                             val = row[stat_name]
                             # Don't trigger auto-save during load
                             self.sample_statistics[stat_name][uid] = val

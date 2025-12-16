@@ -1188,16 +1188,6 @@ class DataManipulationAgent:
         _LOGGER.debug("Generating prompt for instruction: %s", instruction)
 
         # *** NEW: include both column names and dtypes in a compact schema string ***
-        schema_lines = [
-            f"{col} ({self.df_schema['dtypes'].get(col, 'unknown')})"
-            for col in self.df_schema['columns']
-        ]
-        schema_display = ", ".join(schema_lines)
-
-        # prompt = _COMPACT_DATA_SERVICE_AGENT_PROMPT.format(
-        #     instruction=instruction,
-        #     schema_display=schema_display,
-        # )
         prompt = _IMPROVED_DATA_SERVICE_AGENT_PROMPT.format(
             instruction=instruction,
             columns=self.df_schema['columns'],

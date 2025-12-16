@@ -12,9 +12,9 @@ import torch.optim as optim
 import weightslab as wl
 
 from torchvision import datasets, transforms
-from torchmetrics.classification import Accuracy
+from torchmetrics.classification import MulticlassAccuracy
 
-from weightslab.utils.board import Dash as Logger
+from weightslab.utils.board import Dash as DashLogger
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context,
@@ -24,7 +24,7 @@ from weightslab.components.global_monitoring import (
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
 logging.getLogger("PIL").setLevel(logging.WARNING)
-
+logger = logging.getLogger(__name__)
 
 # Simple CNN for YCB (RGB 3xHxW, variable num_classes)
 class YCBCNN(nn.Module):
@@ -56,16 +56,10 @@ class YCBCNN(nn.Module):
             nn.Linear(128, num_classes),
         )
 
-        self._age = 0  # simple age counter for logging
-
     def forward(self, x):
         out = self.features(x)
         out = self.classifier(out)
-        self._age += 1
         return out
-
-    def get_age(self):
-        return self._age
 
 
 # Train / Test functions
@@ -167,13 +161,10 @@ if __name__ == "__main__":
     tqdm_display_eval = parameters.get('tqdm_display_eval', True)
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
-    max_steps = parameters["training_steps_to_do"]
     eval_every = parameters["eval_full_to_train_steps_ratio"]
 
     # --- 4) Register logger + hyperparameters ---
-    logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
-
+    wl.watch_or_edit(DashLogger(), flag="logger", name=exp_name, log_dir=log_dir)
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -181,8 +172,9 @@ if __name__ == "__main__":
         defaults=parameters,
         poll_interval=1.0,
     )
-
-    # --- 5) Data (YCB train/val using ImageFolder, RGB) ---
+    
+    # ------------------------ DATA ------------------------
+    # ------------------------------------------------------
     data_root = parameters.get("data", {}).get(
         "data_dir",
         os.path.join(parameters["root_log_dir"], "data", "ycb_datasets"),
@@ -196,12 +188,15 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"Val dir not found: {val_dir}")
 
     image_size = parameters.get("image_size", 128)
+
+    IM_MEAN = (0.6312528, 0.4949005, 0.3298562)
+    IM_STD  = (0.0721354, 0.0712461, 0.0598827)
     common_transform = transforms.Compose(
         [
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
-            transforms.PILToTensor(),
-            transforms.ConvertImageDtype(torch.float32),
+            transforms.ToTensor(),
+            transforms.Normalize(IM_MEAN, IM_STD),
         ]
     )
 
@@ -209,7 +204,8 @@ if __name__ == "__main__":
     _train_dataset = datasets.ImageFolder(root=train_dir, transform=common_transform)
     _test_dataset = datasets.ImageFolder(root=val_dir, transform=common_transform)
     num_classes = len(datasets.ImageFolder(root=train_dir, transform=common_transform).classes)
-
+    logger.info(f"Detected {num_classes} classes.")
+    
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
 
@@ -220,7 +216,7 @@ if __name__ == "__main__":
         batch_size=train_cfg.get("batch_size", 16),
         shuffle=train_cfg.get("train_shuffle", True),
         is_training=True,
-        compute_hash=True
+        compute_hash=False
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -228,7 +224,7 @@ if __name__ == "__main__":
         name="test_loader",
         batch_size=test_cfg.get("batch_size", 16),
         shuffle=test_cfg.get("test_shuffle", False),
-        compute_hash=True
+        compute_hash=False
     )
 
     # --- 6) Model, optimizer, losses, metric ---
@@ -252,7 +248,7 @@ if __name__ == "__main__":
         log=True,
     )
     test_metric_mlt = wl.watch_or_edit(
-        Accuracy(task="multiclass", num_classes=num_classes).to(device),
+        MulticlassAccuracy(num_classes=num_classes, average="micro").to(device),
         flag="metric",
         name="test_metric/mlt_metric",
         log=True,
@@ -260,7 +256,7 @@ if __name__ == "__main__":
 
     # --- 7) Start WeightsLab services (UI + gRPC) ---
     wl.serve(
-        serving_ui=True,
+        serving_ui=False,
         root_directory=log_dir,
         
         serving_cli=True,
@@ -269,28 +265,31 @@ if __name__ == "__main__":
         n_workers_grpc=parameters.get("number_of_workers"),
     )
 
+    # --- 8) Resume training automatically ---
+    pause_controller.resume()
+
     print("=" * 60)
     print("🚀 STARTING TRAINING")
-    print(f"📈 Total steps: {max_steps}")
     print(f"🔄 Evaluation every {eval_every} steps")
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    # --- 8) Resume training automatically ---
-    pause_controller.resume()
-
     # ================
     # 9. Training Loop
     print("\nStarting Training...")
-    max_steps = parameters.get('training_steps_to_do', 6666)
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
-    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display_eval else test_loader
+    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
     test_loss, test_metric = None, None
     for train_step in train_range:
-        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
+        train_loss = train(
+            train_loader,
+            model,
+            optimizer,
+            train_criterion_mlt,
+            device
+        )
 
-        test_loss, test_metric = None, None
         if train_step % eval_every == 0:
             test_loss, test_metric = test(
                 test_loader,
@@ -301,13 +300,22 @@ if __name__ == "__main__":
                 test_loader_len
             )
 
-        if train_step % 10 == 0 or test_loss is not None:
-            status = f"[Step {train_step:5d}/{max_steps}] Train Loss: {train_loss:.4f}"
-            if test_loss is not None:
-                status += (
-                    f" | Test Loss: {test_loss:.4f} | Test Acc: {test_metric:.2f}%"
-                )
-            print(status)
+        # Verbose
+        if verbose and not tqdm_display:
+            print(
+                f"Training.. " +
+                f"Step {train_step}: " +
+                f"| Train Loss: {train_loss:.4f} " +
+                (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
+                (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
+            )
+        elif tqdm_display:
+            train_range.set_description(f"Step")
+            train_range.set_postfix(
+                train_loss=f"{train_loss:.4f}",
+                test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
+                acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
+            )
 
     print("\n" + "=" * 60)
     print(f"💾 Logs saved to: {log_dir}")

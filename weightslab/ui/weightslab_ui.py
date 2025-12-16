@@ -24,7 +24,6 @@ import collections
 import numpy as np
 import random
 import hashlib
-from pathlib import Path
 
 from dash import dcc
 from dash import html
@@ -676,7 +675,7 @@ class UIState:
                 elif sample_statistics.origin == "eval":
                     self.eval_samples_df = df[all_columns]
 
-        except Exception as e:
+        except Exception:
             logger.exception(
                 "sample_update_failed",
                 extra={"origin": getattr(sample_statistics, "origin", None)}
@@ -1307,7 +1306,7 @@ def interactable_layers(
             children.append(
                 get_layer_div(
                     layer_row, layer_neurons_df, ui_state, checklist_values))
-        except Exception as e:
+        except Exception:
             logger.exception(
                 "layer_render_failed",
                 extra={"layer_id": int(layer_row.get("layer_id", -1))}
@@ -1498,7 +1497,6 @@ def _parse_chw(s):
             return None
         import re
         m = re.match(r'^\s*(\d+)\s*[x×]\s*(\d+)\s*[x×]\s*(\d+)\s*$', s, re.I)
-        from flask import Response, request, abort, jsonify
         C, H, W = map(int, m.groups())
         return (C, H, W)
 
@@ -2115,7 +2113,7 @@ def render_images(ui_state: UIState, stub, sample_ids, origin,
                 )
                 imgs.append(clickable)
 
-    except Exception as e:
+    except Exception:
         logger.exception("sample_render_failed", extra={"origin": origin})
         return no_update
 
@@ -2231,8 +2229,6 @@ def _png_data_uri_from_rgb(rgb: np.ndarray) -> str:
 def _tile_img_component(z: np.ndarray) -> html.Img:
     z = np.asarray(z, dtype=np.float32)
     rgb = _rwg_rgb_from_signed(z)
-
-    H, W = rgb.shape[0], rgb.shape[1]
 
     if z.ndim == 2 and z.shape[0] == 1:  # strip 1xN
         target_w = int(max(40, min(10 * z.shape[1], 600)))
@@ -2369,7 +2365,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     if not os.path.isdir(root_directory):
         try:
             os.makedirs(root_directory, exist_ok=True)
-        except Exception as e:
+        except Exception:
             logger.info("created_root_directory", extra={"root_directory": root_directory})
             sys.exit(1)
 
@@ -2426,16 +2422,20 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     )
     logger.info("\nAbout Fetching initial state.")
 
-    with ScopeTimer(tag="initial_state_fetch_and_update") as t:
-        initial_state_response = stub.ExperimentCommand(
-            get_initial_state_request)
-    logger.info("Fetched initial state.", extra={"scope_timer": str(t)})
-    ui_state.update_from_server_state(initial_state_response)
+    try:
+        with ScopeTimer(tag="initial_state_fetch_and_update") as t:
+            initial_state_response = stub.ExperimentCommand(
+                get_initial_state_request)
+            logger.info("Fetched initial state.", extra={"scope_timer": str(t)})
+            ui_state.update_from_server_state(initial_state_response)
+    except Exception as e:
+        logger.error(f"Error fetching initial state: {e}")
+        return
 
-    print(ui_state)
+    # Generate app layout
     app.layout = get_ui_app_layout(ui_state)
-
     server = app.server
+    
     _IMAGE_CACHE = {}
 
     @server.route("/img/<origin>/<int:sid>")
@@ -3377,7 +3377,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         if sort_info:
             try:
                 df = df.sort_values(by=sort_info['cols'], ascending=sort_info['dirs'])
-            except Exception as e:
+            except Exception:
                 logger.warning("Train table sort failed", extra={"query": str(query)})
 
 
@@ -3419,7 +3419,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         if sort_info:
             try:
                 df = df.sort_values(by=sort_info['cols'], ascending=sort_info['dirs'])
-            except Exception as e:
+            except Exception:
                 logger.warning("Eval table sort failed", extra={"query": str(query)})
 
         num_available_samples = (~df["Discarded"]).sum()

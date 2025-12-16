@@ -671,7 +671,6 @@ class TestH5Persistence(unittest.TestCase):
 
     def test_h5_persistence_all_stats(self):
         """Test that all SAMPLES_STATS_TO_SAVE_TO_H5 persist and only changed UIDs are saved."""
-        from weightslab.data.data_samples_with_ops import SAMPLES_STATS_TO_SAVE_TO_H5
         
         # Create wrapper with H5 persistence
         ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)

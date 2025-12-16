@@ -118,8 +118,8 @@ class TriggersTracker(Tracker):
     def __init__(self, number_of_neurons: int, device: th.device = None, disabled: bool = False):
         super().__init__()
         self.device = device
-        self.number_of_neurons = th.tensor(number_of_neurons if number_of_neurons is not None else 0)
         self.disabled = disabled
+        self.number_of_neurons = th.tensor(number_of_neurons if number_of_neurons is not None else 0)
         self.triggrs_by_neuron = th.zeros(self.number_of_neurons).long().to(self.device)
         self.updates_by_neuron = th.zeros(self.number_of_neurons).long().to(self.device)
 
@@ -162,7 +162,7 @@ class TriggersTracker(Tracker):
         return are_equals
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
-        state = super().state_dict(destination, prefix, keep_vars)
+        state = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
         state[prefix + 'number_of_neurons'] = self.number_of_neurons
         state[prefix + 'triggrs_by_neuron'] = self.triggrs_by_neuron
         state[prefix + 'updates_by_neuron'] = self.updates_by_neuron
