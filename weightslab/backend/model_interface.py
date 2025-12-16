@@ -15,7 +15,9 @@ from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.models.monkey_patcher import monkey_patch_modules
 from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
-    generate_graph_dependencies
+    generate_graph_dependencies_from_torchfx, \
+    generate_layer_dependencies_from_onnx, \
+    generate_index_maps
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
 
@@ -34,6 +36,7 @@ class ModelInterface(NetworkWithOps):
             print_graph_filename: str = None,
             name: str = None,
             register: bool = True,
+            use_onnx: bool = False,
             weak: bool = False
     ):
         """
@@ -66,34 +69,33 @@ class ModelInterface(NetworkWithOps):
         # Define variables
         # # Disable tracking for implementation
         self.tracking_mode = TrackingMode.DISABLED
-        self.name = "Test Architecture Model"
+        self.name = "Default Name" if name is None else name
         self.device = device
         self.model = model.to(device)
         if dummy_input is not None:
             self.dummy_input = dummy_input.to(device)
         else:
             self.dummy_input = th.randn(model.input_shape).to(device)
-        self.print_graph = print_graph
-        self.print_graph_filename = print_graph_filename
-        self.traced_model = symbolic_trace(model)
-        self.traced_model.name = "N.A."
+        if not use_onnx:
+            self.print_graph = print_graph
+            self.print_graph_filename = print_graph_filename
+            self.traced_model = symbolic_trace(model)
+            self.traced_model.name = "N.A."
         self.guard_training_context = guard_training_context
         self.guard_testing_context = guard_testing_context
 
         # Init attributes from super object (i.e., self.model)
         self.init_attributes(self.model)
 
-        # Propagate the shape over the graph
-        self.shape_propagation()
+        if not use_onnx:
+            # Propagate the shape over the graph
+            self.shape_propagation()
 
-        # Generate the graph vizualisation
-        self.generate_graph_vizu()
-
-        # Patch the torch model with WeightsLab features
-        self.monkey_patching()
+            # Generate the graph vizualisation
+            self.generate_graph_vizu()
 
         # Generate the graph dependencies
-        self.define_deps()
+        self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
 
         # Clean
         # Optionally register wrapper in global ledger
@@ -118,8 +120,8 @@ class ModelInterface(NetworkWithOps):
                 self._ledger_name = reg_name
             except Exception:
                 pass
-
-        del self.traced_model
+        if not use_onnx:
+            del self.traced_model
         
         # Hook optimizer update on architecture change 
         self.register_hook_fn_for_architecture_change(
@@ -168,7 +170,6 @@ class ModelInterface(NetworkWithOps):
                     _skip_checkpoint_load = hp.get('skip_checkpoint_load') or hp.get('skip-checkpoint-load') or False
         except Exception:
             _checkpoint_dir = None
-            _checkpoint_manager = None
             _checkpoint_auto_every_steps = 0
             _skip_checkpoint_load = False
         self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
@@ -177,42 +178,14 @@ class ModelInterface(NetworkWithOps):
             try:
                 self._checkpoint_manager = CheckpointManager(_checkpoint_dir)
                 # attempt to load latest checkpoint unless skipped
-                # TODO (GP): 
-                # """
-                #     Traceback (most recent call last):
-                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\components\checkpoint.py", line 323, in load
-                #         model.load_state_dict(ckpt_dict[_CheckpointDictKeys.MODEL])
-                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\backend\model_interface.py", line 438, in load_state_dict
-                #         return super().load_state_dict(state_dict, strict, assign)
-                #             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                #     File "C:\Users\GuillaumePelluet\Documents\Codes\grayBox\weightslab\weightslab\models\model_with_ops.py", line 432, in load_state_dict
-                #         super().load_state_dict(
-                #     File "c:\Users\GuillaumePelluet\Documents\Codes\grayBox\python_env\weightslab\Lib\site-packages\torch\nn\modules\module.py", line 2152, in load_state_dict
-                #         raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
-                #     RuntimeError: Error(s) in loading state_dict for ModelInterface:
-                #             Unexpected key(s) in state_dict: "seen_samples", "tracking_mode", "model.c1.train_dataset_tracker.number_of_neurons", "model.c1.train_dataset_tracker.triggrs_by_neuron", "model.c1.train_dataset_tracker.updates_by_neuron", "model.c1.eval_dataset_tracker.number_of_neurons", "model.c1.eval_dataset_tracker.triggrs_by_neuron", "model.c1.eval_dataset_tracker.updates_by_neuron", "model.b1.train_dataset_tracker.number_of_neurons", "model.b1.train_dataset_tracker.triggrs_by_neuron", "model.b1.train_dataset_tracker.updates_by_neuron", "model.b1.eval_dataset_tracker.number_of_neurons", "model.b1.eval_dataset_tracker.triggrs_by_neuron", "model.b1.eval_dataset_tracker.updates_by_neuron", "model.c2.train_dataset_tracker.number_of_neurons", "model.c2.train_dataset_tracker.triggrs_by_neuron", "model.c2.train_dataset_tracker.updates_by_neuron", "model.c2.eval_dataset_tracker.number_of_neurons", "model.c2.eval_dataset_tracker.triggrs_by_neuron", "model.c2.eval_dataset_tracker.updates_by_neuron", "model.b2.train_dataset_tracker.number_of_neurons", "model.b2.train_dataset_tracker.triggrs_by_neuron", "model.b2.train_dataset_tracker.updates_by_neuron", "model.b2.eval_dataset_tracker.number_of_neurons", "model.b2.eval_dataset_tracker.triggrs_by_neuron", "model.b2.eval_dataset_tracker.updates_by_neuron", "model.fc3.train_dataset_tracker.number_of_neurons", "model.fc3.train_dataset_tracker.triggrs_by_neuron", "model.fc3.train_dataset_tracker.updates_by_neuron", "model.fc3.eval_dataset_tracker.number_of_neurons", "model.fc3.eval_dataset_tracker.triggrs_by_neuron", "model.fc3.eval_dataset_tracker.updates_by_neuron", "model.fc4.train_dataset_tracker.number_of_neurons", "model.fc4.train_dataset_tracker.triggrs_by_neuron", "model.fc4.train_dataset_tracker.updates_by_neuron", "model.fc4.eval_dataset_tracker.number_of_neurons", "model.fc4.eval_dataset_tracker.triggrs_by_neuron", "model.fc4.eval_dataset_tracker.updates_by_neuron".
-                #             size mismatch for model.c1.weight: copying a param with shape torch.Size([10, 1, 3, 3]) from checkpoint, the shape in current model is torch.Size([4, 1, 3, 3]).
-                #             size mismatch for model.c1.bias: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b1.weight: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b1.bias: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b1.running_mean: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b1.running_var: copying a param with shape torch.Size([10]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.c2.weight: copying a param with shape torch.Size([5, 10, 3, 3]) from checkpoint, the shape in current model is torch.Size([4, 4, 3, 3]).
-                #             size mismatch for model.c2.bias: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b2.weight: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b2.bias: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b2.running_mean: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.b2.running_var: copying a param with shape torch.Size([5]) from checkpoint, the shape in current model is torch.Size([4]).
-                #             size mismatch for model.fc3.weight: copying a param with shape torch.Size([64, 180]) from checkpoint, the shape in current model is torch.Size([64, 144]).
-                # """
-                # if not _skip_checkpoint_load:
-                #     try:
-                #         latest = self._checkpoint_manager.get_latest_checkpoint_path()
-                #         if latest:
-                #             # best-effort load into ledger-registered objects
-                #             self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
-                #     except Exception:
-                #         pass
+                if not _skip_checkpoint_load:
+                    try:
+                        latest = self._checkpoint_manager.get_latest_checkpoint_path()
+                        if latest:
+                            # best-effort load into ledger-registered objects
+                            self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
+                    except Exception:
+                        pass
             except Exception:
                 self._checkpoint_manager = None
 
@@ -429,10 +402,9 @@ class ModelInterface(NetworkWithOps):
         """
         if self.print_graph:
             logger.info("--- Generated Graph Dependencies (FX Tracing) ---")
-            or_dependencies = generate_graph_dependencies(
+            or_dependencies = generate_graph_dependencies_from_torchfx(
                 self.model,
-                self.traced_model,
-                indexing_neurons=False
+                self.traced_model.graph
             )
             plot_fx_graph_with_details(
                 self.traced_model,
@@ -440,7 +412,7 @@ class ModelInterface(NetworkWithOps):
                 filename=self.print_graph_filename
             )
 
-    def define_deps(self):
+    def define_deps(self, use_onnx: bool = False, dummy_input: th.Tensor = None):
         """Generates and registers the computational graph dependencies for the model.
 
         This method first calls `generate_graph_dependencies` to determine the
@@ -459,14 +431,31 @@ class ModelInterface(NetworkWithOps):
             `self.dependencies_with_ops` and calling `self.register_dependencies`.
         """
 
-        # Generate the dependencies
-        self.dependencies_with_ops = generate_graph_dependencies(
-            self.model,
-            self.traced_model
+        # Patch the torch model with WeightsLab features
+        self.monkey_patching()
+
+        # Generate the graph dependencies
+        if not use_onnx:
+
+            # Generate the dependencies
+            self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
+                self.model,
+                self.traced_model.graph
+            )
+        else:
+            self.dependencies_with_ops = generate_layer_dependencies_from_onnx(
+                self.model,
+                dummy_input=dummy_input
+            )
+
+            # Patch the torch model with WeightsLab features
+        
+        self.mapped_dependencies_with_ops = generate_index_maps(
+            self.dependencies_with_ops
         )
 
         # Register the layers dependencies
-        self.register_dependencies(self.dependencies_with_ops)
+        self.register_dependencies(self.mapped_dependencies_with_ops)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         """
@@ -557,52 +546,3 @@ class ModelInterface(NetworkWithOps):
 
         string += ")"
         return string
-
-
-if __name__ == "__main__":
-    from weightslab.baseline_models.pytorch.models import \
-        FashionCNN as Model
-    from weightslab.utils.logs import print, setup_logging
-
-    # Setup prints
-    setup_logging('DEBUG')
-    print('Hello World')
-
-    # 0. Get the model
-    model = Model()
-    print(model)
-
-    # 2. Create a dummy input and transform it
-    dummy_input = th.randn(model.input_shape)
-
-    # 3. Test the model inference
-    model(dummy_input)
-
-    # --- Example ---
-    model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
-    print(f'Inference results {model(dummy_input)}')  # infer
-    print(model)
-
-    # --- DEBUG ---
-    with model as m:
-        print(f'Model before operation:\n{m}')
-        # Apply operation
-        m.operate(
-            op_type=1,
-            layer_id=3,
-            neuron_indices=range(5)
-        )
-        print(f'Model after operation:\n{m}')
-
-    # Model Operations
-    # # Test: add neurons
-    print("--- Test: Op Neurons ---")
-    model_op_neurons(model, op=1, rand=False)
-    model(dummy_input)  # Inference test
-    model_op_neurons(model, op=2, rand=False)
-    model(dummy_input)  # Inference test
-    model_op_neurons(model, op=3, rand=False)
-    model(dummy_input)  # Inference test
-    model_op_neurons(model, op=4, rand=False)
-    model(dummy_input)  # Inference test
-    print(f'Inference test of the modified model is:\n{model(dummy_input)}')

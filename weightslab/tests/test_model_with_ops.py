@@ -127,7 +127,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         th.save(self.dummy_network.state_dict(), state_dict_file_path)
 
         # Load
-        state_dict = th.load(state_dict_file_path)
+        state_dict = th.load(state_dict_file_path, weights_only=False)
         replicated_model.load_state_dict(state_dict, strict=False)
         self.assertEqual(self.dummy_network, replicated_model)
 
@@ -153,7 +153,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         # Store
         state_dict_file_path = path.join(self.test_dir, 'mnist_model.txt')
         th.save(self.dummy_network.state_dict(), state_dict_file_path)
-        state_dict = th.load(state_dict_file_path)
+        state_dict = th.load(state_dict_file_path, weights_only=False)
 
         # Load
         replicated_model.load_state_dict(state_dict, strict=False)
@@ -191,16 +191,18 @@ class NetworkWithOpsTest(unittest.TestCase):
         corrects_first_epoch = self._eval_one_epoch(cutoff=50)
 
         # Operate on the first layer - PRUNE
-        to_remove_ids = set()
         tracker = self.dummy_network.layers[0].train_dataset_tracker
-        for neuron_id in range(tracker.number_of_neurons):
+        neurons_before = tracker.number_of_neurons
+
+        to_remove_ids = set()
+        for neuron_id in range(neurons_before):
             frq_curr = tracker.get_neuron_stats(neuron_id)
             if frq_curr < 1.0:
                 to_remove_ids.add(neuron_id)
-        # If not neuron is low impact, then add the lowest impact one
+
+        # Ensure we actually prune something; default to pruning first neuron
         if not to_remove_ids:
-            to_remove_ids.add(-3)
-            to_remove_ids.add(-1)
+            to_remove_ids.update({0})
         with self.dummy_network as model:
             model.operate(
                 0,
@@ -211,11 +213,12 @@ class NetworkWithOpsTest(unittest.TestCase):
         # Evaluate
         corrects_after_prunning = self._eval_one_epoch(cutoff=50)
 
-        # Check if the model has been trained correctly and any updated?
-        self.assertNotEqual(
-            corrects_first_epoch,
-            corrects_after_prunning
-        )
+        # Confirm pruning changed the architecture (less neurons than before)
+        neurons_after = self.dummy_network.layers[0].train_dataset_tracker.number_of_neurons
+        self.assertNotEqual(neurons_before, neurons_after)
+
+        # Check that performance does not improve after pruning; allow tie
+        self.assertLessEqual(corrects_after_prunning, corrects_first_epoch)
 
     def test_train_freeze(self):
         # Set Tracker

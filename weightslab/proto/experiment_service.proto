@@ -18,6 +18,7 @@ service ExperimentService {
   rpc ApplyDataQuery (DataQueryRequest) returns (DataQueryResponse);
   rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
   rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
+  rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
 }
 
 
@@ -320,6 +321,11 @@ message DataEditsRequest {
 
 message DataEditsResponse {
   bool success = 1;
+  string message = 2;
+}
+
+message AgentHealthResponse {
+  bool available = 1;
   string message = 2;
 }
 

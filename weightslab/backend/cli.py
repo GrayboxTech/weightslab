@@ -436,7 +436,7 @@ def _server_loop(host: str, port: int):
     try:
         while True:
             conn, addr = srv.accept()
-            t = threading.Thread(target=_client_handler, args=(conn, addr), daemon=True)
+            t = threading.Thread(target=_client_handler, args=(conn, addr), name='cli_serving_loop', daemon=True)
             t.start()
     finally:
         try:
@@ -617,7 +617,9 @@ if __name__ == '__main__':
                 p = subprocess.Popen(cmd, creationflags=creationflags)
             else:
                 # POSIX: start child in new session/process group
-                p = subprocess.Popen(cmd, preexec_fn=os.setsid)
+                # Use setsid if available (POSIX-only)
+                preexec = getattr(os, 'setsid', None)
+                p = subprocess.Popen(cmd, preexec_fn=preexec)
 
             rc = p.wait()
             print(f'CLI exited with code {rc}. Restarting in {restart_delay}s...')

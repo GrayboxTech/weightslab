@@ -16,7 +16,6 @@ from weightslab.backend.ledgers import (
     register_model,
     list_models,
     list_hyperparams,
-    get_hyperparams,
     set_hyperparam,
 )
 
@@ -148,7 +147,7 @@ class CheckpointManager(object):
              eval_loader_name: Optional[str] = None,
              experiment_name: Optional[str] = None,
              override_filepath: Optional[str] = None,
-             save_full_model: bool = True,
+             save_full_model: bool = False,
              ) -> int | str | None:
         """
         Dump a checkpoint using ledger-registered objects.
@@ -365,7 +364,7 @@ class CheckpointManager(object):
                 return
 
             self.prnt_id = checkpoint_id_or_path
-            ckpt_dict = th.load(path)
+            ckpt_dict = th.load(path, weights_only=False)
         except Exception as e:
             _logger.error(f"Could not load checkpoint due to {str(e)}")
             return

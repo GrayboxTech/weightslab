@@ -221,25 +221,3 @@ class ShapeProp(torch.fx.Interpreter):
         else:
             fake_args = args
         return super().run(*fake_args)
-
-
-if __name__ == "__main__":
-    from weightslabbaseline_models.pytorch.models import TwoLayerUnflattenNet
-
-    N, D_in, H, D_out = 64, 1000, 100, 10
-    x = torch.randn(N, D_in)
-    y = torch.randn(N, D_out)
-    dummy_input = torch.randn(1, D_in, 8, 8)
-    model = TwoLayerUnflattenNet(D_in, D_out)
-    model(dummy_input)
-    gm = torch.fx.symbolic_trace(model)
-    ShapeProp(gm).propagate(dummy_input)
-
-    for node in gm.graph.nodes:
-        print(
-            node.name,
-            node.meta['tensor_meta'].dtype,
-            node.meta['tensor_meta'].shape
-        )
-
-    print('Bye World')

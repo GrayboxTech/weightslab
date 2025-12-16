@@ -25,6 +25,7 @@ class NetworkWithOps(nn.Module):
         self.seen_samples = 0
         self.seen_batched_samples = 0
         self.visited_nodes = set()  # Memory trace of explored nodes
+        self.visited_incoming_nodes = set()  # Memory trace of explored nodes
         self.name = self._get_name()  # Name of the model
         self.linearized_layers = []
         self._architecture_change_hook_fns = []
@@ -193,7 +194,8 @@ class NetworkWithOps(nn.Module):
         """
         # Reset visited nodes memory
         self.visited_nodes = set()
-
+        self.visited_incoming_nodes = set()
+        
         # Call the recursive function
         self._operate(
             layer_id,
@@ -211,10 +213,6 @@ class NetworkWithOps(nn.Module):
         # Final hooking after operation
         for hook_fn in self._architecture_change_hook_fns:
             hook_fn(self)
-        
-        # wait for all processes to sync - used for bkwd sync
-        th.cuda.synchronize() if th.cuda.is_available() else None
-        time.sleep(0.5)  # small sleep to ensure all ops are done
 
     def _operate(
         self,
@@ -250,8 +248,10 @@ class NetworkWithOps(nn.Module):
         :type dependency: Optional[Callable], optional
         :raises ValueError: [description]
         """
+
         logger.debug(f'Operate currently on neurons: {neuron_indices} ' +
               f'of layer id: {layer_id} with op_type: {op_type}')
+
         # Sanity check to see if layer exists
         if not isinstance(layer_id, int):
             raise ValueError(
@@ -262,21 +262,22 @@ class NetworkWithOps(nn.Module):
                 f"{op_type} has not been defined.")
         
         # Convert to index from back
+        logger.debug(f"[DEBUG OPERATE] Called with layer_id={layer_id}")
         layer_id = self._reverse_indexing(layer_id, len(self.layers))
+        logger.debug(f"[DEBUG OPERATE] After _reverse_indexing, layer_id={layer_id}")
         if layer_id not in self._dep_manager.id_2_layer:
             raise ValueError(
                 f"[NetworkWithOps.operate] No module with id {layer_id}")
 
         # Get the current module
         module = self._dep_manager.id_2_layer[layer_id]
+
         current_parent_out = module.get_neurons(attr_name='out_neurons')
 
         # Sanity check to avoid redundancy
         # To be sure that nodes are updated only one time by pass
         bypass = hasattr(module, "bypass")
-        if layer_id in self.visited_nodes and not bypass:
-            return None
-
+        
         # ------------------------------------------------------------------- #
         # ------------------------- REC ------------------------------------- #
         # If the dependent layer is of type "REC", say after a conv we have
@@ -286,7 +287,8 @@ class NetworkWithOps(nn.Module):
                 layer_id, DepType.REC):
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
-            if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
+            if rec_dep_id in _suppress_rec_ids or \
+                    rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
 
@@ -305,9 +307,11 @@ class NetworkWithOps(nn.Module):
         # # Go through child nodes
         for rec_dep_id in self._dep_manager.get_child_ids(
                 layer_id, DepType.REC):
+            logger.debug(f"[DEBUG REC] Layer {layer_id} has REC child {rec_dep_id}")
             if not _suppress_rec_ids:
                 _suppress_rec_ids = set()
-            if rec_dep_id in _suppress_rec_ids or rec_dep_id == layer_id:
+            if rec_dep_id in _suppress_rec_ids or \
+                    rec_dep_id == layer_id:
                 continue
             _suppress_rec_ids.add(layer_id)
 
@@ -331,9 +335,11 @@ class NetworkWithOps(nn.Module):
         # # Go through parents nodes
         for same_dep_id in self._dep_manager.get_parent_ids(
                 layer_id, DepType.SAME):
+            logger.debug(f"[DEBUG SAME PARENT] Layer {layer_id} has SAME parent {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
-            if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
+            if same_dep_id in _suppress_same_ids or \
+                    same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
 
@@ -352,9 +358,11 @@ class NetworkWithOps(nn.Module):
         # # Go through child nodes
         for same_dep_id in self._dep_manager.get_child_ids(
                 layer_id, DepType.SAME):
+            logger.debug(f"[DEBUG SAME CHILD] Layer {layer_id} has SAME child {same_dep_id}")
             if not _suppress_same_ids:
                 _suppress_same_ids = set()
-            if same_dep_id in _suppress_same_ids or same_dep_id == layer_id:
+            if same_dep_id in _suppress_same_ids or \
+                    same_dep_id == layer_id:
                 continue
             _suppress_same_ids.add(layer_id)
 
@@ -378,8 +386,14 @@ class NetworkWithOps(nn.Module):
         # Go through childs
         incoming_module = None
         updated_incoming_children: List[int] = []
-        for incoming_id in self._dep_manager.get_child_ids(
-                layer_id, DepType.INCOMING):
+        
+        incoming_ids = self._dep_manager.get_child_ids(layer_id, DepType.INCOMING)
+        if incoming_ids:
+            logger.debug(f"[DEBUG] {module.get_name_wi_id()} (ID: {layer_id}) has INCOMING children IDs: {incoming_ids}")
+            logger.debug(f"[DEBUG] Current visited_nodes: {self.visited_nodes}")
+            logger.debug(f"[DEBUG] Current _suppress_incoming_ids: {_suppress_incoming_ids}")
+
+        for incoming_id in incoming_ids:
             # Get module with id incoming_id
             incoming_module = self._dep_manager.id_2_layer[incoming_id]
 
@@ -389,10 +403,12 @@ class NetworkWithOps(nn.Module):
             bypass = hasattr(incoming_module, "bypass")
 
             # Avoid double expansion except for bypass nodes
-            if incoming_id in self.visited_nodes and not bypass:
+            if incoming_id in self.visited_incoming_nodes and not bypass:
+                logger.debug(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in visited_incoming_nodes")
                 continue
             if _suppress_incoming_ids and incoming_id \
                     in _suppress_incoming_ids:
+                logger.debug(f"[DEBUG] Skipping {incoming_module.get_name_wi_id()} (ID: {incoming_id}) because it is in _suppress_incoming_ids")
                 continue
 
             # Operate on module incoming neurons
@@ -408,7 +424,7 @@ class NetworkWithOps(nn.Module):
 
             # Keep visited node in mem. if it's a bypass node,
             # i.e., it's incoming from a cat layer for instance.
-            self.visited_nodes.add(incoming_id)
+            self.visited_incoming_nodes.add(incoming_id)
 
             # Save incoming children from layer_id
             updated_incoming_children.append(incoming_id)
@@ -420,10 +436,14 @@ class NetworkWithOps(nn.Module):
         if dependency is None:
             dependency = DepType.SAME if hasattr(module, 'wl_same_flag') \
                 and module.wl_same_flag else None
-
+        # # Define child
+        if incoming_module is not None:
+            kwargs['current_child_name'] = incoming_module.get_name_wi_id()
+        elif current_child_name is not None and current_child_name in module.src_to_dst_mapping_tnsrs:
+            kwargs['current_child_name'] = current_child_name
+        else:
+            kwargs['current_child_name'] = None  # Its child is an Orphan node
         # # Operate
-        kwargs['current_child_name'] = incoming_module.get_name_wi_id() \
-            if incoming_module is not None else current_child_name
         module.operate(
                 neuron_indices,
                 op_type=op_type,
@@ -472,7 +492,7 @@ class NetworkWithOps(nn.Module):
 
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
-        state = super().state_dict(destination, prefix, keep_vars)
+        state: dict = super().state_dict(destination, prefix, keep_vars)
         state[prefix + 'seen_samples'] = self.seen_samples
         state[prefix + 'tracking_mode'] = self.tracking_mode
         return state
