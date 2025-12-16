@@ -162,7 +162,7 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Generate unique IDs
         self._generate_uids(
-            wrapped_dataset, compute_hash=compute_hash
+            wrapped_dataset.dataset, compute_hash=compute_hash
         )
 
         # Detect duplicates and keep only first occurrences
@@ -810,7 +810,7 @@ class DataSampleTrackingWrapper(Dataset):
     def deny_samples_with_predicate(self, predicate: SamplePredicateFn):
         self.dataframe = None
         denied_samples_ids = self._get_denied_sample_ids(predicate)
-        logger.info("denied samples with predicate ", len(denied_samples_ids))
+        logger.info(f"denied samples with predicate {len(denied_samples_ids)}")
         self.denylist_samples(denied_samples_ids)
 
     def deny_samples_and_sample_allowed_with_predicate(
