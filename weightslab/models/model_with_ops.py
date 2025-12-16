@@ -490,7 +490,7 @@ class NetworkWithOps(nn.Module):
                     )
 
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
-        state = super().state_dict(destination, prefix, keep_vars)
+        state = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
         state[prefix + 'seen_samples'] = self.seen_samples
         state[prefix + 'tracking_mode'] = self.tracking_mode
         return state
