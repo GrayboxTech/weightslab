@@ -8,7 +8,6 @@ Saves and loads complete experiment state including:
 - Metrics/signals history
 """
 
-import os
 import json
 import logging
 from datetime import datetime

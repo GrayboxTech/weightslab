@@ -329,7 +329,6 @@ class DataSampleTrackingWrapper(Dataset):
         Returns a numpy array of uint64 IDs.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import multiprocessing as mp
 
         dataset = self.wrapped_dataset if dataset is None else dataset
 
@@ -578,7 +577,7 @@ class DataSampleTrackingWrapper(Dataset):
             self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
         self.set(sample_id=sample_id, stat_name=SampleStatsEx.SAMPLE_ID, stat_value=sample_id)
 
-    def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None, raw: bool = False):
+    def update_batch_sample_stats(self, model_age, ids_batch, losses_batch, predct_batch=None):
         self.dataframe = None
         if predct_batch is None:
             predct_batch = [None] * len(ids_batch)
@@ -596,9 +595,6 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_RAW.value: sample_pred,
                     SampleStatsEx.PREDICTION_LOSS.value: sample_loss
                 })
-
-        # Dump to H5 if needed
-        self.dump_stats_to_h5()
 
     def update_sample_stats_ex(
         self,
@@ -1057,15 +1053,10 @@ class DataSampleTrackingWrapper(Dataset):
                 # Remove old entries for these UIDs then append new ones
                 with pd.HDFStore(str(self._h5_path), mode='a') as store:
                     key = f'/stats_{self._dataset_split}'
-                    # Remove old entries for these UIDs
-                    if key in store:
-                        for uid in pending_uids:
-                            try:
-                                store.remove(key, where=f'uid=={uid}')
-                            except Exception:
-                                pass
+
                     # Append new/updated entries with min_itemsize for string columns
                     # This allows tags to be any reasonable length
+                    # Old data will be override
                     store.append(key, df, format='table', data_columns=['uid'],
                                 min_itemsize={'tags': 256})
                 

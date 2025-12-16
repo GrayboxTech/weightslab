@@ -1,8 +1,6 @@
 import io
 import sys
 import io
-import xxhash
-import hashlib
 import numpy as np
 import torch
 import logging
@@ -11,7 +9,6 @@ import numpy as np
 import weightslab.proto.experiment_service_pb2 as pb2
 
 from PIL import Image
-from typing import Union
 from torchvision import transforms
 from typing import List, Tuple, Iterable
 
@@ -50,6 +47,13 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
     layer_id = layer.get_module_id()
     neuron_representations = []
     for neuron_idx in range(layer.out_neurons):
+        # SAFEGUARD: Ensure trackers are available
+        if layer.train_dataset_tracker is None:
+            continue
+        if layer.eval_dataset_tracker is None:
+            continue
+            
+        # Get neuron stats
         age = int(layer.train_dataset_tracker.get_neuron_age(neuron_idx))
         trate = layer.train_dataset_tracker.get_neuron_triggers(neuron_idx)
         erate = layer.eval_dataset_tracker.get_neuron_triggers(neuron_idx)
@@ -58,7 +62,7 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
         trate = trate/age if age > 0 else 0
         erate = erate/evage if evage > 0 else 0
 
-        neuron_lr = layer.get_per_neuron_learning_rate(
+        neuron_lr = layer.get_per_neuron_learning_rate( 
             neuron_idx,
             is_incoming=False,
             tensor_name=tensor_name
@@ -81,14 +85,22 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
 
 def get_layer_representation(layer) -> pb2.LayerRepresentation:
     layer_representation = None
+    layer_id = layer.get_module_id(),
+    layer_name = layer.__class__.__name__,
+    layer_type = layer.module_name,
+    incoming_neurons_count = layer.in_neurons,
+    neurons_count = layer.out_neurons,
+    kernel_size = (layer.kernel_size[0] if not isinstance(layer.kernel_size, (int, float)) else layer.kernel_size) if hasattr(layer, 'kernel_size') else None,
+    stride = (layer.stride[0] if not isinstance(layer.stride, (int, float)) else layer.stride) if hasattr(layer, 'stride') else None
+
     parameters = {
-        'layer_id': layer.get_module_id(),
-        'layer_name': layer.__class__.__name__,
-        'layer_type': layer.module_name,
-        'incoming_neurons_count': layer.in_neurons,
-        'neurons_count': layer.out_neurons,
-        'kernel_size': layer.kernel_size[0] if hasattr(layer, 'kernel_size') else None,
-        'stride': layer.stride[0] if hasattr(layer, 'stride') else None
+        'layer_id': layer_id,
+        'layer_name': layer_name,
+        'layer_type': layer_type,
+        'incoming_neurons_count': incoming_neurons_count,
+        'neurons_count': neurons_count,
+        'kernel_size': kernel_size,
+        'stride': stride
     }
     layer_representation = pb2.LayerRepresentation(**parameters)
     if layer_representation is None:
@@ -211,7 +223,6 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     sample_stats.sample_count = _safe_dataset_length(dataset)
 
     tasks = getattr(experiment, "tasks", None)
-    is_multi_task = bool(tasks) and len(tasks) > 1
     sample_stats.task_type = "classification"
 
     ignore_index = getattr(dataset, "ignore_index", 255)
@@ -372,12 +383,7 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
         except Exception:
             raw_bytes = transformed_bytes 
 
-        tasks = getattr(experiment, "tasks", None)
-        is_multi_task = bool(tasks) and len(tasks) > 1
-
         task_type = getattr(experiment, "task_type", getattr(dataset, "task_type", "classification"))
-        if is_multi_task:
-            task_type = "multi-task"
 
         cls_label = -1
         mask_bytes = b""

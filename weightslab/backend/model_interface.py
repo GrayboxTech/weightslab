@@ -13,7 +13,6 @@ from weightslab.modules.neuron_ops import NeuronWiseOperations
 
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.models.monkey_patcher import monkey_patch_modules
-from weightslab.utils.tools import model_op_neurons
 from weightslab.utils.computational_graph import \
     generate_graph_dependencies_from_torchfx, \
     generate_layer_dependencies_from_onnx, \

@@ -55,9 +55,6 @@ def _save_data_statistics(
             
         name = 'train_loader' if is_training else 'test_loader'
         
-        # Debug logging
-        # logger.info(f"Saving stats to {name}. Loss shape: {per_sample_loss_np.shape if hasattr(per_sample_loss_np, 'shape') else 'scalar'}")
-        
         get_dataloader(name).tracked_dataset.update_batch_sample_stats(
             model_age,
             batch_ids_np,
