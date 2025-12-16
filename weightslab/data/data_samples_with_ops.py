@@ -6,6 +6,7 @@ import pandas as pd
 import random as rnd
 import threading
 from pathlib import Path
+import os
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
@@ -1034,42 +1035,97 @@ class DataSampleTrackingWrapper(Dataset):
                 if not data:
                     return
                 
-                df = pd.DataFrame(data)
-                
+                df_update = pd.DataFrame(data)
                 # Set uid as unique index
-                df.set_index('uid', inplace=True)
-                
+                df_update.set_index('uid', inplace=True)
+
                 # Ensure consistent types for HDF5 based on SAMPLES_STATS_TO_SAVE_TO_H5
                 type_mapping = {
                     SampleStatsEx.DENY_LISTED.value: bool,
                     SampleStatsEx.TAGS.value: str,
                     SampleStatsEx.ENCOUNTERED.value: int,
                     SampleStatsEx.PREDICTION_AGE.value: int,
-                    SampleStatsEx.PREDICTION_LOSS.value: float
+                    SampleStatsEx.PREDICTION_LOSS.value: float,
                 }
-                
                 for stat_name, dtype in type_mapping.items():
-                    if stat_name in df.columns:
-                        df[stat_name] = df[stat_name].astype(dtype)
-                
-                with pd.HDFStore(str(self._h5_path), mode='a') as store:
-                    key = f'/stats_{self._dataset_split}'
+                    if stat_name in df_update.columns:
+                        try:
+                            df_update[stat_name] = df_update[stat_name].astype(dtype)
+                        except Exception:
+                            pass
 
-                    # Delete existing rows with UIDs we're updating, then append new data
-                    # This is more efficient than loading all + filtering + concatenating
+                key = f'/stats_{self._dataset_split}'
+
+                # Step 1: read existing table safely (if any)
+                df_existing = None
+                if Path(self._h5_path).exists():
                     try:
-                        # Delete rows with UIDs in the new data (if table exists)
-                        store.remove(key, where=f'index in {list(df.index)}')
-                    except (KeyError, TypeError):
-                        # Table doesn't exist or delete syntax not supported, will create on append
+                        with pd.HDFStore(str(self._h5_path), mode='r') as store_r:
+                            if key in store_r:
+                                df_existing = store_r[key]
+                    except Exception as e:
+                        # Existing file might be corrupted; move aside to avoid blocking future writes
+                        try:
+                            corrupt_path = str(self._h5_path) + f'.corrupt-{int(time.time())}'
+                            os.replace(str(self._h5_path), corrupt_path)
+                            logger.error(f"[DataSampleTrackingWrapper] H5 corrupted; moved to {corrupt_path}: {e}")
+                        except Exception:
+                            logger.error(f"[DataSampleTrackingWrapper] H5 corrupted and could not be moved: {e}")
+                        df_existing = None
+
+                # Step 2: merge updates into existing data
+                if df_existing is None:
+                    df_merged = df_update
+                else:
+                    # Align columns union
+                    all_cols = sorted(set(df_existing.columns) | set(df_update.columns))
+                    df_existing = df_existing.reindex(columns=all_cols)
+                    df_update = df_update.reindex(columns=all_cols)
+                    df_merged = df_existing.copy()
+                    df_merged.update(df_update)
+                    # Add any new rows not in existing
+                    new_rows = df_update[~df_update.index.isin(df_existing.index)]
+                    if not new_rows.empty:
+                        df_merged = pd.concat([df_merged, new_rows])
+
+                # Ensure index dtype int for uid
+                try:
+                    df_merged.index = df_merged.index.astype(int)
+                except Exception:
+                    pass
+
+                # Enforce type mapping on merged frame
+                for stat_name, dtype in type_mapping.items():
+                    if stat_name in df_merged.columns:
+                        try:
+                            df_merged[stat_name] = df_merged[stat_name].astype(dtype)
+                        except Exception:
+                            pass
+
+                # Step 3: atomic write via temporary file and replace
+                tmp_path = Path(str(self._h5_path) + '.tmp')
+                try:
+                    # Write full merged table to temp file
+                    with pd.HDFStore(str(tmp_path), mode='w') as store_w:
+                        store_w.put(key, df_merged, format='table', data_columns=True, min_itemsize={'tags': 256})
+                        store_w.flush()
+                    # Replace original atomically
+                    os.replace(str(tmp_path), str(self._h5_path))
+                    logger.debug(f"[DataSampleTrackingWrapper] Saved {len(df_update)} changed stats atomically to {self._h5_path}")
+                finally:
+                    # Clean up temp if still present
+                    try:
+                        if tmp_path.exists():
+                            tmp_path.unlink(missing_ok=True)
+                    except Exception:
                         pass
-                    
-                    # Append new/updated data
-                    store.append(key, df, format='table', data_columns=True, min_itemsize={'tags': 256})
-                
-                logger.debug(f"[DataSampleTrackingWrapper] Saved {len(data)} changed stats to {self._h5_path}")
             except Exception as e:
                 logger.error(f"[DataSampleTrackingWrapper] Failed to save pending stats to H5: {e}")
+                # Re-queue pending uids to retry later
+                try:
+                    self._h5_pending_uids.update(pending_uids)
+                except Exception:
+                    pass
 
     def _load_stats_from_h5(self):
         """Load only SAMPLES_STATS_TO_SAVE_TO_H5 from H5 file if it exists, filtered to current UIDs."""
@@ -1085,7 +1141,6 @@ class DataSampleTrackingWrapper(Dataset):
                     if key not in store:
                         logger.info(f"[DataSampleTrackingWrapper] No saved stats found for {self._dataset_split}")
                         return
-                    
                     # Load all rows then filter to current UIDs
                     df = store[key]
                     df = df[df.index.isin(current_uids)]
@@ -1117,4 +1172,11 @@ class DataSampleTrackingWrapper(Dataset):
                           f"{self.denied_sample_cnt} samples are deny-listed.")
             except Exception as e:
                 logger.error(f"[DataSampleTrackingWrapper] Failed to load stats from H5: {e}")
+                # If file seems corrupted, move aside so future writes can proceed
+                try:
+                    corrupt_path = str(self._h5_path) + f'.corrupt-{int(time.time())}'
+                    os.replace(str(self._h5_path), corrupt_path)
+                    logger.error(f"[DataSampleTrackingWrapper] Moved corrupted H5 to {corrupt_path}")
+                except Exception:
+                    pass
 
