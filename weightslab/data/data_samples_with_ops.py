@@ -162,7 +162,7 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Generate unique IDs
         self._generate_uids(
-            wrapped_dataset.dataset, compute_hash=compute_hash
+            wrapped_dataset, compute_hash=compute_hash
         )
 
         # Detect duplicates and keep only first occurrences

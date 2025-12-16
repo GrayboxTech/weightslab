@@ -8,8 +8,7 @@ from typing import List, Set, Optional, Callable, Dict, Any
 
 from weightslab.components.tracking import TrackingMode
 from weightslab.utils.tools import get_children
-from weightslab.utils.modules_dependencies import _ModulesDependencyManager, \
-    DepType
+from weightslab.utils.modules_dependencies import _ModulesDependencyManager, DepType
 
 
 # Global logger

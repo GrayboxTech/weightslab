@@ -161,7 +161,7 @@ class DataLoaderInterface:
                 )
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
-            self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader, root_log_dir=root_log_dir, compute_hash=compute_hash)
+            self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader.dataset if hasattr(self.dataloader, "dataset") else self.dataloader, root_log_dir=root_log_dir, compute_hash=compute_hash)
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
