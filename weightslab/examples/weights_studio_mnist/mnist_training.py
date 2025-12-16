@@ -1,3 +1,4 @@
+import itertools
 import os
 import time
 import tempfile
@@ -60,7 +61,7 @@ def train(loader, model, optimizer, criterion_mlt, device):
     return loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device):
+def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
@@ -86,7 +87,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
             losses += torch.mean(loss_batch)
             metric_mlt.update(outputs, labels)
 
-    loss = losses / len(loader)
+    loss = losses / test_loader_len
     metric = metric_mlt.compute() * 100
 
     return loss.detach().cpu().item(), metric.detach().cpu().item()
@@ -127,24 +128,10 @@ if __name__ == "__main__":
         parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
+    verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
-    max_steps = parameters.get("training_steps_to_do", 1000)
     eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
-
-    # Start WeightsLab services (gRPC only, no CLI)
-    wl.serve(
-        # UI client settings
-        serving_ui=False,
-        root_directory=log_dir,
-        
-        # gRPC server settings
-        serving_grpc=True,
-        n_workers_grpc=None,
-
-        # CLI server settings
-        serving_cli=True
-    )
 
     # Register components in the GLOBAL_LEDGER via watch_or_edit
     # Logger
@@ -235,35 +222,62 @@ if __name__ == "__main__":
         log=True,
     )
 
+    # Start WeightsLab services (gRPC only, no CLI)
+    wl.serve(
+        # UI client settings
+        serving_ui=False,
+        root_directory=log_dir,
+        
+        # gRPC server settings
+        serving_grpc=True,
+        n_workers_grpc=None,
+
+        # CLI server settings
+        serving_cli=True
+    )
+
     print("=" * 60)
     print("🚀 STARTING TRAINING")
-    print(f"📈 Total steps: {max_steps}")
     print(f"🔄 Evaluation every {eval_every} steps")
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    train_range = tqdm.trange(max_steps, dynamic_ncols=True) if tqdm_display else range(max_steps)
+    train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
+    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
+    test_loss, test_metric = None, None
     for train_step in train_range:
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Periodic full eval
         test_loss, test_metric = None, None
-        if train_step % parameters.get('eval_full_to_train_steps_ratio', 50) == 0:
+        if train_step % eval_every == 0:
             test_loss, test_metric = test(
                 test_loader,
                 model,
                 test_criterion_mlt,
                 test_metric_mlt,
                 device,
+                test_loader_len
             )
 
-        # Verbose logging
-        if train_step % 10 == 0 or test_loss is not None:
-            status = f"[Step {train_step:5d}/{max_steps}] Train Loss: {train_loss:.4f}"
-            if test_loss is not None:
-                status += f" | Test Loss: {test_loss:.4f} | Test Acc: {test_metric:.2f}%"
-            print(status)
+        # Verbose
+        if verbose and not tqdm_display:
+            print(
+                f"Training.. " +
+                f"Step {train_step}: " +
+                f"| Train Loss: {train_loss:.4f} " +
+                (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
+                (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
+            )
+        elif tqdm_display:
+            train_range.set_description(f"Step")
+            train_range.set_postfix(
+                train_loss=f"{train_loss:.4f}",
+                test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
+                acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
+            )
 
     print("\n" + "=" * 60)
     print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")

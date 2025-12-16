@@ -24,17 +24,13 @@ skip_loading: true
 # when registering hyperparameters and artifacts.
 experiment_name: Exp_CNN_Test
 
-# Total number of training steps to perform (approx). Training loops may
-# check this to decide when to stop.
-training_steps_to_do: 20000
-
 # Ratio used to compute how often a full evaluation run occurs relative to
 # training steps (example: eval every `training_steps / eval_full_to_train_steps_ratio`).
-eval_full_to_train_steps_ratio: 200
+eval_full_to_train_steps_ratio: 500
 
 # How often to dump checkpoints relative to training steps. Larger values
 # reduce checkpoint frequency.
-experiment_dump_to_train_steps_ratio: 5000
+experiment_dump_to_train_steps_ratio: 1000
 
 # Whether to skip loading the latest checkpoint at initialization.
 skip_checkpoint_load: false
@@ -48,12 +44,12 @@ data:
     # Shuffle training data each epoch for stochasticity
     train_shuffle: true
     # Number of samples per batch for training
-    batch_size: 16
+    batch_size: 256
   test_loader:
     # Do not shuffle evaluation dataset
     test_shuffle: false
     # Batch size used during evaluation
-    batch_size: 16
+    batch_size: 256
     # Whether to drop the last incomplete batch during evaluation
     drop_last: false
 
