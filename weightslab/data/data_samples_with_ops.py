@@ -1,5 +1,6 @@
 import time
 import logging
+import warnings
 import torch as th
 import numpy as np
 import pandas as pd
@@ -144,7 +145,7 @@ class _StateDictKeys(str, Enum):
 
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset, root_log_dir: Optional[str] = None, compute_hash: bool = True):
+    def __init__(self, wrapped_dataset: Dataset, root_log_dir: Optional[str] = None, is_training: bool = True, compute_hash: bool = True, **_):
         # Setup H5 persistence path
         self._root_log_dir = Path(root_log_dir) if root_log_dir else self._resolve_root_log_dir()
         self._h5_path = None
@@ -210,6 +211,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Detect dataset split for H5 storage
         original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
         split = _detect_dataset_split(original_ds)
+        self.is_training = is_training
         self._dataset_split = split  # Store for H5 filename
 
         # Load existing stats from H5 BEFORE initializing defaults
@@ -482,7 +484,7 @@ class DataSampleTrackingWrapper(Dataset):
         self.sample_statistics[stat_name][sample_id] = stat_value
         
         # Track UIDs with changes to SAMPLES_STATS_TO_SAVE_TO_H5
-        if self._h5_path and stat_name in SAMPLES_STATS_TO_SAVE_TO_H5:
+        if self._h5_path and sample_id not in self._h5_pending_uids and stat_name in SAMPLES_STATS_TO_SAVE_TO_H5:
             self._h5_pending_uids.add(sample_id)
         
         # Immediate save for certain stats
@@ -547,8 +549,16 @@ class DataSampleTrackingWrapper(Dataset):
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DENY_LISTED, raw=True)
 
     def dump_stats_to_h5(self):
-        """Force dump all sample stats to H5."""
-        if self._h5_path is not None and self.iteration_counter % (self.experiment_dump_to_train_steps_ratio or 100) == 0:
+        """
+            Force dump all sample stats to H5.
+            Dump is also triggered automatically based on iteration counter.
+            Every x iterations (experiment_dump_to_train_steps_ratio) or after infer on the whole eval set.
+        """
+        if self._h5_path is not None and self.iteration_counter > 0  and \
+                (
+                    (self.is_training and self.iteration_counter % (self.experiment_dump_to_train_steps_ratio or 100) == 0) or \
+                    (not self.is_training and self.iteration_counter % (self.wrapped_dataset.__len__() or 1) == 0)
+                ):
             self._save_pending_stats_to_h5()
         self.iteration_counter += 1
 
@@ -557,7 +567,7 @@ class DataSampleTrackingWrapper(Dataset):
                             sample_stats: Dict[str, None],
                             raw: bool = True):
         self.dataframe = None
-        
+
         # Remap sample_id if raw=False and the key exists in the remap
         # If key doesn't exist, sample_id is already the original ID
         actual_sample_id = sample_id
@@ -986,7 +996,7 @@ class DataSampleTrackingWrapper(Dataset):
             if key in self.dense_stats_store:
                 return self.dense_stats_store[key].get(sample_id)
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_RAW, raw=True)
-    
+
     def _save_pending_stats_to_h5(self):
         """Save only changed stats from SAMPLES_STATS_TO_SAVE_TO_H5 for pending UIDs.
         
@@ -1039,6 +1049,24 @@ class DataSampleTrackingWrapper(Dataset):
                 # Set uid as unique index
                 df_update.set_index('uid', inplace=True)
 
+                # Sanitize cells: collapse arrays/lists to scalars to match column dtypes
+                def _coerce_scalar_cell(v):
+                    try:
+                        if isinstance(v, np.ndarray):
+                            if v.size == 0:
+                                return None
+                            # Prefer scalar if possible, else first element
+                            try:
+                                return v.item()
+                            except Exception:
+                                return np.ravel(v)[0].item() if v.dtype.kind in ('b','i','u','f') else str(v)
+                        if isinstance(v, (list, tuple)):
+                            return v[0] if len(v) else None
+                    except Exception:
+                        pass
+                    return v
+                df_update = df_update.map(_coerce_scalar_cell)
+
                 # Ensure consistent types for HDF5 based on SAMPLES_STATS_TO_SAVE_TO_H5
                 type_mapping = {
                     SampleStatsEx.DENY_LISTED.value: bool,
@@ -1055,70 +1083,45 @@ class DataSampleTrackingWrapper(Dataset):
                             pass
 
                 key = f'/stats_{self._dataset_split}'
-
-                # Step 1: read existing table safely (if any)
-                df_existing = None
-                if Path(self._h5_path).exists():
-                    try:
-                        with pd.HDFStore(str(self._h5_path), mode='r') as store_r:
-                            if key in store_r:
-                                df_existing = store_r[key]
-                    except Exception as e:
-                        # Existing file might be corrupted; move aside to avoid blocking future writes
-                        try:
-                            corrupt_path = str(self._h5_path) + f'.corrupt-{int(time.time())}'
-                            os.replace(str(self._h5_path), corrupt_path)
-                            logger.error(f"[DataSampleTrackingWrapper] H5 corrupted; moved to {corrupt_path}: {e}")
-                        except Exception:
-                            logger.error(f"[DataSampleTrackingWrapper] H5 corrupted and could not be moved: {e}")
-                        df_existing = None
-
-                # Step 2: merge updates into existing data
-                if df_existing is None:
-                    df_merged = df_update
-                else:
-                    # Align columns union
-                    all_cols = sorted(set(df_existing.columns) | set(df_update.columns))
-                    df_existing = df_existing.reindex(columns=all_cols)
-                    df_update = df_update.reindex(columns=all_cols)
-                    df_merged = df_existing.copy()
-                    df_merged.update(df_update)
-                    # Add any new rows not in existing
-                    new_rows = df_update[~df_update.index.isin(df_existing.index)]
-                    if not new_rows.empty:
-                        df_merged = pd.concat([df_merged, new_rows])
-
+                
                 # Ensure index dtype int for uid
                 try:
-                    df_merged.index = df_merged.index.astype(int)
+                    df_update.index = df_update.index.astype(int)
                 except Exception:
                     pass
 
-                # Enforce type mapping on merged frame
+                # Enforce type mapping on df_update
                 for stat_name, dtype in type_mapping.items():
-                    if stat_name in df_merged.columns:
+                    if stat_name in df_update.columns:
                         try:
-                            df_merged[stat_name] = df_merged[stat_name].astype(dtype)
+                            df_update[stat_name] = df_update[stat_name].astype(dtype)
                         except Exception:
                             pass
 
-                # Step 3: atomic write via temporary file and replace
-                tmp_path = Path(str(self._h5_path) + '.tmp')
+                # Targeted update: only modify rows for pending UIDs, avoid rewriting entire table
                 try:
-                    # Write full merged table to temp file
-                    with pd.HDFStore(str(tmp_path), mode='w') as store_w:
-                        store_w.put(key, df_merged, format='table', data_columns=True, min_itemsize={'tags': 256})
-                        store_w.flush()
-                    # Replace original atomically
-                    os.replace(str(tmp_path), str(self._h5_path))
-                    logger.debug(f"[DataSampleTrackingWrapper] Saved {len(df_update)} changed stats atomically to {self._h5_path}")
-                finally:
-                    # Clean up temp if still present
-                    try:
-                        if tmp_path.exists():
-                            tmp_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                    with pd.HDFStore(str(self._h5_path), mode='a') as store:
+                        if key in store:
+                            # Read existing table
+                            existing = store.select(key)
+                            # Keep only rows NOT being updated (filter out UIDs in df_update)
+                            rows_to_keep = existing[~existing.index.isin(df_update.index)]
+                            # Remove entire key (will rewrite with kept rows + new rows)
+                            store.remove(key)
+                            # Write back rows that are NOT being updated
+                            if not rows_to_keep.empty:
+                                store.append(key, rows_to_keep, format='table', data_columns=True, min_itemsize={'tags': 256})
+                        
+                        # Append only the updated/new rows
+                        store.append(key, df_update, format='table', data_columns=True, min_itemsize={'tags': 256})
+                        store.flush()
+                    
+                    logger.debug(f"[DataSampleTrackingWrapper] Updated {len(df_update)} rows in {self._h5_path}")
+                except Exception as e:
+                    # On failure, log and re-queue for retry
+                    logger.error(f"[DataSampleTrackingWrapper] Failed to update H5 with targeted deletes: {e}")
+                    self._h5_pending_uids.update(pending_uids)
+                    return
             except Exception as e:
                 logger.error(f"[DataSampleTrackingWrapper] Failed to save pending stats to H5: {e}")
                 # Re-queue pending uids to retry later

@@ -122,7 +122,6 @@ class DataLoaderInterface:
         name: Optional[str] = None,
         register: bool = True,
         weak: bool = False,
-        is_training: bool = False,
         root_log_dir: Optional[str] = None,
         compute_hash: bool = True,
         **kwargs,
@@ -139,14 +138,10 @@ class DataLoaderInterface:
             name: Optional name for registration in the global ledger.
             register: Whether to register this interface in the global ledger.
             weak: Whether to use weak references when registering.
-            is_training: Whether this dataloader is used for training (affects iteration).
             root_log_dir: Optional root log directory for tracking wrapper.
             compute_hash: Whether to compute hashes for samples in tracking wrapper.
             **kwargs: Additional kwargs passed to DataLoader if a Dataset is provided.
         """
-        # Strip out our own kwargs so they don't get passed to DataLoader
-        kwargs = dict(kwargs)
-
         # Normalize inputs
         self.dataset: Dataset | DataLoader = data_loader_or_dataset
 
@@ -161,13 +156,13 @@ class DataLoaderInterface:
                 )
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
-            self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader.dataset if hasattr(self.dataloader, "dataset") else self.dataloader, root_log_dir=root_log_dir, compute_hash=compute_hash)
+            self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader.dataset if hasattr(self.dataloader, "dataset") else self.dataloader, root_log_dir=root_log_dir, compute_hash=compute_hash, **kwargs)
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
         else:
             # Dataset supplied: wrap and build our own DataLoader with a mutable batch sampler
-            self.tracked_dataset = DataSampleTrackingWrapper(data_loader_or_dataset, root_log_dir=root_log_dir, compute_hash=compute_hash)
+            self.tracked_dataset = DataSampleTrackingWrapper(data_loader_or_dataset, root_log_dir=root_log_dir, compute_hash=compute_hash, **kwargs)
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
@@ -230,18 +225,18 @@ class DataLoaderInterface:
             self._mutable_batch_sampler = mbs
 
             # Construct dataloader using our batch_sampler
+            self.is_training = kwargs.pop("is_training", False)
             self.dataloader = DataLoader(
                 self.tracked_dataset,
                 batch_sampler=mbs,
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 collate_fn=collate_fn,
-                **kwargs,
+                **kwargs
             )
 
         self.init_attributes(self.dataloader)
 
-        self.is_training = is_training
 
         # Internal iterator used by `_next_batch` / `next_batch`
         self._iterator: Iterator = iter(self.dataloader)
