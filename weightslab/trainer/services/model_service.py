@@ -189,7 +189,7 @@ class ModelService:
 
             if request.sample_id < 0 or request.sample_id >= len(ds):
                 raise ValueError(f"No sample id {request.sample_id} for {request.origin}")
-            
+
             sid = ds.get_sample_id_at_index(request.sample_id)
             x = _get_input_tensor_for_sample(ds, sid, getattr(model, "device", "cpu"))
 

@@ -35,24 +35,24 @@ logger = logging.getLogger(__name__)
 
 class MaskedSampler(Sampler):
     """A sampler that filters out deny-listed samples from iteration.
-    
+
     Wraps a base sampler (e.g., RandomSampler, SequentialSampler) and
     skips indices that correspond to deny-listed samples in the dataset.
-    
+
     This allows the DataLoader to dynamically exclude samples without
     rebuilding the dataset or sampler.
     """
-    
+
     def __init__(self, base_sampler: Sampler, tracked_dataset: DataSampleTrackingWrapper):
         """Initialize the masked sampler.
-        
+
         Args:
             base_sampler: The underlying sampler (RandomSampler, SequentialSampler, etc.)
             tracked_dataset: A DataSampleTrackingWrapper with deny-listed samples
         """
         self.base_sampler = base_sampler
         self.tracked_dataset = tracked_dataset
-    
+
     def __iter__(self):
         """Iterate over non-deny-listed indices."""
         # Build a set of deny-listed UIDs for fast lookup
@@ -60,13 +60,13 @@ class MaskedSampler(Sampler):
             uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
             if is_denied
         }
-        
+
         # Iterate through base sampler, yielding only non-denied indices
         for idx in self.base_sampler:
             uid = int(self.tracked_dataset.unique_ids[idx])
             if uid not in deny_listed_uids:
                 yield idx
-    
+
     def __len__(self):
         """Return the number of non-deny-listed samples."""
         # Count non-denied samples
@@ -97,10 +97,10 @@ class DataLoaderInterface:
     excluded from batches during iteration via the MaskedSampler. This allows
     you to dynamically filter samples at train/eval time without rebuilding
     the dataset:
-    
+
         dataset.denylist_samples({sample_id_1, sample_id_2, ...})
         # Next iteration will skip these samples automatically
-    
+
     Public API:
     - __iter__, __len__, __next__
     - next_batch(), reset_iterator()
@@ -122,9 +122,10 @@ class DataLoaderInterface:
         name: Optional[str] = None,
         register: bool = True,
         weak: bool = False,
-        is_training: bool = False,
         root_log_dir: Optional[str] = None,
         compute_hash: bool = True,
+        use_tags: bool = False,
+        tags_mapping: Optional[dict] = None,
         **kwargs,
     ) -> None:
         """Initialize the DataLoaderInterface.
@@ -139,14 +140,13 @@ class DataLoaderInterface:
             name: Optional name for registration in the global ledger.
             register: Whether to register this interface in the global ledger.
             weak: Whether to use weak references when registering.
-            is_training: Whether this dataloader is used for training (affects iteration).
             root_log_dir: Optional root log directory for tracking wrapper.
             compute_hash: Whether to compute hashes for samples in tracking wrapper.
+            use_tags: Whether to use tags for samples in tracking wrapper.
+            tags_mapping: Optional mapping of tags to integer labels.
+
             **kwargs: Additional kwargs passed to DataLoader if a Dataset is provided.
         """
-        # Strip out our own kwargs so they don't get passed to DataLoader
-        kwargs = dict(kwargs)
-
         # Normalize inputs
         self.dataset: Dataset | DataLoader = data_loader_or_dataset
 
@@ -161,26 +161,41 @@ class DataLoaderInterface:
                 )
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
-            self.tracked_dataset = DataSampleTrackingWrapper(self.dataloader.dataset if hasattr(self.dataloader, "dataset") else self.dataloader, root_log_dir=root_log_dir, compute_hash=compute_hash)
+            self.tracked_dataset = DataSampleTrackingWrapper(
+                self.dataloader.dataset if hasattr(self.dataloader, "dataset") else self.dataloader,
+                root_log_dir=root_log_dir,
+                compute_hash=compute_hash,
+                use_tags=use_tags,
+                tags_mapping=tags_mapping,
+                **kwargs
+            )
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
         else:
             # Dataset supplied: wrap and build our own DataLoader with a mutable batch sampler
-            self.tracked_dataset = DataSampleTrackingWrapper(data_loader_or_dataset, root_log_dir=root_log_dir, compute_hash=compute_hash)
+            self.tracked_dataset = DataSampleTrackingWrapper(
+                data_loader_or_dataset,
+                root_log_dir=root_log_dir,
+                compute_hash=compute_hash,
+                use_tags=use_tags,
+                tags_mapping=tags_mapping,
+                **kwargs
+            )
+
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
 
             # store kwargs so we can recreate dataloader if needed
-            self._dl_build_kwargs = dict(
-                batch_size=batch_size,
-                shuffle=shuffle,
-                num_workers=num_workers,
-                drop_last=drop_last,
-                pin_memory=pin_memory,
-                collate_fn=collate_fn,
-            )
+            self._dl_build_kwargs = {
+                "batch_size": batch_size,
+                "shuffle": shuffle,
+                "num_workers": num_workers,
+                "drop_last": drop_last,
+                "pin_memory": pin_memory,
+                "collate_fn": collate_fn,
+            }
             self._dl_build_kwargs.update(kwargs or {})
 
             # Choose base sampler according to shuffle flag
@@ -189,7 +204,7 @@ class DataLoaderInterface:
                 if shuffle
                 else SequentialSampler(self.tracked_dataset)
             )
-            
+
             # Wrap base sampler with MaskedSampler to skip deny-listed samples
             masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
 
@@ -212,7 +227,6 @@ class DataLoaderInterface:
                         batch.append(idx)
                         if len(batch) >= int(self.batch_size):
                             yield list(batch)
-                            batch = []
                     if batch and not self.drop_last:
                         yield list(batch)
 
@@ -230,18 +244,18 @@ class DataLoaderInterface:
             self._mutable_batch_sampler = mbs
 
             # Construct dataloader using our batch_sampler
+            self.is_training = kwargs.pop("is_training", False)
             self.dataloader = DataLoader(
                 self.tracked_dataset,
                 batch_sampler=mbs,
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 collate_fn=collate_fn,
-                **kwargs,
+                **kwargs
             )
 
         self.init_attributes(self.dataloader)
 
-        self.is_training = is_training
 
         # Internal iterator used by `_next_batch` / `next_batch`
         self._iterator: Iterator = iter(self.dataloader)
@@ -287,7 +301,7 @@ class DataLoaderInterface:
 
         # 1) Expose instance attributes of `obj` as properties on the wrapper class
         obj_vars = getattr(obj, '__dict__', {})
-        for name, value in obj_vars.items():
+        for name, _ in obj_vars.items():
             if name.startswith('_'):
                 continue
             if name in existing_instance_names or name in existing_class_names:
@@ -607,42 +621,3 @@ class DataLoaderInterface:
             f"{getattr(self.dataset, '__class__', type(self.dataset))}, "
             f"batch_size={self.batch_size})"
         )
-
-
-if __name__ == "__main__":
-    # Quick demo when running this module directly.
-    import os
-    import tempfile
-    from torchvision import datasets, transforms
-
-    TMP_DIR = tempfile.mkdtemp()
-
-    train_dataset = datasets.FashionMNIST(
-        root=os.path.join(TMP_DIR, "data"),
-        train=True,
-        download=True,
-        transform=transforms.Compose([transforms.ToTensor()]),
-    )
-
-    # Demonstrate mutable batch sampler usage
-    wrapper = DataLoaderInterface(
-        train_dataset,
-        batch_size=8,
-        shuffle=True,
-        mutable_batch_sampler=True,  # accepted but not passed to DataLoader
-    )
-    print("Initial effective batch_size:", wrapper.get_batch_size())
-    batch = wrapper.next_batch()
-    try:
-        print("Got batch with", len(batch), "elements")
-    except Exception:
-        print("Got a batch (unable to determine length)")
-
-    # Change batch size at runtime
-    wrapper.set_batch_size(16)
-    print("After set_batch_size(16), effective batch_size:", wrapper.batch_size)
-    batch2 = wrapper.next_batch()
-    try:
-        print("Got batch with", len(batch2), "elements")
-    except Exception:
-        print("Got a batch (unable to determine length)")

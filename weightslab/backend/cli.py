@@ -118,7 +118,7 @@ def _handle_command(cmd: str) -> Any:
         if verb == 'pause' or verb == 'p':
             pause_controller.pause()
             return {'ok': True, 'action': 'paused'}
-            
+
 
         if verb == 'resume' or verb == 'r':
             pause_controller.resume()
@@ -399,7 +399,10 @@ def _client_handler(conn: socket.socket, addr):
         conn_file.write((json.dumps(greeting) + "\n").encode('utf8'))
         conn_file.flush()
         while True:
-            line = conn_file.readline()
+            try:
+                line = conn_file.readline()
+            except ConnectionResetError:
+                break
             if not line:
                 break
             cmd = line.decode('utf8').rstrip('\n')
@@ -423,17 +426,16 @@ def _client_handler(conn: socket.socket, addr):
 
 
 def _server_loop(host: str, port: int):
+    """Legacy entry: bind and serve in this thread."""
     global _server_sock, _server_port, _server_host
     _server_host = host
-    _server_port = port
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(5)
-    # update actual port if 0 was chosen
-    _server_port = srv.getsockname()[1]
-    _server_sock = srv
     try:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((host, port))
+        srv.listen(5)
+        _server_port = srv.getsockname()[1]
+        _server_sock = srv
         while True:
             conn, addr = srv.accept()
             t = threading.Thread(target=_client_handler, args=(conn, addr), name='cli_serving_loop', daemon=True)
@@ -445,7 +447,25 @@ def _server_loop(host: str, port: int):
             pass
 
 
-def cli_serve(cli_host: str = 'localhost', **_):
+def _server_loop_sock(srv: socket.socket):
+    """Serve on an already bound/listening socket (avoids rebind race)."""
+    global _server_sock, _server_port, _server_host
+    try:
+        _server_sock = srv
+        _server_host = srv.getsockname()[0]
+        _server_port = srv.getsockname()[1]
+        while True:
+            conn, addr = srv.accept()
+            t = threading.Thread(target=_client_handler, args=(conn, addr), name='cli_serving_loop', daemon=True)
+            t.start()
+    finally:
+        try:
+            srv.close()
+        except Exception:
+            pass
+
+
+def cli_serve(cli_host: str = 'localhost', cli_port: int = 60000, *, spawn_client: bool = True, **_):
     """
         Start the CLI server and optionally open a client in a new console.
         This CLI now operates on objects registered in the global ledger only.
@@ -454,26 +474,39 @@ def cli_serve(cli_host: str = 'localhost', **_):
             cli_host: Host to bind the server to (default: localhost).
     """
 
-    from weightslab import _BANNER
+    # Lazy import of banner to avoid importing the top-level
+    # package (and thus torch) when CUDA DLLs are unavailable.
+    # On some Windows setups, importing torch can fail with
+    # WinError 1455; the CLI should still be able to start.
+    _BANNER = None
+    try:
+        from weightslab import _BANNER as _WB
+        _BANNER = _WB
+    except Exception:
+        # Skip banner if importing the package fails
+        _BANNER = None
 
     global _server_thread, _server_port, _server_host
-    cli_host = os.environ.get('CLI_HOST', 'localhost')
-    cli_port = int(os.environ.get('CLI_PORT', '0'))
+    cli_host = os.environ.get('CLI_HOST', cli_host)
+    cli_port = int(os.environ.get('CLI_PORT', cli_port))
 
     if _server_thread is not None and _server_thread.is_alive():
         return {'ok': False, 'error': 'server_already_running'}
-    
-    # start server thread
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((cli_host, cli_port))
-    sock.listen(1)
-    actual_port = sock.getsockname()[1]
-    sock.close()
+
+    # start server thread on a pre-bound socket to avoid races
+    try:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((cli_host, cli_port))
+        srv.listen(5)
+        actual_port = srv.getsockname()[1]
+    except Exception as e:
+        logger.exception("cli_bind_failed")
+        return {'ok': False, 'error': f'bind_failed: {e}'}
 
     _server_thread = threading.Thread(
-        target=_server_loop,
-        args=(cli_host, actual_port),
+        target=_server_loop_sock,
+        args=(srv,),
         daemon=True,
         name="WeightsLab CLI Server",
     )
@@ -488,31 +521,33 @@ def cli_serve(cli_host: str = 'localhost', **_):
     # wait briefly for server to come up
     time.sleep(0.05)
 
-    try:
-        print(_BANNER)
-    except Exception:
-        pass
+    if _BANNER:
+        try:
+            print(_BANNER)
+        except Exception:
+            pass
 
-    # spawn a new console running the client REPL
-    import subprocess
-    cmd = [sys.executable, '-u', '-c',
-            "import weightslab.backend.cli as _cli; _cli.cli_client_main('%s', %d)" % (cli_host, actual_port)]
-    kwargs = {}
-    if os.name == 'nt':
-        # CREATE_NEW_CONSOLE causes a new terminal window on Windows
-        kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
-    subprocess.Popen(cmd, cwd=os.getcwd(), **kwargs)
+    # optionally spawn a new console running the client REPL
+    if spawn_client:
+        import subprocess
+        cmd = [sys.executable, '-u', '-c',
+                "import weightslab.backend.cli as _cli; _cli.cli_client_main('%s', %d)" % (cli_host, actual_port)]
+        kwargs = {}
+        if os.name == 'nt':
+            # CREATE_NEW_CONSOLE causes a new terminal window on Windows
+            kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+        subprocess.Popen(cmd, cwd=os.getcwd(), **kwargs)
 
     return {'ok': True, 'host': cli_host, 'port': actual_port}
 
 
-def cli_client_main(host: str, port: int):
+def cli_client_main(cli_host: str = 'localhost', cli_port: int = 60000):
     """Simple client REPL that connects to the CLI server.
 
     This is intended to be launched in a separate console window.
     """
-    addr = (host, port)
-    print(f"weightslab CLI connecting to {host}:{port}...")
+    addr = (cli_host, cli_port)
+    print(f"weightslab CLI connecting to {cli_host}:{cli_port}...")
     try:
         s = socket.create_connection(addr)
     except Exception as e:
@@ -582,56 +617,44 @@ def cli_client_main(host: str, port: int):
 
 
 if __name__ == '__main__':
-    #!/usr/bin/env python3
-    """Simple launcher that restarts the weightslab CLI when it exits.
+    # Simple argv parsing for serve/client modes
+    import argparse
+    parser = argparse.ArgumentParser(description='WeightsLab CLI server/client')
+    sub = parser.add_subparsers(dest='mode')
 
-    Usage:
-    python restart_cli.py
+    pserve = sub.add_parser('serve', help='Start CLI server')
+    pserve.add_argument('--host', default='localhost')
+    pserve.add_argument('--port', type=int, default=0)
+    pserve.add_argument('--no-spawn-client', action='store_true', help='Do not spawn client console')
 
-    Behavior:
-    - Starts the CLI as `python -m weightslab.backend.cli` using the same interpreter.
-    - Creates a new process-group/session for the child so Ctrl+C in the
-    CLI window typically does not kill the launcher.
-    - If the CLI process exits, the launcher waits `restart_delay` seconds and
-    restarts it. If you Ctrl+C the launcher itself, it will terminate.
-    """
+    pclient = sub.add_parser('client', help='Start CLI client')
+    pclient.add_argument('--host', default='localhost')
+    pclient.add_argument('--port', type=int, required=True)
 
-    import sys
-    import time
-    import subprocess
-    import os
+    args = parser.parse_args()
 
-    cmd = [sys.executable, '-m', 'weightslab.backend.cli']
-    restart_delay = 1.0
-
-    print('Launcher: starting CLI (module weightslab.backend.cli).')
-    while True:
+    # Default to serving if no subcommand provided
+    if args.mode in (None, 'serve'):
+        spawn = False if (getattr(args, 'no_spawn_client', False)) else True
+        info = cli_serve(cli_host=getattr(args, 'host', 'localhost'), cli_port=getattr(args, 'port', 0), spawn_client=spawn)
+        if not info.get('ok'):
+            print('Failed to start server:', info)
+            sys.exit(1)
+        host, port = info['host'], info['port']
+        print(f'CLI server running on {host}:{port}. Press Ctrl+C to stop.')
         try:
-            if os.name == 'nt':
-                # Windows: create a new process group so console signals are isolated
-                creationflags = 0
-                try:
-                    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-                except Exception:
-                    creationflags = 0
-                p = subprocess.Popen(cmd, creationflags=creationflags)
-            else:
-                # POSIX: start child in new session/process group
-                # Use setsid if available (POSIX-only)
-                preexec = getattr(os, 'setsid', None)
-                p = subprocess.Popen(cmd, preexec_fn=preexec)
-
-            rc = p.wait()
-            print(f'CLI exited with code {rc}. Restarting in {restart_delay}s...')
-            time.sleep(restart_delay)
-
+            # Keep process alive so daemon thread does not exit
+            while _server_thread is not None and _server_thread.is_alive():
+                time.sleep(1.0)
         except KeyboardInterrupt:
-            print('Launcher received Ctrl+C; exiting launcher.')
+            print('Stopping CLI server...')
+            # Close server socket to unblock accept()
             try:
-                p.terminate()
+                if _server_sock:
+                    _server_sock.close()
             except Exception:
                 pass
             sys.exit(0)
-        except Exception as e:
-            print('Launcher error:', e)
-            time.sleep(restart_delay)
+    else:
+        # client mode
+        cli_client_main(cli_host=getattr(args, 'host', 'localhost'), cli_port=getattr(args, 'port'))

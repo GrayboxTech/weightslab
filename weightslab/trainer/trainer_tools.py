@@ -52,7 +52,7 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
             continue
         if layer.eval_dataset_tracker is None:
             continue
-            
+
         # Get neuron stats
         age = int(layer.train_dataset_tracker.get_neuron_age(neuron_idx))
         trate = layer.train_dataset_tracker.get_neuron_triggers(neuron_idx)
@@ -62,7 +62,7 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
         trate = trate/age if age > 0 else 0
         erate = erate/evage if evage > 0 else 0
 
-        neuron_lr = layer.get_per_neuron_learning_rate( 
+        neuron_lr = layer.get_per_neuron_learning_rate(
             neuron_idx,
             is_incoming=False,
             tensor_name=tensor_name
@@ -159,7 +159,7 @@ def mask_to_png_bytes(mask, num_classes=21):
 def _class_ids(x, num_classes=None, ignore_index=255):
     if x is None:
         return []
-    if hasattr(x, "detach"): 
+    if hasattr(x, "detach"):
         x = x.detach().cpu().numpy()
     else:
         x = np.asarray(x)
@@ -250,7 +250,7 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     for sample_id, row in enumerate(records_iter):
         loss = row.get('prediction_loss', -1)
         if not isinstance(loss, dict):
-            loss = {'loss': loss} 
+            loss = {'loss': loss}
         record = pb2.RecordMetadata(
             sample_id=row.get('sample_id', sample_id),
             sample_last_loss=float(row.get('prediction_loss', -1)),
@@ -279,7 +279,7 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     return sample_stats
 
 def _maybe_denorm(img_t, mean=None, std=None):
-    if mean is None or std is None: 
+    if mean is None or std is None:
         return img_t
     if img_t.ndim != 3 or img_t.shape[0] not in (1,3):
         return img_t
@@ -293,7 +293,7 @@ def tensor_to_bytes(tensor, mean=None, std=None):
 
     if tensor.dtype.is_floating_point:
         tensor = _maybe_denorm(tensor, mean, std)
-        tensor = torch.clamp(tensor, 0.0, 1.0)  
+        tensor = torch.clamp(tensor, 0.0, 1.0)
 
     if tensor.ndim == 3 and tensor.shape[0] > 1:
         np_img = (tensor.numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
@@ -323,7 +323,7 @@ def load_raw_image(dataset, index):
     elif hasattr(wrapped, "data"):
         np_img = wrapped.data[index]
         if hasattr(np_img, 'numpy'):
-            np_img = np_img.numpy()  
+            np_img = np_img.numpy()
         if np_img.ndim == 2:
             return Image.fromarray(np_img.astype(np.uint8), mode="L")
         elif np_img.ndim == 3:
@@ -352,10 +352,10 @@ def _get_input_tensor_for_sample(dataset, sample_id, device):
         tensor = torch.tensor(tensor)
 
     if tensor.ndim == 3:
-        tensor = tensor.unsqueeze(0) 
+        tensor = tensor.unsqueeze(0)
     elif tensor.ndim == 1:
         tensor = tensor.unsqueeze(0)
-    
+
     tensor = tensor.to(device)
     return tensor
 
@@ -393,7 +393,7 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
             raw.save(raw_buf, format='PNG')
             raw_bytes = raw_buf.getvalue()
         except Exception:
-            raw_bytes = transformed_bytes 
+            raw_bytes = transformed_bytes
 
         task_type = getattr(experiment, "task_type", getattr(dataset, "task_type", "classification"))
 
@@ -437,7 +437,7 @@ def force_kill_all_python_processes():
     *** ATTENTION : UTILISER AVEC EXTRÊME PRÉCAUTION ! ***
     """
     logger.warning("WARNING: Attempting to kill all Python processes. This could affect other applications.")
-    
+
     if sys.platform.startswith('win'):
         # Windows : Utilise taskkill pour tuer tous les processus 'python.exe'
         try:
@@ -448,7 +448,7 @@ def force_kill_all_python_processes():
         except subprocess.CalledProcessError as e:
             # Cela arrive si aucun processus python n'est trouvé
             logger.warning(f"No Python processes found or error during termination: {e}")
-            
+
     elif sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
         # Linux/macOS : Utilise pkill avec SIGKILL (-9) pour les processus 'python' ou 'python3'
         try:

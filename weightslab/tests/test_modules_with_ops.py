@@ -85,7 +85,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
 
         self._create_layers(device=device)
         layer_instance = self.all_layers.get(layer_key)
-        layer_instance.to(device)  # Update tracker device 
+        layer_instance.to(device)  # Update tracker device
 
         if layer_instance is None:
             self.fail(f"Layer key '{layer_key}' not found in setup.")

@@ -52,9 +52,9 @@ def _save_data_statistics(
                 is_training = m.training
         except Exception:
             pass
-            
+
         name = 'train_loader' if is_training else 'test_loader'
-        
+
         get_dataloader(name).tracked_dataset.update_batch_sample_stats(
             model_age,
             batch_ids_np,
@@ -130,7 +130,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
-    
+
     elif flag.lower() == 'data' or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
         # Ensure ledger has a placeholder (Proxy) for this name so callers
@@ -167,7 +167,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
-    
+
     elif flag.lower() == 'optimizer' or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
         # Determine registration name first
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj, '__class__', type(obj)).__name__ or '_optimizer'
@@ -187,7 +187,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
-    
+
     elif flag.lower() == 'logger' or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
         # Determine registration name for the logger (prefer explicit name)
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj.__class__, '__name__', None) or 'main'
@@ -202,7 +202,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Return a stable handle (proxy) when available, otherwise the registered logger
         return proxy if proxy is not None else get_logger(reg_name)
-    
+
     # Signals: metrics / losses / custom monitors
     elif 'loss' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
@@ -226,7 +226,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     # Original forward
                     out = original_forward(*a, **kw)
 
-                    # extract scalar 
+                    # extract scalar
                     batch_scalar = None
                     scalar = None
                     try:
@@ -246,7 +246,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                 pass
                     except Exception:
                         pass
-                    
+
                     # log if requested and logger present
                     if kwargs.get('log', False) and scalar is not None:
                         try:
@@ -275,7 +275,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                 )
                         except Exception:
                             pass
-                    
+
                     # Save statistics if requested and applicable
                     if batch_scalar is not None and ids is not None and model_age is not None:
                         _save_data_statistics(
@@ -481,7 +481,16 @@ def serve(serving_ui: bool = False, serving_cli: bool = False, serving_grpc: boo
 
     if serving_ui and serving_grpc:
         ui_serve(**kwargs)
-        
+
     if serving_cli:
         cli_serve(**kwargs)
-    
+
+
+def keep_serving():
+    """ Keep the main thread alive to allow background serving threads to run.
+    """
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down WeightsLab services.")
