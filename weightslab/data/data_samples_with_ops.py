@@ -109,13 +109,11 @@ class SampleStatsEx(str, Enum):
 
 # Which sample stats to auto-save to H5 upon update
 SAMPLES_STATS_TO_SAVE_TO_H5 = [
-    # SampleStatsEx.sample_id.value,  # Already saved as key uid in h5
     SampleStatsEx.DENY_LISTED.value,
     SampleStatsEx.TAGS.value,
     SampleStatsEx.ENCOUNTERED.value,
     SampleStatsEx.PREDICTION_LOSS.value,
-    SampleStatsEx.PREDICTION_AGE.value,
-    SampleStatsEx.PREDICTION_RAW.value,
+    SampleStatsEx.PREDICTION_AGE.value
 ]
 SAMPLES_STATS_IMMEDIATE_SAVING_TO_H5 = [
     SampleStatsEx.DENY_LISTED.value,
@@ -131,6 +129,7 @@ SAMPLES_STATS_DEFAULTS = {
     SampleStatsEx.PREDICTION_AGE.value: -1,
     SampleStatsEx.PREDICTION_RAW.value: -1e9,
 }
+
 
 # I just like it when the enum values have the same name leghts.
 class _StateDictKeys(str, Enum):
@@ -536,8 +535,9 @@ class DataSampleTrackingWrapper(Dataset):
             pass
         elif stat_name == SampleStatsEx.PREDICTION_LOSS.value:
             # Convert per-pixel losses to mean loss for H5 storage
-            stat_value = float(stat_value.mean())
-            logger.debug(f"Normalized multi-element PREDICTION_LOSS to mean: {stat_value}")
+            if isinstance(stat_value, (th.Tensor, np.ndarray)):
+                logger.warning(f"PREDICTION_LOSS is a multi-element array (size={stat_value.size}) for sample_id={sample_id}, should be scalar. Converting to mean loss.")
+            pass
         else:
             # For other stats, skip multi-element arrays
             logger.warning(f"Skipping multi-element array for stat '{stat_name}' (size={stat_value.size})")
@@ -551,7 +551,7 @@ class DataSampleTrackingWrapper(Dataset):
         if stat_name == SampleStatsEx.DENY_LISTED and prev_value is not None and prev_value != stat_value:
             self._handle_deny_listed_updates(stat_value)
 
-        self.sample_statistics[stat_name][sample_id] = stat_value if stat_value != '' else None
+        self.sample_statistics[stat_name][sample_id] = stat_value if isinstance(stat_value, (np.ndarray, th.Tensor)) or stat_value != '' else None
 
         # Track UIDs with changes to SAMPLES_STATS_TO_SAVE_TO_H5
         if self._h5_path and sample_id not in self._h5_pending_uids and stat_name in SAMPLES_STATS_TO_SAVE_TO_H5:

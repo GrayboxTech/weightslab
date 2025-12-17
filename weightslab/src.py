@@ -226,6 +226,9 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     # Original forward
                     out = original_forward(*a, **kw)
 
+                    if kwargs.get('per_sample', False):
+                        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
+
                     # extract scalar
                     batch_scalar = None
                     scalar = None
@@ -316,11 +319,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
                 @functools.wraps(original_compute)
                 def new_compute(*a, **kw):
-                    _flag = None
-                    if 'flag' in kw:
-                        _flag = kw.pop('flag', None)
                     out = original_compute(*a, **kw)
-
+                    if kwargs.get('per_sample', False):
+                        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
+                    # extract scalar
                     try:
                         if isinstance(out, th.Tensor):
                             scalar = float(out.detach().cpu().mean().item())
@@ -363,9 +365,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
                 @functools.wraps(original_forward)
                 def new_forward(*a, **kw):
-                    _flag = None
-                    if 'flag' in kw:
-                        _flag = kw.pop('flag', None)
                     out = original_forward(*a, **kw)
 
                     # extract scalar

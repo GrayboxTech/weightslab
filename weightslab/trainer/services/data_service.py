@@ -28,7 +28,7 @@ def _get_stat_from_row(row, stat_name):
     """Extract stat from dataframe row and convert to DataStat message."""
     value = row.get(stat_name)
 
-    if value is None or pd.isna(value):
+    if not isinstance(value, (np.ndarray,torch.Tensor)) and (value is None or pd.isna(value)):
         return None
 
     # Helper for creating DataStat messages
