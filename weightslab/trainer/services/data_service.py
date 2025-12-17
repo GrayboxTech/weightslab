@@ -385,7 +385,7 @@ class DataService:
                 getattr(self._ctx.components.get("model"), "task_type", "classification"),
             )
             task_type = _infer_task_type_from_label(label, default=base_task_type)
-            
+
             for stat_name in stats_to_retrieve:
                 stat = _get_stat_from_row(row, stat_name)
                 if stat is not None:
@@ -397,7 +397,7 @@ class DataService:
                     ))
                 elif task_type == "segmentation":
                     # For segmentation: send extended loss stats and per-class losses even if null
-                    if stat_name in ["mean_loss", "median_loss", "max_loss", "min_loss", "std_loss", 
+                    if stat_name in ["mean_loss", "median_loss", "max_loss", "min_loss", "std_loss",
                                      "num_classes_present", "dominant_class", "dominant_class_ratio", "background_ratio"]:
                         data_stats.append(pb2.DataStat(
                             name=stat_name, type="scalar", shape=[1], value=[0.0]

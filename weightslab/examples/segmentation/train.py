@@ -26,6 +26,9 @@ from weightslab.components.global_monitoring import (
 logging.basicConfig(level=logging.ERROR)
 os.environ["GRPC_VERBOSITY"] = "debug"
 
+# Suppress PIL warnings and set to INFO level
+logging.getLogger("PIL").setLevel(logging.INFO)
+
 
 # =============================================================================
 # Small UNet-ish segmentation model
@@ -159,7 +162,13 @@ class BDD100kSegDataset(Dataset):
         # so exposing .images is enough.
         self.image_transform = transforms.Compose(
             [
-                transforms.Resize((image_size, image_size), interpolation=Image.BILINEAR),
+                transforms.Resize(
+                    (
+                        image_size,
+                        image_size
+                    ),
+                    interpolation=Image.BILINEAR
+                ),
                 transforms.ToTensor(),
             ]
         )
@@ -369,7 +378,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Computing class weights to address class imbalance...")
     print("=" * 60)
-    
+
     def compute_class_weights(dataset, num_classes, ignore_index=255, max_samples=1000):
         """
         Compute class weights based on inverse pixel frequency.
@@ -377,56 +386,56 @@ if __name__ == "__main__":
         """
         import numpy as np
         from tqdm import tqdm
-        
+
         class_counts = np.zeros(num_classes, dtype=np.float64)
-        
+
         # Sample up to max_samples images to compute statistics
         num_samples = min(len(dataset), max_samples)
         print(f"Analyzing {num_samples} samples from dataset...")
-        
+
         for idx in tqdm(range(num_samples), desc="Computing class weights"):
             try:
                 # The dataset returns (img_t, mask_t)
-                _, label = dataset[idx] 
+                _, label = dataset[idx]
                 label_np = label.numpy() if hasattr(label, 'numpy') else np.array(label)
-                
+
                 # Count pixels for each class, excluding ignore_index
                 for c in range(num_classes):
                     class_counts[c] += (label_np == c).sum()
             except Exception as e:
                 print(f"Warning: Could not process sample {idx}: {e}")
                 continue
-        
+
         # Avoid division by zero
         class_counts = np.maximum(class_counts, 1)
-        
+
         # Compute inverse frequency weights
         total_pixels = class_counts.sum()
         class_weights = total_pixels / (num_classes * class_counts)
-        
+
         # Normalize so mean weight is 1.0
         class_weights = class_weights / class_weights.mean()
-        
+
         print("\nClass distribution and weights:")
         print("-" * 60)
         for c in range(num_classes):
             percentage = (class_counts[c] / total_pixels) * 100
             print(f"  Class {c}: {percentage:6.2f}% of pixels → weight: {class_weights[c]:.3f}")
         print("-" * 60)
-        
+
         return torch.FloatTensor(class_weights)
-    
+
     # Compute weights from training dataset
     class_weights = compute_class_weights(_train_dataset, num_classes, ignore_index, max_samples=500)
     class_weights = class_weights.to(device)
-    
+
     print(f"\nApplying class weights: {class_weights.cpu().numpy()}")
     print("=" * 60 + "\n")
 
     # Create weighted loss functions
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(
-            reduction="none", 
+            reduction="none",
             ignore_index=ignore_index,
             weight=class_weights  # ← Class weights applied!
         ),
@@ -436,7 +445,7 @@ if __name__ == "__main__":
     )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(
-            reduction="none", 
+            reduction="none",
             ignore_index=ignore_index,
             weight=class_weights  # ← Class weights applied!
         ),
@@ -457,10 +466,11 @@ if __name__ == "__main__":
 
     # --- 7) Start WeightsLab services ---
     wl.serve(
-        serving_ui=True,
+        serving_ui=False,
         root_directory=log_dir,
+
         serving_grpc=True,
-        n_workers_grpc=parameters.get("number_of_workers"),
+
         serving_cli=False,
     )
 
@@ -472,7 +482,7 @@ if __name__ == "__main__":
     print(f"📂 Data root: {data_root}")
     print("=" * 60 + "\n")
 
-    pause_controller.resume()
+    # pause_controller.resume()
 
     for train_step in tqdm.trange(max_steps, dynamic_ncols=True):
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
@@ -501,18 +511,18 @@ if __name__ == "__main__":
 
     import signal
     import time
-    
+
     # Flag to indicate if Ctrl+C was pressed
     _stop_requested = False
-    
+
     def _signal_handler(sig, frame):
         global _stop_requested
         print("\nCtrl+C detected. Shutting down gracefully...")
         _stop_requested = True
-    
+
     # Register the signal handler for Ctrl+C (SIGINT)
     signal.signal(signal.SIGINT, _signal_handler)
-    
+
     print("Press Ctrl+C to exit...")
     while not _stop_requested:
         time.sleep(0.1) # Small delay to prevent busy-waiting

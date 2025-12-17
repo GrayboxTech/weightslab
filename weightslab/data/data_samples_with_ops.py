@@ -526,7 +526,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Normalize 0-d numpy arrays
         if isinstance(stat_value, np.ndarray) and stat_value.ndim == 0:
             stat_value = stat_value.item()
-        
+
         # Normalize multi-element arrays for stats that need to be saved to H5
         # For PREDICTION_LOSS in segmentation, use mean of per-pixel losses
         if not (stat_name in SAMPLES_STATS_TO_SAVE_TO_H5 and
@@ -669,7 +669,7 @@ class DataSampleTrackingWrapper(Dataset):
                     sz = int(np.sqrt(sample_pred.size))
                     if sz * sz == sample_pred.size:
                         sample_pred = sample_pred.reshape((sz, sz))
-            
+
             # Core stats (keep original behavior)
             self.update_sample_stats(
                 sample_identifier,
@@ -682,10 +682,10 @@ class DataSampleTrackingWrapper(Dataset):
             # Extended stats: Compute scalar loss summaries
             # Works for both classification (scalar) and segmentation (array)
             extended_stats = {}
-            
+
             # Convert to numpy for consistent handling
             loss_np = sample_loss if isinstance(sample_loss, np.ndarray) else np.array(sample_loss)
-            
+
             # Scalar loss summaries
             if loss_np.size > 1:
                 # Segmentation or multi-element loss
@@ -702,23 +702,23 @@ class DataSampleTrackingWrapper(Dataset):
                 extended_stats["min_loss"] = scalar_loss
                 extended_stats["std_loss"] = 0.0
                 extended_stats["median_loss"] = scalar_loss
-            
+
             # Per-class statistics (if prediction is available)
             if sample_pred is not None:
                 pred_np = sample_pred if isinstance(sample_pred, np.ndarray) else np.array(sample_pred)
-                
+
                 # For segmentation: compute per-class loss and distribution
                 if pred_np.ndim >= 2 and loss_np.size > 1:
                     # Get unique classes in prediction
                     unique_classes = np.unique(pred_np)
                     extended_stats["num_classes_present"] = int(len(unique_classes))
-                    
+
                     # Dominant class (most frequent)
                     unique, counts = np.unique(pred_np, return_counts=True)
                     dominant_idx = np.argmax(counts)
                     extended_stats["dominant_class"] = int(unique[dominant_idx])
                     extended_stats["dominant_class_ratio"] = float(counts[dominant_idx] / pred_np.size)
-                    
+
                     # Per-class loss (for up to 10 most common classes to avoid explosion)
                     if len(unique) <= 10:
                         for class_id in unique[:10]:
@@ -726,24 +726,24 @@ class DataSampleTrackingWrapper(Dataset):
                             if mask.any():
                                 class_loss = loss_np[mask].mean()
                                 extended_stats[f"loss_class_{int(class_id)}"] = float(class_loss)
-                    
+
                     # Background ratio (assuming class 0 is background)
                     if 0 in unique:
                         background_ratio = float(counts[unique == 0][0] / pred_np.size)
                         extended_stats["background_ratio"] = background_ratio
-                
+
                 # For classification: just store the predicted class
                 elif pred_np.size == 1:
                     pred_class = int(pred_np.item() if hasattr(pred_np, 'item') else pred_np)
                     extended_stats["predicted_class"] = pred_class
-            
+
             # Update extended stats
             if extended_stats:
                 self.update_sample_stats_ex(sample_identifier, extended_stats)
 
         # Dump to H5 if needed
         self.dump_stats_to_h5()
-            
+
     def update_sample_stats_ex(
         self,
         sample_id: int,
@@ -1071,23 +1071,34 @@ class DataSampleTrackingWrapper(Dataset):
         return data_frame
 
     def as_records(self, limit: int = -1):
-        rows = []
-        denied = 0
+        prediction_age = self.sample_statistics[SampleStatsEx.PREDICTION_AGE]
+        if not prediction_age:
+            return []
 
-        for idx, sample_id in enumerate(
-                self.sample_statistics[SampleStatsEx.PREDICTION_AGE]):
-            if limit >= 0 and idx >= limit:
-                break
-            row = {}
-            for stat_name in SampleStatsEx.ALL():
-                row[stat_name] = self.get(sample_id=sample_id, stat_name=stat_name)
-            for ex_key in self._ex_columns_cache:
-                v = self.sample_statistics_ex.get(ex_key, {}).get(sample_id)
-                if v is not None:
-                    row[ex_key] = v
-            rows.append(row)
-            denied += int(bool(row.get(SampleStatsEx.DENY_LISTED, False)))
-        return rows
+        sample_ids = list(prediction_age.keys())
+        if limit >= 0:
+            sample_ids = sample_ids[:limit]
+
+        # Build core stats DataFrame in one shot (faster than per-sample dict assembly)
+        df_core = pd.DataFrame(self.sample_statistics).reindex(sample_ids)
+
+        # Attach scalar-ish extended stats if present
+        if self._ex_columns_cache:
+            ex_payload = {
+                key: val
+                for key, val in self.sample_statistics_ex.items()
+                if key in self._ex_columns_cache and val
+            }
+            if ex_payload:
+                df_ex = pd.DataFrame(ex_payload).reindex(sample_ids)
+                df_core = df_core.join(df_ex, how="left")
+
+        # Ensure sample_id column exists
+        if SampleStatsEx.SAMPLE_ID not in df_core.columns:
+            df_core[SampleStatsEx.SAMPLE_ID] = sample_ids
+
+        # Convert NaN to None to match previous behavior of missing entries
+        return df_core.where(pd.notnull(df_core), None).to_dict(orient="records")
 
     def get_actual_index(self, index: int) -> int:
         if index not in self.idx_to_idx_remapp:
