@@ -11,7 +11,7 @@ from .src import watch_or_edit, serve, keep_serving
 from .art import _BANNER
 from .utils.logs import setup_logging
 
-logger = None
+
 try:
 	import os
 	
@@ -43,8 +43,10 @@ __license__ = 'BSD 2-clause'
 __all__ = [
 	"watch_or_edit",
 	"serve",
+	"keep_serving",
+
     "_BANNER",
-	"logger",
+	
 	"__version__",
 	"__license__",
     "__author__",
