@@ -103,7 +103,7 @@ if __name__ == "__main__":
     # --- 7) Start WeightsLab services (UI + gRPC) ---
     wl.serve(
         serving_ui=False,
-        
+
         serving_cli=True,
 
         serving_grpc=True,
@@ -113,6 +113,6 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
-    
+
     # Keep the main thread alive to allow background serving threads to run
     wl.keep_serving()

@@ -42,7 +42,7 @@ class MaskedSampler(Sampler):
     This allows the DataLoader to dynamically exclude samples without
     rebuilding the dataset or sampler.
     """
-    
+
     def __init__(self, base_sampler: Sampler, tracked_dataset: DataSampleTrackingWrapper):
         """Initialize the masked sampler.
         
@@ -188,14 +188,14 @@ class DataLoaderInterface:
             )
 
             # store kwargs so we can recreate dataloader if needed
-            self._dl_build_kwargs = dict(
-                batch_size=batch_size,
-                shuffle=shuffle,
-                num_workers=num_workers,
-                drop_last=drop_last,
-                pin_memory=pin_memory,
-                collate_fn=collate_fn,
-            )
+            self._dl_build_kwargs = {
+                "batch_size": batch_size,
+                "shuffle": shuffle,
+                "num_workers": num_workers,
+                "drop_last": drop_last,
+                "pin_memory": pin_memory,
+                "collate_fn": collate_fn,
+            }
             self._dl_build_kwargs.update(kwargs or {})
 
             # Choose base sampler according to shuffle flag
@@ -227,7 +227,6 @@ class DataLoaderInterface:
                         batch.append(idx)
                         if len(batch) >= int(self.batch_size):
                             yield list(batch)
-                            batch = []
                     if batch and not self.drop_last:
                         yield list(batch)
 
@@ -302,7 +301,7 @@ class DataLoaderInterface:
 
         # 1) Expose instance attributes of `obj` as properties on the wrapper class
         obj_vars = getattr(obj, '__dict__', {})
-        for name, value in obj_vars.items():
+        for name, _ in obj_vars.items():
             if name.startswith('_'):
                 continue
             if name in existing_instance_names or name in existing_class_names:
@@ -622,42 +621,3 @@ class DataLoaderInterface:
             f"{getattr(self.dataset, '__class__', type(self.dataset))}, "
             f"batch_size={self.batch_size})"
         )
-
-
-if __name__ == "__main__":
-    # Quick demo when running this module directly.
-    import os
-    import tempfile
-    from torchvision import datasets, transforms
-
-    TMP_DIR = tempfile.mkdtemp()
-
-    train_dataset = datasets.FashionMNIST(
-        root=os.path.join(TMP_DIR, "data"),
-        train=True,
-        download=True,
-        transform=transforms.Compose([transforms.ToTensor()]),
-    )
-
-    # Demonstrate mutable batch sampler usage
-    wrapper = DataLoaderInterface(
-        train_dataset,
-        batch_size=8,
-        shuffle=True,
-        mutable_batch_sampler=True,  # accepted but not passed to DataLoader
-    )
-    print("Initial effective batch_size:", wrapper.get_batch_size())
-    batch = wrapper.next_batch()
-    try:
-        print("Got batch with", len(batch), "elements")
-    except Exception:
-        print("Got a batch (unable to determine length)")
-
-    # Change batch size at runtime
-    wrapper.set_batch_size(16)
-    print("After set_batch_size(16), effective batch_size:", wrapper.batch_size)
-    batch2 = wrapper.next_batch()
-    try:
-        print("Got batch with", len(batch2), "elements")
-    except Exception:
-        print("Got a batch (unable to determine length)")
