@@ -114,7 +114,7 @@ SAMPLES_STATS_TO_SAVE_TO_H5 = [
     SampleStatsEx.ENCOUNTERED.value,
     SampleStatsEx.PREDICTION_LOSS.value,
     SampleStatsEx.PREDICTION_AGE.value,
-    SampleStatsEx.PREDICTION_RAW.value, 
+    # SampleStatsEx.PREDICTION_RAW.value, 
 ]
 SAMPLES_STATS_IMMEDIATE_SAVING_TO_H5 = [
     SampleStatsEx.DENY_LISTED.value,
@@ -598,9 +598,6 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_LOSS.value: sample_loss
                 })
 
-        # Dump to H5 if needed
-        self.dump_stats_to_h5()
-
             # Extended stats: Compute scalar loss summaries
             # Works for both classification (scalar) and segmentation (array)
             extended_stats = {}
@@ -662,6 +659,9 @@ class DataSampleTrackingWrapper(Dataset):
             # Update extended stats
             if extended_stats:
                 self.update_sample_stats_ex(sample_identifier, extended_stats)
+
+        # Dump to H5 if needed
+        self.dump_stats_to_h5()
             
     def update_sample_stats_ex(
         self,

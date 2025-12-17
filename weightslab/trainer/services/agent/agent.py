@@ -4,6 +4,7 @@ import logging
 import requests
 import difflib
 import re
+import pandas as pd
 
 from dataclasses import dataclass
 from typing import Optional, List, Union
@@ -224,7 +225,10 @@ class DataManipulationAgent:
         _LOGGER.info("Checking Ollama health...")
         os.environ['OLLAMA_HOST'] = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
         try:
-            response = requests.get(f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/tags", timeout=5)
+            response = requests.get(
+                f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/tags", 
+                timeout=1  # Reduced from 5 to 1 second for faster initialization
+            )
             if response.status_code == 200:
                 models = response.json().get('models', [])
                 _LOGGER.info("Ollama is running with models: %s", [m.get('name') for m in models])

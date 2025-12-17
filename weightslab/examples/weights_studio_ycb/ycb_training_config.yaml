@@ -1,5 +1,5 @@
-device: cuda
-root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/ycb_datasets_arch_debug"
+device: cpu
+root_log_dir: "/tmp/weightslab_ycb"
 tqdm_display: true
 skip_loading: true
 
@@ -13,7 +13,7 @@ skip_checkpoint_load: false
 is_training: true
 
 data:
-  data_dir: "C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/ycb_datasets_arch/ycb_datasets"
+  data_dir: "/Users/marcgraybx/graybox/development/data/ycb_datasets"
   train_loader:
     train_shuffle: true
     batch_size: 32

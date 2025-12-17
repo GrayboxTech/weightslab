@@ -142,7 +142,7 @@ class TriggersTracker(Tracker):
         return hash(
             (
                 str(self.device),
-                self.number_of_neurons.item(),
+                self.number_of_neurons, #.item(),
                 triggers_tuple,
                 updates_tuple
             )

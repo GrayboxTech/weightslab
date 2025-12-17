@@ -375,7 +375,20 @@ class DataService:
             stats_to_retrieve = request.stats_to_retrieve
             if not stats_to_retrieve:
                 stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
+            
+            # DEBUG: Log what we're sending
+            logger.info(f"[GetDataSamples] df_columns: {df_columns}")
+            logger.info(f"[GetDataSamples] stats_to_retrieve: {stats_to_retrieve}")
+            logger.info(f"[GetDataSamples] row columns: {list(row.index)}")
 
+            # Determine task type early so we can conditionally send stats
+            base_task_type = getattr(
+                dataset,
+                "task_type",
+                getattr(self._ctx.components.get("model"), "task_type", "classification"),
+            )
+            task_type = _infer_task_type_from_label(label, default=base_task_type)
+            
             for stat_name in stats_to_retrieve:
                 stat = _get_stat_from_row(row, stat_name)
                 if stat is not None:
@@ -385,13 +398,18 @@ class DataService:
                     data_stats.append(pb2.DataStat(
                         name="tags", type="string", shape=[1], value_string=""
                     ))
-
-            base_task_type = getattr(
-                dataset,
-                "task_type",
-                getattr(self._ctx.components.get("model"), "task_type", "classification"),
-            )
-            task_type = _infer_task_type_from_label(label, default=base_task_type)
+                elif task_type == "segmentation":
+                    # For segmentation: send extended loss stats and per-class losses even if null
+                    if stat_name in ["mean_loss", "median_loss", "max_loss", "min_loss", "std_loss", 
+                                     "num_classes_present", "dominant_class", "dominant_class_ratio", "background_ratio"]:
+                        data_stats.append(pb2.DataStat(
+                            name=stat_name, type="scalar", shape=[1], value=[0.0]
+                        ))
+                    elif stat_name.startswith("loss_class_"):
+                        # Per-class losses (loss_class_0, loss_class_1, etc.)
+                        data_stats.append(pb2.DataStat(
+                            name=stat_name, type="scalar", shape=[1], value=[0.0]
+                        ))
 
             # Expose origin and task_type as stats
             data_stats.append(pb2.DataStat(
