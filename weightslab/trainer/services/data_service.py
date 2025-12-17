@@ -16,7 +16,7 @@ from concurrent import futures
 from torchvision import transforms
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image
-from weightslab.trainer.services.agent import DataManipulationAgent
+from weightslab.trainer.services.agent.agent import DataManipulationAgent
 
 
 # Get global logger
@@ -375,11 +375,6 @@ class DataService:
             stats_to_retrieve = request.stats_to_retrieve
             if not stats_to_retrieve:
                 stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
-            
-            # DEBUG: Log what we're sending
-            logger.info(f"[GetDataSamples] df_columns: {df_columns}")
-            logger.info(f"[GetDataSamples] stats_to_retrieve: {stats_to_retrieve}")
-            logger.info(f"[GetDataSamples] row columns: {list(row.index)}")
 
             # Determine task type early so we can conditionally send stats
             base_task_type = getattr(
