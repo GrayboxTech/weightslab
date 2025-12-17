@@ -7,7 +7,7 @@ Expose commonly used helpers at package level so users can do::
 
 This file re-exports selected symbols from `weightslab.src`.
 """
-from .src import watch_or_edit, serve
+from .src import watch_or_edit, serve, keep_serving
 from .art import _BANNER
 from .utils.logs import setup_logging
 

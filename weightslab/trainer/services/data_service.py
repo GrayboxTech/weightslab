@@ -164,27 +164,28 @@ class DataService:
             self._tst_loader = self._ctx.components.get("test_loader")
 
         # Pull stats from both datasets (skip if empty)
-        dfs_to_concat = []
+        records = []
+
         tstats = _get_stats(self._trn_loader, "train")
         if not tstats.empty:
-            dfs_to_concat.append(tstats)
-        
+            records.extend(tstats.to_dict("records"))
+
         estats = _get_stats(self._tst_loader, "eval")
         if not estats.empty:
-            dfs_to_concat.append(estats)
-        
-        if not dfs_to_concat:
+            records.extend(estats.to_dict("records"))
+
+        if not records:
             return pd.DataFrame()
-        
-        # Efficient concat with minimal copying
-        concat_df = pd.concat(dfs_to_concat, ignore_index=False, sort=False)
-        
+
+        # Build dataframe once to avoid concat overhead
+        df = pd.DataFrame.from_records(records)
+
         try:
-            concat_df.set_index(["origin", "sample_id"], inplace=True)
+            df.set_index(["origin", "sample_id"], inplace=True)
         except KeyError as e:
-            logger.warning(f"Failed to set index on concat_df: {e}")
-        
-        return concat_df
+            logger.warning(f"Failed to set index on dataframe: {e}")
+
+        return df
     
     def _load_existing_tags(self):
         """Load all existing tags from tracked dataset on startup and merge into dataframe."""
@@ -324,76 +325,6 @@ class DataService:
             logger.error(f"Error processing row for sample_id {row.get('sample_id', -1)}: {e}", exc_info=True)
             return None
 
-    def ApplyDataQuery(self, request, context):
-        """
-        Apply a query on the in-memory dataframe.
-
-        Modes:
-          - request.query == ""  → just return counts, do not modify df
-          - request.query != ""  → always handled by the agent (natural language path)
-
-        Counts returned:
-          - number_of_all_samples: all rows currently in the dataframe
-          - number_of_samples_in_the_loop: rows not deny_listed
-          - number_of_discarded_samples: rows with deny_listed == True
-        """
-        with self._lock:
-            df = self._all_datasets_df  # authoritative DF, mutated in-place
-
-            # 1) No query: just report counts
-            if request.query == "":
-                return self._build_success_response(
-                    df=df,
-                    message=f"Current dataframe has {len(df)} samples",
-                )
-
-            try:
-                # 2) All non-empty queries go through the agent
-                if not request.is_natural_language:
-                    logger.debug(
-                        "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
-                        "treating query as natural language: %r",
-                        request.query,
-                    )
-
-                if self._agent is None:
-                    return pb2.DataQueryResponse(
-                        success=False,
-                        message="Natural language queries require agent (not available)",
-                    )
-
-                # Agent translates query text → operation spec
-                operation = self._agent.query(request.query) or {}
-                func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
-                params = operation.get("params", {}) or {}
-
-                # 2a) Agent-driven RESET has highest priority
-                if params.get("__agent_reset__"):
-                    logger.debug("[ApplyDataQuery] Agent requested reset")
-
-                    # Rebuild from loaders; this is the only place we replace the df object
-                    self._all_datasets_df = self._pull_into_all_data_view_df()
-                    df = self._all_datasets_df
-
-                    return self._build_success_response(
-                        df=df,
-                        message="Reset view to base dataset",
-                    )
-
-                # 2b) All other agent operations mutate df in-place
-                message = self._apply_agent_operation(df, func, params)
-
-                # 3) Return updated counts after mutation
-                return self._build_success_response(df=df, message=message)
-
-            except Exception as e:
-                logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
-                return pb2.DataQueryResponse(
-                    success=False,
-                    message=f"Failed to apply query: {str(e)}",
-                )
-
-
     def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
         """
         Centralized helper so every code path reports counts consistently.
@@ -417,7 +348,6 @@ class DataService:
             number_of_samples_in_the_loop=in_loop_count,
             number_of_discarded_samples=discarded_count,
         )
-
 
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
@@ -636,7 +566,7 @@ class DataService:
 
         return df_slice
 
-    def SlowUpdateInternals(self):
+    def _slowUpdateInternals(self):
         current_time = time.time()
         if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
@@ -650,6 +580,75 @@ class DataService:
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
+
+    def ApplyDataQuery(self, request, context):
+        """
+        Apply a query on the in-memory dataframe.
+
+        Modes:
+          - request.query == ""  → just return counts, do not modify df
+          - request.query != ""  → always handled by the agent (natural language path)
+
+        Counts returned:
+          - number_of_all_samples: all rows currently in the dataframe
+          - number_of_samples_in_the_loop: rows not deny_listed
+          - number_of_discarded_samples: rows with deny_listed == True
+        """
+        with self._lock:
+            df = self._all_datasets_df  # authoritative DF, mutated in-place
+
+            # 1) No query: just report counts
+            if request.query == "":
+                return self._build_success_response(
+                    df=df,
+                    message=f"Current dataframe has {len(df)} samples",
+                )
+
+            try:
+                # 2) All non-empty queries go through the agent
+                if not request.is_natural_language:
+                    logger.debug(
+                        "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
+                        "treating query as natural language: %r",
+                        request.query,
+                    )
+
+                if self._agent is None:
+                    return pb2.DataQueryResponse(
+                        success=False,
+                        message="Natural language queries require agent (not available)",
+                    )
+
+                # Agent translates query text → operation spec
+                operation = self._agent.query(request.query) or {}
+                func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
+                params = operation.get("params", {}) or {}
+
+                # 2a) Agent-driven RESET has highest priority
+                if params.get("__agent_reset__"):
+                    logger.debug("[ApplyDataQuery] Agent requested reset")
+
+                    # Rebuild from loaders; this is the only place we replace the df object
+                    self._all_datasets_df = self._pull_into_all_data_view_df()
+                    df = self._all_datasets_df
+
+                    return self._build_success_response(
+                        df=df,
+                        message="Reset view to base dataset",
+                    )
+
+                # 2b) All other agent operations mutate df in-place
+                message = self._apply_agent_operation(df, func, params)
+
+                # 3) Return updated counts after mutation
+                return self._build_success_response(df=df, message=message)
+
+            except Exception as e:
+                logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
+                return pb2.DataQueryResponse(
+                    success=False,
+                    message=f"Failed to apply query: {str(e)}",
+                )
 
     def GetDataSamples(self, request, context):
         """
@@ -673,7 +672,7 @@ class DataService:
             # Get the requested slice of the dataframe
             # Protect the update and slice with the lock
             with self._lock:
-                self.SlowUpdateInternals()
+                self._slowUpdateInternals()
                 end_index = request.start_index + request.records_cnt
                 df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
 
@@ -718,7 +717,6 @@ class DataService:
                 data_records=[]
             )
 
-    
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags, deny_listed, etc.).
@@ -737,6 +735,10 @@ class DataService:
                 success=False,
                 message="Only 'tags' and 'deny_listed' stat editing is supported",
             )
+
+        # Normalize tag clearing (empty/None) so UI can remove tags by sending ""
+        if request.stat_name == "tags":
+            request.string_value = request.string_value or ""
 
         # We currently do not implement accumulate semantics
         if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:

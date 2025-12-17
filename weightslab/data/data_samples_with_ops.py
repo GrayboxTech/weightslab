@@ -1,13 +1,12 @@
+import os
 import time
 import logging
-import warnings
 import torch as th
 import numpy as np
 import pandas as pd
 import random as rnd
 import threading
 from pathlib import Path
-import os
 
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
@@ -145,12 +144,47 @@ class _StateDictKeys(str, Enum):
 
 
 class DataSampleTrackingWrapper(Dataset):
-    def __init__(self, wrapped_dataset: Dataset, root_log_dir: Optional[str] = None, is_training: bool = True, compute_hash: bool = True, **_):
+    """Wrapper for PyTorch datasets that tracks per-sample statistics and supports tag-based labeling.
+    
+    Args:
+        wrapped_dataset: The base PyTorch dataset to wrap
+        root_log_dir: Directory for H5 persistence of sample statistics
+        is_training: Whether this is a training dataset
+        compute_hash: Whether to compute content-based UIDs (slower but more robust)
+        use_tags: Enable tag-based labeling from H5-stored tags
+        tags_mapping: Dict mapping tag strings to label integers
+            - If only 1 tag specified: binary classification (tag → 1, others → 0)
+            - If multiple tags: multiclass classification using the mapping
+            
+    Examples:
+        Binary classification based on tags:
+        >>> dataset = DataSampleTrackingWrapper(
+        ...     mnist_train,
+        ...     root_log_dir="./logs",
+        ...     use_tags=True,
+        ...     tags_mapping={'huge': 1}  # Images tagged 'huge' → label 1, others → 0
+        ... )
+        
+        Multiclass classification based on tags:
+        >>> dataset = DataSampleTrackingWrapper(
+        ...     mnist_train,
+        ...     root_log_dir="./logs",
+        ...     use_tags=True,
+        ...     tags_mapping={'small': 0, 'medium': 1, 'large': 2}
+        ... )
+    """
+    def __init__(self, wrapped_dataset: Dataset, root_log_dir: Optional[str] = None, is_training: bool = True, compute_hash: bool = True, use_tags: bool = False, tags_mapping: Optional[Dict[str, int]] = None, **_):
         # Setup H5 persistence path
         self._root_log_dir = Path(root_log_dir) if root_log_dir else self._resolve_root_log_dir()
         self._h5_path = None
         self._h5_lock = threading.Lock()
         self._h5_pending_uids = set()  # Track UIDs with pending H5 saves
+        
+        # Tag-based labeling configuration
+        self._use_tags = use_tags
+        self._tags_mapping = tags_mapping or {}
+        self._is_binary_labels = len(self._tags_mapping) == 1 if self._tags_mapping else False
+        
         if self._root_log_dir:
             data_dir = self._root_log_dir / "checkpoints" /"data"
             data_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +292,26 @@ class DataSampleTrackingWrapper(Dataset):
             )
         # Update registry
         GLOBAL_UID_REGISTRY.setdefault(split, set()).update(current_set)
+        
+        # Log tag-based labeling configuration if enabled
+        if self._use_tags:
+            tags_count = sum(1 for tags in self.sample_statistics.get(SampleStatsEx.TAGS, {}).values() if tags)
+            if self._is_binary_labels:
+                target_tag = list(self._tags_mapping.keys())[0]
+                logger.info(
+                    f"[DataSampleTrackingWrapper] Tag-based binary labeling enabled: "
+                    f"'{target_tag}' → 1, others → 0. Found {tags_count} tagged samples."
+                )
+            elif self._tags_mapping:
+                logger.info(
+                    f"[DataSampleTrackingWrapper] Tag-based multiclass labeling enabled with mapping: "
+                    f"{self._tags_mapping}. Found {tags_count} tagged samples."
+                )
+            else:
+                logger.warning(
+                    f"[DataSampleTrackingWrapper] use_tags=True but no tags_mapping provided. "
+                    f"Labels will remain unchanged."
+                )
 
     def __eq__(self, other: "DataSampleTrackingWrapper") -> bool:
         # Unsafely assume that the wrapped dataset are the same
@@ -481,15 +535,15 @@ class DataSampleTrackingWrapper(Dataset):
         if stat_name == SampleStatsEx.DENY_LISTED and prev_value is not None and prev_value != stat_value:
             self._handle_deny_listed_updates(stat_value)
 
-        self.sample_statistics[stat_name][sample_id] = stat_value
+        self.sample_statistics[stat_name][sample_id] = stat_value if stat_value != '' else None
         
         # Track UIDs with changes to SAMPLES_STATS_TO_SAVE_TO_H5
         if self._h5_path and sample_id not in self._h5_pending_uids and stat_name in SAMPLES_STATS_TO_SAVE_TO_H5:
             self._h5_pending_uids.add(sample_id)
-        
+
         # Immediate save for certain stats
         if self._h5_path and stat_name in SAMPLES_STATS_IMMEDIATE_SAVING_TO_H5:
-            logger.debug(f"Immediately saving stat '{stat_name}' for sample_id={sample_id} to H5 from {prev_value} to {stat_value}")
+            logger.debug(f"Immediately saving stat '{stat_name}' to h5 for sample_id={sample_id} to {stat_value}")
             self._save_pending_stats_to_h5()
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False, index: int = None) -> int | float | bool:
@@ -980,6 +1034,22 @@ class DataSampleTrackingWrapper(Dataset):
         if len(data) == 2:
             id = self.unique_ids[index]
             item, target = data
+            
+            # Override target with tag-based label if use_tags is enabled
+            if self._use_tags:
+                tag_value = self.sample_statistics.get(SampleStatsEx.TAGS, {}).get(int(id), '')
+                
+                if self._is_binary_labels:
+                    # Binary classification: 1 if tag matches, 0 otherwise
+                    target_tag = list(self._tags_mapping.keys())[0]
+                    target = 1 if tag_value == target_tag else 0
+                elif self._tags_mapping:
+                    # Multiclass: map tag string to integer label
+                    target = self._tags_mapping.get(tag_value, 0)  # Default to 0 if tag not in mapping
+                else:
+                    # No mapping provided but use_tags=True: keep original target
+                    logger.warning(f"use_tags=True but no tags_mapping provided for sample {id}")
+            
             return item, id, target
         else:
             raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
@@ -1100,6 +1170,8 @@ class DataSampleTrackingWrapper(Dataset):
 
                 # Targeted update: only modify rows for pending UIDs, avoid rewriting entire table
                 try:
+                    if not self._h5_path.exists():
+                        self._h5_path.parent.mkdir(parents=True, exist_ok=True)
                     with pd.HDFStore(str(self._h5_path), mode='a') as store:
                         if key in store:
                             # Read existing table
