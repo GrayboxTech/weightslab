@@ -100,7 +100,7 @@ def build_method_docs() -> str:
 
 
 _DEFAULT_DATA_SERVICE_AGENT_PROMPT = """
-You are a code parser that converts short natural language instructions about 
+You are a code parser that converts short natural language instructions about
 dataframes into structured Python dataframe operations.
 
 DataFrame Schema:
@@ -530,7 +530,7 @@ class DataManipulationAgent:
     def is_ollama_available(self) -> bool:
         """
         Check if Ollama is currently available and accessible.
-        
+
         Returns:
             bool: True if Ollama is running and accessible, False otherwise
         """

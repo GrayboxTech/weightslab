@@ -1,36 +1,70 @@
-import itertools
 import os
-import time
 import tempfile
 import logging
 
+import yaml
 import tqdm
 import torch
+import itertools
 import torch.nn as nn
 import torch.optim as optim
-import yaml
-
 import weightslab as wl
-from torchvision import datasets, transforms
-from torchmetrics.classification import Accuracy
-from torchvision import datasets, transforms
 
-from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
-from weightslab.utils.board import Dash as Logger
+from torchvision import datasets, transforms
+from torchmetrics.classification import MulticlassAccuracy
+
+from weightslab.utils.board import Dash as DashLogger
 from weightslab.components.global_monitoring import (
     guard_training_context,
-    guard_testing_context
+    guard_testing_context,
+    pause_controller
 )
 
 
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
+logging.getLogger("PIL").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
-# -----------------------------------------------------------------------------
+# Simple CNN for YCB (RGB 3xHxW, variable num_classes)
+class YCBCNN(nn.Module):
+    def __init__(self, num_classes: int, image_size: int = 28):
+        super().__init__()
+        # Exposed for WeightsLab's ModelInterface
+        # Batch dimension will be added by ModelInterface if needed; they call
+        # torch.randn(model.input_shape), so we give it (1, C, H, W)
+        self.input_shape = (1, 3, image_size, image_size)
+
+        # Input: (B, 3, image_size, image_size)
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+        )
+
+        # After two 2x2 pools, spatial size is image_size / 4
+        feat_h = image_size // 4
+        feat_w = image_size // 4
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * feat_h * feat_w, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        out = self.features(x)
+        out = self.classifier(out)
+        return out
+
+
 # Train / Test functions
-# -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_mlt, device):
+def train(loader, model, optimizer, criterion_mlt, device="cpu"):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
@@ -61,7 +95,7 @@ def train(loader, model, optimizer, criterion_mlt, device):
     return loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
+def test(loader, model, criterion_mlt, metric_mlt, device, loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
@@ -87,58 +121,50 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
             losses += torch.mean(loss_batch)
             metric_mlt.update(outputs, labels)
 
-    loss = losses / test_loader_len
+    loss = losses / loader_len
     metric = metric_mlt.compute() * 100
 
     return loss.detach().cpu().item(), metric.detach().cpu().item()
 
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    start_time = time.time()
-
-    # 2) Load hyperparameters (from YAML if present)
-    parameters = {}
-    config_path = os.path.join(os.path.dirname(__file__), "mnist_training_config.yaml")
+    # --- 1) Load hyperparameters from YAML (if present) ---
+    config_path = os.path.join(os.path.dirname(__file__), "ycb_training_config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
+    else:
+        parameters = {}
 
-    parameters = parameters or {}
-    # ---- sensible defaults / normalization ----
-    parameters.setdefault("experiment_name", "mnist_cnn")
+    # Defaults
+    parameters.setdefault("experiment_name", "ycb_cnn")
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 1000)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
-    # FORCE training to start in "running" mode
-    parameters["is_training"] = True
+    parameters["is_training"] = True  # start in running mode
+    parameters.setdefault("number_of_workers", 4)
 
     exp_name = parameters["experiment_name"]
 
-    # Device selection
+    # --- 2) Device selection ---
     if parameters.get("device", "auto") == "auto":
-        parameters["device"] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        parameters["device"] = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
     device = parameters["device"]
 
-    # Logging dir
+    # --- 3) Logging directory ---
     if not parameters.get("root_log_dir"):
         tmp_dir = tempfile.mkdtemp()
         parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
-
+    tqdm_display = parameters.get('tqdm_display', True)
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
-    tqdm_display = parameters.get("tqdm_display", True)
-    eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
+    eval_every = parameters["eval_full_to_train_steps_ratio"]
 
-    # Register components in the GLOBAL_LEDGER via watch_or_edit
-    # Logger
-    logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
-
-    # Hyperparameters (must use 'hyperparameters' flag for trainer services / UI)
+    # --- 4) Register logger + hyperparameters ---
+    wl.watch_or_edit(DashLogger(), flag="logger", name=exp_name, log_dir=log_dir)
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -147,62 +173,72 @@ if __name__ == "__main__":
         poll_interval=1.0,
     )
 
-    # Model
-    _model = CNN()
-    model = wl.watch_or_edit(_model, flag="model", name=exp_name, device=device)
-
-    # Optimizer
-    lr = parameters.get("optimizer", {}).get("lr", 0.01)
-    _optimizer = optim.Adam(model.parameters(), lr=lr)
-    optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
-
-    # Data (MNIST train/test)
-    _train_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
-        train=False,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        ),
+    # ------------------------ DATA ------------------------
+    # ------------------------------------------------------
+    data_root = parameters.get("data", {}).get(
+        "data_dir",
+        os.path.join(parameters["root_log_dir"], "data", "ycb_datasets"),
     )
-    _test_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
-        train=False,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        ),
+    train_dir = os.path.join(data_root, "train")
+    val_dir = os.path.join(data_root, "val")
+
+    if not os.path.isdir(train_dir):
+        raise FileNotFoundError(f"Train dir not found: {train_dir}")
+    if not os.path.isdir(val_dir):
+        raise FileNotFoundError(f"Val dir not found: {val_dir}")
+
+    image_size = parameters.get("image_size", 128)
+
+    IM_MEAN = (0.6312528, 0.4949005, 0.3298562)
+    IM_STD  = (0.0721354, 0.0712461, 0.0598827)
+    common_transform = transforms.Compose(
+        [
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(IM_MEAN, IM_STD),
+        ]
     )
 
-    # Read data config in unified style: data.train_loader / data.test_loader
+    # Load subsample of datasets for quick testing
+    _train_dataset = datasets.ImageFolder(root=train_dir, transform=common_transform)
+    _test_dataset = datasets.ImageFolder(root=val_dir, transform=common_transform)
+    num_classes = len(datasets.ImageFolder(root=train_dir, transform=common_transform).classes)
+    logger.info(f"Detected {num_classes} classes.")
+
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
-    train_bs = train_cfg.get("batch_size", 16)
-    test_bs = test_cfg.get("batch_size", 16)
-    train_shuffle = train_cfg.get("train_shuffle", True)
-    test_shuffle = test_cfg.get("test_shuffle", False)
 
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
         name="train_loader",
-        batch_size=train_bs,
-        shuffle=train_shuffle,
+        batch_size=train_cfg.get("batch_size", 16),
+        shuffle=train_cfg.get("train_shuffle", True),
         is_training=True,
+        compute_hash=False,
+        use_tags=True,
+        tags_mapping={'huge': 1}
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
         flag="data",
         name="test_loader",
-        batch_size=test_bs,
-        shuffle=test_shuffle,
+        batch_size=test_cfg.get("batch_size", 16),
+        shuffle=test_cfg.get("test_shuffle", False),
+        compute_hash=False,
+        use_tags=True,
+        tags_mapping={'huge': 1}
     )
 
-    # Losses & metric (watched objects – they log themselves)
+    # --- 6) Model, optimizer, losses, metric ---
+    _model = YCBCNN(num_classes=num_classes, image_size=image_size)
+    model = wl.watch_or_edit(_model, flag="model", name=exp_name, device=device)
+
+    lr = parameters.get("optimizer", {}).get("lr", 0.01)
+    _optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
+
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
@@ -216,25 +252,25 @@ if __name__ == "__main__":
         log=True,
     )
     test_metric_mlt = wl.watch_or_edit(
-        Accuracy(task="multiclass", num_classes=10).to(device),
+        MulticlassAccuracy(num_classes=num_classes, average="micro").to(device),
         flag="metric",
         name="test_metric/mlt_metric",
         log=True,
     )
 
-    # Start WeightsLab services (gRPC only, no CLI)
+    # --- 7) Start WeightsLab services (UI + gRPC) ---
     wl.serve(
-        # UI client settings
         serving_ui=False,
         root_directory=log_dir,
 
-        # gRPC server settings
-        serving_grpc=True,
-        n_workers_grpc=None,
+        serving_cli=True,
 
-        # CLI server settings
-        serving_cli=True
+        serving_grpc=True,
+        n_workers_grpc=parameters.get("number_of_workers"),
     )
+
+    # --- 8) Resume training automatically ---
+    pause_controller.resume()
 
     print("=" * 60)
     print("🚀 STARTING TRAINING")
@@ -242,16 +278,22 @@ if __name__ == "__main__":
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
+    # ================
+    # 9. Training Loop
+    print("\nStarting Training...")
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
     test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
     test_loss, test_metric = None, None
     for train_step in train_range:
-        # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
+        train_loss = train(
+            train_loader,
+            model,
+            optimizer,
+            train_criterion_mlt,
+            device
+        )
 
-        # Periodic full eval
-        test_loss, test_metric = None, None
         if train_step % eval_every == 0:
             test_loss, test_metric = test(
                 test_loader,
@@ -280,7 +322,6 @@ if __name__ == "__main__":
             )
 
     print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
 

@@ -1334,11 +1334,11 @@ class UNet(nn.Module):
 class UNet3p(nn.Module):
     """
     UNet 3+ Architecture for Semantic Segmentation.
-    
-    This single-class implementation uses full-scale skip connections to 
+
+    This single-class implementation uses full-scale skip connections to
     combine multi-scale features for high-resolution output.
-    
-    Note: Deep Supervision is often used but is omitted here for simplicity 
+
+    Note: Deep Supervision is often used but is omitted here for simplicity
     and focusing on the core feature fusion logic.
     """
     def __init__(self, n_channels=3, n_classes=1, filter_list=[64, 128, 256, 512, 1024]):
@@ -1350,7 +1350,7 @@ class UNet3p(nn.Module):
         self.F_cat = self.filters[0] * 5  # Total channels in feature concatenation (e.g., 64 * 5 = 320)
 
         # ------------------- Internal Building Blocks -------------------
-        
+
         # Helper for a simple 3x3 Conv -> BN -> ReLU block
         def conv_block(in_c, out_c):
             return nn.Sequential(
@@ -1422,7 +1422,7 @@ class UNet3p(nn.Module):
         self.h4_L1 = conv_block(self.filters[3], self.F_cat) # D4 -> D1 (up by 8x)
         self.h5_L1 = conv_block(self.filters[4], self.F_cat) # E5 -> D1 (up by 16x)
         self.up_conv1 = double_conv(5 * self.F_cat, self.filters[0]) # Final D1 convolution
-        
+
         # ------------------- FINAL Output Layer -------------------
         self.outc = nn.Conv2d(self.filters[0], n_classes, kernel_size=1)
 
@@ -1437,15 +1437,15 @@ class UNet3p(nn.Module):
         p1 = self.pool1(e1) # Size H/2
 
         # E2 (128 channels)
-        e2 = self.conv2(p1) 
+        e2 = self.conv2(p1)
         p2 = self.pool2(e2) # Size H/4
 
         # E3 (256 channels)
-        e3 = self.conv3(p2) 
+        e3 = self.conv3(p2)
         p3 = self.pool3(e3) # Size H/8
 
         # E4 (512 channels)
-        e4 = self.conv4(p3) 
+        e4 = self.conv4(p3)
         p4 = self.pool4(e4) # Size H/16
 
         # E5 (1024 channels) - Bottleneck
@@ -1546,7 +1546,7 @@ class UNet3p(nn.Module):
 
 class UNet3D(nn.Module):
     """
-    A single-class implementation of the 3D U-Net architecture 
+    A single-class implementation of the 3D U-Net architecture
     for volumetric image segmentation.
     """
     def __init__(self, input_channels=1, output_classes=1, base_channels=32, v_size=64):
@@ -1554,7 +1554,7 @@ class UNet3D(nn.Module):
         self.input_shape = (2, input_channels, v_size, v_size, v_size)
         self.input_channels = input_channels
         self.output_classes = output_classes
-        
+
         def double_conv_3d(in_c, out_c):
             """Returns a sequential block of two Conv3d layers with ReLU."""
             return nn.Sequential(
@@ -1567,79 +1567,79 @@ class UNet3D(nn.Module):
             )
 
         # --- ENCODER (Contracting Path) ---
-        
+
         # Initial convolution and first block
         self.inc = double_conv_3d(input_channels, base_channels)  # C -> 32
-        
+
         # Down 1
         self.down1_pool = nn.MaxPool3d(kernel_size=2, stride=2)
         self.down1_conv = double_conv_3d(base_channels, base_channels * 2) # 32 -> 64
-        
+
         # Down 2
         self.down2_pool = nn.MaxPool3d(kernel_size=2, stride=2)
         self.down2_conv = double_conv_3d(base_channels * 2, base_channels * 4) # 64 -> 128
-        
+
         # Down 3 (Bottleneck)
         self.down3_pool = nn.MaxPool3d(kernel_size=2, stride=2)
         self.down3_conv = double_conv_3d(base_channels * 4, base_channels * 8) # 128 -> 256
-        
+
         # --- DECODER (Expansive Path) ---
-        
+
         # Up 3
         # Transposed conv to double D, H, W while halving channels
         self.up3_upsample = nn.ConvTranspose3d(base_channels * 8, base_channels * 4, kernel_size=2, stride=2) # 256 -> 128
         # DoubleConv takes (skip_c + upsampled_c) -> base_channels * 4
         self.up3_conv = double_conv_3d(base_channels * 8, base_channels * 4) # (128 + 128) -> 128
-        
+
         # Up 2
         self.up2_upsample = nn.ConvTranspose3d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2) # 128 -> 64
         self.up2_conv = double_conv_3d(base_channels * 4, base_channels * 2) # (64 + 64) -> 64
-        
+
         # Up 1
         self.up1_upsample = nn.ConvTranspose3d(base_channels * 2, base_channels, kernel_size=2, stride=2) # 64 -> 32
         self.up1_conv = double_conv_3d(base_channels * 2, base_channels) # (32 + 32) -> 32
-        
+
         # Final Output Layer (maps channels to class count)
         self.out_conv = nn.Conv3d(base_channels, output_classes, kernel_size=1) # 32 -> C_out
 
     def forward(self, x):
         # x shape: (B, C, D, H, W)
-        
+
         # --- ENCODER ---
         x1 = self.inc(x)                 # B x 32 x D x H x W (Skip 1)
-        
+
         x2 = self.down1_pool(x1)
         x2 = self.down1_conv(x2)         # B x 64 x D/2 x H/2 x W/2 (Skip 2)
-        
+
         x3 = self.down2_pool(x2)
         x3 = self.down2_conv(x3)         # B x 128 x D/4 x H/4 x W/4 (Skip 3)
-        
+
         x4 = self.down3_pool(x3)
         x4 = self.down3_conv(x4)         # B x 256 x D/8 x H/8 x W/8 (Bottleneck)
-        
+
         # --- DECODER ---
-        
+
         # Up 3
         up3 = self.up3_upsample(x4)      # B x 128 x D/4 x H/4 x W/4 (Upsampled)
         # Skip connection: Concatenate with x3 (128 channels)
         cat3 = torch.cat([x3, up3], dim=1) # B x 256 x D/4 x H/4 x W/4
         x = self.up3_conv(cat3)          # B x 128 x D/4 x H/4 x W/4
-        
+
         # Up 2
         up2 = self.up2_upsample(x)       # B x 64 x D/2 x H/2 x W/2
         # Skip connection: Concatenate with x2 (64 channels)
         cat2 = torch.cat([x2, up2], dim=1) # B x 128 x D/2 x H/2 x W/2
         x = self.up2_conv(cat2)          # B x 64 x D/2 x H/2 x W/2
-        
+
         # Up 1
         up1 = self.up1_upsample(x)       # B x 32 x D x H x W
         # Skip connection: Concatenate with x1 (32 channels)
         cat1 = torch.cat([x1, up1], dim=1) # B x 64 x D x H x W
         x = self.up1_conv(cat1)          # B x 32 x D x H x W
-        
+
         # Final Output
         logits = self.out_conv(x)        # B x C_out x D x H x W
-        
+
         return logits
 
 

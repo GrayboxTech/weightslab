@@ -121,8 +121,8 @@ class ModelInterface(NetworkWithOps):
                 pass
         if not use_onnx:
             del self.traced_model
-        
-        # Hook optimizer update on architecture change 
+
+        # Hook optimizer update on architecture change
         self.register_hook_fn_for_architecture_change(
             lambda model: self._update_optimizer(model)
         )
@@ -316,7 +316,7 @@ class ModelInterface(NetworkWithOps):
                     pass
         except Exception:
             pass
-    
+
     def is_training(self) -> bool:
         """
         Checks if the model is currently in training mode.
@@ -448,7 +448,7 @@ class ModelInterface(NetworkWithOps):
             )
 
             # Patch the torch model with WeightsLab features
-        
+
         self.mapped_dependencies_with_ops = generate_index_maps(
             self.dependencies_with_ops
         )
@@ -471,7 +471,7 @@ class ModelInterface(NetworkWithOps):
         Returns:
             th.Tensor: The output tensor from the model's forward pass.
         """
-        
+
         # Check device
         if x.device != self.device:
             x = x.to(self.device)
@@ -480,7 +480,7 @@ class ModelInterface(NetworkWithOps):
         out = self.model(x)
 
         return out
-    
+
     def apply_architecture_op(self, op_type, layer_id, neuron_indices=None):
         """
             Applies an architecture operation to the model within a managed context.

@@ -546,7 +546,7 @@ def load_config_from_yaml(filepath: str) -> Dict:
     except yaml.YAMLError as e:
         logger.error(f"Error loading YAML file: {e}. Using default parameters.")
         return {}
-    
+
 
 def _npy_bytes(arr: np.ndarray) -> bytes:
     """Serialize array to .npy in memory (deterministic, includes dtype+shape)."""

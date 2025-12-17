@@ -67,7 +67,7 @@ _ANNOTATIONS_DF_COLUMNS = [
     "experiment_name", "model_age", "annotation", "metadata"]
 
 _SAMPLES_DF_COLUMNS = [
-    "SampleId", "Target", "Prediction", "LastLoss", "Encounters", "Discarded" 
+    "SampleId", "Target", "Prediction", "LastLoss", "Encounters", "Discarded"
 ]
 
 _PLOTS_COLOR_WHEEL = [
@@ -205,7 +205,7 @@ class KeyValueFormatter(logging.Formatter):
         'name','msg','args','levelname','levelno','pathname','filename','module',
         'exc_info','exc_text','stack_info','lineno','funcName','created','msecs',
         'relativeCreated','thread','threadName','processName','process','asctime',
-        'message' 
+        'message'
     }
     def format(self, record):
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record.created))
@@ -222,7 +222,7 @@ def setup_logging():
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(KeyValueFormatter())
     root = logging.getLogger()
-    root.handlers[:] = [handler]          
+    root.handlers[:] = [handler]
     root.setLevel(logging.INFO)
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
@@ -249,7 +249,7 @@ class PlotPoint:
 
 class UIState:
     """
-        A class to represent the state of the UI and all the objects and 
+        A class to represent the state of the UI and all the objects and
         their properties necessary to be maintained for the UI to function.
     """
     def __init__(self, root_directory: str):
@@ -262,7 +262,7 @@ class UIState:
         self.hyperparam = pd.DataFrame(columns=_HYPERPARAM_COLUMNS)
         # Details about the layers
         self.layers_df = pd.DataFrame(columns=_LAYER_DF_COLUMNS)
-        # Details about neurons 
+        # Details about neurons
         self.neurons_df = pd.DataFrame(columns=_NEURONS_DF_COLUMNS)
         # Details about the metrics
         self.metrics_df = pd.DataFrame(columns=_METRICS_DF_COLUMNS)
@@ -613,7 +613,7 @@ class UIState:
                 status.experiment_name,
                 status.model_age,
                 status.annotat_status.name,
-                str(metadata),  # TODO: revise this 
+                str(metadata),  # TODO: revise this
             ]
             with self.metrics_lock:
                 self.annotation.loc[len(self.annotation)] = annotation_row
@@ -641,8 +641,8 @@ class UIState:
             for record in sample_statistics.records:
                 row = {
                     "SampleId": int(record.sample_id),
-                    "Target": list(record.sample_label),            
-                    "Prediction": list(record.sample_prediction), 
+                    "Target": list(record.sample_label),
+                    "Prediction": list(record.sample_prediction),
                     "LastLoss": float(record.sample_last_loss),
                     "Encounters": int(record.sample_encounters),
                     "Discarded": bool(record.sample_discarded),
@@ -668,7 +668,7 @@ class UIState:
             df = pd.DataFrame(rows)
             for col in all_columns:
                 if col not in df.columns:
-                    df[col] = None 
+                    df[col] = None
             with self.lock:
                 if sample_statistics.origin == "train":
                     self.samples_df = df[all_columns]
@@ -1172,7 +1172,7 @@ def get_layer_div(
             type='text',
             placeholder='[0-10]',
             style={'width': '9ch', 'marginLeft': '8px'},
-            debounce=True 
+            debounce=True
         ),
         style={'display': 'inline-block', 'verticalAlign': 'middle'},
         title="Limit rendered neurons: e.g. 0:23 (inclusive)"
@@ -1236,7 +1236,7 @@ def get_layer_div(
         children=[
             html.Div(
                 [
-                    html.Span("", style={'flex': '1 1 auto'}), 
+                    html.Span("", style={'flex': '1 1 auto'}),
                     html.Small("Fetch filters", style={'marginRight': '6px'}),
                     fetch_filters_toggle,
                     neuron_range_input
@@ -1274,7 +1274,7 @@ def get_layer_div(
             ),
 
             html.Div(
-                children=[table_wrap, side_panel], 
+                children=[table_wrap, side_panel],
                 style={'display': 'flex', 'alignItems': 'flex-start', 'gap': '8px'}
             ),
 
@@ -1411,7 +1411,7 @@ def zerofy_checklist():
             {'label': 'zerofy with frozen', 'value': 'frozen'},
             {'label': 'zerofy with older',  'value': 'older'},
         ],
-        value=[],         
+        value=[],
         inline=True,
         labelStyle={'marginRight': '10px'},
     )
@@ -1462,9 +1462,9 @@ def activation_controls():
             className="justify-content-center d-flex align-items-center flex-nowrap gap-2"
         ),
         style={
-            'display': 'none',          
+            'display': 'none',
             'margin': '6px auto 2px',
-            'maxWidth': '720px'         
+            'maxWidth': '720px'
         }
     )
 
@@ -1539,11 +1539,11 @@ def _parse_neuron_range(text):
         if m:
             a, b = int(m.group(1)), int(m.group(2))
             if a > b: a, b = b, a
-            out.update(range(a, b + 1)) 
+            out.update(range(a, b + 1))
         elif re.match(r'^\d+$', p):
             out.add(int(p))
         else:
-            return None  
+            return None
     return sorted(out) if out else None
 
 
@@ -1617,7 +1617,7 @@ def _build_table_columns(df: pd.DataFrame) -> list[dict]:
     base = [c for c in _DISPLAY_COLUMNS if c in df.columns]
     extra = sorted([c for c in df.columns if c not in base and c not in {"Encounters", "Discarded"}])
     cols = []
-    
+
     for col in base + extra:
         spec = {"name": col, "id": col}
         if col == "LastLoss":
@@ -1765,7 +1765,7 @@ def get_data_tab(ui_state: UIState):
             dbc.Checklist(
                 id='train-denylist-accumulate-checkbox',
                 options=[{'label': 'Accumulate', 'value': 'accumulate'}],
-                value=[], 
+                value=[],
                 inline=True,
                 style={'marginLeft': '1vw'}
             ),
@@ -1837,23 +1837,23 @@ def get_data_tab(ui_state: UIState):
                     train_controls,
                     html.Div([
                         html.Div([train_table], style={
-                            'flex': '0 0 35vw', 
+                            'flex': '0 0 35vw',
                             'minWidth': '35vw',
                             'height': '100%'
                         }),
                         html.Div([
                             html.Div(id='train-sample-panel')
                         ], style={
-                            'flex': '1', 
-                            'minWidth': '400px', 
-                            'height': 'auto',  
+                            'flex': '1',
+                            'minWidth': '400px',
+                            'height': 'auto',
                             'display': 'flex',
                             'overflow': 'auto',
                             'alignItems': 'flex-start',
                             'justifyContent': 'center'
                         })
                     ], style={
-                        'display': 'flex', 
+                        'display': 'flex',
                         'alignItems': 'stretch',
                         'gap': '1vw',
                         'width': '100%'
@@ -1868,7 +1868,7 @@ def get_data_tab(ui_state: UIState):
                     eval_controls,
                     html.Div([
                         html.Div([eval_table], style={
-                            'flex': '0 0 35vw',  
+                            'flex': '0 0 35vw',
                             'minWidth': '35vw',
                             'height': '100%'
 
@@ -1876,16 +1876,16 @@ def get_data_tab(ui_state: UIState):
                         html.Div([
                             html.Div(id='eval-sample-panel')
                         ], style={
-                            'flex': '1', 
-                            'minWidth': '400px', 
-                            'height': 'auto', 
-                            'overflow': 'auto', 
+                            'flex': '1',
+                            'minWidth': '400px',
+                            'height': 'auto',
+                            'overflow': 'auto',
                             'display': 'flex',
                             'alignItems': 'flex-start',
                             'justifyContent': 'center'
                         })
                     ], style={
-                        'display': 'flex', 
+                        'display': 'flex',
                         'alignItems': 'stretch',
                         'gap': '1vw',
                         'width': '100%'
@@ -1916,25 +1916,25 @@ def label_below_img(img_component, last_loss, img_size):
 
 def render_unified_triplet(sample, sample_row, task_type, is_selected, img_size, is_discarded, sid=None, last_loss=None):
     """Unified triplet display for both segmentation and reconstruction"""
-    
+
     if task_type == "segmentation":
         left_label, left_border = "Input", "#888"
-        middle_label, middle_border = "Target", "green" 
+        middle_label, middle_border = "Target", "green"
         right_label, right_border = "Prediction", "blue"
-        
+
         left_b64 = base64.b64encode(sample.raw_data).decode('utf-8')
         middle_b64 = base64.b64encode(sample.mask).decode('utf-8') if sample.mask else ""
         right_b64 = base64.b64encode(sample.prediction).decode('utf-8') if sample.prediction else ""
-        
+
     else:  # reconstruction
         left_label, left_border = "Input", "#888"
         middle_label, middle_border = "Target", "green"
         right_label, right_border = "Reconstruction", "blue"
-        
+
         left_b64 = base64.b64encode(sample.raw_data).decode('utf-8')
         middle_b64 = base64.b64encode(sample.raw_data).decode('utf-8')  # Target ≈ Input for reconstruction
         right_b64 = base64.b64encode(sample.prediction).decode('utf-8') if sample.prediction else ""
-    
+
     def img_component(src_b64, label, border_color):
         if src_b64:
             return html.Div([
@@ -1943,8 +1943,8 @@ def render_unified_triplet(sample, sample_row, task_type, is_selected, img_size,
                     width=img_size,
                     height=img_size,
                     style={
-                        'width': f'{img_size}px', 
-                        'height': f'{img_size}px', 
+                        'width': f'{img_size}px',
+                        'height': f'{img_size}px',
                         'border': f'2px solid {border_color}',
                         'contentVisibility': 'auto'
                     }
@@ -1961,7 +1961,7 @@ def render_unified_triplet(sample, sample_row, task_type, is_selected, img_size,
                 }),
                 html.Div(label, style={'fontSize': 10, 'textAlign': 'center', 'marginTop': '2px'})
             ])
-    
+
     # Get classification info if available (for multi-task)
     cls_info = None
     if sample_row is not None:
@@ -1972,7 +1972,7 @@ def render_unified_triplet(sample, sample_row, task_type, is_selected, img_size,
         if isinstance(prediction, list) and len(prediction) > 0:
             prediction = prediction[0]
         cls_info = f"Cls: T{target}/P{prediction}"
-    
+
     return html.Div([
         # Metadata overlays
         html.Div(
@@ -1990,7 +1990,7 @@ def render_unified_triplet(sample, sample_row, task_type, is_selected, img_size,
                 'fontSize': '10px', 'padding': '1px 5px', 'borderRadius': '3px'
             }
         ) if last_loss is not None else None,
-        
+
         # Classification info for multi-task
         html.Div(
             cls_info, style={
@@ -1999,24 +1999,24 @@ def render_unified_triplet(sample, sample_row, task_type, is_selected, img_size,
                 'fontSize': '9px', 'padding': '1px 4px', 'borderRadius': '3px'
             }
         ) if cls_info else None,
-        
+
         # Task type badge
         html.Div(
             task_type, style={
-                'position': 'absolute', 'bottom': '2px', 'right': '4px', 
+                'position': 'absolute', 'bottom': '2px', 'right': '4px',
                 'background': 'rgba(0,0,0,0.7)', 'color': 'white',
                 'fontSize': '8px', 'padding': '1px 4px', 'borderRadius': '3px',
                 'textTransform': 'uppercase'
             }
         ),
-        
+
         # Images
         html.Div([
             img_component(left_b64, left_label, left_border),
             img_component(middle_b64, middle_label, middle_border),
             img_component(right_b64, right_label, right_border)
         ], style={'display': 'flex', 'flexDirection': 'row', 'gap': '4px'})
-        
+
     ], style={
         'position': 'relative',
         'marginBottom': '8px',
@@ -2080,7 +2080,7 @@ def render_images(ui_state: UIState, stub, sample_ids, origin,
                 )
                 imgs.append(clickable)
 
-        else:  
+        else:
             # Unified triplet for both segmentation and reconstruction
             batch_response = stub.GetSamples(pb2.BatchSampleRequest(
                 sample_ids=sample_ids,
@@ -2093,18 +2093,18 @@ def render_images(ui_state: UIState, stub, sample_ids, origin,
                 sid = int(sample.sample_id)
                 is_discarded = sid in discarded_ids
                 last_loss = id_to_loss.get(sid, None)
-                
-                df = ui_state.samples_df if origin == "train" else ui_state.eval_samples_df  
+
+                df = ui_state.samples_df if origin == "train" else ui_state.eval_samples_df
                 sample_row = df[df['SampleId'] == sid].iloc[0] if not df.empty else None
-                
+
                 task_type = "segmentation" if sample.mask else "reconstruction"
-                
+
                 triplet = render_unified_triplet(
-                    sample, sample_row, task_type, 
-                    sid in selected_ids, img_size, is_discarded, 
+                    sample, sample_row, task_type,
+                    sid in selected_ids, img_size, is_discarded,
                     sid, last_loss
                 )
-                
+
                 clickable = html.Div(
                     [triplet],
                     id={'type': 'sample-img', 'origin': origin, 'sid': sid},
@@ -2206,7 +2206,7 @@ def _rwg_rgb_from_signed(z: np.ndarray) -> np.ndarray:
 
     neg = t < 0
     r[neg] = 1.0
-    g[neg] = 1.0 + t[neg] 
+    g[neg] = 1.0 + t[neg]
     b[neg] = 1.0 + t[neg]
 
     pos = ~neg
@@ -2233,13 +2233,13 @@ def _tile_img_component(z: np.ndarray) -> html.Img:
     if z.ndim == 2 and z.shape[0] == 1:  # strip 1xN
         target_w = int(max(40, min(10 * z.shape[1], 600)))
         style = {
-            'height': '16px',                  
-            'width': f'{target_w}px',          
-            'imageRendering': 'pixelated',     
+            'height': '16px',
+            'width': f'{target_w}px',
+            'imageRendering': 'pixelated',
         }
-    else: 
+    else:
         style = {
-            'height': '36px',                  
+            'height': '36px',
             'width': '36px',
             'imageRendering': 'pixelated',
         }
@@ -2316,16 +2316,16 @@ def parse_args():
 def check_host_available(ui_host: str, timeout: float = 5.0) -> bool:
     """
     Check if the gRPC ui_host is available before attempting to connect.
-    
+
     Args:
         ui_host: Host address in format 'hostname:port' or 'ip:port'
         timeout: Connection timeout in seconds
-        
+
     Returns:
         True if ui_host is reachable, False otherwise
     """
     import socket
-    
+
     try:
         # Parse ui_host and port
         if ':' in ui_host:
@@ -2334,20 +2334,20 @@ def check_host_available(ui_host: str, timeout: float = 5.0) -> bool:
         else:
             hostname = ui_host
             port = 50051  # Default gRPC port
-        
+
         # Try to establish a TCP connection
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         result = sock.connect_ex((hostname, port))
         sock.close()
-        
+
         if result == 0:
             logger.info("host_available", extra={"ui_host": ui_host})
             return True
         else:
             logger.warning("host_unavailable", extra={"ui_host": ui_host, "error_code": result})
             return False
-            
+
     except socket.gaierror as e:
         logger.error("host_resolution_failed", extra={"ui_host": ui_host, "error": str(e)})
         return False
@@ -2435,7 +2435,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     # Generate app layout
     app.layout = get_ui_app_layout(ui_state)
     server = app.server
-    
+
     _IMAGE_CACHE = {}
 
     @server.route("/img/<origin>/<int:sid>")
@@ -2443,7 +2443,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         try:
             w = int(request.args.get("w", "128"))
             h = int(request.args.get("h", "128"))
-            fmt = request.args.get("fmt", "webp")  
+            fmt = request.args.get("fmt", "webp")
             if origin not in ("train","eval"): abort(404)
 
             key = (origin, sid, w, h, fmt)
@@ -2474,7 +2474,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
                 return Response(status=304)
 
             resp = Response(data, mimetype=mime)
-            resp.headers["Cache-Control"] = "public, no-cache"  
+            resp.headers["Cache-Control"] = "public, no-cache"
             resp.headers["ETag"] = etag
             return resp
         except Exception as e:
@@ -2484,7 +2484,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     @server.route("/api/root-log-dir")
     def get_root_log_dir():
         """REST endpoint to get the root log directory.
-        
+
         Used by Weights Studio UI to resolve image paths.
         Returns JSON with root_log_dir path.
         """
@@ -2495,10 +2495,10 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
                 get_hyper_parameters=False,
                 get_interactive_layers=False,
             )).response  # This just gets command response, not what we want
-            
+
             # Instead, try to get it from ui_state (root_directory was passed to main())
             root_log_dir = root_directory
-            
+
             return jsonify({
                 'success': True,
                 'root_log_dir': root_log_dir
@@ -2789,7 +2789,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
 
 
         if not selected_to_ids and not predicates:
-            return 
+            return
 
         zerofy_op = pb2.WeightOperation(
             op_type=pb2.WeightOperationType.ZEROFY,
@@ -2815,7 +2815,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
                 get_interactive_layers=True,
             ))
         )
-        return 
+        return
 
     @app.callback(
         Input({"type": "layer-freeze-btn", "layer_id": ALL}, "n_clicks"),
@@ -3081,7 +3081,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
                 "count": int(len(weight_operation.neuron_ids)),
                 "resp_message": getattr(response, "message", "")[:200]
             })
-    
+
     @app.callback(
         Output({'type': 'layer-side-panel', 'layer_id': MATCH}, 'style'),
         Input('neuron_stats-checkboxes', 'value'),
@@ -3130,8 +3130,8 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         Output({'type': 'layer-activation', 'layer_id': MATCH}, 'style'),
         # Input('weights-render-freq', 'n_intervals'),
         Input('neuron_stats-checkboxes', 'value'),
-        Input('activation-sample-id', 'value'),   
-        Input('activation-origin', 'value'),  
+        Input('activation-sample-id', 'value'),
+        Input('activation-origin', 'value'),
         State({'type': 'layer-activation', 'layer_id': MATCH}, 'id'),
         prevent_initial_call = True
     )
@@ -3151,7 +3151,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         is_conv = "Conv2d" in (getattr(resp_pre, "layer_type", "") or "")
         resp_post = None
         if is_conv:
-            bn_layer_id = layer_id + 1 
+            bn_layer_id = layer_id + 1
             resp_post = stub.GetActivations(pb2.ActivationRequest(
                 layer_id=bn_layer_id, sample_id=sample_id, origin=origin
             ))
@@ -3204,9 +3204,9 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     @app.callback(
         Output({'type': 'layer-heatmap', 'layer_id': MATCH}, 'children'),
         Output({'type': 'layer-heatmap', 'layer_id': MATCH}, 'style'),
-        Input('weights-fetch-freq', 'n_intervals'),                      
+        Input('weights-fetch-freq', 'n_intervals'),
         Input('neuron_stats-checkboxes', 'value'),
-        Input({'type': 'layer-heatmap-checkbox', 'layer_id': ALL}, 'value'), 
+        Input({'type': 'layer-heatmap-checkbox', 'layer_id': ALL}, 'value'),
         Input({'type': 'layer-neuron-range', 'layer_id': ALL}, 'n_submit'),
         State({'type': 'layer-heatmap', 'layer_id': MATCH}, 'id'),
         State({'type': 'linear-incoming-shape', 'layer_id': ALL}, 'id'),
@@ -3216,7 +3216,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         State({'type': 'layer-neuron-range', 'layer_id': ALL}, 'value'),
     )
     def render_layer_heatmap(
-            _, checklist_values, checkbox_values, submit_counts, heatmap_id, 
+            _, checklist_values, checkbox_values, submit_counts, heatmap_id,
             all_linear_ids, all_linear_values, all_cb_ids, all_range_ids, all_range_vals
     ):
         values = checklist_values or []
@@ -3385,7 +3385,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         selected_count = len(train_selected_ids or [])
         return (
             df.to_dict('records'),
-            _build_table_columns(df),                  
+            _build_table_columns(df),
             f"Train Dataset #{num_available_samples} samples | {selected_count} selected"
         )
 
@@ -3544,7 +3544,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
                 request.deny_eval_samples_operation.accumulate = accumulate
         resp = stub.ExperimentCommand(request)
         logger.info("Updated samples", extra={
-            "tab": tab_type,                          
+            "tab": tab_type,
             "action": ("undiscard" if un_discard else "deny"),
             "count": int(len(sample_ids)),
             "accumulate": bool(accumulate),
@@ -3630,8 +3630,8 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         Input('sample-inspect-checkboxes', 'value'),
         Input('eval-sample-inspect-checkboxes', 'value'),
         Input('data-tabs', 'value'),
-        State('train-image-selected-ids', 'data'), 
-        State('eval-image-selected-ids', 'data'),  
+        State('train-image-selected-ids', 'data'),
+        State('eval-image-selected-ids', 'data'),
         prevent_initial_call=True
     )
     def render_samples(
@@ -3656,7 +3656,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
                                     discarded_ids=discarded_ids,
                                     selected_ids=(eval_selected_ids or []))
         return panels
-    
+
     @app.callback(
         Output({'type': 'sample-img-el', 'origin': 'train', 'slot': ALL}, 'src'),
         Output({'type': 'sample-img-label', 'origin': 'train', 'slot': ALL}, 'children'),
@@ -3679,7 +3679,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             urls[i] = f"/img/train/{sid}?w={img_size}&h={img_size}&fmt=webp"
             labels[i] = f"Loss: {last_loss:.4f}" if last_loss is not None else "Loss: -"
         return urls, labels
-    
+
     @app.callback(
         Output({'type': 'sample-img-el', 'origin': 'eval', 'slot': ALL}, 'src'),
         Output({'type': 'sample-img-label', 'origin': 'eval', 'slot': ALL}, 'children'),
@@ -3727,7 +3727,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     @app.callback(
         Output('train-data-table', 'selected_rows', allow_duplicate=True),
         Input('train-image-selected-ids', 'data'),
-        Input('train-data-table', 'data'),          
+        Input('train-data-table', 'data'),
         prevent_initial_call=True
     )
     def restore_train_selected_rows(selected_ids, data):
@@ -3740,7 +3740,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     @app.callback(
         Output('eval-data-table', 'selected_rows', allow_duplicate=True),
         Input('eval-image-selected-ids', 'data'),
-        Input('eval-data-table', 'data'),           
+        Input('eval-data-table', 'data'),
         prevent_initial_call=True
     )
     def restore_eval_selected_rows(selected_ids, data):
@@ -3798,11 +3798,11 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         if "discard_by_flag_flip" in table_checkboxes:
             return previous_data
         return current_data
-    
+
     @app.callback(
         Output('train-image-selected-ids', 'data', allow_duplicate=True),
-        Input('train-data-table', 'derived_virtual_selected_rows'), 
-        State('train-data-table', 'derived_virtual_data'),          
+        Input('train-data-table', 'derived_virtual_selected_rows'),
+        State('train-data-table', 'derived_virtual_data'),
         State('train-image-selected-ids', 'data'),
         prevent_initial_call=True
     )
@@ -3811,7 +3811,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             return no_update
         ids = [vdata[i]['SampleId'] for i in sel_rows if 0 <= i < len(vdata)]
         return ids
-    
+
     @app.callback(
         Output('eval-image-selected-ids', 'data', allow_duplicate=True),
         Input('eval-data-table', 'derived_virtual_selected_rows'),
@@ -3830,7 +3830,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
     @app.callback(
         Output({'type': 'sample-img-el', 'origin': 'train', 'sid': ALL}, 'style'),
         Input('train-image-selected-ids', 'data'),
-        Input('train-sample-panel', 'children'),  
+        Input('train-sample-panel', 'children'),
         State({'type': 'sample-img-el', 'origin': 'train', 'sid': ALL}, 'id'),
         State({'type': 'sample-img-el', 'origin': 'train', 'sid': ALL}, 'style'),
         prevent_initial_call=True
@@ -3849,7 +3849,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             out.append(s)
         return out
 
-        
+
     @app.callback(
         Output({'type': 'sample-img-el', 'origin': 'eval', 'sid': ALL}, 'style'),
         Input('eval-image-selected-ids', 'data'),
@@ -3914,7 +3914,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
         return graph_divs
 
     @app.callback(
-        Output({'type': "graph", "index": MATCH}, "figure", 
+        Output({'type': "graph", "index": MATCH}, "figure",
                allow_duplicate=True),
         Input("graphss-render-freq", "n_intervals"),
         State({'type': "graph", "index": MATCH}, "id"),
@@ -4080,7 +4080,7 @@ def ui_serve(root_directory: str = None, ui_host: str = "localhost", ui_port: in
     """Launch the UI in a separate subprocess to avoid GIL contention."""
     import subprocess
     import sys
-    
+
     ui_host = os.environ.get("WEIGHTSLAB_UI_HOST", ui_host)
     ui_port = int(os.environ.get("WEIGHTSLAB_UI_PORT", ui_port))
     grpc_host = os.environ.get("GRPC_BACKEND_HOST", grpc_host)
@@ -4094,7 +4094,7 @@ def ui_serve(root_directory: str = None, ui_host: str = "localhost", ui_port: in
         "--ui_host", f'{ui_host}:{ui_port}',
         "--grpc_host", f'{grpc_host}:{grpc_port}'
     ]
-    
+
     logger.info("ui_subprocess_starting", extra={
         "command": " ".join(cmd),
         "ui_host": ui_host,
@@ -4103,7 +4103,7 @@ def ui_serve(root_directory: str = None, ui_host: str = "localhost", ui_port: in
         "grpc_port": grpc_port,
         "root_directory": root_directory
     })
-    
+
     # Launch UI as subprocess - output goes to parent console
     ui_process = subprocess.Popen(
         cmd,
@@ -4111,7 +4111,7 @@ def ui_serve(root_directory: str = None, ui_host: str = "localhost", ui_port: in
         stderr=None,  # Inherit parent's stderr (console)
         stdin=subprocess.DEVNULL
     )
-    
+
     logger.info("ui_subprocess_started", extra={
         "pid": ui_process.pid,
         "ui_host": ui_host,
@@ -4120,7 +4120,7 @@ def ui_serve(root_directory: str = None, ui_host: str = "localhost", ui_port: in
         "grpc_port": grpc_port,
         "root_directory": root_directory
     })
-    
+
     return ui_process
 
 

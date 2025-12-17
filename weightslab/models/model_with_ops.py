@@ -48,7 +48,7 @@ class NetworkWithOps(nn.Module):
 
     def __repr__(self):
         return super().__repr__() + f" age=({self.seen_samples})"
-    
+
     def _conv_neuron_to_linear_neurons_through_flatten(
             self, conv_layer, linear_layer):
         conv_neurons = conv_layer.weight.shape[0]
@@ -92,7 +92,7 @@ class NetworkWithOps(nn.Module):
 
     def get_batched_age(self):
         return self.seen_batched_samples
-     
+
     def get_name(self):
         return self.name
 
@@ -145,7 +145,7 @@ class NetworkWithOps(nn.Module):
             setattr(tracked_input, 'batch_size', tracked_input.shape[0])
         self.seen_samples += tracked_input.batch_size
         self.seen_batched_samples += 1
-        
+
         # If an instance provides an auto-dump hook (e.g., ModelInterface), call it.
         try:
             hook = getattr(self, '_maybe_auto_dump', None)
@@ -156,7 +156,7 @@ class NetworkWithOps(nn.Module):
                     pass
         except Exception:
             pass
-    
+
     def operate(
         self,
         layer_id: int,
@@ -193,7 +193,7 @@ class NetworkWithOps(nn.Module):
         # Reset visited nodes memory
         self.visited_nodes = set()
         self.visited_incoming_nodes = set()
-        
+
         # Call the recursive function
         self._operate(
             layer_id,
@@ -256,9 +256,9 @@ class NetworkWithOps(nn.Module):
                 f"[NetworkWithOps.operate] Layer_id ({layer_id}) is not int.")
         if op_type is None:
             raise ValueError(
-                f"[NetworkWithOps.operate] Neuron operation " + 
+                f"[NetworkWithOps.operate] Neuron operation " +
                 f"{op_type} has not been defined.")
-        
+
         # Convert to index from back
         logger.debug(f"[DEBUG OPERATE] Called with layer_id={layer_id}")
         layer_id = self._reverse_indexing(layer_id, len(self.layers))
@@ -275,7 +275,7 @@ class NetworkWithOps(nn.Module):
         # Sanity check to avoid redundancy
         # To be sure that nodes are updated only one time by pass
         bypass = hasattr(module, "bypass")
-        
+
         # ------------------------------------------------------------------- #
         # ------------------------- REC ------------------------------------- #
         # If the dependent layer is of type "REC", say after a conv we have
@@ -384,7 +384,7 @@ class NetworkWithOps(nn.Module):
         # Go through childs
         incoming_module = None
         updated_incoming_children: List[int] = []
-        
+
         incoming_ids = self._dep_manager.get_child_ids(layer_id, DepType.INCOMING)
         if incoming_ids:
             logger.debug(f"[DEBUG] {module.get_name_wi_id()} (ID: {layer_id}) has INCOMING children IDs: {incoming_ids}")

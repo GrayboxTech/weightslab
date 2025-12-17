@@ -1,5 +1,4 @@
 import os
-import time
 import tempfile
 import logging
 
@@ -21,10 +20,12 @@ from weightslab.components.global_monitoring import (
     pause_controller
 )
 
+
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
 logging.getLogger("PIL").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
 
 # Simple CNN for YCB (RGB 3xHxW, variable num_classes)
 class YCBCNN(nn.Module):
@@ -158,7 +159,6 @@ if __name__ == "__main__":
         parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
     tqdm_display = parameters.get('tqdm_display', True)
-    tqdm_display_eval = parameters.get('tqdm_display_eval', True)
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     eval_every = parameters["eval_full_to_train_steps_ratio"]
@@ -172,7 +172,7 @@ if __name__ == "__main__":
         defaults=parameters,
         poll_interval=1.0,
     )
-    
+
     # ------------------------ DATA ------------------------
     # ------------------------------------------------------
     data_root = parameters.get("data", {}).get(
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     _test_dataset = datasets.ImageFolder(root=val_dir, transform=common_transform)
     num_classes = len(datasets.ImageFolder(root=train_dir, transform=common_transform).classes)
     logger.info(f"Detected {num_classes} classes.")
-    
+
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
 
@@ -216,7 +216,9 @@ if __name__ == "__main__":
         batch_size=train_cfg.get("batch_size", 16),
         shuffle=train_cfg.get("train_shuffle", True),
         is_training=True,
-        compute_hash=False
+        compute_hash=False,
+        use_tags=True,
+        tags_mapping={'huge': 1}
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -224,7 +226,9 @@ if __name__ == "__main__":
         name="test_loader",
         batch_size=test_cfg.get("batch_size", 16),
         shuffle=test_cfg.get("test_shuffle", False),
-        compute_hash=False
+        compute_hash=False,
+        use_tags=True,
+        tags_mapping={'huge': 1}
     )
 
     # --- 6) Model, optimizer, losses, metric ---
@@ -258,7 +262,7 @@ if __name__ == "__main__":
     wl.serve(
         serving_ui=False,
         root_directory=log_dir,
-        
+
         serving_cli=True,
 
         serving_grpc=True,
@@ -321,10 +325,5 @@ if __name__ == "__main__":
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
 
-    # Keep server alive for UI
-    print("\nServer is still running. Press Ctrl+C to stop.")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nStopping server...")
+    # Keep the main thread alive to allow background serving threads to run
+    wl.keep_serving()

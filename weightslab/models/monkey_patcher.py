@@ -17,7 +17,7 @@ def monkey_patch_modules(module: nn.Module):
     """
         Dynamically injects LayerWiseOperations methods, wraps forward, and
         renames the module's displayed class name.
-       
+
         Args:
             module (nn.Module): The module to be patched.
     """

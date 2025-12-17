@@ -19,6 +19,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            **/requirements*.txt
+
+      - name: Cache pip and Ruff
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/ruff
+          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache
+          restore-keys: |
+            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
+            ${{ runner.os }}-
 
       - name: Get changed Python files
         id: changed-files

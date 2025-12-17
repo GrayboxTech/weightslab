@@ -23,14 +23,14 @@ from weightslab.utils.modules_dependencies import DepType
 from weightslab.backend.model_interface import ModelInterface
 
 
-os.environ['WEIGHTSLAB_LOG_LEVEL'] = 'DEBUG'    
+os.environ['WEIGHTSLAB_LOG_LEVEL'] = 'DEBUG'
 
 1
 class MinimalSAMEDependencies(nn.Module):
     """
     Tests SAME dependency type: Conv -> BN -> ReLU
-    
-    Expected: 
+
+    Expected:
     - conv -> bn: SAME (BN has only 1D params)
     - bn -> relu: SAME (ReLU has no params)
     """
@@ -39,7 +39,7 @@ class MinimalSAMEDependencies(nn.Module):
         self.conv = nn.Conv2d(3, 64, 3, padding=1)
         self.bn = nn.BatchNorm2d(64)
         self.relu = nn.ReLU()
-    
+
     def forward(self, x):
         x = self.conv(x)
         x = self.bn(x)
@@ -50,7 +50,7 @@ class MinimalSAMEDependencies(nn.Module):
 class MinimalINCOMINGDependencies(nn.Module):
     """
     Tests INCOMING dependency type: Conv -> Conv
-    
+
     Expected:
     - conv1 -> conv2: INCOMING (Conv2d has 2D weight matrix)
     """
@@ -58,7 +58,7 @@ class MinimalINCOMINGDependencies(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(3, 64, 3, padding=1)
         self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
-    
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.conv2(x)
@@ -68,7 +68,7 @@ class MinimalINCOMINGDependencies(nn.Module):
 class MinimalMixedDependencies(nn.Module):
     """
     Tests mixed SAME and INCOMING: Conv -> BN -> ReLU -> Conv
-    
+
     Expected:
     - conv1 -> bn: SAME
     - bn -> relu: SAME
@@ -80,7 +80,7 @@ class MinimalMixedDependencies(nn.Module):
         self.bn = nn.BatchNorm2d(64)
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
-    
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn(x)
@@ -92,7 +92,7 @@ class MinimalMixedDependencies(nn.Module):
 class MinimalResidualBlock(nn.Module):
     """
     Tests REC dependency type: Simple residual connection
-    
+
     Expected:
     - conv1 -> bn1: SAME
     - bn1 -> relu: SAME
@@ -107,7 +107,7 @@ class MinimalResidualBlock(nn.Module):
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(64, 64, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
-    
+
     def forward(self, x):
         out1 = self.conv1(x)
         out = self.bn1(out1)
@@ -121,7 +121,7 @@ class MinimalResidualBlock(nn.Module):
 class MinimalSkipConnectionCat(nn.Module):
     """
     Tests REC dependency via concatenation (Concat operation)
-    
+
     Expected:
     - conv1 -> relu: SAME
     - conv2 -> relu2: SAME
@@ -134,14 +134,14 @@ class MinimalSkipConnectionCat(nn.Module):
         self.conv2 = nn.Conv2d(3, 32, 3, padding=1)
         self.relu2 = nn.ReLU()
         self.conv_merged = nn.Conv2d(64, 64, 3, padding=1)
-    
+
     def forward(self, x):
         branch1 = self.conv1(x)
         branch1 = self.relu1(branch1)
-        
+
         branch2 = self.conv2(x)
         branch2 = self.relu2(branch2)
-        
+
         merged = torch.cat([branch1, branch2], dim=1)  # REC: both branches constrained
         out = self.conv_merged(merged)
         return out
@@ -150,7 +150,7 @@ class MinimalSkipConnectionCat(nn.Module):
 class MinimalWithMaxPool(nn.Module):
     """
     Tests non-learnable layers in dependency chain: Conv -> MaxPool -> ReLU -> Conv
-    
+
     Expected:
     - conv1 -> maxpool: SAME (MaxPool has no learnable params)
     - maxpool -> relu: SAME (ReLU has no learnable params)
@@ -162,7 +162,7 @@ class MinimalWithMaxPool(nn.Module):
         self.maxpool = nn.MaxPool2d(2, 2)
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(64, 128, 1, padding=0)
-    
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.maxpool(x)
@@ -174,7 +174,7 @@ class MinimalWithMaxPool(nn.Module):
 class MinimalWithUpsampling(nn.Module):
     """
     Tests upsampling layer: Conv -> Upsample -> Conv
-    
+
     Expected:
     - conv1 -> upsample: SAME (Upsample has no learnable params)
     - upsample -> conv2: INCOMING
@@ -184,7 +184,7 @@ class MinimalWithUpsampling(nn.Module):
         self.conv1 = nn.Conv2d(3, 64, 3, padding=1)
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.conv2 = nn.Conv2d(64, 128, 3, padding=1)
-    
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.upsample(x)
@@ -390,7 +390,7 @@ class MinimalSubOperation(nn.Module):
 
 class DependencyPatternTest(unittest.TestCase):
     """Base class for dependency pattern tests"""
-    
+
     def get_dependencies_torchfx(self, model: nn.Module, dummy_input: torch.Tensor) -> List[Tuple[nn.Module, nn.Module, DepType]]:
         """Extract dependencies using torch.fx tracing"""
         try:
@@ -399,7 +399,7 @@ class DependencyPatternTest(unittest.TestCase):
             return self.model
         except Exception as e:
             self.skipTest(f"TorchFX tracing failed: {e}")
-    
+
     def get_dependencies_onnx(self, model: nn.Module, dummy_input: torch.Tensor) -> List[Tuple[nn.Module, nn.Module, DepType]]:
         """Extract dependencies using ONNX export"""
         try:
@@ -408,31 +408,31 @@ class DependencyPatternTest(unittest.TestCase):
             return self.model
         except Exception as e:
             self.skipTest(f"ONNX export failed: {e}")
-    
-    def assert_dependency_exists(self, deps: List[Tuple[nn.Module, nn.Module, DepType]], 
+
+    def assert_dependency_exists(self, deps: List[Tuple[nn.Module, nn.Module, DepType]],
                                 src_name: str, dst_name: str, dep_type: DepType = None):
         """Assert that a dependency exists between two modules"""
         module_names = {id(m): n for n, m in self.model.named_modules()}
         found = False
-        
+
         for src, dst, dtype in deps:
             src_n = module_names.get(id(src))
             dst_n = module_names.get(id(dst))
-            
+
             if src_n == src_name and dst_n == dst_name:
                 found = True
                 if dep_type is not None:
-                    self.assertEqual(dtype, dep_type, 
+                    self.assertEqual(dtype, dep_type,
                         f"Expected {src_name} -> {dst_name} to have type {dep_type.name}, got {dtype.name}")
                 break
-        
+
         self.assertTrue(found, f"Dependency {src_name} -> {dst_name} not found")
-    
-    def assert_dependency_count_range(self, deps: List[Tuple[nn.Module, nn.Module, DepType]], 
+
+    def assert_dependency_count_range(self, deps: List[Tuple[nn.Module, nn.Module, DepType]],
                                       min_count: int = None, max_count: int = None):
         """Assert that dependency count is within expected range"""
         if min_count is not None:
-            self.assertGreaterEqual(len(deps), min_count, 
+            self.assertGreaterEqual(len(deps), min_count,
                 f"Expected at least {min_count} dependencies, got {len(deps)}")
         if max_count is not None:
             self.assertLessEqual(len(deps), max_count,
@@ -456,13 +456,13 @@ class DependencyPatternTest(unittest.TestCase):
 
 class TestSAMEDependencies(DependencyPatternTest):
     """Test models with SAME dependency patterns"""
-    
+
     def setUp(self):
         self.model = MinimalSAMEDependencies()
         self.model.eval()
         self._model = self.model
         self.dummy_input = torch.randn(1, 3, 32, 32)
-    
+
     def test_same_pattern_onnx(self):
         """Test SAME pattern: Conv -> BN -> ReLU with ONNX"""
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
@@ -470,7 +470,7 @@ class TestSAMEDependencies(DependencyPatternTest):
 
         # Should have dependencies connecting all layers
         self.assert_dependency_count_range(deps, min_count=2)
-        
+
         # Check for SAME type dependencies
         same_deps = [d for d in deps if d[2] == DepType.SAME]
         self.assertGreater(len(same_deps), 0, "Should have at least one SAME dependency")
@@ -486,14 +486,14 @@ class TestSAMEDependencies(DependencyPatternTest):
         """Test SAME pattern: Conv -> BN -> ReLU with TorchFX"""
         self.model = self.get_dependencies_torchfx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=2)
-        
+
         # Check for SAME type dependencies
         same_deps = [d for d in deps if d[2] == DepType.SAME]
         self.assertGreater(len(same_deps), 0, "Should have at least one SAME dependency")
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2]])
@@ -504,25 +504,25 @@ class TestSAMEDependencies(DependencyPatternTest):
 
 class TestINCOMINGDependencies(DependencyPatternTest):
     """Test models with INCOMING dependency patterns"""
-    
+
     def setUp(self):
         self.model = MinimalINCOMINGDependencies()
         self.model.eval()
         self._model = self.model
         self.dummy_input = torch.randn(1, 3, 32, 32)
-    
+
     def test_incoming_pattern_onnx(self):
         """Test INCOMING pattern: Conv -> Conv with ONNX"""
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have at least one dependency
         self.assert_dependency_count_range(deps, min_count=1)
-        
+
         # Check for INCOMING type dependencies
         incoming_deps = [d for d in deps if d[2] == DepType.INCOMING]
         self.assertGreater(len(incoming_deps), 0, "Should have at least one INCOMING dependency")
-            
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1]])
@@ -534,10 +534,10 @@ class TestINCOMINGDependencies(DependencyPatternTest):
         """Test INCOMING pattern: Conv -> Conv with TorchFX"""
         self.model = self.get_dependencies_torchfx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=1)
-        
+
         # Check for INCOMING type dependencies
         incoming_deps = [d for d in deps if d[2] == DepType.INCOMING]
         self.assertGreater(len(incoming_deps), 0, "Should have at least one INCOMING dependency")
@@ -552,28 +552,28 @@ class TestINCOMINGDependencies(DependencyPatternTest):
 
 class TestMixedDependencies(DependencyPatternTest):
     """Test models with mixed dependency patterns"""
-    
+
     def setUp(self):
         self.model = MinimalMixedDependencies()
         self.model.eval()
         self._model = self.model
         self.dummy_input = torch.randn(1, 3, 32, 32)
-    
+
     def test_mixed_pattern_onnx(self):
         """Test mixed pattern: Conv -> BN -> ReLU -> Conv with ONNX"""
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have multiple dependencies
         self.assert_dependency_count_range(deps, min_count=3)
-        
+
         # Check for both SAME and INCOMING types
         same_deps = [d for d in deps if d[2] == DepType.SAME]
         incoming_deps = [d for d in deps if d[2] == DepType.INCOMING]
-        
+
         self.assertGreater(len(same_deps), 0, "Should have SAME dependencies")
         self.assertGreater(len(incoming_deps), 0, "Should have INCOMING dependencies")
-    
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
@@ -585,7 +585,7 @@ class TestMixedDependencies(DependencyPatternTest):
         """Test mixed pattern: Conv -> BN -> ReLU -> Conv with TorchFX"""
         self.model = self.get_dependencies_torchfx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=3)
 
@@ -599,21 +599,21 @@ class TestMixedDependencies(DependencyPatternTest):
 
 class TestResidualConnections(DependencyPatternTest):
     """Test models with residual (REC) dependency patterns"""
-    
+
     def setUp(self):
         self.model = MinimalResidualBlock()
         self.model.eval()
         self._model = self.model
         self.dummy_input = torch.randn(1, 64, 32, 32)
-    
+
     def test_residual_pattern_onnx(self):
         """Test residual pattern with ONNX"""
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=4)
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3], [3, 4], [4, 0], [0, 4]])
@@ -625,7 +625,7 @@ class TestResidualConnections(DependencyPatternTest):
         """Test residual pattern with TorchFX"""
         self.model = self.get_dependencies_torchfx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=4)
 
@@ -639,21 +639,21 @@ class TestResidualConnections(DependencyPatternTest):
 
 class TestConcatenationSkipConnections(DependencyPatternTest):
     """Test models with concatenation skip connections (REC dependencies)"""
-    
+
     def setUp(self):
         self.model = MinimalSkipConnectionCat()
         self.model.eval()
         self._model = self.model
         self.dummy_input = torch.randn(1, 3, 32, 32)
-    
+
     def test_concat_pattern_onnx(self):
         """Test concatenation pattern with ONNX"""
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=4)
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [2, 3], [1, 4], [3, 4]])
@@ -665,7 +665,7 @@ class TestConcatenationSkipConnections(DependencyPatternTest):
         """Test concatenation pattern with TorchFX"""
         self.model = self.get_dependencies_torchfx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=4)
 
@@ -679,33 +679,33 @@ class TestConcatenationSkipConnections(DependencyPatternTest):
 
 class TestNonLearnableLayers(DependencyPatternTest):
     """Test models with non-learnable layers (MaxPool, ReLU, etc.)"""
-    
+
     def setUp(self):
         self.model = MinimalWithMaxPool()
         self.model.eval()
         self._model = self.model
         self.dummy_input = torch.randn(1, 3, 32, 32)
-    
+
     def test_maxpool_pattern_onnx(self):
         """Test pattern with MaxPool: Conv -> MaxPool -> ReLU -> Conv with ONNX"""
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies including non-learnable layers
         self.assert_dependency_count_range(deps, min_count=3)
-        
+
         # Should include MaxPool and ReLU in dependencies
         module_names = {id(m): n for n, m in self.model.named_modules()}
         dep_pairs = [(module_names.get(id(s)), module_names.get(id(d))) for s, d, _ in deps]
-        
+
         # Check that maxpool appears in dependency chain
         maxpool_involved = any(
-            ('maxpool' in str(pair[0] or '') or 'maxpool' in str(pair[1] or '')) 
+            ('maxpool' in str(pair[0] or '') or 'maxpool' in str(pair[1] or ''))
             for pair in dep_pairs
         )
-        self.assertTrue(maxpool_involved or len(deps) > 0, 
+        self.assertTrue(maxpool_involved or len(deps) > 0,
             "Should have dependencies involving pooling layer")
-    
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
@@ -717,22 +717,22 @@ class TestNonLearnableLayers(DependencyPatternTest):
         """Test pattern with MaxPool using TorchFX"""
         self.model = self.get_dependencies_torchfx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=3)
 
         # Should include MaxPool and ReLU in dependencies
         module_names = {id(m): n for n, m in self.model.named_modules()}
         dep_pairs = [(module_names.get(id(s)), module_names.get(id(d))) for s, d, _ in deps]
-        
+
         # Check that maxpool appears in dependency chain
         maxpool_involved = any(
-            ('maxpool' in str(pair[0] or '') or 'maxpool' in str(pair[1] or '')) 
+            ('maxpool' in str(pair[0] or '') or 'maxpool' in str(pair[1] or ''))
             for pair in dep_pairs
         )
-        self.assertTrue(maxpool_involved or len(deps) > 0, 
+        self.assertTrue(maxpool_involved or len(deps) > 0,
             "Should have dependencies involving pooling layer")
-    
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
@@ -743,28 +743,28 @@ class TestNonLearnableLayers(DependencyPatternTest):
 
 class TestUpsampling(DependencyPatternTest):
     """Test models with upsampling layers"""
-    
+
     def setUp(self):
         self.model = MinimalWithUpsampling()
         self.model.eval()
         self._model = self.model
         self.dummy_input = torch.randn(1, 3, 32, 32)
-    
+
     def test_upsample_pattern_onnx(self):
         """Test pattern with Upsample: Conv -> Upsample -> Conv with ONNX"""
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=2)
-        
+
         # Check for dependencies involving upsampling
         module_names = {id(m): n for n, m in self.model.named_modules()}
         dep_pairs = [(module_names.get(id(s)), module_names.get(id(d))) for s, d, _ in deps]
-        
+
         # Verify dependencies exist
         self.assertTrue(len(dep_pairs) > 0, "Should have dependencies with upsample layer")
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2]])
@@ -776,17 +776,17 @@ class TestUpsampling(DependencyPatternTest):
         """Test pattern with Upsample using TorchFX"""
         self.model = self.get_dependencies_torchfx(self.model, self.dummy_input)
         deps = self.model.dependencies_with_ops
-        
+
         # Should have dependencies
         self.assert_dependency_count_range(deps, min_count=2)
-    
+
         # Check for dependencies involving upsampling
         module_names = {id(m): n for n, m in self.model.named_modules()}
         dep_pairs = [(module_names.get(id(s)), module_names.get(id(d))) for s, d, _ in deps]
-        
+
         # Verify dependencies exist
         self.assertTrue(len(dep_pairs) > 0, "Should have dependencies with upsample layer")
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2]])
@@ -797,31 +797,31 @@ class TestUpsampling(DependencyPatternTest):
 
 class TestInferDependencyType(unittest.TestCase):
     """Test the _infer_dependency_type helper function"""
-    
+
     def test_conv2d_inference(self):
         """Conv2d has 2D+ weights -> INCOMING"""
         conv = nn.Conv2d(3, 64, 3)
         dep_type = _infer_dependency_type(conv)
         self.assertEqual(dep_type, DepType.INCOMING)
-    
+
     def test_batchnorm_inference(self):
         """BatchNorm has only 1D params -> SAME"""
         bn = nn.BatchNorm2d(64)
         dep_type = _infer_dependency_type(bn)
         self.assertEqual(dep_type, DepType.SAME)
-    
+
     def test_linear_inference(self):
         """Linear has 2D weights -> INCOMING"""
         linear = nn.Linear(100, 50)
         dep_type = _infer_dependency_type(linear)
         self.assertEqual(dep_type, DepType.INCOMING)
-    
+
     def test_relu_inference(self):
         """ReLU has no params -> SAME"""
         relu = nn.ReLU()
         dep_type = _infer_dependency_type(relu)
         self.assertEqual(dep_type, DepType.SAME)
-    
+
     def test_maxpool_inference(self):
         """MaxPool has no params -> SAME"""
         maxpool = nn.MaxPool2d(2, 2)
@@ -842,7 +842,7 @@ class TestGroupedConv(DependencyPatternTest):
         self.assert_dependency_count_range(deps, min_count=3)
         incoming_deps = [d for d in deps if d[2] == DepType.INCOMING]
         self.assertGreater(len(incoming_deps), 0)
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
@@ -856,7 +856,7 @@ class TestGroupedConv(DependencyPatternTest):
         self.assert_dependency_count_range(deps, min_count=3)
         incoming_deps = [d for d in deps if d[2] == DepType.INCOMING]
         self.assertGreater(len(incoming_deps), 0)
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3]])
@@ -878,7 +878,7 @@ class TestDepthwisePointwiseWithLinear(DependencyPatternTest):
         deps = self.model.dependencies_with_ops
         incoming_deps = [d for d in deps if d[2] == DepType.INCOMING]
         self.assertGreater(len(incoming_deps), 0)
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7]])
@@ -891,7 +891,7 @@ class TestDepthwisePointwiseWithLinear(DependencyPatternTest):
         deps = self.model.dependencies_with_ops
         incoming_deps = [d for d in deps if d[-1] == DepType.INCOMING]
         self.assertGreater(len(incoming_deps), 0)
-        
+
         # Check dependency consistency
         same_deps_ids = [[d[0].module_id, d[1].module_id] for d in deps]
         self.assertEqual(same_deps_ids, [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7]])

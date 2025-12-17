@@ -106,7 +106,7 @@ class Tracker(NeuronWiseOperations, th.nn.Module):
 class TriggersTracker(Tracker):
     """
     Computes how often does neurons trigger on average during a given
-    time frame. Keeps track of how many times a neuron triggered (a.k.a 
+    time frame. Keeps track of how many times a neuron triggered (a.k.a
     its value was over 0) and how many samples tha neuron has seen.
 
     Args:
@@ -298,7 +298,7 @@ class TriggersTracker(Tracker):
     def get_neuron_stats(self, neuron_id: int):
         """ Get how often did this neuron trigger on average. """
         if self.disabled:
-            return None 
+            return None
         return self.get_neuron_triggers(neuron_id) / \
             max(self.get_neuron_age(neuron_id), 1)
 

@@ -118,7 +118,7 @@ def _handle_command(cmd: str) -> Any:
         if verb == 'pause' or verb == 'p':
             pause_controller.pause()
             return {'ok': True, 'action': 'paused'}
-            
+
 
         if verb == 'resume' or verb == 'r':
             pause_controller.resume()
@@ -492,7 +492,7 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 60000, *, spawn_clien
 
     if _server_thread is not None and _server_thread.is_alive():
         return {'ok': False, 'error': 'server_already_running'}
-    
+
     # start server thread on a pre-bound socket to avoid races
     try:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -12,7 +12,6 @@ import yaml
 import itertools
 
 from torchvision import datasets, transforms
-from torch.utils.data import Subset
 from torchmetrics.classification import Accuracy
 
 from weightslab.utils.board import Dash as Logger
@@ -278,5 +277,10 @@ if __name__ == '__main__':
                 acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
             )
 
-    print(f"--- Training completed in {time.time() - start_time:.2f} seconds ---")
-    print(f"Log directory: {log_dir}")
+    print("\n" + "=" * 60)
+    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
+    print(f"💾 Logs saved to: {log_dir}")
+    print("=" * 60)
+
+    # Keep the main thread alive to allow background serving threads to run
+    wl.keep_serving()
