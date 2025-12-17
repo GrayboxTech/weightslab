@@ -485,3 +485,12 @@ def serve(serving_ui: bool = False, serving_cli: bool = False, serving_grpc: boo
     if serving_cli:
         cli_serve(**kwargs)
     
+
+def keep_serving():
+    """ Keep the main thread alive to allow background serving threads to run.
+    """
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down WeightsLab services.")
