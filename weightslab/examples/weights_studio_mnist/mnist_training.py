@@ -21,7 +21,7 @@ from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context
 )
-os.environ["GRPC_VERBOSITY"] = "debug"
+
 
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
@@ -283,3 +283,6 @@ if __name__ == "__main__":
     print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
+
+    # Keep the main thread alive to allow background serving threads to run
+    wl.keep_serving()
