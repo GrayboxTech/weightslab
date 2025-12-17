@@ -5,7 +5,7 @@ from PIL import Image
 
 def load_raw_image(dataset, index):
     """Load raw image from dataset at given index."""
-    
+
     def to_uint8(np_img: np.ndarray) -> np.ndarray:
         """Convert an array to uint8 safely for PIL.
         - Floats in [0,1] -> scale by 255
@@ -26,10 +26,10 @@ def load_raw_image(dataset, index):
         # Clip to valid byte range then cast
         np_img = np.clip(np_img, 0, 255)
         return np_img.astype(np.uint8)
-    
+
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
-    
+
     if hasattr(wrapped, "images") and isinstance(wrapped.images, list):
         img_path = wrapped.images[index]
         img = Image.open(img_path)
@@ -47,7 +47,7 @@ def load_raw_image(dataset, index):
         if isinstance(np_img, (list, tuple)):
             np_img = np_img[0]
         if hasattr(np_img, 'numpy'):
-            np_img = np_img.numpy()  
+            np_img = np_img.numpy()
         if np_img.ndim == 2:
             np_img = to_uint8(np_img)
             return Image.fromarray(np_img, mode="L")

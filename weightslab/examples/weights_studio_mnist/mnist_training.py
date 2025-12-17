@@ -109,7 +109,7 @@ if __name__ == "__main__":
     parameters = parameters or {}
     # ---- sensible defaults / normalization ----
     parameters.setdefault("experiment_name", "mnist_cnn")
-    parameters.setdefault("device", "auto")  
+    parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 1000)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     # FORCE training to start in "running" mode
@@ -227,7 +227,7 @@ if __name__ == "__main__":
         # UI client settings
         serving_ui=False,
         root_directory=log_dir,
-        
+
         # gRPC server settings
         serving_grpc=True,
         n_workers_grpc=None,

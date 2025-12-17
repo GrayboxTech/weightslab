@@ -172,7 +172,7 @@ if __name__ == "__main__":
         defaults=parameters,
         poll_interval=1.0,
     )
-    
+
     # ------------------------ DATA ------------------------
     # ------------------------------------------------------
     data_root = parameters.get("data", {}).get(
@@ -262,7 +262,7 @@ if __name__ == "__main__":
     wl.serve(
         serving_ui=False,
         root_directory=log_dir,
-        
+
         serving_cli=True,
 
         serving_grpc=True,

@@ -26,7 +26,7 @@ class NeuronWiseOperations:
 
         self.module_id = NeuronWiseOperations.MODULE_ID
         NeuronWiseOperations.MODULE_ID += 1
-    
+
     def get_name(self):
         """Return the module name"""
 

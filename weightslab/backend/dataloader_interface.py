@@ -35,24 +35,24 @@ logger = logging.getLogger(__name__)
 
 class MaskedSampler(Sampler):
     """A sampler that filters out deny-listed samples from iteration.
-    
+
     Wraps a base sampler (e.g., RandomSampler, SequentialSampler) and
     skips indices that correspond to deny-listed samples in the dataset.
-    
+
     This allows the DataLoader to dynamically exclude samples without
     rebuilding the dataset or sampler.
     """
 
     def __init__(self, base_sampler: Sampler, tracked_dataset: DataSampleTrackingWrapper):
         """Initialize the masked sampler.
-        
+
         Args:
             base_sampler: The underlying sampler (RandomSampler, SequentialSampler, etc.)
             tracked_dataset: A DataSampleTrackingWrapper with deny-listed samples
         """
         self.base_sampler = base_sampler
         self.tracked_dataset = tracked_dataset
-    
+
     def __iter__(self):
         """Iterate over non-deny-listed indices."""
         # Build a set of deny-listed UIDs for fast lookup
@@ -60,13 +60,13 @@ class MaskedSampler(Sampler):
             uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
             if is_denied
         }
-        
+
         # Iterate through base sampler, yielding only non-denied indices
         for idx in self.base_sampler:
             uid = int(self.tracked_dataset.unique_ids[idx])
             if uid not in deny_listed_uids:
                 yield idx
-    
+
     def __len__(self):
         """Return the number of non-deny-listed samples."""
         # Count non-denied samples
@@ -97,10 +97,10 @@ class DataLoaderInterface:
     excluded from batches during iteration via the MaskedSampler. This allows
     you to dynamically filter samples at train/eval time without rebuilding
     the dataset:
-    
+
         dataset.denylist_samples({sample_id_1, sample_id_2, ...})
         # Next iteration will skip these samples automatically
-    
+
     Public API:
     - __iter__, __len__, __next__
     - next_batch(), reset_iterator()
@@ -144,7 +144,7 @@ class DataLoaderInterface:
             compute_hash: Whether to compute hashes for samples in tracking wrapper.
             use_tags: Whether to use tags for samples in tracking wrapper.
             tags_mapping: Optional mapping of tags to integer labels.
-            
+
             **kwargs: Additional kwargs passed to DataLoader if a Dataset is provided.
         """
         # Normalize inputs
@@ -204,7 +204,7 @@ class DataLoaderInterface:
                 if shuffle
                 else SequentialSampler(self.tracked_dataset)
             )
-            
+
             # Wrap base sampler with MaskedSampler to skip deny-listed samples
             masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
 

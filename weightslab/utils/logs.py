@@ -28,42 +28,42 @@ def setup_logging(level, log_to_file=True):
         log_to_file (bool): If True, logs are written to a temp file (default: True).
     """
     global _LOG_FILE_PATH
-    
+
     # Reset logger handlers to ensure previous configurations don't interfere
     logging.getLogger().handlers = []
 
     # Create formatters
     formatter = logging.Formatter(FORMAT)
-    
+
     # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level.upper())
     console_handler.setFormatter(formatter)
-    
+
     # Get root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level.upper())
     root_logger.addHandler(console_handler)
-    
+
     # File handler - write to temp directory
     if log_to_file:
         # Create temp directory for logs if it doesn't exist
         temp_dir = tempfile.gettempdir()
         log_dir = os.path.join(temp_dir, 'weightslab_logs')
         os.makedirs(log_dir, exist_ok=True)
-        
+
         # Create log file with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         _LOG_FILE_PATH = os.path.join(log_dir, f'weightslab_{timestamp}.log')
-        
+
         file_handler = logging.FileHandler(_LOG_FILE_PATH, mode='w')
         file_handler.setLevel(logging.DEBUG)  # Always log DEBUG+ to file
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
-        
+
         # Register exit handler to print log location
         atexit.register(_print_log_location)
-        
+
         # Log the initialization
         logging.info(f"WeightsLab logging initialized - Log file: {_LOG_FILE_PATH}")
 

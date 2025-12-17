@@ -452,25 +452,25 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         """Test that MaskedSampler properly filters denied samples during iteration."""
         from weightslab.backend.dataloader_interface import MaskedSampler
         from torch.utils.data import SequentialSampler
-        
+
         # Deny samples at indices 1 and 4
         denied_uids = {self.uids[1], self.uids[4]}
         self.wrapped_dataset.denylist_samples(denied_uids)
-        
+
         # Create base sampler and wrap with MaskedSampler
         base_sampler = SequentialSampler(self.wrapped_dataset)
         masked_sampler = MaskedSampler(base_sampler, self.wrapped_dataset)
-        
+
         # Collect all indices yielded by masked sampler
         yielded_indices = list(masked_sampler)
-        
+
         # Should have 4 indices (6 total - 2 denied)
         self.assertEqual(len(yielded_indices), 4)
 
         # Denied indices should NOT appear
         self.assertNotIn(1, yielded_indices)
         self.assertNotIn(4, yielded_indices)
-        
+
         # Non-denied indices should appear
         self.assertIn(0, yielded_indices)
         self.assertIn(2, yielded_indices)
@@ -481,14 +481,14 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         """Test that MaskedSampler.__len__() returns correct count excluding denied samples."""
         from weightslab.backend.dataloader_interface import MaskedSampler
         from torch.utils.data import SequentialSampler
-        
+
         # Deny 2 samples
         denied_uids = {self.uids[2], self.uids[5]}
         self.wrapped_dataset.denylist_samples(denied_uids)
-        
+
         base_sampler = SequentialSampler(self.wrapped_dataset)
         masked_sampler = MaskedSampler(base_sampler, self.wrapped_dataset)
-        
+
         # Length should be 4 (6 total - 2 denied)
         self.assertEqual(len(masked_sampler), 4)
 
@@ -497,30 +497,30 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         from torch.utils.data import DataLoader
         from weightslab.backend.dataloader_interface import MaskedSampler
         from torch.utils.data import SequentialSampler
-        
+
         # Deny first 2 samples
         denied_uids = {self.uids[0], self.uids[1]}
         self.wrapped_dataset.denylist_samples(denied_uids)
-        
+
         # Create DataLoader with MaskedSampler
         base_sampler = SequentialSampler(self.wrapped_dataset)
         masked_sampler = MaskedSampler(base_sampler, self.wrapped_dataset)
         loader = DataLoader(self.wrapped_dataset, batch_size=2, sampler=masked_sampler)
-        
+
         # Collect all UIDs from all batches
         all_uids_in_batches = []
         for batch in loader:
             # batch is tuple of (data, uid, label)
             batch_uids = batch[1].tolist()
             all_uids_in_batches.extend(batch_uids)
-        
+
         # Should have 6 UIDs (6 total - 2 denied)
         self.assertEqual(len(all_uids_in_batches), 4)
-        
+
         # Denied UIDs should NOT appear in any batch
         for denied_uid in denied_uids:
             self.assertNotIn(denied_uid, all_uids_in_batches)
-        
+
         # Non-denied UIDs should appear
         for uid in self.uids:
             if uid not in denied_uids:
@@ -531,20 +531,20 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         from torch.utils.data import DataLoader
         from weightslab.backend.dataloader_interface import MaskedSampler
         from torch.utils.data import SequentialSampler
-        
+
         # Deny 1 sample
         denied_uids = {self.uids[3]}
         self.wrapped_dataset.denylist_samples(denied_uids)
-        
+
         # Create DataLoader with batch_size=2
         base_sampler = SequentialSampler(self.wrapped_dataset)
         masked_sampler = MaskedSampler(base_sampler, self.wrapped_dataset)
         loader = DataLoader(self.wrapped_dataset, batch_size=2, sampler=masked_sampler)
-        
+
         # With 5 non-denied samples and batch_size=2, expect 3 batches
         batch_count = len(loader)
         self.assertEqual(batch_count, 3)  # ceil(5 / 2) = 3
-        
+
         # Verify by iterating
         actual_batches = list(loader)
         self.assertEqual(len(actual_batches), 3)
@@ -554,29 +554,29 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         from torch.utils.data import DataLoader
         from weightslab.backend.dataloader_interface import MaskedSampler
         from torch.utils.data import SequentialSampler
-        
+
         # Deny 2 samples
         denied_uids = {self.uids[0], self.uids[5]}
         self.wrapped_dataset.denylist_samples(denied_uids)
-        
+
         base_sampler = SequentialSampler(self.wrapped_dataset)
         masked_sampler = MaskedSampler(base_sampler, self.wrapped_dataset)
         loader = DataLoader(self.wrapped_dataset, batch_size=1, sampler=masked_sampler)
-        
+
         # Run 3 epochs
         all_uids_seen = []
         for _ in range(3):
             for batch in loader:
                 batch_uid = batch[1].item()
                 all_uids_seen.append(batch_uid)
-        
+
         # Should have 12 UIDs total (4 non-denied * 3 epochs)
         self.assertEqual(len(all_uids_seen), 12)
-        
+
         # Denied UIDs should never appear
         for denied_uid in denied_uids:
             self.assertNotIn(denied_uid, all_uids_seen)
-        
+
         # Only non-denied UIDs should appear
         unique_uids_seen = set(all_uids_seen)
         expected_uids = set(self.uids) - denied_uids
@@ -587,17 +587,17 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         from torch.utils.data import DataLoader
         from weightslab.backend.dataloader_interface import MaskedSampler
         from torch.utils.data import SequentialSampler
-        
+
         # Deny all samples
         self.wrapped_dataset.denylist_samples(set(self.uids))
-        
+
         base_sampler = SequentialSampler(self.wrapped_dataset)
         masked_sampler = MaskedSampler(base_sampler, self.wrapped_dataset)
         loader = DataLoader(self.wrapped_dataset, batch_size=2, sampler=masked_sampler)
-        
+
         # Should have length 0
         self.assertEqual(len(loader), 0)
-        
+
         # Should produce no batches
         batches = list(loader)
         self.assertEqual(len(batches), 0)
@@ -614,26 +614,26 @@ class TestH5Persistence(unittest.TestCase):
         """Test that denied samples persist across restarts."""
         # Create wrapper with H5 persistence
         ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
+
         # Get UIDs for testing
         uids = [int(uid) for uid in ds1.unique_ids]
-        
+
         # Deny first two samples
         ds1.denylist_samples({uids[0], uids[1]})
-        
+
         # Verify denied state
         self.assertTrue(ds1.is_deny_listed(uids[0]))
         self.assertTrue(ds1.is_deny_listed(uids[1]))
         self.assertFalse(ds1.is_deny_listed(uids[2]))
         self.assertEqual(ds1.denied_sample_cnt, 2)
-        
+
         # Verify only changed UIDs are in pending set (before save)
         # After denylist_samples, _save_pending_stats_to_h5 is called, so pending should be empty
         self.assertEqual(len(ds1._h5_pending_uids), 0)
-        
+
         # Create new wrapper (simulating restart)
         ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
+
         # Verify denied state persisted
         self.assertTrue(ds2.is_deny_listed(uids[0]))
         self.assertTrue(ds2.is_deny_listed(uids[1]))
@@ -644,25 +644,25 @@ class TestH5Persistence(unittest.TestCase):
         """Test that tags persist across restarts and only changed UIDs are saved."""
         # Create wrapper with H5 persistence
         ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
+
         # Get UIDs for testing
         uids = [int(uid) for uid in ds1.unique_ids]
-        
+
         # Add tags to only first 2 samples
         ds1.set(uids[0], SampleStatsEx.TAGS.value, "outlier,mislabeled")
         ds1.set(uids[1], SampleStatsEx.TAGS.value, "edge_case")
-        
+
         # Verify tags in memory
         self.assertEqual(ds1.get(uids[0], SampleStatsEx.TAGS.value), "outlier,mislabeled")
         self.assertEqual(ds1.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
-        
+
         # TAGS is in IMMEDIATE_SAVING_TO_H5, so it's saved immediately, not added to pending
         # After immediate save, pending should be empty
         self.assertEqual(len(ds1._h5_pending_uids), 0)
-        
+
         # Create new wrapper (simulating restart)
         ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
+
         # Verify only the 2 tagged samples persisted
         self.assertEqual(ds2.get(uids[0], SampleStatsEx.TAGS.value), "outlier,mislabeled")
         self.assertEqual(ds2.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
@@ -671,13 +671,13 @@ class TestH5Persistence(unittest.TestCase):
 
     def test_h5_persistence_all_stats(self):
         """Test that all SAMPLES_STATS_TO_SAVE_TO_H5 persist and only changed UIDs are saved."""
-        
+
         # Create wrapper with H5 persistence
         ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
+
         # Get UIDs for testing
         uids = [int(uid) for uid in ds1.unique_ids]
-        
+
         # Update various stats for only first 3 samples (not all)
         # Encountered
         ds1.set(uids[1], SampleStatsEx.ENCOUNTERED.value, 5)
@@ -687,7 +687,7 @@ class TestH5Persistence(unittest.TestCase):
         ds1.set(uids[0], SampleStatsEx.PREDICTION_AGE.value, 100)
         # Prediction raw (simple scalar for testing)
         ds1.set(uids[1], SampleStatsEx.PREDICTION_RAW.value, 3)
-        
+
         # Verify only changed UIDs that trigger deferred saves are tracked
         # DENY_LISTED and TAGS are in IMMEDIATE_SAVING, so they're saved right away
         # ENCOUNTERED, PREDICTION_LOSS, PREDICTION_AGE, PREDICTION_RAW are deferred
@@ -703,8 +703,8 @@ class TestH5Persistence(unittest.TestCase):
         # Other UIDs should NOT be in pending
         for uid in uids[3:]:
             self.assertNotIn(uid, ds1._h5_pending_uids)
-        
-        # # These operation will enforce saving everything to H5 
+
+        # # These operation will enforce saving everything to H5
         # Deny listed (already tested but include for completeness)
         ds1.set(uids[2], SampleStatsEx.DENY_LISTED.value, True)
         # Tags
@@ -721,14 +721,14 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds1.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
         self.assertEqual(ds1.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
         self.assertTrue(ds1.get(uids[2], SampleStatsEx.DENY_LISTED.value))
-        
+
         # Manually trigger save
         ds1._save_pending_stats_to_h5()
         self.assertEqual(len(ds1._h5_pending_uids), 0)
-        
+
         # Create new wrapper (simulating restart)
         ds2 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
-        
+
         # Verify all stats persisted for changed UIDs
         self.assertEqual(ds2.get(uids[0], SampleStatsEx.TAGS.value), "test_tag")
         self.assertEqual(ds2.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
@@ -736,7 +736,7 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds2.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
         self.assertEqual(ds2.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
         self.assertTrue(ds2.get(uids[2], SampleStatsEx.DENY_LISTED.value))
-        
+
         # Verify unchanged UIDs have default values (not saved/loaded from H5)
         # These should be initialized with defaults, not loaded
         self.assertEqual(ds2.get(uids[3], SampleStatsEx.TAGS.value), '')
@@ -747,12 +747,12 @@ class TestH5Persistence(unittest.TestCase):
         """Test that wrapper works without H5 persistence."""
         # Create wrapper without root_log_dir
         ds = DataSampleTrackingWrapper(self.base_ds)
-        
+
         # Should work normally, just no persistence
         uids = [int(uid) for uid in ds.unique_ids]
         ds.denylist_samples({uids[0]})
         self.assertTrue(ds.is_deny_listed(uids[0]))
-        
+
         # No H5 file should be created
         self.assertIsNone(ds._h5_path)
 

@@ -38,12 +38,12 @@ __credits__ = 'GrayBox'
 __license__ = 'BSD 2-clause'
 
 __all__ = [
-    "watch_or_edit", 
+    "watch_or_edit",
     "serve",
     "keep_serving",
 
     "_BANNER",
-    
+
     "__version__",
     "__license__",
     "__author__",

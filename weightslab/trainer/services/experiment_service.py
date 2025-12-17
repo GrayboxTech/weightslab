@@ -21,10 +21,10 @@ class ExperimentService:
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
-    
+
     def get_root_log_dir(self) -> str:
         """Get the root log directory.
-        
+
         Returns:
             Absolute path to root_log_dir
         """
