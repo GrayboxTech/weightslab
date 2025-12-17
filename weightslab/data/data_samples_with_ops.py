@@ -469,6 +469,22 @@ class DataSampleTrackingWrapper(Dataset):
         # Normalize 0-d numpy arrays
         if isinstance(stat_value, np.ndarray) and stat_value.ndim == 0:
             stat_value = stat_value.item()
+        
+        # Normalize multi-element arrays for stats that need to be saved to H5
+        # For PREDICTION_LOSS in segmentation, use mean of per-pixel losses
+        if not (stat_name in SAMPLES_STATS_TO_SAVE_TO_H5 and
+                isinstance(stat_value, np.ndarray) and
+                stat_value.size > 1):
+            # No special handling needed, proceed with the original value
+            pass
+        elif stat_name == SampleStatsEx.PREDICTION_LOSS.value:
+            # Convert per-pixel losses to mean loss for H5 storage
+            stat_value = float(stat_value.mean())
+            logger.debug(f"Normalized multi-element PREDICTION_LOSS to mean: {stat_value}")
+        else:
+            # For other stats, skip multi-element arrays
+            logger.warning(f"Skipping multi-element array for stat '{stat_name}' (size={stat_value.size})")
+            return
 
         # Debug logging for tags
         if stat_name == SampleStatsEx.TAGS or stat_name == SampleStatsEx.TAGS.value:
@@ -1085,7 +1101,14 @@ class DataSampleTrackingWrapper(Dataset):
                         elif isinstance(val, np.bool_):
                             val = bool(val)
                         elif isinstance(val, np.ndarray):
-                            val = val.item()
+                            # Only convert arrays with a single element to scalar
+                            if val.size == 1:
+                                val = val.item()
+                            else:
+                                # Skip multi-element arrays - they should be in dense_stats_store
+                                # For segmentation, use scalar summaries like mean_loss instead
+                                logger.debug(f"Skipping multi-element array for stat '{stat_name}' (size={val.size})")
+                                continue
                         elif isinstance(val, bool):
                             pass  # Already correct type
                         elif isinstance(val, (int, float, str)):
