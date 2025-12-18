@@ -120,7 +120,7 @@ class DataManipulationAgent:
         elif df.index.name is not None:
             # Add single index name if it exists
             all_columns.append(df.index.name)
-        
+
         # Add expected extended stats columns that will be populated during training
         # This ensures the agent recognizes them even before they appear in the DataFrame
         expected_extended_stats = [
@@ -131,7 +131,7 @@ class DataManipulationAgent:
         # Also add per-class loss columns (up to 10 classes)
         for i in range(10):
             expected_extended_stats.append(f"loss_class_{i}")
-        
+
         # Add expected columns that aren't already in the DataFrame
         for col in expected_extended_stats:
             if col not in all_columns:
@@ -226,7 +226,7 @@ class DataManipulationAgent:
         os.environ['OLLAMA_HOST'] = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
         try:
             response = requests.get(
-                f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/tags", 
+                f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/tags",
                 timeout=1  # Reduced from 5 to 1 second for faster initialization
             )
             if response.status_code == 200:
@@ -241,7 +241,6 @@ class DataManipulationAgent:
                 _LOGGER.error("Ollama health check failed with status: %s", response.status_code)
         except requests.RequestException as e:
             _LOGGER.error(f"Ollama is not accessible at http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}: %s", e)
-            raise DataAgentError("Ollama service is not running. Please start Ollama first.") from e
 
     def _parse_intent_json(self, json_str: str) -> Intent:
         """Parses the raw LLM JSON output into a structured Intent object."""
@@ -338,7 +337,7 @@ class DataManipulationAgent:
             # For index columns and simple column names, use direct reference
             # For columns with special chars, use backticks
             is_index_col = resolved_col in index_names
-            
+
             if re.match(r'^[\w]+$', resolved_col):
                 # Simple alphanumeric name - use as-is (works for both index and regular columns)
                 col_ref = resolved_col
@@ -349,19 +348,19 @@ class DataManipulationAgent:
             # 3. Build expression based on operator
             op = cond.op.lower()
             val = cond.value
-            
+
             # Simple operators
             if op in ("==", "!=", ">", "<", ">=", "<="):
                 # Quote string values, keep numbers as is
                 value_repr = f"'{val}'" if isinstance(val, str) else str(val)
                 parts.append(f"({col_ref} {op} {value_repr})")
-            
+
             # Between
             elif op == "between" and cond.value is not None and cond.value2 is not None:
                 min_val = float(cond.value)
                 max_val = float(cond.value2)
                 parts.append(f"({col_ref}.between({min_val}, {max_val}))")
-                
+
             else:
                 _LOGGER.warning("Skipping condition due to invalid operator or values: %s", cond)
 
@@ -377,7 +376,7 @@ class DataManipulationAgent:
         if intent.kind == "head" and intent.n is not None:
             op["function"] = "df.head"
             op["params"] = {"n": max(0, int(intent.n))}
-        
+
         elif intent.kind == "tail" and intent.n is not None:
             op["function"] = "df.tail"
             op["params"] = {"n": max(0, int(intent.n))}
@@ -389,7 +388,7 @@ class DataManipulationAgent:
                 resolved = self._resolve_column(col)
                 if resolved:
                     resolved_cols.append(resolved)
-            
+
             if resolved_cols:
                 op["function"] = "df.sort_values"
                 op["params"] = {
@@ -442,7 +441,7 @@ class DataManipulationAgent:
             # When the LLM understands the user wants to reset the view
             op["function"] = "df.reset_view"  # Arbitrary string for logging/debug
             op["params"] = {"__agent_reset__": True}  # The signal the DataService checks for
-        
+
         # If noop, this stays {"function": None, "params": {}}
         return op
 
@@ -450,7 +449,7 @@ class DataManipulationAgent:
         """Main entry point to query the agent: call Ollama and return a Pandas operation."""
         # Load Intent Prompt
         prompt = INTENT_PROMPT.format(instruction=instruction, columns=self.df_schema['columns'])
-        
+
         try:
             response = requests.post(
                 f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/generate?source=data-agent",
@@ -465,7 +464,7 @@ class DataManipulationAgent:
                 },
                 timeout=600
             )
-            
+
             _LOGGER.debug("Ollama response status: %s", response.status_code)
         except requests.RequestException as e:
             raise DataAgentError(f"Ollama request failed: {e}") from e
@@ -496,7 +495,7 @@ class DataManipulationAgent:
 
             # --- TRANSLATE INTENT TO PANDAS OPERATION ---
             operation = self._intent_to_pandas_op(intent)
-            
+
             _LOGGER.info("Generated Pandas operation: %s", operation)
             return operation
         else:
