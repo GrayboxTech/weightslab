@@ -36,7 +36,8 @@ class ModelInterface(NetworkWithOps):
             name: str = None,
             register: bool = True,
             use_onnx: bool = False,
-            weak: bool = False
+            weak: bool = False,
+            **_
     ):
         """
         Initializes the WatcherEditor instance.
@@ -435,8 +436,6 @@ class ModelInterface(NetworkWithOps):
 
         # Generate the graph dependencies
         if not use_onnx:
-
-            # Generate the dependencies
             self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
                 self.model,
                 self.traced_model.graph
@@ -447,13 +446,12 @@ class ModelInterface(NetworkWithOps):
                 dummy_input=dummy_input
             )
 
-            # Patch the torch model with WeightsLab features
-
+        # Map dependencies between layers and their operations
         self.mapped_dependencies_with_ops = generate_index_maps(
             self.dependencies_with_ops
         )
 
-        # Register the layers dependencies
+        # Register the dependencies
         self.register_dependencies(self.mapped_dependencies_with_ops)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
