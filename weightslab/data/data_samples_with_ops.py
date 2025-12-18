@@ -1125,28 +1125,44 @@ class DataSampleTrackingWrapper(Dataset):
         if index is None and id is not None:
             index = self.unique_id_to_index[id]
         data = self.wrapped_dataset[index]
-        if len(data) == 2:
-            id = self.unique_ids[index]
-            item, target = data
 
-            # Override target with tag-based label if use_tags is enabled
-            if self._use_tags:
-                tag_value = self.sample_statistics.get(SampleStatsEx.TAGS, {}).get(int(id), '')
+        # Ensure data is a tuple for consistent handling
+        if not isinstance(data, tuple):
+            data = (data,)
 
-                if self._is_binary_labels:
-                    # Binary classification: 1 if tag matches, 0 otherwise
-                    target_tag = list(self._tags_mapping.keys())[0]
-                    target = 1 if tag_value == target_tag else 0
-                elif self._tags_mapping:
-                    # Multiclass: map tag string to integer label
-                    target = self._tags_mapping.get(tag_value, 0)  # Default to 0 if tag not in mapping
-                else:
-                    # No mapping provided but use_tags=True: keep original target
-                    logger.warning(f"use_tags=True but no tags_mapping provided for sample {id}")
+        if len(data) == 0:
+            raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
 
-            return item, id, target
-        else:
-            raise ValueError("Unexpected number of elements returned by wrapped_dataset.__getitem__")
+        id = self.unique_ids[index]
+
+        # Extract first element (always the input data)
+        item = data[0]
+
+        # For single element (unsupervised): return (item, id)
+        if len(data) == 1:
+            return item, id
+
+        # For 2+ elements: second is target/label, rest are additional (boxes, masks, etc.)
+        target = data[1]
+        rest = data[2:] if len(data) > 2 else ()
+
+        # Override target with tag-based label if use_tags is enabled
+        if self._use_tags:
+            tag_value = self.sample_statistics.get(SampleStatsEx.TAGS, {}).get(int(id), '')
+
+            if self._is_binary_labels:
+                # Binary classification: 1 if tag matches, 0 otherwise
+                target_tag = list(self._tags_mapping.keys())[0]
+                target = 1 if tag_value == target_tag else 0
+            elif self._tags_mapping:
+                # Multiclass: map tag string to integer label
+                target = self._tags_mapping.get(tag_value, 0)  # Default to 0 if tag not in mapping
+            else:
+                # No mapping provided but use_tags=True: keep original target
+                logger.warning(f"use_tags=True but no tags_mapping provided for sample {id}")
+
+        # Return (item, id, target, *rest) - preserves additional elements like boxes, masks
+        return (item, id, target) + rest
 
     def get_index_from_sample_id(self, sample_id: int) -> int:
         return self.unique_id_to_index[sample_id]
