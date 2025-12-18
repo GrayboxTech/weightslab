@@ -1,6 +1,7 @@
 import os
 import time
 import tempfile
+import itertools
 import logging
 
 import tqdm
@@ -234,13 +235,13 @@ def train(loader, model, optimizer, criterion_mlt, device):
     return float(loss.detach().cpu().item())
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device):
+def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the val loader."""
     losses = 0.0
     metric_mlt.reset()
 
     with guard_testing_context, torch.no_grad():
-        for (inputs, ids, labels) in loader:
+        for inputs, ids, labels in loader:
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -258,7 +259,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device):
 
             metric_mlt.update(preds, labels)
 
-    loss = float((losses / len(loader)).detach().cpu().item())
+    loss = float((losses / test_loader_len).detach().cpu().item())
     miou = float(metric_mlt.compute().detach().cpu().item() * 100.0)
     return loss, miou
 
@@ -308,6 +309,8 @@ if __name__ == "__main__":
     log_dir = parameters["root_log_dir"]
     max_steps = parameters["training_steps_to_do"]
     eval_every = parameters["eval_full_to_train_steps_ratio"]
+    verbose = parameters.get("verbose", True)
+    tqdm_display = parameters.get("tqdm_display", True)
 
     # --- 4) Register logger + hyperparameters ---
     logger = Logger()
@@ -354,7 +357,8 @@ if __name__ == "__main__":
         name="train_loader",
         batch_size=train_cfg.get("batch_size", 2),
         shuffle=train_cfg.get("train_shuffle", True),
-        is_training=True,
+        compute_hash=False,
+        is_training=True
     )
     test_loader = wl.watch_or_edit(
         _val_dataset,
@@ -362,6 +366,8 @@ if __name__ == "__main__":
         name="test_loader",
         batch_size=test_cfg.get("batch_size", 2),
         shuffle=test_cfg.get("test_shuffle", False),
+        compute_hash=False,
+        is_training=False
     )
 
     # --- 6) Model, optimizer, losses, metric ---
@@ -379,7 +385,7 @@ if __name__ == "__main__":
     print("Computing class weights to address class imbalance...")
     print("=" * 60)
 
-    def compute_class_weights(dataset, num_classes, ignore_index=255, max_samples=1000):
+    def compute_class_weights(dataset, num_classes, max_samples=1000):
         """
         Compute class weights based on inverse pixel frequency.
         Rare classes get higher weights to balance the loss.
@@ -399,7 +405,7 @@ if __name__ == "__main__":
                 _, label = dataset[idx]
                 label_np = label.numpy() if hasattr(label, 'numpy') else np.array(label)
 
-                # Count pixels for each class, excluding ignore_index
+                # Count pixels for each class
                 for c in range(num_classes):
                     class_counts[c] += (label_np == c).sum()
             except Exception as e:
@@ -426,7 +432,7 @@ if __name__ == "__main__":
         return torch.FloatTensor(class_weights)
 
     # Compute weights from training dataset
-    class_weights = compute_class_weights(_train_dataset, num_classes, ignore_index, max_samples=500)
+    class_weights = compute_class_weights(_train_dataset, num_classes, max_samples=500)
     class_weights = class_weights.to(device)
 
     print(f"\nApplying class weights: {class_weights.cpu().numpy()}")
@@ -441,6 +447,7 @@ if __name__ == "__main__":
         ),
         flag="loss",
         name="train_loss/mlt_loss",
+        per_sample=True,
         log=True,
     )
     test_criterion_mlt = wl.watch_or_edit(
@@ -451,6 +458,7 @@ if __name__ == "__main__":
         ),
         flag="loss",
         name="test_loss/mlt_loss",
+        per_sample=True,
         log=True,
     )
     test_metric_mlt = wl.watch_or_edit(
@@ -482,48 +490,45 @@ if __name__ == "__main__":
     print(f"📂 Data root: {data_root}")
     print("=" * 60 + "\n")
 
-    # pause_controller.resume()
+    # --- 8) Training loop ---
+    pause_controller.resume()
 
-    for train_step in tqdm.trange(max_steps, dynamic_ncols=True):
+    # ================
+    # 7. Training Loop
+    train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
+    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
+    test_loss, test_metric = None, None
+    start_time = time.time()
+    for train_step in train_range:
+        # Train
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
-        test_loss, test_metric = None, None
-        if train_step % eval_every == 0:
-            test_loss, test_metric = test(
-                test_loader,
-                model,
-                test_criterion_mlt,
-                test_metric_mlt,
-                device,
+        # Test
+        if train_step == 0 or train_step % eval_every == 0:
+            test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
+
+        # Verbose
+        if verbose and not tqdm_display:
+            print(
+                f"Training.. " +
+                f"Step {train_step}: " +
+                f"| Train Loss: {train_loss:.4f} " +
+                (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
+                (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
+            )
+        elif tqdm_display:
+            train_range.set_description(f"Step")
+            train_range.set_postfix(
+                train_loss=f"{train_loss:.4f}",
+                test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
+                acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
             )
 
-        if train_step % 10 == 0 or test_loss is not None:
-            status = f"[Step {train_step:5d}/{max_steps}] Train Loss: {train_loss:.4f}"
-            if test_loss is not None:
-                status += (
-                    f" | Val Loss: {test_loss:.4f} | mIoU: {test_metric:.2f}%"
-                )
-            print(status)
-
     print("\n" + "=" * 60)
+    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")
     print("=" * 60)
 
-    import signal
-    import time
-
-    # Flag to indicate if Ctrl+C was pressed
-    _stop_requested = False
-
-    def _signal_handler(sig, frame):
-        global _stop_requested
-        print("\nCtrl+C detected. Shutting down gracefully...")
-        _stop_requested = True
-
-    # Register the signal handler for Ctrl+C (SIGINT)
-    signal.signal(signal.SIGINT, _signal_handler)
-
-    print("Press Ctrl+C to exit...")
-    while not _stop_requested:
-        time.sleep(0.1) # Small delay to prevent busy-waiting
-
+    # Keep the main thread alive to allow background serving threads to run
+    wl.keep_serving()
