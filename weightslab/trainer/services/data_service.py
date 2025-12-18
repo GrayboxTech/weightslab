@@ -340,7 +340,7 @@ class DataService:
             elif len(data) == 2:
                 tensor, label = data
             elif len(data) == 3:
-                tensor, label, _ = data
+                tensor, _ , label= data
             elif len(data) == 4:
                 tensor, _, label, _ = data
 
