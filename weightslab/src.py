@@ -27,12 +27,12 @@ def _save_data_statistics(
     model_age: int,
     batch_ids: th.Tensor,
     losses_batch: th.Tensor,
-    preds: th.Tensor,
+    preds: th.Tensor = None,
     lock: Lock = Lock()
 ):
     with lock:
         # Get batch data
-        pred_np = preds.detach().cpu().numpy()
+        pred_np = preds.detach().cpu().numpy() if preds is not None else None
         batch_ids_np = batch_ids.detach().cpu().numpy()
         if not isinstance(losses_batch, dict):
             per_sample_loss_np = losses_batch.detach().cpu().numpy()
@@ -42,33 +42,32 @@ def _save_data_statistics(
             per_sample_loss_np = losses_batch
 
         # Update batch sample stats
-        # Check if model is in training mode
-        is_training = True
-        try:
-            m = get_model()
-            if hasattr(m, "is_training"):
-                is_training = m.is_training()
-            elif hasattr(m, "training"):
-                is_training = m.training
-        except Exception:
-            pass
+        # Check if model is in training mode with grad enabled
+        is_training = th.is_grad_enabled()
 
         name = 'train_loader' if is_training else 'test_loader'
-
-        get_dataloader(name).tracked_dataset.update_batch_sample_stats(
-            model_age,
-            batch_ids_np,
-            per_sample_loss_np,
-            pred_np
-        )
-        get_dataloader(name).tracked_dataset.update_sample_stats_ex_batch(
-            batch_ids_np,
-            {
-                "loss/combined": per_sample_loss_np,
-                "pred": pred_np
-            }
-        )
-
+        try:
+            get_dataloader(name).tracked_dataset.update_batch_sample_stats(
+                model_age,
+                batch_ids_np,
+                per_sample_loss_np,
+                pred_np
+            )
+            get_dataloader(name).tracked_dataset.update_sample_stats_ex_batch(
+                batch_ids_np,
+                {
+                    "loss/combined": per_sample_loss_np,
+                    "pred": pred_np
+                }
+            )
+        except AttributeError as e:
+            logger.warning(
+                "Warning: Could not save data statistics to " +
+                f"tracked dataset: {e}. Please ensure the " +
+                "dataloader has a tracked dataset with " +
+                "`update_batch_sample_stats` and " +
+                "`update_sample_stats_ex_batch` methods, and is_training set."
+            )
 
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
     """
@@ -204,7 +203,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         return proxy if proxy is not None else get_logger(reg_name)
 
     # Signals: metrics / losses / custom monitors
-    elif 'loss' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
+    elif 'loss' in flag.lower() or flag.lower() in ('criterion', 'signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
         reg_name = kwargs.get('name') or flag
 

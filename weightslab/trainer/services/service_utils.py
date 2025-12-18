@@ -38,11 +38,13 @@ def load_raw_image(dataset, index):
         img_path = wrapped.files[index]
         img = Image.open(img_path)
         return img.convert("RGB")
-    elif hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
+    elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
         if hasattr(wrapped, "dataset"):
             wrapped_data = wrapped.dataset.base.data if hasattr(wrapped.dataset, "base") else wrapped.dataset
-        else:
+        elif hasattr(wrapped, "data"):
             wrapped_data = wrapped.data
+        else:
+            wrapped_data = wrapped
         np_img = wrapped_data[index]
         if isinstance(np_img, (list, tuple)):
             np_img = np_img[0]

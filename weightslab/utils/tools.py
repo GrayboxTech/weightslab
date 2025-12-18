@@ -154,7 +154,8 @@ def rename_with_ops(module: nn.Module) -> nn.Module:
     original_name = module._get_name()
 
     # 2. Define the new name
-    new_name = f"{original_name}WithNeuronOps"
+    new_name = f"{original_name}WithNeuronOps" if "WithNeuronOps" not in original_name \
+        else original_name
 
     # 3. Create a custom method to return the new name
     def new_get_name(self):

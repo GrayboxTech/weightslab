@@ -28,7 +28,7 @@ def _get_stat_from_row(row, stat_name):
     """Extract stat from dataframe row and convert to DataStat message."""
     value = row.get(stat_name)
 
-    if not isinstance(value, (np.ndarray,torch.Tensor)) and (value is None or pd.isna(value)):
+    if not isinstance(value, (np.ndarray, torch.Tensor)) and (value is None or pd.isna(value)):
         return None
 
     # Helper for creating DataStat messages
@@ -331,9 +331,18 @@ class DataService:
             raw_shape, transformed_shape = [], []
 
             if hasattr(dataset, "_getitem_raw"):
-                tensor, _, label = dataset._getitem_raw(id=sample_id)
+                data = dataset._getitem_raw(id=sample_id)
             else:
-                tensor, _, label = dataset[sample_id]
+                data = dataset[sample_id]
+            if len(data) == 1:
+                tensor, _, = data
+                label = None
+            elif len(data) == 2:
+                tensor, label = data
+            elif len(data) == 3:
+                tensor, label, _ = data
+            elif len(data) == 4:
+                tensor, _, label, _ = data
 
             if request.include_transformed_data:
                 img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor
