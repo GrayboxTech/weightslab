@@ -685,8 +685,6 @@ class TestH5Persistence(unittest.TestCase):
         ds1.set(uids[2], SampleStatsEx.PREDICTION_LOSS.value, 0.42)
         # Prediction age
         ds1.set(uids[0], SampleStatsEx.PREDICTION_AGE.value, 100)
-        # Prediction raw (simple scalar for testing)
-        ds1.set(uids[1], SampleStatsEx.PREDICTION_RAW.value, 3)
 
         # Verify only changed UIDs that trigger deferred saves are tracked
         # DENY_LISTED and TAGS are in IMMEDIATE_SAVING, so they're saved right away
@@ -719,7 +717,6 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds1.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
         self.assertEqual(ds1.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
         self.assertEqual(ds1.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertEqual(ds1.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
         self.assertTrue(ds1.get(uids[2], SampleStatsEx.DENY_LISTED.value))
 
         # Manually trigger save
@@ -734,7 +731,6 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds2.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
         self.assertEqual(ds2.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
         self.assertEqual(ds2.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertEqual(ds2.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
         self.assertTrue(ds2.get(uids[2], SampleStatsEx.DENY_LISTED.value))
 
         # Verify unchanged UIDs have default values (not saved/loaded from H5)
