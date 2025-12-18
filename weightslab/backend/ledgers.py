@@ -111,19 +111,13 @@ class Proxy:
     def __repr__(self):
         with self._lock:
             return f"Proxy({repr(self._obj)})"
+
     def __next__(self):
         """Allow the Proxy itself to act as an iterator when `next(proxy)` is
         called. We cache an internal iterator per-proxy so successive calls to
         `next(proxy)` advance through the wrapped object. The iterator is
         invalidated when `set()` is called.
         """
-        # with self._lock:
-        #     if self._obj is None:
-        #         raise TypeError("Proxy target not set")
-            # it = getattr(self, '_iterator', None)
-            # if it is None:
-            #     it = iter(self._obj)
-            #     self._iterator = it
 
         try:
             return next(self._obj)

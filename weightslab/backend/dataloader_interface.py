@@ -227,6 +227,7 @@ class DataLoaderInterface:
                         batch.append(idx)
                         if len(batch) >= int(self.batch_size):
                             yield list(batch)
+                            batch = []
                     if batch and not self.drop_last:
                         yield list(batch)
 
