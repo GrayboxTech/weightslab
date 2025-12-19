@@ -14,9 +14,10 @@ import weightslab.proto.experiment_service_pb2 as pb2
 from pathlib import Path
 from concurrent import futures
 from torchvision import transforms
+from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image
-from weightslab.trainer.services.agent.agent import DataManipulationAgent
+from weightslab.trainer.services.agent import DataManipulationAgent
 
 
 # Get global logger
@@ -98,14 +99,6 @@ def _get_stat_from_row(row, stat_name):
     # 8) Fallback: stringify
     return make_stat("string", [1], value_string=str(value)[:512])
 
-def _get_stats(loader, origin: str):
-    """Extract dataset statistics from a loader."""
-    if loader is None or not hasattr(loader, "tracked_dataset"):
-        return pd.DataFrame()
-    df = pd.DataFrame(loader.tracked_dataset.as_records())
-    df["origin"] = origin
-    return df
-
 def _infer_task_type_from_label(label, default="classification"):
     """
     Heuristic: guess task type based on label shape / dtype.
@@ -152,14 +145,21 @@ class DataService:
         # init references to the context components
         self._ctx.ensure_components()
         self.df_lock = threading.RLock()
-        self._trn_loader = self._ctx.components.get("train_loader")
-        self._tst_loader = self._ctx.components.get("test_loader")
 
-        if self._trn_loader is None or self._tst_loader is None:
-            logger.error(
-                "DataService initialized without train_loader or test_loader.")
+        # Dynamically get all available data loaders from the ledger
+        from weightslab.backend.ledgers import get_dataloaders
+        loader_names = get_dataloaders()
+        self._loaders = {name: self._ctx.components.get(name) for name in loader_names}
+
+        if not self._loaders:
+            logger.warning("DataService initialized without any data loaders.")
+        else:
+            logger.info(f"DataService found loaders: {list(self._loaders.keys())}")
 
         self._root_log_dir = self._resolve_root_log_dir()
+        self._h5_path = self._resolve_h5_path()
+        self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
+        self._stats_last_mtime = None
 
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
@@ -167,6 +167,11 @@ class DataService:
 
         self._last_internals_update_time = None
         logger.info("DataService initialized.")
+
+    def _initialize_data_service(self):
+        """Recreate the in-memory dataframe view from the shared H5 store."""
+        self._all_datasets_df = self._pull_into_all_data_view_df()
+        self._load_existing_tags()
 
     def _resolve_root_log_dir(self) -> Path:
         """Resolve root log directory from hyperparams/env, fallback to ./logs."""
@@ -188,6 +193,17 @@ class DataService:
         if root is None:
             root = Path("logs").absolute()
         return Path(root)
+
+    def _resolve_h5_path(self) -> Path | None:
+        """Return the H5 path used by tracked datasets and the streaming view."""
+        if self._root_log_dir is None:
+            return None
+        data_dir = Path(self._root_log_dir) / "checkpoints" / "data"
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return data_dir / "data_with_ops.h5"
 
     def get_root_log_dir(self) -> str:
         """Get the root log directory as a string.
@@ -236,79 +252,64 @@ class DataService:
         return True, ""
 
     def _pull_into_all_data_view_df(self):
-        """Pull stats from both loaders into a single indexed dataframe."""
-        # Sanity check
-        if self._trn_loader is None:
-            self._trn_loader = self._ctx.components.get("train_loader")
-        if self._tst_loader is None:
-            self._tst_loader = self._ctx.components.get("test_loader")
+            """Stream stats from the shared H5 store with timeout to avoid blocking training.
 
-        # Pull stats from both datasets (skip if empty)
-        records = []
+            Uses a timeout on the H5 read lock - if H5 is busy (training is writing),
+            we return the last known good snapshot rather than waiting.
+            This ensures DataService communication never blocks the training loop.
+            """
+            if self._stats_store is None:
+                return pd.DataFrame()
 
-        tstats = _get_stats(self._trn_loader, "train")
-        if not tstats.empty:
-            records.extend(tstats.to_dict("records"))
+            # Dynamically discover all loader origins from tracked datasets
+            origins = []
+            for _, loader in self._loaders.items():
+                if loader is not None:
+                    tracked_ds = getattr(loader, "tracked_dataset", None)
+                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                        origin = tracked_ds._dataset_split
+                        if origin not in origins:
+                            origins.append(origin)
 
-        estats = _get_stats(self._tst_loader, "eval")
-        if not estats.empty:
-            records.extend(estats.to_dict("records"))
+            if not origins:
+                logger.warning("[DataService] No dataset origins found from loaders")
+                return pd.DataFrame()
 
-        if not records:
-            return pd.DataFrame()
+            # Attempt non-blocking read from H5 store
+            # If H5 is locked (training writing), timeout and return cached snapshot
+            try:
+                df = self._stats_store.load_all(origins, non_blocking=True)
+                if df.empty:
+                    return df
 
-        # Build dataframe once to avoid concat overhead
-        df = pd.DataFrame.from_records(records)
+                # Ensure MultiIndex for stable slicing and agent operations
+                try:
+                    if not isinstance(df.index, pd.MultiIndex):
+                        df.set_index(["origin", "sample_id"], inplace=True)
+                except Exception as e:
+                    logger.warning(f"Failed to set index on streamed dataframe: {e}")
 
-        try:
-            df.set_index(["origin", "sample_id"], inplace=True)
-        except KeyError as e:
-            logger.warning(f"Failed to set index on dataframe: {e}")
+                try:
+                    self._stats_last_mtime = self._stats_store.path().stat().st_mtime
+                except Exception:
+                    self._stats_last_mtime = None
 
-        return df
+                return df
+            except TimeoutError:
+                # H5 is locked by training - return last snapshot to avoid blocking
+                logger.debug("[DataService] H5 read timeout - returning cached snapshot")
+                return self._all_datasets_df if self._all_datasets_df is not None else pd.DataFrame()
 
     def _load_existing_tags(self):
-        """Load all existing tags from tracked dataset on startup and merge into dataframe."""
+        """Ensure tags column is present on the streamed dataframe."""
         if self._all_datasets_df is None or self._all_datasets_df.empty:
             return
 
-        try:
-            # Initialize tags column if not present
-            if "tags" not in self._all_datasets_df.columns:
+        if "tags" not in self._all_datasets_df.columns:
+            try:
                 self._all_datasets_df["tags"] = ""
-
-            # Get tracked datasets to load tags
-            trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
-            tst_tracked = self._tst_loader.tracked_dataset if self._tst_loader else None
-
-            if not trn_tracked and not tst_tracked:
-                return
-
-            # Build unified tag lookup dict (faster than per-row lookups)
-            tag_dict = {}
-            if trn_tracked:
-                tag_dict.update(trn_tracked.sample_statistics.get("tags", {}))
-            if tst_tracked:
-                tag_dict.update(tst_tracked.sample_statistics.get("tags", {}))
-
-            if not tag_dict:
-                return
-
-            # Vectorized update: use map for efficiency
-            if isinstance(self._all_datasets_df.index, pd.MultiIndex):
-                # For MultiIndex, map from sample_id level
-                sample_ids = self._all_datasets_df.index.get_level_values("sample_id")
-                self._all_datasets_df["tags"] = sample_ids.map(lambda sid: tag_dict.get(int(sid), "")).fillna("")
-            else:
-                # For regular columns
-                self._all_datasets_df["tags"] = self._all_datasets_df["sample_id"].map(
-                    lambda sid: tag_dict.get(int(sid), "")
-                ).fillna("")
-
-            loaded_count = sum(1 for v in tag_dict.values() if v)
-            logger.info(f"Loaded existing tags for {loaded_count} UID(s) from tracked dataset(s)")
-        except Exception as e:
-            logger.warning(f"Failed to load existing tags: {e}")
+            except Exception:
+                pass
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
@@ -318,12 +319,19 @@ class DataService:
             # TODO (GP): should be index returned here not sample_id directly, wrong name
             sample_id = int(row.get('sample_id', 0))
 
-            if origin == 'train':
-                dataset = self._trn_loader.tracked_dataset
-            elif origin == 'test' or origin == 'eval':
-                dataset = self._tst_loader.tracked_dataset
-            else:
-                logger.warning("Unknown origin '%s' for sample %s", origin, sample_id)
+            # Find the dataset for this origin dynamically
+            dataset = None
+            for _, loader in self._loaders.items():
+                if loader is None:
+                    continue
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    if tracked_ds._dataset_split == origin:
+                        dataset = tracked_ds
+                        break
+
+            if dataset is None:
+                logger.warning("Unknown or missing dataset for origin '%s' sample %s", origin, sample_id)
                 return None
 
             data_stats = []
@@ -334,6 +342,8 @@ class DataService:
                 data = dataset._getitem_raw(id=sample_id)
             else:
                 data = dataset[sample_id]
+
+            # Unpack data tuple depending on its length
             if len(data) == 1:
                 tensor, _, = data
                 label = None
@@ -701,66 +711,30 @@ class DataService:
         return "No operation applied"
 
     def _hydrate_tags_for_slice(self, df_slice: pd.DataFrame) -> pd.DataFrame:
-        """Load tags for the provided slice only and update in-memory views."""
-        if df_slice is None or df_slice.empty or "sample_id" not in df_slice.columns:
-            return df_slice
-
-        try:
-            # Get tracked datasets to load tags
-            trn_tracked = self._trn_loader.tracked_dataset if self._trn_loader else None
-            tst_tracked = self._tst_loader.tracked_dataset if self._tst_loader else None
-        except Exception as e:
-            logger.warning(f"Could not access tracked datasets: {e}")
+        """Ensure tags column exists on the slice (values already streamed from H5)."""
+        if df_slice is None or df_slice.empty:
             return df_slice
 
         if "tags" not in df_slice.columns:
             df_slice["tags"] = ""
-
-        # Build tag lookup dict from tracked datasets (avoid repeated dict lookups in loop)
-        tag_dict = {}
-        if trn_tracked:
-            tag_dict.update(trn_tracked.sample_statistics.get("tags", {}))
-        if tst_tracked:
-            tag_dict.update(tst_tracked.sample_statistics.get("tags", {}))
-
-        # Vectorized update: use map instead of iterating with .loc
-        df_slice["tags"] = df_slice["sample_id"].map(lambda sid: tag_dict.get(int(sid), "")).fillna("")
-
-        # Update main dataframe in one vectorized operation
-        if self._all_datasets_df is not None:
-            try:
-                if isinstance(self._all_datasets_df.index, pd.MultiIndex) and {
-                    "origin", "sample_id"
-                }.issubset(set(self._all_datasets_df.index.names or [])):
-                    # For MultiIndex, update matching rows
-                    sample_id_level = self._all_datasets_df.index.get_level_values("sample_id")
-                    mask = sample_id_level.isin(df_slice["sample_id"].values)
-                    for sid in df_slice["sample_id"].unique():
-                        tag_val = df_slice[df_slice["sample_id"] == sid]["tags"].iloc[0]
-                        idx_mask = sample_id_level == sid
-                        self._all_datasets_df.loc[idx_mask, "tags"] = tag_val
-                elif "sample_id" in self._all_datasets_df.columns:
-                    # For regular columns, update using isin (faster than loop)
-                    mask = self._all_datasets_df["sample_id"].isin(df_slice["sample_id"].values)
-                    self._all_datasets_df.loc[mask, "tags"] = self._all_datasets_df.loc[mask, "sample_id"].map(
-                        lambda sid: tag_dict.get(int(sid), "")
-                    )
-            except Exception as e:
-                logger.debug(f"[_hydrate_tags_for_slice] Could not update main dataframe: {e}")
-
         return df_slice
 
     def _slowUpdateInternals(self):
         current_time = time.time()
-        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 5:
             return
 
-        # Just this line, will mess any filtering/ordering that is being applied
+        if self._stats_store and not self._stats_store.has_changed_since(self._stats_last_mtime):
+            self._last_internals_update_time = current_time
+            return
+
         updated_df = self._pull_into_all_data_view_df()
 
-        # Order the rows in updated_df the order in self._all_datasets_df but
-        # also make sure that we only keep the rows that are in self._all_datasets_df
-        updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
+        if self._all_datasets_df is not None and not updated_df.empty and not self._all_datasets_df.empty:
+            try:
+                updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
+            except Exception:
+                pass
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
@@ -864,10 +838,10 @@ class DataService:
             df_slice = self._hydrate_tags_for_slice(df_slice)
 
             if df_slice.empty:
-                logger.warning("No samples found at index %s", request.start_index)
+                logger.warning(f"No samples found at index {request.start_index}:{end_index}")
                 return pb2.DataSamplesResponse(
                     success=False,
-                    message=f"No samples found at index {request.start_index}",
+                    message=f"No samples found at index {request.start_index}:{end_index}",
                     data_records=[]
                 )
 
@@ -880,7 +854,7 @@ class DataService:
 
             # Use more workers for I/O-bound image processing (CPU count * 2)
             import os
-            max_workers = min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8)
+            max_workers = max(min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8), 1)
 
             with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 results = executor.map(self._process_sample_row, tasks, timeout=30)
@@ -931,18 +905,32 @@ class DataService:
                 message="Accumulate tagging not supported",
             )
 
-        train_loader = components.get("train_loader")
-        test_loader = components.get("test_loader")
+        # Get all loaders dynamically
+        from weightslab.backend.ledgers import get_dataloaders
+        loader_names = get_dataloaders()
+        loaders_map = {name: components.get(name) for name in loader_names}
 
         # ---------------------------------------------------------------------
         # 1) Apply edits to the underlying editable dataset wrapper
         # ---------------------------------------------------------------------
         for sid, origin in zip(request.samples_ids, request.sample_origins):
             dataset = None
-            if origin == "train":
-                dataset = getattr(train_loader, "tracked_dataset", train_loader) if train_loader else None
-            elif origin in ("test", "eval"):  # accept both, see below
-                dataset = getattr(test_loader, "tracked_dataset", test_loader) if test_loader else None
+
+            # Find the loader for this origin (match by name suffix or exact match)
+            for loader_name, loader in loaders_map.items():
+                # Match origin like "train" to "train_loader", "val" to "val_loader", etc.
+                if loader is None:
+                    continue
+                # Get the tracked dataset's split name
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    if tracked_ds._dataset_split == origin:
+                        dataset = tracked_ds
+                        break
+                # Fallback: match by loader name (e.g., "train_loader" contains "train")
+                elif origin in loader_name:
+                    dataset = getattr(loader, "tracked_dataset", loader)
+                    break
 
             if dataset is None:
                 continue
@@ -1036,7 +1024,56 @@ class DataService:
             except Exception as e:
                 logger.warning(f"Could not persist tags to tracked dataset: {e}")
 
+        # ------------------------------------------------------------------
+        # 5) Persist edits back to the shared H5 store for all origins
+        # ------------------------------------------------------------------
+        if self._stats_store and request.samples_ids:
+            updates_by_origin = {}
+            for sid, origin in zip(request.samples_ids, request.sample_origins):
+                value = request.string_value if request.stat_name == "tags" else request.bool_value
+                updates_by_origin.setdefault(origin, []).append({"sample_id": sid, request.stat_name: value})
+
+            for origin, rows in updates_by_origin.items():
+                try:
+                    df_update = pd.DataFrame(rows).set_index("sample_id")
+                    self._stats_store.upsert(origin, df_update)
+                except Exception as e:
+                    logger.debug(f"[EditDataSample] Failed to persist edits for origin={origin}: {e}")
+
         return pb2.DataEditsResponse(
             success=True,
             message=f"Edited {len(request.samples_ids)} samples",
         )
+
+    def GetDataSplits(self, request, context):
+        """
+        Return the list of available dataset splits (train, test, val, etc.)
+        """
+        try:
+            from weightslab.backend.ledgers import get_dataloaders
+
+            split_names = []
+            loader_names = get_dataloaders()
+
+            for loader_name in loader_names:
+                loader = self._ctx.components.get(loader_name)
+                if loader is None:
+                    continue
+
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    split_name = tracked_ds._dataset_split
+                    if split_name and split_name not in split_names:
+                        split_names.append(split_name)
+
+            logger.info(f"GetDataSplits returning: {split_names}")
+            return pb2.DataSplitsResponse(
+                success=True,
+                split_names=split_names
+            )
+        except Exception as e:
+            logger.error(f"GetDataSplits failed: {e}", exc_info=True)
+            return pb2.DataSplitsResponse(
+                success=False,
+                split_names=[]
+            )

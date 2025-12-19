@@ -155,12 +155,28 @@ class ExperimentService:
 
         if request.HasField("deny_samples_operation"):
             with weightslab_rlock:
+                from weightslab.backend.ledgers import get_dataloaders
+
                 denied_cnt = len(request.deny_samples_operation.sample_ids)
-                ds = components.get("train_loader")
+                origin = request.deny_samples_operation.origin if hasattr(request.deny_samples_operation, 'origin') else 'train'
+
+                # Find the loader for the requested origin
+                loader_names = get_dataloaders()
+                ds = None
+                for loader_name in loader_names:
+                    loader = components.get(loader_name)
+                    if loader is None:
+                        continue
+                    tracked_ds = getattr(loader, "tracked_dataset", None)
+                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                        if tracked_ds._dataset_split == origin:
+                            ds = loader
+                            break
+
                 if ds is None:
                     return pb2.CommandResponse(
                         success=False,
-                        message="No train dataloader registered",
+                        message=f"No dataloader registered for origin '{origin}'",
                     )
                 dataset = getattr(ds, "tracked_dataset", ds)
                 dataset.denylist_samples(
@@ -169,17 +185,33 @@ class ExperimentService:
                 )
                 return pb2.CommandResponse(
                     success=True,
-                    message=f"Denied {denied_cnt} train samples",
+                    message=f"Denied {denied_cnt} samples from '{origin}'",
                 )
 
         if request.HasField("deny_eval_samples_operation"):
             with weightslab_rlock:
+                from weightslab.backend.ledgers import get_dataloaders
+
                 denied_cnt = len(request.deny_eval_samples_operation.sample_ids)
-                ds = components.get("test_loader")
+                origin = request.deny_eval_samples_operation.origin if hasattr(request.deny_eval_samples_operation, 'origin') else 'eval'
+
+                # Find the loader for the requested origin
+                loader_names = get_dataloaders()
+                ds = None
+                for loader_name in loader_names:
+                    loader = components.get(loader_name)
+                    if loader is None:
+                        continue
+                    tracked_ds = getattr(loader, "tracked_dataset", None)
+                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                        if tracked_ds._dataset_split == origin:
+                            ds = loader
+                            break
+
                 if ds is None:
                     return pb2.CommandResponse(
                         success=False,
-                        message="No eval dataloader registered",
+                        message=f"No dataloader registered for origin '{origin}'",
                     )
                 dataset = getattr(ds, "tracked_dataset", ds)
                 dataset.denylist_samples(
@@ -188,33 +220,65 @@ class ExperimentService:
                 )
             return pb2.CommandResponse(
                 success=True,
-                message=f"Denied {denied_cnt} eval samples",
+                message=f"Denied {denied_cnt} samples from '{origin}'",
             )
 
         if request.HasField("remove_from_denylist_operation"):
             with weightslab_rlock:
+                from weightslab.backend.ledgers import get_dataloaders
+
                 allowed = set(request.remove_from_denylist_operation.sample_ids)
-                ds = components.get("train_loader")
+                origin = request.remove_from_denylist_operation.origin if hasattr(request.remove_from_denylist_operation, 'origin') else 'train'
+
+                # Find the loader for the requested origin
+                loader_names = get_dataloaders()
+                ds = None
+                for loader_name in loader_names:
+                    loader = components.get(loader_name)
+                    if loader is None:
+                        continue
+                    tracked_ds = getattr(loader, "tracked_dataset", None)
+                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                        if tracked_ds._dataset_split == origin:
+                            ds = loader
+                            break
+
                 if ds is None:
                     return pb2.CommandResponse(
                         success=False,
-                        message="No train dataloader registered",
+                        message=f"No dataloader registered for origin '{origin}'",
                     )
                 dataset = getattr(ds, "tracked_dataset", ds)
                 dataset.allowlist_samples(allowed)
                 return pb2.CommandResponse(
                     success=True,
-                    message=f"Un-denied {len(allowed)} train samples",
+                    message=f"Un-denied {len(allowed)} samples from '{origin}'",
                 )
 
         if request.HasField("remove_eval_from_denylist_operation"):
             with weightslab_rlock:
+                from weightslab.backend.ledgers import get_dataloaders
+
                 allowed = set(request.remove_eval_from_denylist_operation.sample_ids)
-                ds = components.get("test_loader")
+                origin = request.remove_eval_from_denylist_operation.origin if hasattr(request.remove_eval_from_denylist_operation, 'origin') else 'eval'
+
+                # Find the loader for the requested origin
+                loader_names = get_dataloaders()
+                ds = None
+                for loader_name in loader_names:
+                    loader = components.get(loader_name)
+                    if loader is None:
+                        continue
+                    tracked_ds = getattr(loader, "tracked_dataset", None)
+                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                        if tracked_ds._dataset_split == origin:
+                            ds = loader
+                            break
+
                 if ds is None:
                     return pb2.CommandResponse(
                         success=False,
-                        message="No eval dataloader registered",
+                        message=f"No dataloader registered for origin '{origin}'",
                     )
                 dataset = getattr(ds, "tracked_dataset", ds)
                 dataset.allowlist_samples(allowed)
@@ -265,51 +329,41 @@ class ExperimentService:
                     )
 
         if request.get_data_records:
-            if request.get_data_records == "train":
-                ds = components.get("train_loader")
-                if ds is not None:
-                    dataset = getattr(ds, "tracked_dataset", ds)
-                    response.sample_statistics.CopyFrom(
-                        get_data_set_representation(
-                            dataset,
-                            types.SimpleNamespace(
-                                **{
-                                    "tasks": getattr(components.get("model"), "tasks", None),
-                                    "task_type": getattr(
-                                        components.get("model"),
-                                        "task_type",
-                                        getattr(dataset, "task_type", "classification"),
-                                    ),
-                                    "num_classes": getattr(
-                                        components.get("model"), "num_classes", None
-                                    ),
-                                }
-                            ),
-                        )
+            from weightslab.backend.ledgers import get_dataloaders
+
+            # Find the loader for the requested origin dynamically
+            loader_names = get_dataloaders()
+            ds = None
+            for loader_name in loader_names:
+                loader = components.get(loader_name)
+                if loader is None:
+                    continue
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    if tracked_ds._dataset_split == request.get_data_records:
+                        ds = loader
+                        break
+
+            if ds is not None:
+                dataset = getattr(ds, "tracked_dataset", ds)
+                response.sample_statistics.CopyFrom(
+                    get_data_set_representation(
+                        dataset,
+                        types.SimpleNamespace(
+                            **{
+                                "tasks": getattr(components.get("model"), "tasks", None),
+                                "task_type": getattr(
+                                    components.get("model"),
+                                    "task_type",
+                                    getattr(dataset, "task_type", "classification"),
+                                ),
+                                "num_classes": getattr(
+                                    components.get("model"), "num_classes", None
+                                ),
+                            }
+                        ),
                     )
-                    response.sample_statistics.origin = "train"
-            elif request.get_data_records == "eval":
-                ds = components.get("test_loader")
-                if ds is not None:
-                    dataset = getattr(ds, "tracked_dataset", ds)
-                    response.sample_statistics.CopyFrom(
-                        get_data_set_representation(
-                            dataset,
-                            types.SimpleNamespace(
-                                **{
-                                    "tasks": getattr(components.get("model"), "tasks", None),
-                                    "task_type": getattr(
-                                        components.get("model"),
-                                        "task_type",
-                                        getattr(dataset, "task_type", "classification"),
-                                    ),
-                                    "num_classes": getattr(
-                                        components.get("model"), "num_classes", None
-                                    ),
-                                }
-                            ),
-                        )
-                    )
-                    response.sample_statistics.origin = "eval"
+                )
+                response.sample_statistics.origin = request.get_data_records
 
         return response

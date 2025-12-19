@@ -71,6 +71,9 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     def EditDataSample(self, request, context):
         return self._exp_service.data_service.EditDataSample(request, context)
 
+    def GetDataSplits(self, request, context):
+        return self._exp_service.data_service.GetDataSplits(request, context)
+
     # -------------------------------------------------------------------------
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------

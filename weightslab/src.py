@@ -13,7 +13,7 @@ from threading import Lock
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.ledgers import get_model, get_dataloader, get_dataloaders, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.ui.weightslab_ui import ui_serve
@@ -47,13 +47,25 @@ def _save_data_statistics(
 
         name = 'train_loader' if is_training else 'test_loader'
         try:
-            get_dataloader(name).tracked_dataset.update_batch_sample_stats(
+            loader = get_dataloader(name)
+
+            # TODO (GP): improve this logic to avoid double updates
+            # Improvement here should be to separate dataloaders that generates data from datasets, from data storage, which should be global,
+            # and in the ledger. So that we don't have to try multiple dataloaders to update the same dataset. And we can work on dataloader named Chloe for instance.
+            # https://github.com/GrayboxTech/weightslab/issues/50
+            if set(batch_ids_np) - set(get_dataloader(name).tracked_dataset.unique_ids):
+                nloaders = get_dataloaders()
+                for lname in nloaders:
+                    loader = get_dataloader(lname)
+                    if set(batch_ids_np).issubset(set(loader.tracked_dataset.unique_ids)):
+                        break
+            loader.tracked_dataset.update_batch_sample_stats(
                 model_age,
                 batch_ids_np,
                 per_sample_loss_np,
                 pred_np
             )
-            get_dataloader(name).tracked_dataset.update_sample_stats_ex_batch(
+            loader.tracked_dataset.update_sample_stats_ex_batch(
                 batch_ids_np,
                 {
                     "loss/combined": per_sample_loss_np,
@@ -132,6 +144,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
     elif flag.lower() == 'data' or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
+        kwargs['name'] = reg_name
+
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_dataloader` will create a Proxy if
@@ -222,7 +236,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     model_age = kw.pop('model_age', None)
                     preds = kw.pop('preds', None)
 
-                    # Original forward
+                    # Original forward of the signal
                     out = original_forward(*a, **kw)
 
                     if kwargs.get('per_sample', False):
