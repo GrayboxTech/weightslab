@@ -221,6 +221,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     ids = kw.pop('batch_ids', None)
                     model_age = kw.pop('model_age', None)
                     preds = kw.pop('preds', None)
+                    manual_losses_batch = kw.pop('losses_batch', None)
 
                     # Original forward
                     out = original_forward(*a, **kw)
@@ -229,11 +230,26 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
 
                     # extract scalar
-                    batch_scalar = None
+                    batch_scalar = manual_losses_batch
                     scalar = None
                     try:
-                        # Assume loss returns per-sample losses - mean by default
-                        if isinstance(out, th.Tensor):
+                        # 1. Use manual batch scalar if provided (preferred for complex loss outputs)
+                        if batch_scalar is not None:
+                            if isinstance(batch_scalar, th.Tensor):
+                                batch_scalar = batch_scalar.detach().cpu()
+                                if batch_scalar.ndim == 0:
+                                    scalar = float(batch_scalar.item())
+                                else:
+                                    scalar = float(batch_scalar.mean().item())
+                            else:
+                                try:
+                                    import numpy as _np
+                                    batch_scalar = _np.array(batch_scalar)
+                                    scalar = float(batch_scalar.mean())
+                                except Exception:
+                                    pass
+                        # 2. Otherwise fall back to extracting from 'out'
+                        elif isinstance(out, th.Tensor):
                             batch_scalar = out.detach().cpu()
                             if batch_scalar.ndim == 0:
                                 scalar = float(batch_scalar.item())

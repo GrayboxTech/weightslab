@@ -79,6 +79,36 @@ class MaskedSampler(Sampler):
         return max(0, total - denied_count)
 
 
+class MutableBatchSampler:
+    """A simple mutable batch sampler that yields lists of indices.
+
+    Changing the `batch_size` attribute at runtime will affect
+    subsequent iterations.
+    """
+
+    def __init__(self, base_sampler, batch_size, drop_last=False):
+        self.base_sampler = base_sampler
+        self.batch_size = int(batch_size)
+        self.drop_last = bool(drop_last)
+
+    def __iter__(self):
+        batch = []
+        for idx in self.base_sampler:
+            batch.append(idx)
+            if len(batch) >= int(self.batch_size):
+                yield list(batch)
+        if batch and not self.drop_last:
+            yield list(batch)
+
+    def __len__(self):
+        try:
+            total = len(self.base_sampler)
+            b = max(1, int(self.batch_size))
+            return (total + b - 1) // b
+        except Exception:
+            raise TypeError("len not supported for this sampler")
+
+
 class DataLoaderInterface:
     """Wrap a Dataset or DataLoader and expose common helpers.
 
