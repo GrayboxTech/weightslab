@@ -1,0 +1,35 @@
+experiment_name: "single_litenet_aida"
+data_root: "/Users/marcgraybx/graybox/development/data/BDD100k_reduced"
+device: "auto"
+training_steps_to_do: 1000
+image_size: 192
+num_classes: 6
+ignore_index: 255
+eval_full_to_train_steps_ratio: 100
+optimizer:
+  lr: 2e-3
+data:
+  train_loader:
+    batch_size: 144
+    num_workers: 0
+    shuffle: false
+  test_loader:
+    batch_size: 144
+    num_workers: 0
+
+model:
+  name: "nano"
+  encoder:
+    level_0_ch: 4
+    level_1_ch: 8
+    level_2_ch: 16
+    level_3_ch: 32
+    level_4_ch: 64
+    out_channels: 16
+    p: 1
+    q: 1
+  caam:
+    out_channels: 8
+  decoder:
+    level_0_ch: 4
+    level_1_ch: 8

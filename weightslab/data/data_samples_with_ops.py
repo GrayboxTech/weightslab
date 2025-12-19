@@ -312,6 +312,18 @@ class DataSampleTrackingWrapper(Dataset):
                     f"Labels will remain unchanged."
                 )
 
+    def __getstate__(self):
+        """Exclude the Lock which cannot be pickled."""
+        state = self.__dict__.copy()
+        if "_h5_lock" in state:
+            del state["_h5_lock"]
+        return state
+
+    def __setstate__(self, state):
+        """Restore state and recreate the Lock."""
+        self.__dict__.update(state)
+        self._h5_lock = threading.Lock()
+
     def __eq__(self, other: "DataSampleTrackingWrapper") -> bool:
         # Unsafely assume that the wrapped dataset are the same
         # TODO(rotaru): investigate how to compare the underlying dataset
@@ -535,9 +547,13 @@ class DataSampleTrackingWrapper(Dataset):
             pass
         elif stat_name == SampleStatsEx.PREDICTION_LOSS.value:
             # Convert per-pixel losses to mean loss for H5 storage
-            if isinstance(stat_value, (th.Tensor, np.ndarray)):
-                logger.warning(f"PREDICTION_LOSS is a multi-element array (size={stat_value.size}) for sample_id={sample_id}, should be scalar. Converting to mean loss.")
-            pass
+            if isinstance(stat_value, (th.Tensor, np.ndarray)) and stat_value.size > 1:
+                # logger.debug(f"PREDICTION_LOSS is a multi-element array (size={stat_value.size}) for sample_id={sample_id}. Converting to mean loss for H5 storage.")
+                # Convert tensor to numpy if needed
+                if isinstance(stat_value, th.Tensor):
+                    stat_value = stat_value.detach().cpu().numpy()
+                # Compute mean for scalar storage
+                stat_value = float(np.mean(stat_value))
         else:
             # For other stats, skip multi-element arrays
             logger.warning(f"Skipping multi-element array for stat '{stat_name}' (size={stat_value.size})")
