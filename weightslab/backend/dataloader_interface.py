@@ -25,7 +25,6 @@ from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
-    list_hyperparams,
 )
 
 

@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import list_hyperparams, get_hyperparams, set_hyperparam, resolve_hp_name
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
 
 from weightslab.components.tracking import TrackingMode
 
@@ -221,7 +221,7 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                     pause_controller.resume()
                 elif controller_running and not hp_is_training:
                     pause_controller.pause()
-            
+
             # Re-evaluate controller state after potential changes
             controller_paused = pause_controller.is_paused()
             controller_running = not controller_paused

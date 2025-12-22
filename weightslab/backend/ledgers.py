@@ -295,7 +295,7 @@ class Ledger:
             if name is None:
                 from weightslab.backend.ledgers import resolve_hp_name
                 name = resolve_hp_name()
-            
+
             if name is None or name not in self._hyperparams:
                 # If still None and we have sets, take the first as ultimate fallback
                 keys = list(self._hyperparams.keys())
@@ -303,7 +303,7 @@ class Ledger:
                     name = keys[0]
                 else:
                     raise KeyError(f'no hyperparams registered under {name or "None"}')
-            
+
             hp = self._hyperparams.get(name)
             # if proxy, get underlying dict
             if isinstance(hp, Proxy):
