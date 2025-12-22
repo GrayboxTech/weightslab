@@ -6,9 +6,10 @@ import torch
 import numpy as np
 
 import weightslab.proto.experiment_service_pb2 as pb2
-from weightslab.trainer.trainer_tools import process_sample, _get_input_tensor_for_sample, get_layer_representation, get_layer_representations, get_data_set_representation
+from weightslab.trainer.trainer_tools import process_sample, _get_input_tensor_for_sample
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.components.global_monitoring import weightslab_rlock
+
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,25 @@ class ModelService:
 
         components = self._ctx.components
 
-        ds = components.get("train_loader") if request.origin == "train" else components.get("test_loader")
+        # Dynamically find the loader for the requested origin
+        from weightslab.backend.ledgers import get_dataloaders
+        loader_names = get_dataloaders()
+
+        ds = None
+        for loader_name in loader_names:
+            loader = components.get(loader_name)
+            if loader is None:
+                continue
+            tracked_ds = getattr(loader, "tracked_dataset", None)
+            if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                if tracked_ds._dataset_split == request.origin:
+                    ds = loader
+                    break
+
+        if ds is None:
+            logger.warning(f"No loader found for origin '{request.origin}'")
+            return pb2.BatchSampleResponse()
+
         dataset = getattr(ds, "tracked_dataset", ds)
         response = pb2.BatchSampleResponse()
 
@@ -182,14 +201,30 @@ class ModelService:
             if int(request.layer_id) == last_layer_id:
                 return empty_resp
 
-            ds = getattr(components.get("train_loader"), "tracked_dataset", components.get("train_loader"))
-            if request.origin == "eval":
-                ds = getattr(components.get("test_loader"), "tracked_dataset", components.get("test_loader"))
+            # Dynamically find the loader for the requested origin
+            from weightslab.backend.ledgers import get_dataloaders
+            loader_names = get_dataloaders()
+
+            ds = None
+            for loader_name in loader_names:
+                loader = components.get(loader_name)
+                if loader is None:
+                    continue
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    if tracked_ds._dataset_split == request.origin:
+                        ds = getattr(loader, "tracked_dataset", loader)
+                        break
+
+            if ds is None:
+                logger.warning(f"No dataset found for origin '{request.origin}'")
+                return empty_resp
 
             if request.sample_id < 0 or request.sample_id >= len(ds):
                 raise ValueError(f"No sample id {request.sample_id} for {request.origin}")
 
-            x = _get_input_tensor_for_sample(ds, request.sample_id, getattr(model, "device", "cpu"))
+            sid = ds.get_sample_id_at_index(request.sample_id)
+            x = _get_input_tensor_for_sample(ds, sid, getattr(model, "device", "cpu"))
 
             with torch.no_grad():
                 intermediaries = {}

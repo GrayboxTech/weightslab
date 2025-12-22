@@ -1,4 +1,3 @@
-import os
 import torch
 import tempfile
 import weightslab as wl
@@ -7,7 +6,7 @@ from weightslab.backend.ledgers import register_optimizer
 
 
 class OptimizerInterface:
-    def __init__(self, optimizer_or_cls, params=None, name: str = None, register: bool = True, weak: bool = False, _kill: bool = False, **kwargs):
+    def __init__(self, optimizer_or_cls, params=None, name: str = None, register: bool = True, weak: bool = False, **kwargs):
         """Wrap a torch optimizer instance or instantiate one from a class.
 
         If `optimizer_or_cls` is an instance of `torch.optim.Optimizer` it is
@@ -26,7 +25,7 @@ class OptimizerInterface:
 
         # Expose attributes and methods from the wrapped optimizer
         self.init_attributes(self.optimizer)
-        
+
         # Optionally register this wrapper into the global ledger so other
         # threads / modules can access it by name. Prefer explicit `name`,
         # else infer from the optimizer class or fall back to '_optimizer'.
@@ -135,7 +134,7 @@ class OptimizerInterface:
 if __name__ == "__main__":
     print('Hello World')
     from weightslab.baseline_models.pytorch.models import FashionCNN
-    
+
     # 0. Init. variables
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     TMP_DIR = tempfile.mkdtemp()
@@ -146,7 +145,7 @@ if __name__ == "__main__":
         model.parameters(),
         lr=1e-2
     )
-    
+
     # WatchOrEdit
     model = wl.watch_or_edit(model, flag='model')
-    optim = wl.watch_or_edit(optimizer, flag='optimizer') 
+    optim = wl.watch_or_edit(optimizer, flag='optimizer')

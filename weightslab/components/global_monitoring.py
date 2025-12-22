@@ -31,9 +31,9 @@ class PauseController:
         print('\nTraining paused.')
         self._event.clear()
         set_hyperparam(None, 'is_training', False)
-    
+
     def resume(self):
-        print('Training resumed.')
+        print('\nTraining resumed.')
         self._event.set()
         set_hyperparam(None, 'is_training', True)
 
@@ -63,7 +63,7 @@ class OpContext:
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         """
-        Executed upon exiting the 'with' block (after user code runs). 
+        Executed upon exiting the 'with' block (after user code runs).
         Reverts the model state.
         """
 
@@ -71,7 +71,7 @@ class OpContext:
 
         # If exc_type is not None, an exception occurred in the block.
         # Returning False (default) allows the exception to propagate.
-        return False 
+        return False
 
 op_context = OpContext()
 
@@ -94,26 +94,24 @@ class GuardContext:
         """
         pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
-        
+
         # The exact logic requested by the user:
         if self.for_training:
             self.model.set_tracking_mode(TrackingMode.TRAIN)
-            self.model.train()
         else:
             self.model.set_tracking_mode(TrackingMode.EVAL)
-            self.model.eval()
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         """
-        Executed upon exiting the 'with' block (after user code runs). 
+        Executed upon exiting the 'with' block (after user code runs).
         Reverts the model state.
         """
-        
+
         if exc_type is RuntimeError:
             logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__")
             self.architecture_guard.__exit__(exc_type, exc_value, traceback)
             return True  # suppress the exception
-        
+
         self.architecture_guard.__exit__(exc_type, exc_value, traceback)
 
         # Use provided op_context if present, otherwise fall back to module-level
@@ -165,7 +163,7 @@ class GuardContext:
             except Exception:
                 pass
 
-        return False 
+        return False
 
 
 # Define Global Object here
@@ -192,7 +190,6 @@ def _resolve_hp_name() -> str | None:
     return None
 
 def _pause_hp_sync_loop(poll_interval: float = 0.5):
-    last_name = None
     while True:
         try:
             name = _resolve_hp_name()

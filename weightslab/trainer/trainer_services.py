@@ -1,23 +1,15 @@
 import os
-import types
-import time
 import grpc
-import torch
 import logging
-import traceback
-import numpy as np
-import pandas as pd
-
-import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
 from threading import Thread
 from concurrent import futures
 
-from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
 from weightslab.trainer.trainer_tools import *
-from weightslab.trainer.trainer_tools import _get_input_tensor_for_sample
-from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
+
+from weightslab.trainer.experiment_context import ExperimentContext
+from weightslab.trainer.services.experiment_service import ExperimentService
 
 from weightslab.trainer.experiment_context import ExperimentContext
 from weightslab.trainer.services.experiment_service import ExperimentService
@@ -54,21 +46,21 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # -------------------------------------------------------------------------
     def GetSamples(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetSamples({request})")
-        return self._exp_service.model_service.get_samples(request)
+        return self._exp_service.model_service.GetSamples(request, context)
 
     # -------------------------------------------------------------------------
     # Weights inspection
     # -------------------------------------------------------------------------
     def GetWeights(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetWeights({request})")
-        return self._exp_service.model_service.get_weights(request)
+        return self._exp_service.model_service.GetWeights(request, context)
 
     # -------------------------------------------------------------------------
     # Activations
     # -------------------------------------------------------------------------
     def GetActivations(self, request, context):
         logger.debug(f"ExperimentServiceServicer.GetActivations({request})")
-        return self._exp_service.model_service.get_activations(request)
+        return self._exp_service.model_service.GetActivations(request, context)
 
     # -------------------------------------------------------------------------
     # Data service helpers + RPCs (for weights_studio UI)
@@ -81,6 +73,12 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
     def EditDataSample(self, request, context):
         return self._exp_service.data_service.EditDataSample(request, context)
+
+    def GetDataSplits(self, request, context):
+        return self._exp_service.data_service.GetDataSplits(request, context)
+
+    def CheckAgentHealth(self, request, context):
+        return self._exp_service.data_service.CheckAgentHealth(request, context)
 
     # -------------------------------------------------------------------------
     # Training & hyperparameter commands
@@ -100,7 +98,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
 # -----------------------------------------------------------------------------
-def grpc_serve(n_workers_grpc: int = 4, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
+def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
     """Configure trainer services such as gRPC server.
 
     Args:

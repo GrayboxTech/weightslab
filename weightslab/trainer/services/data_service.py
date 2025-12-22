@@ -1,878 +1,888 @@
+import io
+import time
+import torch
 import logging
+import os
 import traceback
+import threading
+
 import numpy as np
 import pandas as pd
-from torch.utils.data import Dataset
 
 import weightslab.proto.experiment_service_pb2 as pb2
 
+from pathlib import Path
+from concurrent import futures
+from torchvision import transforms
+from weightslab.data.h5_dataframe_store import H5DataFrameStore
+from weightslab.components.global_monitoring import pause_controller
+from weightslab.trainer.services.service_utils import load_raw_image
+from weightslab.trainer.services.agent import DataManipulationAgent
+
+
+# Get global logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
 
-class EditableDatasetAdapter(Dataset):
+def _get_stat_from_row(row, stat_name):
+    """Extract stat from dataframe row and convert to DataStat message."""
+    value = row.get(stat_name)
+
+    if not isinstance(value, (np.ndarray, torch.Tensor)) and (value is None or pd.isna(value)):
+        return None
+
+    # Helper for creating DataStat messages
+    def make_stat(type_, shape, **kwargs):
+        return pb2.DataStat(name=stat_name, type=type_, shape=shape, **kwargs)
+
+    # 1) Fast-path: None
+    if value is None:
+        return None
+
+    # Detect array-like first
+    is_array_like = isinstance(value, (np.ndarray, list, tuple)) or isinstance(value, torch.Tensor)
+
+    # 2) NaN handling ONLY for non-array-like values
+    if not is_array_like:
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            # Some objects don't like pd.isna, just ignore
+            pass
+
+    # 3) torch.Tensor -> numpy
+    if isinstance(value, torch.Tensor):
+        try:
+            value = value.detach().cpu().numpy()
+        except Exception:
+            return None
+
+    # 4) numpy arrays -> array stat
+    if isinstance(value, np.ndarray):
+        # 0-dim array -> scalar
+        if value.ndim == 0:
+            v = float(value.item())
+            return make_stat("scalar", [], value=[v])
+
+        a = value
+        # NOTE: if you ever need to cap size, you could do it here:
+        # if a.size > MAX_ALLOWED:
+        #     a = a.reshape(-1)[:MAX_ALLOWED]
+        return make_stat(
+            "array",
+            list(a.shape),
+            value=a.ravel().astype(float).tolist(),
+        )
+
+    # 5) list/tuple -> treat as 1D array
+    if isinstance(value, (list, tuple)):
+        a = np.asarray(value)
+        if a.ndim == 0:
+            v = float(a.item())
+            return make_stat("scalar", [], value=[v])
+        return make_stat(
+            "array",
+            list(a.shape),
+            value=a.ravel().astype(float).tolist(),
+        )
+
+    # 6) scalars
+    if isinstance(value, (int, float, bool, np.integer, np.floating, np.bool_)):
+        return make_stat("scalar", [], value=[float(value)])
+
+    # 7) strings
+    if isinstance(value, str):
+        return make_stat("string", [1], value_string=value)
+
+    # 8) Fallback: stringify
+    return make_stat("string", [1], value_string=str(value)[:512])
+
+def _infer_task_type_from_label(label, default="classification"):
     """
-    Wraps an arbitrary dataset to make it compatible with DataService.EditDataSample
-    and GetDataSamples.
+    Heuristic: guess task type based on label shape / dtype.
 
-    It:
-      - delegates __len__ and __getitem__ to the underlying dataset
-      - adds .set(sample_id, stat_name, value)
-      - exposes .sample_statistics as a dict of per-sample metadata
-      - forwards unknown attributes to the base dataset
+    - 0D or size==1 → classification-like
+    - 2D integer mask → segmentation-like
+    - 3D 1-channel integer tensor → segmentation-like
+    - otherwise → fall back to default
     """
+    try:
+        arr = label.cpu().numpy() if hasattr(label, "cpu") else np.asarray(label)
+    except Exception:
+        return default
 
-    def __init__(self, base_dataset):
-        self.wrapped_dataset = base_dataset  # important: for _dataset_to_df unwrapping
-        self.sample_statistics = {
-            "tags": {},         # sample_id -> string
-            "deny_listed": {},  # sample_id -> bool
-        }
+    # Scalar / single element → treat as classification
+    if arr.ndim == 0 or arr.size == 1:
+        return "classification"
 
-    def __len__(self):
-        return len(self.wrapped_dataset)
+    # 2D integer-ish → very likely segmentation mask
+    if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
+        return "segmentation"
 
-    def __getitem__(self, idx):
-        return self.wrapped_dataset[idx]
+    # 3D with a single channel can also be a mask (1, H, W) or (H, W, 1)
+    if arr.ndim == 3:
+        if arr.shape[0] == 1 or arr.shape[-1] == 1:
+            if np.issubdtype(arr.dtype, np.integer):
+                return "segmentation"
 
-    def set(self, sample_id: int, stat_name: str, value):
-        """
-        Called by DataService.EditDataSample:
-            dataset.set(sid, "tags", request.string_value)
-            dataset.set(sid, "deny_listed", request.bool_value)
-        """
-        sid = int(sample_id)
-        if stat_name not in self.sample_statistics:
-            self.sample_statistics[stat_name] = {}
-
-        if stat_name == "tags":
-            self.sample_statistics["tags"][sid] = str(value)
-        elif stat_name == "deny_listed":
-            self.sample_statistics["deny_listed"][sid] = bool(value)
-        else:
-            self.sample_statistics[stat_name][sid] = value
-
-    def __getattr__(self, name):
-        """
-        Delegate all other attributes to the wrapped dataset.
-        This preserves things like .classes, .class_to_idx, .data, .targets, etc.
-        """
-        return getattr(self.wrapped_dataset, name)
-
-    def as_records(self):
-        """
-        If the wrapped dataset supports as_records, call it and then
-        inject our local edits (tags, deny_listed) into the result.
-        """
-        # 1. Get base records
-        if hasattr(self.wrapped_dataset, "as_records"):
-            records = self.wrapped_dataset.as_records()
-        else:
-            # If wrapped dataset doesn't have as_records, we raise AttributeError
-            # so that the caller knows it's not supported (or __getattr__ would have handled it).
-            raise AttributeError(f"'{type(self.wrapped_dataset).__name__}' object has no attribute 'as_records'")
-
-        # 2. Inject stats
-        if not records:
-            return records
-
-        # We'll iterate and update.
-        for row in records:
-            sid = row.get("sample_id")
-            if sid is None:
-                continue
-            sid = int(sid)
-
-            # Update tags
-            if "tags" in self.sample_statistics and sid in self.sample_statistics["tags"]:
-                row["tags"] = self.sample_statistics["tags"][sid]
-
-            # Update deny_listed
-            if "deny_listed" in self.sample_statistics and sid in self.sample_statistics["deny_listed"]:
-                row["deny_listed"] = self.sample_statistics["deny_listed"][sid]
-
-        return records
+    # Anything else: keep the caller's default guess
+    return default
 
 
 class DataService:
+
     """
     Data service helpers + RPCs (for weights_studio UI).
+
+    Images are sent over gRPC as bytes (JPEG) for simplicity and correctness.
     """
 
     def __init__(self, ctx):
         self._ctx = ctx
-        # Data service components (initialized lazily on first use)
-        # Single dataframe representing the current "view".
-        self._all_datasets_df: pd.DataFrame | None = None
-        # NEW: base dataframe (unfiltered) used for reset operations
-        self._base_df: pd.DataFrame | None = None
-        self._agent = None
+        self._lock = threading.Lock()
 
-    # -------------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------------
-    def _make_loader_editable(self, loader):
-        """
-        Ensure that the loader's underlying dataset is editable:
-          - has .set(...)
-          - has .sample_statistics
+        # init references to the context components
+        self._ctx.ensure_components()
+        self.df_lock = threading.RLock()
 
-        We wrap loader.dataset (or loader itself) with EditableDatasetAdapter
-        if needed, and mutate in place so the rest of the system sees it too.
-        """
-        if loader is None:
-            return None
+        # Dynamically get all available data loaders from the ledger
+        from weightslab.backend.ledgers import get_dataloaders
+        loader_names = get_dataloaders()
+        self._loaders = {name: self._ctx.components.get(name) for name in loader_names}
 
-        # Get the underlying dataset if it's a DataLoader-like
-        base_ds = getattr(loader, "dataset", loader)
-
-        # Already supports editing? leave it alone
-        if hasattr(base_ds, "set") and hasattr(base_ds, "sample_statistics"):
-            return loader
-
-        # Wrap it
-        adapted = EditableDatasetAdapter(base_ds)
-
-        # If loader has a .dataset attribute, update it; else we just return the adapted dataset
-        if hasattr(loader, "dataset"):
-            loader.dataset = adapted
-            return loader
+        if not self._loaders:
+            logger.warning("DataService initialized without any data loaders.")
         else:
-            # loader itself was a dataset instance
-            return adapted
+            logger.info(f"DataService found loaders: {list(self._loaders.keys())}")
 
-    def _get_stat_from_row(self, row, stat_name):
-        """Extract stat from dataframe row and convert to DataStat message."""
-        try:
-            value = row[stat_name]
-        except (KeyError, IndexError):
-            return None
+        self._root_log_dir = self._resolve_root_log_dir()
+        self._h5_path = self._resolve_h5_path()
+        self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
+        self._stats_last_mtime = None
 
-        if value is None:
-            return None
+        self._all_datasets_df = self._pull_into_all_data_view_df()
+        self._load_existing_tags()
+        self._agent = DataManipulationAgent(self)
 
-        if isinstance(value, (int, float)):
-            if pd.isna(value):
-                return None
-            return pb2.DataStat(
-                name=stat_name,
-                type="scalar",
-                shape=[1],
-                value=[float(value)],
-            )
-        elif isinstance(value, str):
-            return pb2.DataStat(
-                name=stat_name,
-                type="string",
-                shape=[1],
-                value_string=value,
-            )
-        elif isinstance(value, (list, np.ndarray)):
-            arr = np.array(value)
-            return pb2.DataStat(
-                name=stat_name,
-                type="array",
-                shape=list(arr.shape),
-                value=arr.flatten().astype(float).tolist(),
-            )
-        return None
+        self._last_internals_update_time = None
+        logger.info("DataService initialized.")
 
-    # -------------------------------------------------------------------------
-    # NEW: overlay runtime sample_statistics (tags / deny_listed / etc.)
-    # -------------------------------------------------------------------------
-    def _with_runtime_sample_statistics(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Return a copy of df where columns like 'tags' / 'deny_listed' are refreshed
-        from the underlying EditableDatasetAdapter.sample_statistics.
-
-        This makes the wrapper the single source of truth, and ensures that
-        queries like "tags == 'abc'" see the latest edits, even if the in-memory
-        dataframe got out of sync.
-
-        We merge on (origin, sample_id).
-        """
-        if df is None or df.empty:
-            return df
-
-        try:
-            self._ctx.ensure_components()
-            components = self._ctx.components
-
-            records: list[dict] = []
-
-            def _collect_for_loader(loader, origin: str):
-                if not loader:
-                    return
-                ds = getattr(loader, "dataset", loader)
-                if not hasattr(ds, "sample_statistics"):
-                    return
-
-                ss = ds.sample_statistics  # dict: stat_name -> {sample_id -> value}
-                if not ss:
-                    return
-
-                for stat_name, mapping in ss.items():
-                    if not mapping:
-                        continue
-                    for sid, value in mapping.items():
-                        records.append(
-                            {
-                                "origin": origin,
-                                "sample_id": int(sid),
-                                stat_name: value,
-                            }
-                        )
-
-            _collect_for_loader(components.get("train_loader"), "train")
-            _collect_for_loader(components.get("test_loader"), "eval")
-
-            if not records:
-                # nothing to overlay
-                return df
-
-            stats_df = pd.DataFrame(records)
-            # drop duplicates in case we collected multiple times; keep last
-            stats_df = stats_df.drop_duplicates(subset=["origin", "sample_id"], keep="last")
-
-            merged = df.merge(
-                stats_df,
-                on=["origin", "sample_id"],
-                how="left",
-                suffixes=("", "_rt"),
-            )
-
-            # For every added column (tags, deny_listed, etc.), prefer the runtime value
-            for col in stats_df.columns:
-                if col in ("origin", "sample_id"):
-                    continue
-                rt_col = f"{col}_rt"
-                if rt_col in merged.columns:
-                    mask = merged[rt_col].notna()
-                    merged.loc[mask, col] = merged.loc[mask, rt_col]
-                    merged = merged.drop(columns=[rt_col])
-
-            return merged
-
-        except Exception as e:
-            logger.warning("Failed to overlay runtime sample_statistics: %s", e)
-            return df
-
-    # -------------------------------------------------------------------------
-    # Initialization / refresh
-    # -------------------------------------------------------------------------
     def _initialize_data_service(self):
-        """Initialize data service components using ledger-resolved dataloaders."""
+        """Recreate the in-memory dataframe view from the shared H5 store."""
+        self._all_datasets_df = self._pull_into_all_data_view_df()
+        self._load_existing_tags()
+
+    def _resolve_root_log_dir(self) -> Path:
+        """Resolve root log directory from hyperparams/env, fallback to ./logs."""
+        root = None
         try:
-            self._ctx.ensure_components()
-
-            components = self._ctx.components
-
-            train_loader = components.get("train_loader")
-            test_loader = components.get("test_loader")
-
-            if train_loader is None or test_loader is None:
-                logger.warning("Cannot initialize data service: dataloaders not in ledger")
-                return
-
-            # Make sure both loaders have editable datasets (set + sample_statistics)
-            train_loader = self._make_loader_editable(train_loader)
-            test_loader = self._make_loader_editable(test_loader)
-
-            # Write back into ctx.components so later calls (EditDataSample, etc.) see the wrapped versions
-            components["train_loader"] = train_loader
-            components["test_loader"] = test_loader
-
-            def _dataset_to_df(dataset_or_loader, origin: str) -> pd.DataFrame:
-                """Convert a dataset/loader into a DataFrame usable by the UI."""
-                raw_ds = dataset_or_loader
-                while True:
-                    if hasattr(raw_ds, "wrapped_dataset"):
-                        new_ds = raw_ds.wrapped_dataset
-                        if new_ds is not None:
-                            raw_ds = new_ds
-                        else:
-                            break
-                    elif hasattr(raw_ds, "dataset"):
-                        new_ds = raw_ds.dataset
-                        if new_ds is not None:
-                            raw_ds = new_ds
-                        else:
-                            break
-                    else:
-                        break
-
-                    if raw_ds is None:
-                        break
-
-                if raw_ds is None:
-                    logger.warning(f"raw_ds is None for {origin}, returning empty DF")
-                    return pd.DataFrame()
-
-                records = []
-
-                # Fast path for torchvision-style datasets with data/targets (MNIST, etc.)
-                if hasattr(raw_ds, "data") and hasattr(raw_ds, "targets"):
-                    try:
-                        images = raw_ds.data.numpy()
-                        labels = raw_ds.targets.numpy()
-                        for i in range(len(raw_ds)):
-                            records.append(
-                                {
-                                    "sample_id": i,
-                                    "label": int(labels[i]),
-                                    "image": images[i],
-                                    "origin": origin,
-                                }
-                            )
-                    except Exception as e:
-                        logger.warning(f"Fast path failed for {origin}: {e}")
-
-                # Fast path for ImageFolder datasets - only load metadata, not images
-                # This prevents OOM and timeouts with large datasets
-                if not records and hasattr(raw_ds, "samples") and hasattr(raw_ds, "targets"):
-                    try:
-                        logger.debug(f"Using ImageFolder fast path for {origin} with {len(raw_ds)} samples")
-                        for i in range(len(raw_ds)):
-                            records.append(
-                                {
-                                    "sample_id": i,
-                                    "label": int(raw_ds.targets[i]),
-                                    # Don't load image here - will be loaded on-demand by GetDataSamples
-                                    "origin": origin,
-                                }
-                            )
-                    except Exception as e:
-                        logger.warning(f"ImageFolder fast path failed for {origin}: {e}")
-
-                # Fallback: iterate samples (WARNING: slow for large datasets!)
-                if not records:
-                    logger.warning(
-                        f"Using slow fallback path for {origin} - this may take a while "
-                        f"and consume significant memory for {len(raw_ds)} samples"
+            hp = self._ctx.components.get("hyperparams")
+            if hp is not None and hasattr(hp, "get"):
+                hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if isinstance(hp_dict, dict):
+                    root = (
+                        hp_dict.get("root_log_dir")
+                        or hp_dict.get("root_directory")
+                        or hp_dict.get("root")
                     )
-                    for i in range(len(raw_ds)):
-                        try:
-                            item = raw_ds[i]
-                            if isinstance(item, (tuple, list)):
-                                img, lbl = item[0], item[-1]
-                            else:
-                                img, lbl = item, None
+        except Exception:
+            root = None
 
-                            if hasattr(img, "numpy"):
-                                img_arr = img.numpy()
-                            else:
-                                img_arr = np.array(img)
+        root = root or os.getenv("WEIGHTSLAB_ROOT_LOG_DIR")
+        if root is None:
+            root = Path("logs").absolute()
+        return Path(root)
 
-                            records.append(
-                                {
-                                    "sample_id": i,
-                                    "label": int(lbl) if lbl is not None else None,
-                                    "image": img_arr,
-                                    "origin": origin,
-                                }
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to convert sample {i}: {e}")
-                            continue
+    def _resolve_h5_path(self) -> Path | None:
+        """Return the H5 path used by tracked datasets and the streaming view."""
+        if self._root_log_dir is None:
+            return None
+        data_dir = Path(self._root_log_dir) / "checkpoints" / "data"
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return data_dir / "data_with_ops.h5"
 
-                df = pd.DataFrame(records)
+    def get_root_log_dir(self) -> str:
+        """Get the root log directory as a string.
 
-                # Merge dynamic stats from wrapper if available
-                stats_source = dataset_or_loader
+        Returns:
+            Absolute path to root_log_dir
+        """
+        return str(self._root_log_dir.absolute())
+
+    def is_agent_available(self) -> bool:
+        """
+        Check if the agent (Ollama) is available for natural language queries.
+
+        Returns:
+            bool: True if agent is available, False otherwise
+        """
+        if self._agent is None:
+            return False
+        try:
+            return self._agent.is_ollama_available()
+        except Exception as e:
+            logger.debug(f"Error checking agent availability: {e}")
+            return False
+
+    def _is_training_active(self) -> bool:
+        """Return True if training is currently running (not paused)."""
+        try:
+            hp = self._ctx.components.get("hyperparams")
+            if hp is not None and hasattr(hp, "get"):
+                hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if isinstance(hp_dict, dict):
+                    flag = hp_dict.get("is_training")
+                    if flag is not None:
+                        return bool(flag)
+        except Exception:
+            pass
+        # Fall back to pause controller state if hyperparams missing
+        try:
+            return not pause_controller.is_paused()
+        except Exception:
+            return True
+
+    def _interaction_allowed(self):
+        if self._is_training_active():
+            return False, "Training is running; pause to browse or edit data."
+        return True, ""
+
+    def _pull_into_all_data_view_df(self):
+            """Stream stats from the shared H5 store with timeout to avoid blocking training.
+
+            Uses a timeout on the H5 read lock - if H5 is busy (training is writing),
+            we return the last known good snapshot rather than waiting.
+            This ensures DataService communication never blocks the training loop.
+            """
+            if self._stats_store is None:
+                return pd.DataFrame()
+
+            # Dynamically discover all loader origins from tracked datasets
+            origins = []
+            for _, loader in self._loaders.items():
+                if loader is not None:
+                    tracked_ds = getattr(loader, "tracked_dataset", None)
+                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                        origin = tracked_ds._dataset_split
+                        if origin not in origins:
+                            origins.append(origin)
+
+            if not origins:
+                logger.warning("[DataService] No dataset origins found from loaders")
+                return pd.DataFrame()
+
+            # Attempt non-blocking read from H5 store
+            # If H5 is locked (training writing), timeout and return cached snapshot
+            try:
+                df = self._stats_store.load_all(origins, non_blocking=True)
+                if df.empty:
+                    return df
+
+                # Ensure MultiIndex for stable slicing and agent operations
                 try:
-                    if hasattr(stats_source, "as_records"):
-                        stats_records = stats_source.as_records()
-                        if stats_records:
-                            stats_df = pd.DataFrame(stats_records)
-                            if "sample_id" in stats_df.columns:
-                                stats_df["sample_id"] = stats_df["sample_id"].astype(int)
-                            df = pd.merge(
-                                df,
-                                stats_df,
-                                on="sample_id",
-                                how="left",
-                                suffixes=("", "_stats"),
-                            )
-
-                    # Merge EditableDatasetAdapter.sample_statistics if present
-                    # We look on the underlying dataset, not the loader.
-                    ds = getattr(stats_source, "dataset", stats_source)
-                    if hasattr(ds, "sample_statistics"):
-                        ss = ds.sample_statistics  # e.g. {"tags": {sid: str}, "deny_listed": {sid: bool}}
-                        stats_records = []
-                        # iterate over all sample_ids we know from df
-                        for sid in df["sample_id"].unique():
-                            sid = int(sid)
-                            row = {"sample_id": sid}
-                            changed = False
-                            for key, mapping in ss.items():
-                                if sid in mapping:
-                                    row[key] = mapping[sid]
-                                    changed = True
-                            if changed:
-                                stats_records.append(row)
-
-                        if stats_records:
-                            ss_df = pd.DataFrame(stats_records)
-                            ss_df["sample_id"] = ss_df["sample_id"].astype(int)
-                            df = pd.merge(
-                                df,
-                                ss_df,
-                                on="sample_id",
-                                how="left",
-                                suffixes=("", "_stat"),
-                            )
+                    if not isinstance(df.index, pd.MultiIndex):
+                        df.set_index(["origin", "sample_id"], inplace=True)
                 except Exception as e:
-                    logger.warning(f"Failed to merge stats for {origin}: {e}")
+                    logger.warning(f"Failed to set index on streamed dataframe: {e}")
+
+                try:
+                    self._stats_last_mtime = self._stats_store.path().stat().st_mtime
+                except Exception:
+                    self._stats_last_mtime = None
 
                 return df
+            except TimeoutError:
+                # H5 is locked by training - return last snapshot to avoid blocking
+                logger.debug("[DataService] H5 read timeout - returning cached snapshot")
+                return self._all_datasets_df if self._all_datasets_df is not None else pd.DataFrame()
 
-            train_df = _dataset_to_df(train_loader, "train")
-            eval_df = _dataset_to_df(test_loader, "eval")
-
-            self._all_datasets_df = pd.concat([train_df, eval_df], ignore_index=True)
-
-            if "tags" not in self._all_datasets_df.columns:
-                self._all_datasets_df["tags"] = ""
-            if "deny_listed" not in self._all_datasets_df.columns:
-                self._all_datasets_df["deny_listed"] = False
-
-            logger.debug(f"Created combined DataFrame with {len(self._all_datasets_df)} samples")
-            logger.debug(f"DataFrame columns: {list(self._all_datasets_df.columns)}")
-
-            # NEW: keep a base snapshot of the unfiltered dataframe for reset
-            try:
-                self._base_df = self._all_datasets_df.copy(deep=True)
-            except Exception as e:
-                logger.warning(f"Failed to create base dataframe copy: {e}")
-                self._base_df = None
-
-            # Optional: external agent (weights_studio integration)
-            try:
-                import sys, os
-
-                # path to trainer_services.py
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-
-                repo_root = os.path.abspath(os.path.join(current_dir, "..", "..", "..", ".."))
-
-                # weights_studio location: /Users/.../v0/weights_studio
-                weights_studio_path = os.path.join(repo_root, "weights_studio")
-
-                if os.path.isdir(weights_studio_path) and weights_studio_path not in sys.path:
-                    sys.path.append(weights_studio_path)
-
-                from agent.agent import DataManipulationAgent
-                import agent.agent as agent
-
-                self._agent = DataManipulationAgent(self._all_datasets_df)
-                logger.debug("Data service initialized successfully with agent")
-
-            except ImportError as e:
-                logger.warning(f"DataManipulationAgent not available: {e}")
-                self._agent = None
-
-        except Exception as e:
-            logger.error(f"Data service initialization failed: {e}")
-            self._agent = None
-
-    def _refresh_data_stats(self):
-        """Refresh dynamic stats in the dataframe from underlying datasets."""
-        if self._all_datasets_df is None:
+    def _load_existing_tags(self):
+        """Ensure tags column is present on the streamed dataframe."""
+        if self._all_datasets_df is None or self._all_datasets_df.empty:
             return
 
+        if "tags" not in self._all_datasets_df.columns:
+            try:
+                self._all_datasets_df["tags"] = ""
+            except Exception:
+                pass
+
+    def _process_sample_row(self, args):
+        """Process a single dataframe row to create a DataRecord."""
+        row, request, df_columns = args
         try:
-            self._ctx.ensure_components()
-            components = self._ctx.components
+            origin = row.get('origin', 'unknown')
+            # TODO (GP): should be index returned here not sample_id directly, wrong name
+            sample_id = int(row.get('sample_id', 0))
 
-            dfs = []
+            # Find the dataset for this origin dynamically
+            dataset = None
+            for _, loader in self._loaders.items():
+                if loader is None:
+                    continue
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    if tracked_ds._dataset_split == origin:
+                        dataset = tracked_ds
+                        break
 
-            def _get_stats(loader, origin: str):
-                if not loader:
-                    return None
-                recs = None
-                if hasattr(loader, "as_records"):
-                    recs = loader.as_records()
-                else:
-                    ds = getattr(loader, "dataset", loader)
-                    if hasattr(ds, "as_records"):
-                        recs = ds.as_records()
-                if recs:
-                    df = pd.DataFrame(recs)
-                    df["origin"] = origin
-                    if "sample_id" in df.columns:
-                        df["sample_id"] = df["sample_id"].astype(int)
-                    return df
+            if dataset is None:
+                logger.warning("Unknown or missing dataset for origin '%s' sample %s", origin, sample_id)
                 return None
 
-            train_stats = _get_stats(components.get("train_loader"), "train")
-            if train_stats is not None:
-                dfs.append(train_stats)
+            data_stats = []
+            raw_data_bytes, transformed_data_bytes = b"", b""
+            raw_shape, transformed_shape = [], []
 
-            eval_stats = _get_stats(components.get("test_loader"), "eval")
-            if eval_stats is not None:
-                dfs.append(eval_stats)
+            if hasattr(dataset, "_getitem_raw"):
+                data = dataset._getitem_raw(id=sample_id)
+            else:
+                data = dataset[sample_id]
 
-            if not dfs:
-                return
+            # Unpack data tuple depending on its length
+            if len(data) == 1:
+                tensor, _, = data
+                label = None
+            elif len(data) == 2:
+                tensor, label = data
+            elif len(data) == 3:
+                tensor, _ , label= data
+            elif len(data) == 4:
+                tensor, _, label, _ = data
 
-            all_stats = pd.concat(dfs, ignore_index=True)
-            if all_stats.empty:
-                return
+            if request.include_transformed_data:
+                img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor
+                transformed_shape = list(img.shape)
+                pil_img = transforms.ToPILImage()(img.detach().cpu())
+                buf = io.BytesIO()
+                pil_img.save(buf, format='PNG')
+                transformed_data_bytes = buf.getvalue()
 
-            target_df = self._all_datasets_df.set_index(["origin", "sample_id"])
-            source_df = all_stats.set_index(["origin", "sample_id"])
+            if request.include_raw_data:
+                try:
+                    index = dataset.get_index_from_sample_id(sample_id)
+                    raw_img = load_raw_image(dataset, index)
+                    original_size = raw_img.size
 
-            for col in source_df.columns:
-                target_df[col] = source_df[col]
+                    # Handle resize request
+                    # Negative values indicate percentage mode (e.g., -50 means 50% of original)
+                    # Positive values indicate absolute pixel dimensions
+                    # Zero means no resize
+                    if request.resize_width < 0 and request.resize_height < 0:
+                        percent = abs(request.resize_width) / 100.0
+                        target_width = int(original_size[0] * percent)
+                        target_height = int(original_size[1] * percent)
 
-            self._all_datasets_df = target_df.reset_index()
+                        # Only resize if we're actually reducing size
+                        if target_width < original_size[0] or target_height < original_size[1]:
+                            raw_img = raw_img.resize((target_width, target_height))
+                    elif request.resize_width > 0 and request.resize_height > 0:
+                        if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
+                            raw_img = raw_img.resize((request.resize_width, request.resize_height))
 
-            if self._agent:
-                self._agent.df = self._all_datasets_df
+                    raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
+                    raw_buf = io.BytesIO()
+                    raw_img.save(raw_buf, format='PNG')
+                    raw_data_bytes = raw_buf.getvalue()
+                except Exception as e:
+                    logger.warning(f"Could not load raw image for sample {sample_id}: {e}")
+                    raw_data_bytes = transformed_data_bytes
+                    raw_shape = transformed_shape
 
-        except Exception as e:
-            logger.warning(f"Failed to refresh data stats: {e}")
+            stats_to_retrieve = request.stats_to_retrieve
+            if not stats_to_retrieve:
+                stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
 
-    # -------------------------------------------------------------------------
-    # Data service RPCs
-    # -------------------------------------------------------------------------
-    def ApplyDataQuery(self, request, context):
-        """Apply query to filter/sort/manipulate dataset."""
-        # Ensure DF + agent are initialized once
-        if self._agent is None or self._all_datasets_df is None:
-            self._initialize_data_service()
-        else:
-            self._refresh_data_stats()
-
-        if self._all_datasets_df is None:
-            return pb2.DataQueryResponse(
-                success=False,
-                message="Data service not available",
+            # Determine task type early so we can conditionally send stats
+            base_task_type = getattr(
+                dataset,
+                "task_type",
+                getattr(self._ctx.components.get("model"), "task_type", "classification"),
             )
+            task_type = _infer_task_type_from_label(label, default=base_task_type)
 
-        # No query: just report counts on the current df
-        if request.query == "":
-            total_count = len(self._all_datasets_df)
-            discarded_count = (
-                len(
-                    self._all_datasets_df[
-                        self._all_datasets_df.get("deny_listed", False) == True  # noqa: E712
-                    ]
-                )
-                if "deny_listed" in self._all_datasets_df.columns
-                else 0
-            )
-            in_loop_count = total_count - discarded_count
+            for stat_name in stats_to_retrieve:
+                stat = _get_stat_from_row(row, stat_name)
+                if stat is not None:
+                    data_stats.append(stat)
+                elif stat_name == "tags":
+                    # Always send tags, even if empty, so frontend shows it in metadata
+                    data_stats.append(pb2.DataStat(
+                        name="tags", type="string", shape=[1], value_string=""
+                    ))
+                elif task_type == "segmentation":
+                    # For segmentation: send extended loss stats and per-class losses even if null
+                    if stat_name in ["mean_loss", "median_loss", "max_loss", "min_loss", "std_loss",
+                                     "num_classes_present", "dominant_class", "dominant_class_ratio", "background_ratio"]:
+                        data_stats.append(pb2.DataStat(
+                            name=stat_name, type="scalar", shape=[1], value=[0.0]
+                        ))
+                    elif stat_name.startswith("loss_class_"):
+                        # Per-class losses (loss_class_0, loss_class_1, etc.)
+                        data_stats.append(pb2.DataStat(
+                            name=stat_name, type="scalar", shape=[1], value=[0.0]
+                        ))
 
-            return pb2.DataQueryResponse(
-                success=True,
-                message=f"Current dataframe has {total_count} samples",
-                number_of_all_samples=total_count,
-                number_of_samples_in_the_loop=in_loop_count,
-                number_of_discarded_samples=discarded_count,
-            )
+            # Expose origin and task_type as stats
+            data_stats.append(pb2.DataStat(
+                name='origin', type='string', shape=[1], value_string=origin))
 
-        try:
-            # Start from the current view, but overlay latest runtime stats (tags, deny_listed, etc.)
-            source_df = self._with_runtime_sample_statistics(self._all_datasets_df)
+            data_stats.append(pb2.DataStat(
+                name='task_type', type='string', shape=[1], value_string=str(task_type)))
 
-            # Debug: tag distribution before any query is applied
-            try:
-                if "tags" in source_df.columns:
-                    logger.debug(
-                        "[ApplyDataQuery] source_df tags value_counts before query: %s",
-                        source_df["tags"].value_counts().to_dict()
+            # Encode label safely depending on task_type  (GT mask / label)
+            label_arr = np.array(label.cpu() if hasattr(label, 'cpu') else label)
+
+            if task_type == "segmentation":
+                # Treat label as segmentation mask → array stat
+                data_stats.append(pb2.DataStat(
+                    name='label',
+                    type='array',
+                    shape=list(label_arr.shape),
+                    value=label_arr.astype(float).ravel().tolist(),
+                ))
+
+                try:
+                    # Prefer dataset attribute if available
+                    num_classes = getattr(dataset, "num_classes", None)
+                    if num_classes is None:
+                        # Fallback: infer from this label
+                        if label_arr.size > 0:
+                            max_id = int(label_arr.max())
+                            num_classes = max(1, max_id + 1)
+                        else:
+                            num_classes = 1
+
+                    data_stats.append(pb2.DataStat(
+                        name="num_classes",
+                        type="scalar",
+                        shape=[1],
+                        value=[float(num_classes)],
+                    ))
+                except Exception as e:
+                    logger.warning(f"Could not infer num_classes for sample {sample_id}: {e}")
+            else:
+                # Classification / other scalar-like labels
+                label_arr = np.asarray(label_arr)
+                if label_arr.size == 1:
+                    label_val = float(label_arr.reshape(-1)[0])
+                    data_stats.append(pb2.DataStat(
+                        name='label',
+                        type='scalar',
+                        shape=[1],
+                        value=[label_val],
+                    ))
+                else:
+                    # Fallback for non-scalar labels in non-segmentation tasks
+                    data_stats.append(pb2.DataStat(
+                        name='label',
+                        type='array',
+                        shape=list(label_arr.shape),
+                        value=label_arr.astype(float).ravel().tolist(),
+                    ))
+
+            # Predicted mask for segmentation (if available)
+            if task_type == "segmentation" and hasattr(dataset, "get_prediction_mask"):
+                try:
+                    pred_mask = dataset.get_prediction_mask(sample_id)
+                    if pred_mask is not None:
+                        pred_arr = np.asarray(
+                            pred_mask.cpu() if hasattr(pred_mask, "cpu") else pred_mask
+                        )
+
+                        data_stats.append(pb2.DataStat(
+                            name='pred_mask',
+                            type='array',
+                            shape=list(pred_arr.shape),
+                            value=pred_arr.astype(float).ravel().tolist(),
+                        ))
+                except Exception as e:
+                    logger.warning(
+                        f"Could not get prediction mask for sample {sample_id}: {e}"
                     )
-            except Exception as e:
-                logger.warning("[ApplyDataQuery] failed logging tags value_counts: %s", e)
 
-            if request.is_natural_language:
+            if raw_data_bytes:
+                data_stats.append(pb2.DataStat(
+                    name='raw_data', type='bytes', shape=raw_shape,
+                    value=raw_data_bytes))
+            if transformed_data_bytes:
+                data_stats.append(pb2.DataStat(
+                    name='transformed_data', type='bytes',
+                    shape=transformed_shape, value=transformed_data_bytes))
+
+            return pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
+        except Exception as e:
+            logger.error(f"Error processing row for sample_id {row.get('sample_id', -1)}: {e}", exc_info=True)
+            return None
+
+    def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
+        """
+        Centralized helper so every code path reports counts consistently.
+
+        - number_of_all_samples: all rows in df
+        - number_of_discarded_samples: rows with deny_listed == True (if column exists)
+        - number_of_samples_in_the_loop: rows not deny_listed
+        """
+        total_count = len(df)
+        discarded_count = (
+            len(df[df.get("deny_listed", False) == True])  # noqa: E712
+            if "deny_listed" in df.columns
+            else 0
+        )
+        in_loop_count = total_count - discarded_count
+
+        return pb2.DataQueryResponse(
+            success=True,
+            message=message,
+            number_of_all_samples=total_count,
+            number_of_samples_in_the_loop=in_loop_count,
+            number_of_discarded_samples=discarded_count,
+        )
+
+    def _apply_agent_operation(self, df, func: str, params: dict) -> str:
+        """
+        Apply an agent-described operation to df in-place.
+
+        Returns a short human-readable message describing what was applied.
+        """
+        # A) Agent-driven df.query → keep/filter rows via in-place drop
+        if func == "df.query":
+            expr = params.get("expr", "")
+            print(f"[DEBUG] ENTERED df.query branch with expr={expr}")
+            before = len(df)
+            kept = df.query(expr)
+            print(f"[DEBUG] df.query kept {len(kept)} rows out of {before}")
+            df.drop(index=df.index.difference(kept.index), inplace=True)
+            print(f"[DEBUG] AFTER DROP df_len={len(df)}")
+            return f"Applied query: {expr}"
+
+        # B) Other supported Pandas operations (drop, sort, head, tail, sample)
+        if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
+            func_name = func.replace("df.", "")
+
+            try:
+                # -------- DROP --------
+                if func_name == "drop" and "index" in params:
+                    index_expr = params["index"]
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.drop with index expression: %r",
+                        index_expr
+                    )
+                    index_to_drop = eval(index_expr, {"df": df, "np": np})
+                    df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: drop"
+
+                # ---- SORT_VALUES ----
+                if func_name == "sort_values":
+                    safe_params = params.copy()
+                    by = safe_params.get("by", [])
+                    if isinstance(by, str):
+                        by = [by]
+
+                    logger.debug(
+                        "[ApplyDataQuery] Preparing in-place sort_values on columns %s with params %s",
+                        by, safe_params
+                    )
+
+                    from pandas.api.types import (
+                        is_categorical_dtype,
+                        is_numeric_dtype,
+                        is_object_dtype,
+                    )
+
+                    # Sanitize sort columns so sort_values is less fragile
+                    for col in by:
+                        if col not in df.columns:
+                            continue
+
+                        s = df[col]
+
+                        # 1) Categorical → cast to str to avoid "categories must be unique"
+                        if is_categorical_dtype(s.dtype):
+                            logger.debug(
+                                "[ApplyDataQuery] Column %r is categorical; casting to str before sorting",
+                                col,
+                            )
+                            df[col] = s.astype(str)
+                            continue
+
+                        # 2) Object/string → try to interpret as numeric for better sorting
+                        if is_object_dtype(s.dtype) and not is_numeric_dtype(s.dtype):
+                            logger.debug(
+                                "[ApplyDataQuery] Column %r is object; attempting numeric conversion for sort",
+                                col,
+                            )
+                            converted = pd.to_numeric(s, errors="ignore")
+                            if is_numeric_dtype(converted.dtype):
+                                logger.debug(
+                                    "[ApplyDataQuery] Column %r converted to numeric dtype %s",
+                                    col, converted.dtype,
+                                )
+                                df[col] = converted
+
+                    safe_params["by"] = by
+                    safe_params["inplace"] = True
+
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.sort_values(inplace=True) with params=%s on df shape=%s",
+                        safe_params, df.shape
+                    )
+
+                    try:
+                        df.sort_values(**safe_params)
+                    except ValueError as e:
+                        # Fallback for categorical issues
+                        if "Categorical categories must be unique" in str(e):
+                            logger.warning(
+                                "[ApplyDataQuery] sort_values failed due to non-unique categorical "
+                                "categories; casting sort columns to str and retrying."
+                            )
+                            for col in by:
+                                if col in df.columns:
+                                    df[col] = df[col].astype(str)
+                            df.sort_values(**safe_params)
+                        else:
+                            raise
+
+                    return "Applied operation: sort_values"
+
+                # -------- HEAD --------
+                if func_name == "head":
+                    n = int(params.get("n", 5))
+                    logger.debug(
+                        "[ApplyDataQuery] Applying head (in-place) with n=%d on df shape=%s",
+                        n, df.shape
+                    )
+                    if n < len(df):
+                        index_to_keep = df.index[:n]
+                        index_to_drop = df.index.difference(index_to_keep)
+                        df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: head"
+
+                # -------- TAIL --------
+                if func_name == "tail":
+                    n = int(params.get("n", 5))
+                    logger.debug(
+                        "[ApplyDataQuery] Applying tail (in-place) with n=%d on df shape=%s",
+                        n, df.shape
+                    )
+                    if n < len(df):
+                        index_to_keep = df.index[-n:]
+                        index_to_drop = df.index.difference(index_to_keep)
+                        df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: tail"
+
+                # ------ SAMPLE -------
+                if func_name == "sample":
+                    logger.debug(
+                        "[ApplyDataQuery] Applying sample (in-place) with params=%s on df shape=%s",
+                        params, df.shape
+                    )
+                    # Support either n or frac; default to 50% if unspecified
+                    n = params.get("n")
+                    frac = params.get("frac")
+                    if n is not None:
+                        sampled = df.sample(n=int(n))
+                    elif frac is not None:
+                        sampled = df.sample(frac=float(frac))
+                    else:
+                        sampled = df.sample(frac=0.5)
+
+                    index_to_drop = df.index.difference(sampled.index)
+                    df.drop(index=index_to_drop, inplace=True)
+                    return "Applied operation: sample"
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to apply agent operation {func_name} with params {params}: {e}",
+                    exc_info=True
+                )
+                return f"Failed to apply {func_name}: {e}"
+
+        # C) Unrecognized function: no-op, but log it
+        logger.warning(
+            "[ApplyDataQuery] Agent returned unrecognized function: %s. No operation applied.",
+            func
+        )
+        return "No operation applied"
+
+    def _hydrate_tags_for_slice(self, df_slice: pd.DataFrame) -> pd.DataFrame:
+        """Ensure tags column exists on the slice (values already streamed from H5)."""
+        if df_slice is None or df_slice.empty:
+            return df_slice
+
+        if "tags" not in df_slice.columns:
+            df_slice["tags"] = ""
+        return df_slice
+
+    def _slowUpdateInternals(self):
+        current_time = time.time()
+        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 5:
+            return
+
+        if self._stats_store and not self._stats_store.has_changed_since(self._stats_last_mtime):
+            self._last_internals_update_time = current_time
+            return
+
+        updated_df = self._pull_into_all_data_view_df()
+
+
+        if self._all_datasets_df is not None and not updated_df.empty and not self._all_datasets_df.empty:
+            try:
+                # Use the union of both indices to preserve new lines in updated_df
+                combined_index = self._all_datasets_df.index.union(updated_df.index)
+                updated_df = updated_df.reindex(combined_index, copy=False)
+            except Exception:
+                pass
+
+        self._all_datasets_df = updated_df
+        self._last_internals_update_time = current_time
+
+    def ApplyDataQuery(self, request, context):
+        """
+        Apply a query on the in-memory dataframe.
+
+        Modes:
+          - request.query == ""  → just return counts, do not modify df
+          - request.query != ""  → always handled by the agent (natural language path)
+
+        Counts returned:
+          - number_of_all_samples: all rows currently in the dataframe
+          - number_of_samples_in_the_loop: rows not deny_listed
+          - number_of_discarded_samples: rows with deny_listed == True
+        """
+        with self._lock:
+            df = self._all_datasets_df  # authoritative DF, mutated in-place
+
+            # 1) No query: just report counts
+            if request.query == "":
+                return self._build_success_response(
+                    df=df,
+                    message=f"Current dataframe has {len(df)} samples",
+                )
+
+            try:
+                # 2) All non-empty queries go through the agent
+                if not request.is_natural_language:
+                    logger.debug(
+                        "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
+                        "treating query as natural language: %r",
+                        request.query,
+                    )
+
                 if self._agent is None:
                     return pb2.DataQueryResponse(
                         success=False,
-                        message="Natural language queries require Ollama agent (not available)",
+                        message="Natural language queries require agent (not available)",
                     )
 
-                # Let the agent translate NL → operation spec or reset intent
-                self._agent.df = source_df
-                operation = self._agent.query(request.query)
-
-                # Check for agent-driven reset intent
+                # Agent translates query text → operation spec
+                operation = self._agent.query(request.query) or {}
+                func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
                 params = operation.get("params", {}) or {}
+
+                # 2a) Agent-driven RESET has highest priority
                 if params.get("__agent_reset__"):
-                    # Reset to base df (unfiltered) and refresh dynamic stats
-                    if self._base_df is not None:
-                        try:
-                            self._all_datasets_df = self._base_df.copy(deep=True)
-                        except Exception as e:
-                            logger.warning(f"Failed to copy base dataframe during reset: {e}")
-                            self._all_datasets_df = self._base_df
-                        # Refresh dynamic stats (tags/deny_listed, etc.)
-                        try:
-                            self._refresh_data_stats()
-                        except Exception as e:
-                            logger.warning(f"Failed to refresh stats after reset: {e}")
-                        message = "Reset view to base dataset"
-                    else:
-                        logger.warning("[ApplyDataQuery] Agent requested reset but _base_df is None")
-                        message = "Reset requested but base dataset is not available"
+                    logger.debug("[ApplyDataQuery] Agent requested reset")
 
-                    total_count = len(self._all_datasets_df)
-                    discarded_count = (
-                        len(
-                            self._all_datasets_df[
-                                self._all_datasets_df.get("deny_listed", False) == True  # noqa: E712
-                            ]
-                        )
-                        if "deny_listed" in self._all_datasets_df.columns
-                        else 0
-                    )
-                    in_loop_count = total_count - discarded_count
+                    # Rebuild from loaders; this is the only place we replace the df object
+                    self._all_datasets_df = self._pull_into_all_data_view_df()
+                    df = self._all_datasets_df
 
-                    return pb2.DataQueryResponse(
-                        success=True,
-                        message=message,
-                        number_of_all_samples=total_count,
-                        number_of_samples_in_the_loop=in_loop_count,
-                        number_of_discarded_samples=discarded_count,
+                    return self._build_success_response(
+                        df=df,
+                        message="Reset view to base dataset",
                     )
 
-                func = operation.get("function")
-                # For df.query, we apply directly on the current source_df
-                if func == "df.query":
-                    expr = params.get("expr", "")
-                    logger.debug(
-                        "[ApplyDataQuery] Applying df.query with expr=%r on df shape=%s",
-                        expr, source_df.shape
-                    )
-                    self._all_datasets_df = source_df.query(expr)
-                    message = f"Applied query: {expr}"
-                else:
-                    # For other operations delegate to agent.apply_operation
-                    logger.debug(
-                        "[ApplyDataQuery] Applying operation %s on df shape=%s",
-                        func, source_df.shape
-                    )
-                    self._all_datasets_df = self._agent.apply_operation(source_df, operation)
-                    message = f"Applied operation: {func}"
-            else:
-                # Structured query supplied directly by UI
-                expr = request.query
-                logger.debug(
-                    "[ApplyDataQuery] Applying structured df.query with expr=%r on df shape=%s",
-                    expr, source_df.shape
+                # 2b) All other agent operations mutate df in-place
+                message = self._apply_agent_operation(df, func, params)
+
+                # 3) Return updated counts after mutation
+                return self._build_success_response(df=df, message=message)
+
+            except Exception as e:
+                logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
+                return pb2.DataQueryResponse(
+                    success=False,
+                    message=f"Failed to apply query: {str(e)}",
                 )
-                self._all_datasets_df = source_df.query(expr)
-                message = f"Query [{request.query}] applied"
-
-            total_count = len(self._all_datasets_df)
-            discarded_count = (
-                len(
-                    self._all_datasets_df[
-                        self._all_datasets_df.get("deny_listed", False) == True  # noqa: E712
-                    ]
-                )
-                if "deny_listed" in self._all_datasets_df.columns
-                else 0
-            )
-            in_loop_count = total_count - discarded_count
-
-            return pb2.DataQueryResponse(
-                success=True,
-                message=message,
-                number_of_all_samples=total_count,
-                number_of_samples_in_the_loop=in_loop_count,
-                number_of_discarded_samples=discarded_count,
-            )
-        except Exception as e:
-            logger.error(f"Failed to apply query: {e}", exc_info=True)
-            return pb2.DataQueryResponse(
-                success=False,
-                message=f"Failed to apply query: {str(e)}",
-            )
 
     def GetDataSamples(self, request, context):
-        """Retrieve samples with their data statistics."""
-        logger.debug(
-            f"GetDataSamples called: start_index={request.start_index}, "
-            f"records_cnt={request.records_cnt}"
-        )
-
-        if self._all_datasets_df is None:
-            logger.debug("Initializing data service (first call)")
-            self._initialize_data_service()
-        else:
-            try:
-                self._refresh_data_stats()
-            except Exception as e:
-                logger.warning(f"Failed to refresh dynamic stats before GetDataSamples: {e}")
-
-        if self._all_datasets_df is None:
-            logger.error("Data service initialization failed - no dataframe available")
-            return pb2.DataSamplesResponse(
-                success=False,
-                message="Data service not available",
-                data_records=[],
+        """
+        Retrieve samples from the dataframe with their data statistics.
+        Only allowed when training is paused.
+        """
+        try:
+            logger.info(
+                "GetSamples called with start_index=%s, records_cnt=%s",
+                request.start_index, request.records_cnt
             )
 
-        # Always work with a view that has up-to-date runtime stats
-        view_df = self._with_runtime_sample_statistics(self._all_datasets_df)
-
-        logger.debug(f"Current view DataFrame has {len(view_df)} total samples")
-
-        try:
+            # Validate request parameters
             if request.start_index < 0 or request.records_cnt <= 0:
                 return pb2.DataSamplesResponse(
                     success=False,
                     message="Invalid start_index or records_cnt",
-                    data_records=[],
+                    data_records=[]
                 )
 
-            end_index = request.start_index + request.records_cnt
-            df_slice = view_df.iloc[request.start_index:end_index]
+            # Get the requested slice of the dataframe
+            # Protect the update and slice with the lock
+            with self._lock:
+                self._slowUpdateInternals()
+                end_index = request.start_index + request.records_cnt
+                df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
+
+            # Load tags only for the displayed slice (stream-friendly)
+            df_slice = self._hydrate_tags_for_slice(df_slice)
 
             if df_slice.empty:
+                logger.warning(f"No samples found at index {request.start_index}:{end_index}")
                 return pb2.DataSamplesResponse(
                     success=False,
-                    message=f"No samples found at index {request.start_index}",
-                    data_records=[],
+                    message=f"No samples found at index {request.start_index}:{end_index}",
+                    data_records=[]
                 )
 
-            self._ctx.ensure_components()
-            components = self._ctx.components
+            logger.info(
+                "Retrieving samples from %s to %s", request.start_index, end_index)
 
-            train_loader = components.get("train_loader")
-            test_loader = components.get("test_loader")
-
+            # Build the data records list in parallel with optimized worker count
             data_records = []
-            for _, row in df_slice.iterrows():
-                origin = row.get("origin", "unknown")
-                sample_id = int(row.get("sample_id", 0))
+            tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
-                if origin == "train":
-                    dataset = getattr(train_loader, "dataset", train_loader) if train_loader else None
-                elif origin == "eval":
-                    dataset = getattr(test_loader, "dataset", test_loader) if test_loader else None
-                else:
-                    continue
+            # Use more workers for I/O-bound image processing (CPU count * 2)
+            import os
+            max_workers = max(min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8), 1)
 
-                if dataset is None:
-                    continue
+            with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = executor.map(self._process_sample_row, tasks, timeout=30)
+                data_records = [res for res in results if res is not None]
 
-                data_stats = []
-                stats_to_retrieve = list(request.stats_to_retrieve)
-                if not stats_to_retrieve:
-                    stats_to_retrieve = [c for c in df_slice.columns if c != "sample_id"]
-                
-                # Always include 'image' if include_raw_data is true, even if not in DataFrame
-                # (for lazy-loaded ImageFolder datasets)
-                if request.include_raw_data and "image" not in stats_to_retrieve:
-                    stats_to_retrieve.append("image")
-
-                for stat_name in stats_to_retrieve:
-                    stat = self._get_stat_from_row(row, stat_name)
-
-                    # Special handling for 'image' - load on-demand if not in DataFrame
-                    if stat_name == "image" and stat is None and dataset is not None:
-                        try:
-                            # Unwrap to get the raw dataset (similar to _dataset_to_df)
-                            raw_ds = dataset
-                            while True:
-                                if hasattr(raw_ds, "wrapped_dataset"):
-                                    new_ds = raw_ds.wrapped_dataset
-                                    if new_ds is not None:
-                                        raw_ds = new_ds
-                                    else:
-                                        break
-                                elif hasattr(raw_ds, "dataset"):
-                                    new_ds = raw_ds.dataset
-                                    if new_ds is not None:
-                                        raw_ds = new_ds
-                                    else:
-                                        break
-                                else:
-                                    break
-                                if raw_ds is None:
-                                    break
-                            
-                            # Load image on-demand from the raw dataset
-                            if raw_ds is not None:
-                                item = raw_ds[sample_id]
-                                if isinstance(item, (tuple, list)):
-                                    img = item[0]
-                                else:
-                                    img = item
-                                
-                                if hasattr(img, "numpy"):
-                                    img_arr = img.numpy()
-                                else:
-                                    img_arr = np.array(img)
-                                
-                                stat = pb2.DataStat(
-                                    name="image",
-                                    type="array",
-                                    shape=list(img_arr.shape),
-                                    value=img_arr.flatten().astype(float).tolist(),
-                                )
-                        except Exception as e:
-                            logger.warning(f"Could not load image on-demand for sample {sample_id} from {origin}: {e}")
-
-                    if (
-                        stat_name in ["tags", "deny_listed"]
-                        and dataset is not None
-                        and hasattr(dataset, "sample_statistics")
-                    ):
-                        try:
-                            if stat_name in dataset.sample_statistics:
-                                wrapper_value = dataset.sample_statistics[stat_name].get(sample_id)
-                                if wrapper_value is not None:
-                                    if stat_name == "tags" and wrapper_value != "":
-                                        stat = pb2.DataStat(
-                                            name=stat_name,
-                                            type="string",
-                                            shape=[1],
-                                            value_string=wrapper_value,
-                                        )
-                                    elif stat_name == "deny_listed":
-                                        stat = pb2.DataStat(
-                                            name=stat_name,
-                                            type="scalar",
-                                            shape=[1],
-                                            value=[float(wrapper_value)],
-                                        )
-                        except Exception as e:
-                            logger.debug(f"Could not get {stat_name} from dataset wrapper: {e}")
-
-                    if stat:
-                        data_stats.append(stat)
-
-                data_records.append(
-                    pb2.DataRecord(
-                        sample_id=sample_id,
-                        data_stats=data_stats,
-                    )
-                )
-
-            logger.debug(
-                f"Successfully created {len(data_records)} data records from "
-                f"{len(df_slice)} dataframe rows"
-            )
+            logger.info("Retrieved %s data records", len(data_records))
             return pb2.DataSamplesResponse(
                 success=True,
                 message=f"Retrieved {len(data_records)} data records",
-                data_records=data_records,
+                data_records=data_records
             )
+
         except Exception as e:
-            logger.error(f"Failed to retrieve samples: {e}", exc_info=True)
+            logger.error("Failed to retrieve samples: %s", str(e), exc_info=True)
             return pb2.DataSamplesResponse(
                 success=False,
-                message=f"Failed to retrieve samples: {str(e)}",
-                data_records=[],
+                message=f"Failed to retrieve samples: {str(e)}\n{traceback.format_exc()}",
+                data_records=[]
             )
 
     def EditDataSample(self, request, context):
-        """Edit sample metadata (tags, deny_listed, etc.)."""
+        """
+        Edit sample metadata (tags, deny_listed, etc.).
+        """
 
         # Make sure dataframe + editable wrappers are initialized
         if self._all_datasets_df is None:
@@ -888,6 +898,10 @@ class DataService:
                 message="Only 'tags' and 'deny_listed' stat editing is supported",
             )
 
+        # Normalize tag clearing (empty/None) so UI can remove tags by sending ""
+        if request.stat_name == "tags":
+            request.string_value = request.string_value or ""
+
         # We currently do not implement accumulate semantics
         if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
             return pb2.DataEditsResponse(
@@ -895,81 +909,192 @@ class DataService:
                 message="Accumulate tagging not supported",
             )
 
-        train_loader = components.get("train_loader")
-        test_loader = components.get("test_loader")
+        # Get all loaders dynamically
+        from weightslab.backend.ledgers import get_dataloaders
+        loader_names = get_dataloaders()
+        loaders_map = {name: components.get(name) for name in loader_names}
 
         # ---------------------------------------------------------------------
         # 1) Apply edits to the underlying editable dataset wrapper
         # ---------------------------------------------------------------------
         for sid, origin in zip(request.samples_ids, request.sample_origins):
             dataset = None
-            if origin == "train":
-                dataset = getattr(train_loader, "dataset", train_loader) if train_loader else None
-            elif origin == "eval":
-                dataset = getattr(test_loader, "dataset", test_loader) if test_loader else None
+
+            # Find the loader for this origin (match by name suffix or exact match)
+            for loader_name, loader in loaders_map.items():
+                # Match origin like "train" to "train_loader", "val" to "val_loader", etc.
+                if loader is None:
+                    continue
+                # Get the tracked dataset's split name
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    if tracked_ds._dataset_split == origin:
+                        dataset = tracked_ds
+                        break
+                # Fallback: match by loader name (e.g., "train_loader" contains "train")
+                elif origin in loader_name:
+                    dataset = getattr(loader, "tracked_dataset", loader)
+                    break
 
             if dataset is None:
                 continue
 
             try:
-                if request.stat_name == "tags":
-                    dataset.set(sid, "tags", request.string_value)
-                elif request.stat_name == "deny_listed":
-                    dataset.set(sid, "deny_listed", request.bool_value)
+                if hasattr(dataset, "set"):
+                    if request.stat_name == "tags":
+                        dataset.set(sid, "tags", request.string_value)
+                    elif request.stat_name == "deny_listed":
+                        dataset.set(sid, "deny_listed", request.bool_value)
+                else:
+                    logger.warning(
+                        f"[EditDataSample] Dataset for origin={origin} does not support 'set'; "
+                        "only DataFrame will be updated."
+                    )
             except Exception as e:
                 logger.warning(f"Could not edit sample {sid}: {e}")
 
         # ---------------------------------------------------------------------
         # 2) Mirror edits into the in-memory DataFrame (used by the UI / agent)
         # ---------------------------------------------------------------------
-        if self._all_datasets_df is not None:
-            # Update the DataFrame
-            for sid, origin in zip(request.samples_ids, request.sample_origins):
-                mask = (
-                    (self._all_datasets_df["sample_id"] == sid)
-                    & (self._all_datasets_df["origin"] == origin)
-                )
-                value = request.string_value if request.stat_name == "tags" else request.bool_value
-                try:
-                    self._all_datasets_df.loc[mask, request.stat_name] = value
-                except Exception as e:
-                    logger.debug(
-                        f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
+        with self._lock:
+            if self._all_datasets_df is not None:
+                # If origin/sample_id are in the index, use index levels
+                uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
+
+                for sid, origin in zip(request.samples_ids, request.sample_origins):
+                    value = (
+                        request.string_value
+                        if request.stat_name == "tags"
+                        else request.bool_value
                     )
 
-            # Debug AFTER the updates
-            try:
-                ids = list(request.samples_ids)
-                origins = list(request.sample_origins)
+                    try:
+                        if uses_multiindex and set(self._all_datasets_df.index.names) >= {"origin", "sample_id"}:
+                            # MultiIndex: select rows by index
+                            idx = (origin, sid)
+                            # (use .loc on the index tuple directly)
+                            self._all_datasets_df.loc[idx, request.stat_name] = value
+                        else:
+                            # Fallback: origin / sample_id as columns
+                            mask = (
+                                (self._all_datasets_df["sample_id"] == sid)
+                                & (self._all_datasets_df["origin"] == origin)
+                            )
+                            self._all_datasets_df.loc[mask, request.stat_name] = value
 
-                debug_rows = self._all_datasets_df[
-                    (self._all_datasets_df["sample_id"].isin(ids))
-                    & (self._all_datasets_df["origin"].isin(origins))
-                ]
-                logger.debug(
-                    "[DEBUG EditDataSample] Updated rows:\n%s",
-                    debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
-                )
+                    except Exception as e:
+                        logger.debug(
+                            f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
+                        )
 
-                if request.stat_name == "tags":
-                    tagged = self._all_datasets_df[
-                        self._all_datasets_df["tags"] == request.string_value
+                # Debug AFTER the updates
+                try:
+                    ids = list(request.samples_ids)
+                    origins = list(request.sample_origins)
+
+                    debug_rows = self._all_datasets_df[
+                        (self._all_datasets_df["sample_id"].isin(ids))
+                        & (self._all_datasets_df["origin"].isin(origins))
                     ]
                     logger.debug(
-                        "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
-                        request.string_value,
-                        len(tagged),
+                        "[DEBUG EditDataSample] Updated rows:\n%s",
+                        debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
                     )
-            except Exception as e:
-                logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
 
-        # ---------------------------------------------------------------------
-        # 3) Keep the optional agent in sync
-        # ---------------------------------------------------------------------
-        if self._agent is not None and self._all_datasets_df is not None:
-            self._agent.df = self._all_datasets_df
+                    if request.stat_name == "tags":
+                        tagged = self._all_datasets_df[
+                            self._all_datasets_df["tags"] == request.string_value
+                        ]
+                        logger.debug(
+                            "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
+                            request.string_value,
+                            len(tagged),
+                        )
+                except Exception as e:
+                    logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
+
+        # ------------------------------------------------------------------
+        # 4) Persist tag edits to the tracked dataset (auto-sync to H5)
+        # ------------------------------------------------------------------
+        if request.stat_name == "tags" and request.samples_ids:
+            try:
+                for sid in request.samples_ids:
+                    tags_str = request.string_value or ""
+                    for loader_name, loader in loaders_map.items():
+                        if loader is None:
+                            continue
+                        tracked_ds = getattr(loader, "tracked_dataset", None)
+                        if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                            origin = tracked_ds._dataset_split
+                            if origin in request.sample_origins:
+                                if hasattr(tracked_ds, 'set'):
+                                    tracked_ds.set(int(sid), "tags", tags_str)
+            except Exception as e:
+                logger.warning(f"Could not persist tags to tracked dataset: {e}")
+
+        # ------------------------------------------------------------------
+        # 5) Persist edits back to the shared H5 store for all origins
+        # ------------------------------------------------------------------
+        if self._stats_store and request.samples_ids:
+            updates_by_origin = {}
+            for sid, origin in zip(request.samples_ids, request.sample_origins):
+                value = request.string_value if request.stat_name == "tags" else request.bool_value
+                updates_by_origin.setdefault(origin, []).append({"sample_id": sid, request.stat_name: value})
+
+            for origin, rows in updates_by_origin.items():
+                try:
+                    df_update = pd.DataFrame(rows).set_index("sample_id")
+                    self._stats_store.upsert(origin, df_update)
+                except Exception as e:
+                    logger.debug(f"[EditDataSample] Failed to persist edits for origin={origin}: {e}")
 
         return pb2.DataEditsResponse(
             success=True,
             message=f"Edited {len(request.samples_ids)} samples",
         )
+
+    def GetDataSplits(self, request, context):
+        """
+        Return the list of available dataset splits (train, test, val, etc.)
+        """
+        try:
+            from weightslab.backend.ledgers import get_dataloaders
+
+            split_names = []
+            loader_names = get_dataloaders()
+
+            for loader_name in loader_names:
+                loader = self._ctx.components.get(loader_name)
+                if loader is None:
+                    continue
+
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    split_name = tracked_ds._dataset_split
+                    if split_name and split_name not in split_names:
+                        split_names.append(split_name)
+
+            logger.info(f"GetDataSplits returning: {split_names}")
+            return pb2.DataSplitsResponse(
+                success=True,
+                split_names=split_names
+            )
+        except Exception as e:
+            logger.error(f"GetDataSplits failed: {e}", exc_info=True)
+            return pb2.DataSplitsResponse(
+                success=False,
+                split_names=[]
+            )
+
+    def CheckAgentHealth(self, request, context):
+        """
+        gRPC method to check if the agent is available for natural language queries.
+        Returns:
+            AgentHealthResponse { available: bool, message: str }
+        """
+        try:
+            available = self.is_agent_available()
+            msg = "Agent is available" if available else "Agent is not available"
+            return pb2.AgentHealthResponse(available=available, message=msg)
+        except Exception as e:
+            return pb2.AgentHealthResponse(available=False, message=f"Error: {e}")

@@ -5,16 +5,14 @@
     batch normalization, and max pooling that are useful to stress test
     our neuron operations.
 """
-import os
 import warnings; warnings.filterwarnings("ignore")
 import torch
-import inspect
 import logging
-import importlib
 import torch.nn as nn
 import torchvision.models as models
+import torchvision.transforms as T
 
-from typing import Callable, Type
+from typing import Tuple, List
 from torch.nn import functional as F
 
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
@@ -1336,11 +1334,11 @@ class UNet(nn.Module):
 class UNet3p(nn.Module):
     """
     UNet 3+ Architecture for Semantic Segmentation.
-    
-    This single-class implementation uses full-scale skip connections to 
+
+    This single-class implementation uses full-scale skip connections to
     combine multi-scale features for high-resolution output.
-    
-    Note: Deep Supervision is often used but is omitted here for simplicity 
+
+    Note: Deep Supervision is often used but is omitted here for simplicity
     and focusing on the core feature fusion logic.
     """
     def __init__(self, n_channels=3, n_classes=1, filter_list=[64, 128, 256, 512, 1024]):
@@ -1352,7 +1350,7 @@ class UNet3p(nn.Module):
         self.F_cat = self.filters[0] * 5  # Total channels in feature concatenation (e.g., 64 * 5 = 320)
 
         # ------------------- Internal Building Blocks -------------------
-        
+
         # Helper for a simple 3x3 Conv -> BN -> ReLU block
         def conv_block(in_c, out_c):
             return nn.Sequential(
@@ -1424,7 +1422,7 @@ class UNet3p(nn.Module):
         self.h4_L1 = conv_block(self.filters[3], self.F_cat) # D4 -> D1 (up by 8x)
         self.h5_L1 = conv_block(self.filters[4], self.F_cat) # E5 -> D1 (up by 16x)
         self.up_conv1 = double_conv(5 * self.F_cat, self.filters[0]) # Final D1 convolution
-        
+
         # ------------------- FINAL Output Layer -------------------
         self.outc = nn.Conv2d(self.filters[0], n_classes, kernel_size=1)
 
@@ -1439,15 +1437,15 @@ class UNet3p(nn.Module):
         p1 = self.pool1(e1) # Size H/2
 
         # E2 (128 channels)
-        e2 = self.conv2(p1) 
+        e2 = self.conv2(p1)
         p2 = self.pool2(e2) # Size H/4
 
         # E3 (256 channels)
-        e3 = self.conv3(p2) 
+        e3 = self.conv3(p2)
         p3 = self.pool3(e3) # Size H/8
 
         # E4 (512 channels)
-        e4 = self.conv4(p3) 
+        e4 = self.conv4(p3)
         p4 = self.pool4(e4) # Size H/16
 
         # E5 (1024 channels) - Bottleneck
@@ -1548,7 +1546,7 @@ class UNet3p(nn.Module):
 
 class UNet3D(nn.Module):
     """
-    A single-class implementation of the 3D U-Net architecture 
+    A single-class implementation of the 3D U-Net architecture
     for volumetric image segmentation.
     """
     def __init__(self, input_channels=1, output_classes=1, base_channels=32, v_size=64):
@@ -1556,7 +1554,7 @@ class UNet3D(nn.Module):
         self.input_shape = (2, input_channels, v_size, v_size, v_size)
         self.input_channels = input_channels
         self.output_classes = output_classes
-        
+
         def double_conv_3d(in_c, out_c):
             """Returns a sequential block of two Conv3d layers with ReLU."""
             return nn.Sequential(
@@ -1569,297 +1567,317 @@ class UNet3D(nn.Module):
             )
 
         # --- ENCODER (Contracting Path) ---
-        
+
         # Initial convolution and first block
         self.inc = double_conv_3d(input_channels, base_channels)  # C -> 32
-        
+
         # Down 1
         self.down1_pool = nn.MaxPool3d(kernel_size=2, stride=2)
         self.down1_conv = double_conv_3d(base_channels, base_channels * 2) # 32 -> 64
-        
+
         # Down 2
         self.down2_pool = nn.MaxPool3d(kernel_size=2, stride=2)
         self.down2_conv = double_conv_3d(base_channels * 2, base_channels * 4) # 64 -> 128
-        
+
         # Down 3 (Bottleneck)
         self.down3_pool = nn.MaxPool3d(kernel_size=2, stride=2)
         self.down3_conv = double_conv_3d(base_channels * 4, base_channels * 8) # 128 -> 256
-        
+
         # --- DECODER (Expansive Path) ---
-        
+
         # Up 3
         # Transposed conv to double D, H, W while halving channels
         self.up3_upsample = nn.ConvTranspose3d(base_channels * 8, base_channels * 4, kernel_size=2, stride=2) # 256 -> 128
         # DoubleConv takes (skip_c + upsampled_c) -> base_channels * 4
         self.up3_conv = double_conv_3d(base_channels * 8, base_channels * 4) # (128 + 128) -> 128
-        
+
         # Up 2
         self.up2_upsample = nn.ConvTranspose3d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2) # 128 -> 64
         self.up2_conv = double_conv_3d(base_channels * 4, base_channels * 2) # (64 + 64) -> 64
-        
+
         # Up 1
         self.up1_upsample = nn.ConvTranspose3d(base_channels * 2, base_channels, kernel_size=2, stride=2) # 64 -> 32
         self.up1_conv = double_conv_3d(base_channels * 2, base_channels) # (32 + 32) -> 32
-        
+
         # Final Output Layer (maps channels to class count)
         self.out_conv = nn.Conv3d(base_channels, output_classes, kernel_size=1) # 32 -> C_out
 
     def forward(self, x):
         # x shape: (B, C, D, H, W)
-        
+
         # --- ENCODER ---
         x1 = self.inc(x)                 # B x 32 x D x H x W (Skip 1)
-        
+
         x2 = self.down1_pool(x1)
         x2 = self.down1_conv(x2)         # B x 64 x D/2 x H/2 x W/2 (Skip 2)
-        
+
         x3 = self.down2_pool(x2)
         x3 = self.down2_conv(x3)         # B x 128 x D/4 x H/4 x W/4 (Skip 3)
-        
+
         x4 = self.down3_pool(x3)
         x4 = self.down3_conv(x4)         # B x 256 x D/8 x H/8 x W/8 (Bottleneck)
-        
+
         # --- DECODER ---
-        
+
         # Up 3
         up3 = self.up3_upsample(x4)      # B x 128 x D/4 x H/4 x W/4 (Upsampled)
         # Skip connection: Concatenate with x3 (128 channels)
         cat3 = torch.cat([x3, up3], dim=1) # B x 256 x D/4 x H/4 x W/4
         x = self.up3_conv(cat3)          # B x 128 x D/4 x H/4 x W/4
-        
+
         # Up 2
         up2 = self.up2_upsample(x)       # B x 64 x D/2 x H/2 x W/2
         # Skip connection: Concatenate with x2 (64 channels)
         cat2 = torch.cat([x2, up2], dim=1) # B x 128 x D/2 x H/2 x W/2
         x = self.up2_conv(cat2)          # B x 64 x D/2 x H/2 x W/2
-        
+
         # Up 1
         up1 = self.up1_upsample(x)       # B x 32 x D x H x W
         # Skip connection: Concatenate with x1 (32 channels)
         cat1 = torch.cat([x1, up1], dim=1) # B x 64 x D x H x W
         x = self.up1_conv(cat1)          # B x 32 x D x H x W
-        
+
         # Final Output
         logits = self.out_conv(x)        # B x C_out x D x H x W
-        
+
         return logits
 
 
-# Get the list of all model classes to parametrize the test
-ALL_MODEL_CLASSES = [
-    FashionCNN, FashionCNNSequential, SimpleMLP, GraphMLP_res_test_A, GraphMLP_res_test_B, GraphMLP_res_test_C, GraphMLP_res_test_D, SingleBlockResNetTruncated, ResNet18_L1_Extractor, VGG13, VGG11, VGG16, VGG19, ResNet18, ResNet34, ResNet50, FCNResNet50, FlexibleCNNBlock, DCGAN, SimpleVAE, TwoLayerUnflattenNet, ToyAvgPoolNet, TinyUNet, UNet, UNet3p, UNet3D
-]
-# TODO (GP):
-#   - Currently, TinyUNet_Straightforward operations (prune at least) is not working because the index mapping is not working as upsample wi. factor 2 or more is not considered in the mapping and in the graph generally.
-# Harcoded solution will be to check, and if one layer btw BN3 and CN8 is a upsampling, with multiply the mapping by the factor i.e., factor of 2, CN8 dst_to_src{'BN3': {0: [0,]*factor, 1: [1,]*factor]}.
- 
+class TinyYOLO(nn.Module):
+    """
+    Tiny YOLO-like single-class detector (all-in-one class).
+
+    Outputs tensor shape (N, S, S, B*5 + C) where:
+      - for each cell and each box: tx, ty, tw, th, conf
+      - plus class logits/prob (here C=1 by default)
+
+    decode/predict helpers are provided as methods of this class.
+    """
+
+    def __init__(self, S: int = 7, B: int = 2, C: int = 1, image_size: int = 224):
+        """
+        S: grid size (SxS)
+        B: boxes per cell
+        C: number of classes (1 for single class)
+        image_size: input image size (square) used for inference preprocessing / visualization
+        """
+        super().__init__()
+        self.S = S
+        self.B = B
+        self.C = C
+        self.image_size = image_size
+        self.input_shape = (1, 3, image_size, image_size)
+
+        # Tiny backbone: conv stack -> feature map of size (N, feat_ch, S, S)
+        # We make sure adaptive pooling yields SxS.
+        self.backbone = nn.Sequential(
+            self._conv_bn_act(3, 16, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(16, 32, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(32, 64, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(64, 128, 3, 1, 1),
+            nn.MaxPool2d(2),
+            self._conv_bn_act(128, 256, 3, 1, 1),
+            nn.AdaptiveAvgPool2d((S, S)),
+        )
+
+        # head: project features -> (B*5 + C) channels
+        out_ch = B * 5 + C
+        self.head = nn.Sequential(
+            self._conv_bn_act(256, 512, 3, 1, 1),
+            nn.Conv2d(512, out_ch, kernel_size=1)
+        )
+
+        # ImageNet normalization (used on input images)
+        self.preprocess = T.Compose([
+            T.Resize((image_size, image_size)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet mean/std
+                        std=[0.229, 0.224, 0.225]),
+        ])
+
+    @staticmethod
+    def _conv_bn_act(in_ch, out_ch, k=3, s=1, p=1):
+        return nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.LeakyReLU(0.1, inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (N, 3, H, W)
+        returns: (N, S, S, B*5 + C)
+        """
+        feat = self.backbone(x)
+        out = self.head(feat)
+        out = out.permute(0, 2, 3, 1).contiguous()
+        return out
+
+    def decode_preds(self, pred: torch.Tensor, conf_thresh: float = 0.25) -> List[List[Tuple[float, float, float, float, float, int]]]:
+        """
+        Decode raw predictions into boxes per image.
+
+        pred: (N, S, S, B*5 + C)
+        returns: list length N, each element is a list of boxes (x1,y1,x2,y2,score,class)
+                 coordinates normalized in [0,1] relative to image width & height.
+        """
+        device = pred.device
+        N, S, _, _ = pred.shape
+        boxes_per_image = []
+
+        # prepare grid coords
+        grid_y, grid_x = torch.meshgrid(torch.arange(S, device=device), torch.arange(S, device=device))
+        grid_x = grid_x.float()
+        grid_y = grid_y.float()
+
+        for i in range(N):
+            img_pred = pred[i]  # S x S x (B*5 + C)
+            img_boxes = []
+
+            # class score per cell (for single class we use sigmoid)
+            if self.C == 1:
+                cls_score = torch.sigmoid(img_pred[..., -1])  # (S, S)
+            else:
+                cls_logits = img_pred[..., self.B * 5:]
+                cls_score_all = F.softmax(cls_logits, dim=-1)
+                # take score for class 0 ("cat") by default
+                cls_score = cls_score_all[..., 0]
+
+            # iterate boxes
+            for b in range(self.B):
+                offset = b * 5
+                tx = torch.sigmoid(img_pred[..., offset + 0])
+                ty = torch.sigmoid(img_pred[..., offset + 1])
+                tw = img_pred[..., offset + 2].exp()
+                th = img_pred[..., offset + 3].exp()
+                conf = torch.sigmoid(img_pred[..., offset + 4])
+
+                # center coordinates normalized
+                cx = (grid_x + tx) / S
+                cy = (grid_y + ty) / S
+                # width/height normalized (simple scheme, no anchors)
+                w = tw / S
+                h = th / S
+
+                final_conf = conf * cls_score  # class-aware confidence
+
+                mask = final_conf > conf_thresh
+                if mask.any():
+                    cx_m = cx[mask]
+                    cy_m = cy[mask]
+                    w_m = w[mask]
+                    h_m = h[mask]
+                    conf_m = final_conf[mask]
+
+                    x1 = (cx_m - 0.5 * w_m).clamp(0.0, 1.0)
+                    y1 = (cy_m - 0.5 * h_m).clamp(0.0, 1.0)
+                    x2 = (cx_m + 0.5 * w_m).clamp(0.0, 1.0)
+                    y2 = (cy_m + 0.5 * h_m).clamp(0.0, 1.0)
+
+                    for xi, yi, xj, yj, cf in zip(x1.tolist(), y1.tolist(), x2.tolist(), y2.tolist(), conf_m.tolist()):
+                        img_boxes.append((xi, yi, xj, yj, cf, 0))
+
+            boxes_per_image.append(img_boxes)
+        return boxes_per_image
+
+    @staticmethod
+    def nms(boxes: List[Tuple[float, float, float, float, float, int]], iou_thresh: float = 0.5) -> List[Tuple[float, float, float, float, float, int]]:
+        """
+        Simple class-agnostic NMS on boxes list of (x1,y1,x2,y2,score,cls).
+        Returns list of kept boxes.
+        """
+        if not boxes:
+            return []
+        # convert to tensors for convenience
+        boxes_arr = torch.tensor([b[:4] for b in boxes], dtype=torch.float32)
+        scores = torch.tensor([b[4] for b in boxes], dtype=torch.float32)
+        order = scores.argsort(descending=True)
+        keep = []
+        suppressed = torch.zeros(len(boxes), dtype=torch.bool)
+        for idx in order.tolist():
+            if suppressed[idx]:
+                continue
+            keep.append(boxes[idx])
+            # suppress IoU > thresh
+            box_i = boxes_arr[idx]
+            xi1, yi1, xi2, yi2 = box_i
+            area_i = (xi2 - xi1).clamp(min=0) * (yi2 - yi1).clamp(min=0)
+            for j in order.tolist():
+                if j == idx or suppressed[j]:
+                    continue
+                box_j = boxes_arr[j]
+                xj1, yj1, xj2, yj2 = box_j
+                inter_x1 = max(xi1.item(), xj1.item())
+                inter_y1 = max(yi1.item(), yj1.item())
+                inter_x2 = min(xi2.item(), xj2.item())
+                inter_y2 = min(yi2.item(), yj2.item())
+                inter_w = max(0.0, inter_x2 - inter_x1)
+                inter_h = max(0.0, inter_y2 - inter_y1)
+                inter = inter_w * inter_h
+                area_j = (xj2 - xj1).clamp(min=0) * (yj2 - yj1).clamp(min=0)
+                union = area_i + area_j - inter
+                if union <= 0:
+                    continue
+                iou = inter / union
+                if iou > iou_thresh:
+                    suppressed[j] = True
+        return keep
+
+
+class Yolov11(nn.Module):
+    """Lightweight wrapper around Ultralytics YOLOv11.
+
+    Loads a YOLOv11 checkpoint via ``ultralytics`` and exposes the underlying
+    PyTorch module so it can be used like any other `nn.Module` in WeightsLab.
+
+    Args:
+        variant: Model name or path accepted by ``ultralytics.YOLO``
+        device: Optional torch device string or torch.device to place the model
+        img_size: Nominal square input resolution for metadata only
+    """
+
+    def __init__(self, variant: str = "yolo11n.pt", device=None, img_size: int = 640):
+        super().__init__()
+        try:
+            from ultralytics import YOLO  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise ImportError(
+                "Ultralytics is required for Yolov11 baseline. Install with: pip install ultralytics"
+            ) from exc
+
+        self.task_type = "detection"
+        self.input_shape = (1, 3, img_size, img_size)
+
+        self.yolo = YOLO(variant)
+        self.model = self.yolo.model
+
+        if device is not None:
+            self.model.to(device)
+
+    def forward(self, x: torch.Tensor):
+        # Delegate to the underlying YOLOv11 torch model to keep gradients intact
+        return self.model(x)
+
+    @torch.no_grad()
+    def predict(self, x, **kwargs):
+        """Convenience inference wrapper using Ultralytics predict pipeline."""
+        return self.yolo.predict(x, **kwargs)
+
+
 if __name__ == "__main__":
-    from weightslab.backend.model_interface import ModelInterface
-    from weightslab.utils.logs import print, setup_logging
+    model = Yolov11()
 
-    # TODO (GP): MobileNet not working; Inverted Residual Connexion I think
-    class MobileNet_v3(nn.Module):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
+    # Predict with the model
+    results = model.yolo("https://ultralytics.com/images/bus.jpg")  # predict on an image
 
-            # Set input shape
-            self.input_shape = (1, 3, 224, 224)
-
-            # Get the pre-trained VGG-13
-            self.model = models.mobilenet_v3_large(
-                weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
-            )
-
-        def forward(self, input):
-            return self.model(input)
-    class MobileNetV3Tiny(nn.Module):
-        """
-        Implémentation 'Toy' du MobileNetV3 encapsulée en une seule classe.
-        Contient les blocs HSwish, SELayer et InvertedResidual comme classes internes.
-        """
-        
-        # --- 1. Activation Hard-Swish (h-swish) ---
-        class HSwish(nn.Module):
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                # Hard-Swish: x * ReLU6(x + 3) / 6
-                return x * nn.functional.relu6(x + 3., inplace=True) / 6.
-
-        # --- 2. Squeeze-and-Excitation Layer (SE) ---
-        class SELayer(nn.Module):
-            def __init__(self, channel: int, reduction: int = 4):
-                super().__init__()
-                # Calcul du nombre de canaux "squeeze" (doit être un multiple de 8)
-                squeeze_channels = max(1, channel // reduction)
-                self.avg_pool = nn.AdaptiveAvgPool2d(1)
-                self.fc = nn.Sequential(
-                    nn.Conv2d(channel, squeeze_channels, 1, 1, 0),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(squeeze_channels, channel, 1, 1, 0),
-                    # Utilise Hard-Sigmoid: ReLU6(x + 3) / 6
-                    nn.Hardsigmoid(inplace=True)
-                )
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                out = self.avg_pool(x)
-                out = self.fc(out)
-                return x * out
-
-        # --- 3. Inverted Residual Block ---
-        class InvertedResidual(nn.Module):
-            def __init__(self, inp: int, hidden: int, oup: int, kernel_size: int,
-                        stride: int, use_se: bool, activation_fn: Callable[[], nn.Module]):
-                super().__init__()
-                assert stride in [1, 2]
-                self.use_res_connect = stride == 1 and inp == oup
-
-                NormLayer = nn.BatchNorm2d 
-
-                layers = []
-
-                # 1x1 Convolution pour l'expansion
-                if inp != hidden:
-                    layers.extend([
-                        nn.Conv2d(inp, hidden, 1, 1, 0, bias=False),
-                        NormLayer(hidden),
-                        activation_fn()
-                    ])
-                    
-                layers.extend([
-                    nn.Conv2d(hidden, hidden, kernel_size, stride, (kernel_size - 1) // 2,
-                            groups=hidden, bias=False),
-                    NormLayer(hidden),
-                    activation_fn()
-                ])
-
-                # Squeeze-and-Excitation (SE)
-                if use_se:
-                    # La SELayer doit être instanciée de la classe interne de MobileNetV3Tiny
-                    # On triche un peu ici car self.SELayer n'est pas directement accessible, 
-                    # mais dans ce contexte, si on le sort, ça marche mieux pour l'encapsulation.
-                    # Pour l'exemple, nous allons assumer que SELayer est accessible dans l'espace de nom.
-                    # NOTE: Pour la production, il est souvent préférable de définir les blocs séparément.
-                    # Pour respecter la demande, nous devons appeler la classe SE par son nom.
-                    layers.append(MobileNetV3Tiny.SELayer(hidden))
-
-                # 1x1 Convolution pour la projection (sans activation)
-                layers.extend([
-                    nn.Conv2d(hidden, oup, 1, 1, 0, bias=False),
-                    NormLayer(oup)
-                ])
-
-                self.conv = nn.Sequential(*layers)
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                if self.use_res_connect:
-                    return x + self.conv(x)
-                else:
-                    return self.conv(x)
-
-        # --- Constructeur de MobileNetV3Tiny ---
-        def __init__(self, num_classes: int = 10):
-            super().__init__()
-            self.input_shape = (1, 3, 64, 64)
-            # Références aux classes internes pour la configuration
-            self.HS = MobileNetV3Tiny.HSwish
-            self.IRB = MobileNetV3Tiny.InvertedResidual
-            self.ReLU = nn.ReLU6
-            
-            # Configuration simplifiée (inspirée de MobileNetV3-Small)
-            # inp, hidden, oup, k, s, se, nl (activation)
-            inverted_residual_setting = [
-                [16, 16, 16, 3, 2, True, self.ReLU],  
-                [16, 72, 24, 3, 2, False, self.ReLU], 
-                [24, 88, 24, 3, 1, False, self.ReLU],
-                [24, 96, 40, 5, 2, True, self.HS],   
-                [40, 240, 40, 5, 1, True, self.HS],
-                [40, 240, 40, 5, 1, True, self.HS],
-            ]
-            
-            # Couche initiale
-            self.features = [
-                nn.Sequential(
-                    nn.Conv2d(3, 16, 3, 2, 1, bias=False),
-                    nn.BatchNorm2d(16),
-                    self.HS()
-                )
-            ]
-            
-            # Empilement des blocs InvertedResidual
-            input_channel = 16
-            for t, h, c, k, s, se, nl in inverted_residual_setting:
-                output_channel = c
-                self.features.append(
-                    self.IRB(input_channel, h, output_channel, k, s, se, nl)
-                )
-                input_channel = output_channel
-                
-            # Dernières couches
-            last_conv_out = 576
-            
-            self.features.append(
-                nn.Sequential(
-                    nn.Conv2d(input_channel, last_conv_out, 1, 1, 0, bias=False),
-                    nn.BatchNorm2d(last_conv_out),
-                    self.HS()
-                )
-            )
-
-            self.features = nn.Sequential(*self.features)
-            self.avgpool = nn.AdaptiveAvgPool2d(1)
-
-            # Couche de classification
-            self.classifier = nn.Sequential(
-                nn.Linear(last_conv_out, 1280),
-                self.HS(),
-                nn.Dropout(0.2),
-                nn.Linear(1280, num_classes)
-            )
-
-        # --- Méthode Forward ---
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            x = self.features(x)
-            x = self.avgpool(x)
-            x = torch.flatten(x, 1)
-            x = self.classifier(x)
-            return x
-
-    # Setup prints
-    setup_logging('DEBUG')
-    print('Hello World')
-
-    # 0. Get the model
-    model = ResNet18()
-    print(model)
-
-    # 2. Create a dummy input and transform it
-    dummy_input = torch.randn(model.input_shape)
-
-    # 3. Test the model inference
-    model(dummy_input)
-
-    # --- Example ---
-    model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
-    print(f'Inference results {model(dummy_input)}')  # infer
-    print(model)
-
-    # Model Operations
-    # # # Test: add neurons
-    # print("--- Test: Add Neurons ---")
-    # model_op_neurons(model, layer_id=3, op=4, dummy_input=dummy_input)
-    # model_op_neurons(model, op=)
-    with model as m:
-        m.operate(1, {-1}, op_type=1)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(1, {-14, -2}, op_type=2)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(1, {-14, -2}, op_type=3)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(1, {-14, -2}, op_type=4)
-    model(dummy_input)  # Inference test
-    with model as m:
-        m.operate(3, {-1}, op_type=1)
-    model(dummy_input)  # Inference test
-    print(f'Inference test of the modified model is:\n{model(dummy_input)}')
+    # Access the results
+    for result in results:
+        xywh = result.boxes.xywh  # center-x, center-y, width, height
+        xywhn = result.boxes.xywhn  # normalized
+        xyxy = result.boxes.xyxy  # top-left-x, top-left-y, bottom-right-x, bottom-right-y
+        xyxyn = result.boxes.xyxyn  # normalized
+        names = [result.names[cls.item()] for cls in result.boxes.cls.int()]  # class name of each box
+        confs = result.boxes.conf  # confidence score of each box
