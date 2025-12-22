@@ -19,6 +19,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
+from weightslab.backend.ledgers import get_dataloaders
 
 
 # Get global logger
@@ -180,7 +181,6 @@ class DataService:
         self.df_lock = threading.RLock()
 
         # Dynamically get all available data loaders from the ledger
-        from weightslab.backend.ledgers import get_dataloaders
         loader_names = get_dataloaders()
         self._loaders = {name: self._ctx.components.get(name) for name in loader_names}
 
@@ -311,7 +311,7 @@ class DataService:
             # Attempt non-blocking read from H5 store
             # If H5 is locked (training writing), timeout and return cached snapshot
             try:
-                df = self._stats_store.load_all(origins, non_blocking=True)
+                df = self._stats_store.load_all(origins, non_blocking=False)
                 if df.empty:
                     return df
 
@@ -579,11 +579,11 @@ class DataService:
         """Collect all unique tags currently present in the tracked datasets."""
         tags = set()
         try:
-            # Check both loaders for tracked datasets
-            for loader in [self._trn_loader, self._tst_loader]:
-                if loader and hasattr(loader, "tracked_dataset"):
-                    tracked_tags = loader.tracked_dataset.sample_statistics.get("tags", {})
-                    for tag_val in tracked_tags.values():
+            # Extract tags from the dataframe if it exists and has a tags column
+            if self._all_datasets_df is not None and not self._all_datasets_df.empty:
+                if "tags" in self._all_datasets_df.columns:
+                    tag_values = self._all_datasets_df["tags"].dropna()
+                    for tag_val in tag_values:
                         if tag_val:
                             # Tags are stored as comma-separated strings
                             for t in str(tag_val).split(','):
@@ -617,8 +617,7 @@ class DataService:
             message=message,
             number_of_all_samples=total_count,
             number_of_samples_in_the_loop=in_loop_count,
-            number_of_discarded_samples=discarded_count,
-            unique_tags=unique_tags
+            number_of_discarded_samples=discarded_count
         )
 
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
@@ -965,8 +964,6 @@ class DataService:
 
         self._ctx.ensure_components()
         components = self._ctx.components
-        train_loader = components.get("train_loader")
-        test_loader = components.get("test_loader")
 
         if request.stat_name not in ["tags", "deny_listed"]:
             return pb2.DataEditsResponse(
@@ -977,18 +974,6 @@ class DataService:
         if request.stat_name == "tags":
             request.string_value = request.string_value or ""
 
-        # We currently do not implement accumulate semantics
-        if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
-            return pb2.DataEditsResponse(
-                success=False,
-                message="Accumulate tagging not supported",
-            )
-
-        # Get all loaders dynamically
-        from weightslab.backend.ledgers import get_dataloaders
-        loader_names = get_dataloaders()
-        loaders_map = {name: components.get(name) for name in loader_names}
-
         # ---------------------------------------------------------------------
         # 1) Apply edits to the underlying editable dataset wrapper (H5 persistence)
         # ---------------------------------------------------------------------
@@ -996,7 +981,7 @@ class DataService:
             dataset = None
 
             # Find the loader for this origin (match by name suffix or exact match)
-            for loader_name, loader in loaders_map.items():
+            for loader_name, loader in self._loaders.items():
                 # Match origin like "train" to "train_loader", "val" to "val_loader", etc.
                 if loader is None:
                     continue
@@ -1017,7 +1002,26 @@ class DataService:
                 if hasattr(dataset, "set"):
                     if request.stat_name == "tags":
                         new_val = request.string_value
-                        current_tags_str = dataset.sample_statistics.get("tags", {}).get(sid, "")
+                        # Get current tags from the dataframe instead of sample_statistics
+                        current_tags_str = ""
+                        if self._all_datasets_df is not None and not self._all_datasets_df.empty:
+                            try:
+                                if isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                                    current_tags_str = self._all_datasets_df.loc[(origin, sid), "tags"] if "tags" in self._all_datasets_df.columns else ""
+                                else:
+                                    # Look for the row matching origin and sample_id
+                                    mask = (
+                                        (self._all_datasets_df["sample_id"] == sid)
+                                        & (self._all_datasets_df["origin"] == origin)
+                                    )
+                                    matching_rows = self._all_datasets_df[mask]
+                                    if not matching_rows.empty and "tags" in self._all_datasets_df.columns:
+                                        current_tags_str = matching_rows.iloc[0]["tags"]
+                            except (KeyError, IndexError):
+                                current_tags_str = ""
+
+                        if pd.isna(current_tags_str):
+                            current_tags_str = ""
                         current_tags = [t.strip() for t in str(current_tags_str).split(',') if t.strip()]
 
                         if request.type == pb2.SampleEditType.EDIT_ACCUMULATE and new_val:
@@ -1028,6 +1032,9 @@ class DataService:
                             if new_val in current_tags:
                                 current_tags.remove(new_val)
                             new_val = ", ".join(current_tags)
+                        elif request.type == pb2.SampleEditType.EDIT_OVERRIDE:
+                            # EDIT_OVERRIDE: completely replace tags with new value
+                            new_val = new_val or ""
 
                         dataset.set(sid, "tags", new_val)
                     elif request.stat_name == "deny_listed":
@@ -1044,7 +1051,10 @@ class DataService:
                 for sid, origin in zip(request.samples_ids, request.sample_origins):
                     if request.stat_name == "tags":
                         new_val = request.string_value
-                        if (request.type == pb2.SampleEditType.EDIT_ACCUMULATE or request.type == pb2.SampleEditType.EDIT_REMOVE) and new_val:
+                        if request.type == pb2.SampleEditType.EDIT_OVERRIDE:
+                            # EDIT_OVERRIDE: directly use the new value
+                            target_val = new_val or ""
+                        elif (request.type == pb2.SampleEditType.EDIT_ACCUMULATE or request.type == pb2.SampleEditType.EDIT_REMOVE):
                             try:
                                 if uses_multiindex:
                                     current_val = self._all_datasets_df.loc[(origin, sid), "tags"]
@@ -1063,8 +1073,9 @@ class DataService:
                                 if new_val in current_tags:
                                     current_tags.remove(new_val)
 
-                            new_val = ", ".join(current_tags)
-                        target_val = new_val
+                            target_val = ", ".join(current_tags)
+                        else:
+                            target_val = new_val or ""
                     else:
                         target_val = request.bool_value
 
@@ -1084,32 +1095,6 @@ class DataService:
                             f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
                         )
 
-                # Debug AFTER the updates
-                try:
-                    ids = list(request.samples_ids)
-                    origins = list(request.sample_origins)
-
-                    debug_rows = self._all_datasets_df[
-                        (self._all_datasets_df["sample_id"].isin(ids))
-                        & (self._all_datasets_df["origin"].isin(origins))
-                    ]
-                    logger.debug(
-                        "[DEBUG EditDataSample] Updated rows:\n%s",
-                        debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
-                    )
-
-                    if request.stat_name == "tags":
-                        tagged = self._all_datasets_df[
-                            self._all_datasets_df["tags"] == request.string_value
-                        ]
-                        logger.debug(
-                            "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
-                            request.string_value,
-                            len(tagged),
-                        )
-                except Exception as e:
-                    logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
-
         # ------------------------------------------------------------------
         # 4) Persist tag edits to the tracked dataset (auto-sync to H5)
         # ------------------------------------------------------------------
@@ -1117,7 +1102,7 @@ class DataService:
             try:
                 for sid in request.samples_ids:
                     tags_str = request.string_value or ""
-                    for loader_name, loader in loaders_map.items():
+                    for loader_name, loader in self._loaders.items():
                         if loader is None:
                             continue
                         tracked_ds = getattr(loader, "tracked_dataset", None)

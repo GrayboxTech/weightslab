@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Union
 
 import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -192,59 +193,82 @@ class H5DataFrameStore:
         return self._normalize_for_read(df, origin)
 
     def load_all(self, origins: Iterable[str] = None, columns: Optional[Iterable[str]] = None, non_blocking: bool = False) -> pd.DataFrame:
-            """Load all origins in a single H5 transaction.
+        """Load all origins in a single H5 transaction.
 
-            Args:
-                non_blocking: If True, use short timeout to avoid blocking training.
-            """
-            if not self._path.exists():
-                return pd.DataFrame()
+        Args:
+            non_blocking: If True, use short timeout to avoid blocking training.
+        """
+        if not self._path.exists():
+            return pd.DataFrame()
 
-            if origins is None or origins == 'all' or (isinstance(origins, set) and 'all' in origins):
-                origins = set()
-                try:
-                    with pd.HDFStore(str(self._path), mode="r") as store:
-                        for key in store.keys():
-                            if key.startswith(f"/{self._key_prefix}_"):
-                                origin = key[len(f"/{self._key_prefix}_") :]
-                                origins.add(origin)
-                except (FileNotFoundError, OSError) as exc:
-                    if not non_blocking:
-                        logger.warning(f"[H5DataFrameStore] Failed to list origins from {self._path}: {exc}")
-                    return pd.DataFrame()
-
-            origins_list = list({origins} if isinstance(origins, str) else set(origins))
-            if not origins_list:
-                return pd.DataFrame()
-
-            # Batch load under single lock/transaction with timeout support
-            lock_timeout = 0.5 if non_blocking else self._lock_timeout
+        if origins is None or origins == 'all' or (isinstance(origins, set) and 'all' in origins):
+            origins = set()
             with self._local_lock:
                 try:
                     with _InterProcessFileLock(self._lock_path, timeout=lock_timeout, poll_interval=self._poll_interval):
                         try:
                             with pd.HDFStore(str(self._path), mode="r") as store:
-                                frames = []
-                                for origin in origins_list:
-                                    key = self._key(origin)
-                                    if key in store:
-                                        df = store.select(key, columns=list(columns) if columns else None)
-                                        df = self._normalize_for_read(df, origin)
-                                        frames.append(df)
-
-                                if not frames:
-                                    return pd.DataFrame()
-
-                                return pd.concat(frames, ignore_index=False)
-                        except (FileNotFoundError, OSError, KeyError) as exc:
+                                for key in store.keys():
+                                    if key.startswith(f"/{self._key_prefix}_"):
+                                        origin = key[len(f"/{self._key_prefix}_") :]
+                                        origins.add(origin)
+                        except (FileNotFoundError, OSError) as exc:
                             if not non_blocking:
-                                logger.warning(f"[H5DataFrameStore] Failed to load multiple origins from {self._path}: {exc}")
+                                logger.warning(f"[H5DataFrameStore] Failed to list origins from {self._path}: {exc}")
                             return pd.DataFrame()
                 except TimeoutError:
                     if non_blocking:
                         logger.debug(f"[H5DataFrameStore] Non-blocking read timeout for multiple origins")
                         return pd.DataFrame()
                     raise
+
+        origins_list = list({origins} if isinstance(origins, str) else set(origins))
+        if not origins_list:
+            return pd.DataFrame()
+
+        # Batch load under single lock/transaction with timeout support
+        lock_timeout = 0.5 if non_blocking else self._lock_timeout
+        with self._local_lock:
+            try:
+                with _InterProcessFileLock(self._lock_path, timeout=lock_timeout, poll_interval=self._poll_interval):
+                    try:
+                        with pd.HDFStore(str(self._path), mode="a") as store:
+                            frames = []
+                            corrupted_keys = []
+                            for origin in origins_list:
+                                key = self._key(origin)
+                                if key in store:
+                                    try:
+                                        df = store.select(key, columns=list(columns) if columns else None)
+                                        df = self._normalize_for_read(df, origin)
+                                        frames.append(df)
+                                    except (TypeError, KeyError) as exc:
+                                        # Mark corrupted key for removal
+                                        logger.warning(f"[H5DataFrameStore] Detected corrupted key {key}: {exc}")
+                                        corrupted_keys.append(key)
+                                        continue
+
+                            # Remove corrupted keys
+                            for key in corrupted_keys:
+                                try:
+                                    store.remove(key)
+                                    logger.info(f"[H5DataFrameStore] Removed corrupted key {key}")
+                                except Exception as exc:
+                                    logger.warning(f"[H5DataFrameStore] Failed to remove corrupted key {key}: {exc}")
+
+                            if not frames:
+                                return pd.DataFrame()
+
+                            return pd.concat(frames, ignore_index=False)
+                    except (FileNotFoundError, OSError, KeyError) as exc:
+                        if not non_blocking:
+                            logger.warning(f"[H5DataFrameStore] Failed to load multiple origins from {self._path}: {exc}")
+                        return pd.DataFrame()
+            except TimeoutError:
+                if non_blocking:
+                    logger.debug(f"[H5DataFrameStore] Non-blocking read timeout for multiple origins")
+                    return pd.DataFrame()
+                raise
 
     def upsert(self, origin: str, df: pd.DataFrame) -> int:
         df_norm = self._normalize_for_write(df)
@@ -258,26 +282,30 @@ class H5DataFrameStore:
             with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
                 try:
                     with pd.HDFStore(str(self._path), mode="a") as store:
-                        retained = pd.DataFrame()
+                        existing = pd.DataFrame()
                         if key in store:
                             existing = store.select(key)
-                            retained = existing[~existing.index.isin(df_norm.index)] if not existing.empty else pd.DataFrame()
+                            # retained = existing[~existing.index.isin(df_norm.index)] if not existing.empty else pd.DataFrame()
                             store.remove(key)
                             store.flush()
                         # Update retained in place with df_norm, then add new rows
-                        if not retained.empty:
-                            retained.update(df_norm)
-                            new_idx = df_norm.index.difference(retained.index)
-                            if not new_idx.empty:
-                                for idx in new_idx:
-                                    retained.loc[idx] = df_norm.loc[idx]
+                        if not existing.empty:
+                            if 'tags' in existing.columns and 'tags' in df_norm.columns and len(df_norm.columns) == 1:  # Only for tags update
+                                idx = df_norm.index.intersection(existing.index)
+                                if len(idx) > 0:
+                                    curr = existing.loc[idx, 'tags'].fillna('').astype(str)
+                                    new = df_norm.loc[idx, 'tags'].fillna('').astype(str)
+                                    sep = np.where((curr.str.len() > 0) & (new.str.len() > 0), ', ', '')
+                                    combined = curr + sep + new
+                                    existing.loc[idx, 'tags'] = combined
+                            else:
+                                existing.update(df_norm)
                         else:
-                            retained = df_norm.copy()
+                            existing = df_norm.copy()
                         # Remove any duplicate indices (keep last, i.e., new rows)
-                        retained = retained[~retained.index.duplicated(keep='last')]
-                        store.append(key, retained, format="table", data_columns=True, min_itemsize={"tags": 256})
+                        existing = existing[~existing.index.duplicated(keep='last')]
+                        store.append(key, existing, format="table", data_columns=True, min_itemsize={"tags": 256})
                         store.flush()
-                        self._record_mtime()
                         return len(df_norm)
                 except Exception as exc:
                     logger.error(f"[H5DataFrameStore] Failed to upsert rows for {origin} into {self._path}: {exc}")
