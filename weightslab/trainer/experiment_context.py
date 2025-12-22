@@ -57,6 +57,7 @@ class ExperimentContext:
             list_optimizers,
             get_logger,
             list_loggers,
+            resolve_hp_name,
         )
 
         # resolve model
@@ -115,8 +116,10 @@ class ExperimentContext:
             hp_names = list_hyperparams()
             if self._exp_name and self._exp_name in hp_names:
                 hyperparams = get_hyperparams(self._exp_name)
-            elif len(hp_names) == 1:
-                hyperparams = get_hyperparams()
+            else:
+                hp_name = resolve_hp_name()
+                if hp_name:
+                    hyperparams = get_hyperparams(hp_name)
         except Exception:
             hyperparams = None
 
@@ -169,4 +172,5 @@ class ExperimentContext:
             ("Checkpoint Frequency", "checkpooint_frequency", "number", _hp_getter("experiment_dump_to_train_steps_ratio", 100)),
             ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
             ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 8)),
+            ("Is Training", "is_training", "number", _hp_getter("is_training", 1)),
         }

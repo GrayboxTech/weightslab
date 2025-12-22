@@ -425,8 +425,8 @@ class DataLoaderInterface:
             return
 
         try:
-            params = list_hyperparams()
-            if not params:
+            hp_name = resolve_hp_name()
+            if hp_name is None:
                 # no hyperparams; optionally use a default
                 try:
                     self.set_batch_size(64)
@@ -434,7 +434,7 @@ class DataLoaderInterface:
                     pass
                 return
 
-            latest = get_hyperparams(params[0])
+            latest = get_hyperparams(hp_name)
             data_cfg = latest.get("data", {})
             if self._ledger_name in data_cfg:
                 bs = data_cfg[self._ledger_name].get("batch_size", None)
