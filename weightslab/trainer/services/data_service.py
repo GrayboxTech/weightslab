@@ -132,6 +132,7 @@ def _infer_task_type_from_label(label, default="classification"):
 
 
 class DataService:
+
     """
     Data service helpers + RPCs (for weights_studio UI).
 
@@ -730,9 +731,12 @@ class DataService:
 
         updated_df = self._pull_into_all_data_view_df()
 
+
         if self._all_datasets_df is not None and not updated_df.empty and not self._all_datasets_df.empty:
             try:
-                updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
+                # Use the union of both indices to preserve new lines in updated_df
+                combined_index = self._all_datasets_df.index.union(updated_df.index)
+                updated_df = updated_df.reindex(combined_index, copy=False)
             except Exception:
                 pass
 
@@ -1077,3 +1081,16 @@ class DataService:
                 success=False,
                 split_names=[]
             )
+
+    def CheckAgentHealth(self, request, context):
+        """
+        gRPC method to check if the agent is available for natural language queries.
+        Returns:
+            AgentHealthResponse { available: bool, message: str }
+        """
+        try:
+            available = self.is_agent_available()
+            msg = "Agent is available" if available else "Agent is not available"
+            return pb2.AgentHealthResponse(available=available, message=msg)
+        except Exception as e:
+            return pb2.AgentHealthResponse(available=False, message=f"Error: {e}")

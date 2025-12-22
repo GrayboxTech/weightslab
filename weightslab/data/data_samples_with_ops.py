@@ -132,7 +132,10 @@ class SampleStats:
         Ex.TAGS.value: '',
         Ex.ENCOUNTERED.value: 0,
         Ex.PREDICTION_LOSS.value: -1.0,
-        Ex.PREDICTION_AGE.value: -1
+        Ex.PREDICTION_AGE.value: -1,
+
+        Ex.TARGET.value: None,
+        Ex.PREDICTION_RAW.value: None,
     }
 
     DEFAULTS_TYPES = {
@@ -141,6 +144,9 @@ class SampleStats:
         Ex.ENCOUNTERED.value: int,
         Ex.PREDICTION_AGE.value: int,
         Ex.PREDICTION_LOSS.value: float,
+
+        Ex.PREDICTION_RAW.value: int | np.ndarray,
+        Ex.TARGET.value: int | np.ndarray,
     }
 
 # Backward-compatible aliases
@@ -679,6 +685,38 @@ class DataSampleTrackingWrapper(Dataset):
             else:
                 self.idx_to_idx_remapp[idx - delta] = idx
 
+    def _normalize_and_cast_for_df(self, value):
+        """
+        Normalize and cast arrays/tensors for DataFrame storage:
+        - If array/tensor is float and all values in [0, 1], scale to [0, 255] and cast to uint8.
+        - Convert arrays/tensors to list or scalar.
+        - Otherwise, cast to save type if possible.
+        """
+
+        arr = value
+        # Convert torch tensor to numpy
+        if th is not None and isinstance(arr, th.Tensor):
+            arr = arr.cpu().numpy()
+        if isinstance(arr, np.ndarray):
+            if arr.size == 1:
+                pass
+            elif np.issubdtype(arr.dtype, np.floating):
+                # Normalize float arrays in [0, 1] to [0, 255] uint8
+                if arr.min() >= 0.0 and arr.max() <= 1.0:
+                    arr = (arr * 255).round().astype(np.uint8)
+            elif np.issubdtype(arr.dtype, np.integer) and arr.dtype.itemsize == 2:
+                # Convert 16-bit integer arrays to 8-bit by scaling
+                arr_min, arr_max = arr.min(), arr.max()
+                if arr_max > 255 or arr_min < 0:
+                    # Scale to [0, 255] if out of 8-bit range
+                    arr = ((arr - arr_min) / (arr_max - arr_min) * 255).round().astype(np.uint8)
+                else:
+                    arr = arr.astype(np.uint8)
+
+            if arr.ndim == 2:
+                arr = arr[None]  # 1, H, W
+        return arr
+
     def set(self, sample_id: int, stat_name: str, stat_value, raw: bool = True):
         # When raw=False, remap sample_id from dataloader index to original sample_id
         if not raw and self.idx_to_idx_remapp and sample_id in self.idx_to_idx_remapp:
@@ -713,7 +751,24 @@ class DataSampleTrackingWrapper(Dataset):
                 self._stats_df[stat_name] = None
 
             # Set the value in DataFrame
-            clean_value = None if (stat_value == '' and not isinstance(stat_value, (np.ndarray, th.Tensor))) else stat_value
+            clean_value = None if not isinstance(stat_value, (np.ndarray, th.Tensor)) and stat_value == '' else stat_value
+
+            # Normalize and cast arrays/tensors for DataFrame
+            clean_value = self._normalize_and_cast_for_df(clean_value)
+
+            # Cast to save format if not already the case (for scalars)
+            if stat_name in SAMPLES_STATS_DEFAULTS_TYPES:
+                dtype = SAMPLES_STATS_DEFAULTS_TYPES[stat_name]
+                try:
+                    if clean_value is not None and not isinstance(clean_value, dtype) and not isinstance(clean_value, list):
+                        clean_value = dtype(clean_value)
+                except Exception:
+                    pass
+
+            # If clean_value is a list (from array), ensure column dtype is object
+            if isinstance(clean_value, (list, np.ndarray)):
+                if stat_name not in self._stats_df.columns or self._stats_df[stat_name].dtype != 'O':
+                    self._stats_df[stat_name] = self._stats_df[stat_name].astype('object')
             self._stats_df.loc[sample_id, stat_name] = clean_value
 
             # Track UIDs with changes to SAMPLES_STATS_TO_SAVE_TO_H5
@@ -737,7 +792,7 @@ class DataSampleTrackingWrapper(Dataset):
             # Check if value exists in DataFrame
             if sample_id in self._stats_df.index and stat_name in self._stats_df.columns:
                 value = self._stats_df.loc[sample_id, stat_name]
-                if pd.notna(value):
+                if pd.notna(np.asanyarray(value).all()):
                     # Handle array fix
                     if isinstance(value, np.ndarray) and value.size == 1:
                         return value.item()
@@ -756,17 +811,21 @@ class DataSampleTrackingWrapper(Dataset):
                         value = self[index][2]  # 0 -> data; 1 -> index; 2 -> label
                 self._stats_df.loc[sample_id, stat_name] = value
                 return value
+
             elif stat_name == SampleStatsEx.SAMPLE_ID:
                 value = sample_id
                 if raw and index in self.idx_to_idx_remapp:
                     value = self.idx_to_idx_remapp[index]
                 return value
+
             elif stat_name == SampleStatsEx.DENY_LISTED:
                 # Return default
                 return False
+
             elif stat_name == SampleStatsEx.TAGS:
                 # Return default
                 return ''
+
             else:
                 raise KeyError(f"Stat {stat_name} not found for sample_id {sample_id}")
 

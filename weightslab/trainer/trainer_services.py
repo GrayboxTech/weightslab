@@ -74,6 +74,9 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     def GetDataSplits(self, request, context):
         return self._exp_service.data_service.GetDataSplits(request, context)
 
+    def CheckAgentHealth(self, request, context):
+        return self._exp_service.data_service.CheckAgentHealth(request, context)
+
     # -------------------------------------------------------------------------
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------

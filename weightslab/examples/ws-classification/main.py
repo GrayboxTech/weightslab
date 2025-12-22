@@ -101,7 +101,7 @@ if __name__ == "__main__":
 
     # 2) Load hyperparameters (from YAML if present)
     parameters = {}
-    config_path = os.path.join(os.path.dirname(__file__), "mnist_training_config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}

@@ -135,7 +135,7 @@ class BDD100kSegDataset(Dataset):
         self.ignore_index = ignore_index
         self.task_type = "segmentation"
 
-        img_dir = os.path.join(root, "images_1280x720", split)
+        img_dir = os.path.join(root, "images", split)
         lbl_dir = os.path.join(root, "labels", split)
 
         image_files = [
@@ -269,7 +269,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
 # =============================================================================
 if __name__ == "__main__":
     # --- 1) Load hyperparameters from YAML (if present) ---
-    config_path = os.path.join(os.path.dirname(__file__), "bdd_seg_training_config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
@@ -315,7 +315,6 @@ if __name__ == "__main__":
     # --- 4) Register logger + hyperparameters ---
     logger = Logger()
     wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
-
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -325,25 +324,29 @@ if __name__ == "__main__":
     )
 
     # --- 5) Data (BDD100k reduced) ---
-    # Your layout from earlier:
-    #   .../development/merge-main-dev/weightslab  (this script)
-    #   .../development/data/BDD100k_reduced      (data)
-    default_data_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "data", "BDD100k_reduced")
-    )
-    data_root = parameters.get("data_root", default_data_root)
-
+    data_root = parameters.get("data_root", None)
+    if data_root is None:
+        raise ValueError("Please set 'data_root' in the configuration YAML.")
     train_cfg = parameters.get("data", {}).get("train_loader", {})
+    val_cfg = parameters.get("data", {}).get("val_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
 
-    _train_dataset = BDD100kSegDataset(
+    _full_train_dataset = BDD100kSegDataset(
         root=data_root,
         split="train",
         num_classes=num_classes,
         ignore_index=ignore_index,
         image_size=image_size,
     )
-    _val_dataset = BDD100kSegDataset(
+
+    # Split train into train/val subsets
+    val_fraction = parameters.get("val_fraction", 0.1)  # 10% for validation by default
+    total_train = len(_full_train_dataset)
+    val_size = int(total_train * val_fraction)
+    train_size = total_train - val_size
+    generator = torch.Generator().manual_seed(42)
+    _train_dataset, _val_dataset = torch.utils.data.random_split(_full_train_dataset, [train_size, val_size], generator=generator)
+    _test_dataset = BDD100kSegDataset(
         root=data_root,
         split="val",
         num_classes=num_classes,
@@ -360,8 +363,17 @@ if __name__ == "__main__":
         compute_hash=False,
         is_training=True
     )
-    test_loader = wl.watch_or_edit(
+    val_loader = wl.watch_or_edit(
         _val_dataset,
+        flag="data",
+        name="val_loader",
+        batch_size=val_cfg.get("batch_size", 2),
+        shuffle=False,
+        compute_hash=False,
+        is_training=False
+    )
+    test_loader = wl.watch_or_edit(
+        _test_dataset,
         flag="data",
         name="test_loader",
         batch_size=test_cfg.get("batch_size", 2),
@@ -496,13 +508,19 @@ if __name__ == "__main__":
     # ================
     # 7. Training Loop
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
+    val_loader_len = len(val_loader)  # Store length before wrapping with tqdm
+    val_loader = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
     test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
-    test_loss, test_metric = None, None
+
+    val_loss, val_metric, test_loss, test_metric = None, None, None, None
     start_time = time.time()
     for train_step in train_range:
         # Train
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
+
+        # Validation
+        val_loss, val_metric = test(val_loader, model, test_criterion_mlt, test_metric_mlt, device, val_loader_len)
 
         # Test
         if train_step == 0 or train_step % eval_every == 0:
@@ -514,6 +532,8 @@ if __name__ == "__main__":
                 f"Training.. " +
                 f"Step {train_step}: " +
                 f"| Train Loss: {train_loss:.4f} " +
+                (f"| Val Loss: {val_loss:.4f} " if val_loss is not None else '') +
+                (f"| Val Acc mlt: {val_metric:.2f}% " if val_metric is not None else '') +
                 (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
                 (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
             )
@@ -521,8 +541,10 @@ if __name__ == "__main__":
             train_range.set_description(f"Step")
             train_range.set_postfix(
                 train_loss=f"{train_loss:.4f}",
+                val_loss=f"{val_loss:.4f}" if val_loss is not None else "N/A",
+                val_acc=f"{val_metric:.2f}%" if val_metric is not None else "N/A",
                 test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
-                acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
+                test_acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
             )
 
     print("\n" + "=" * 60)
