@@ -823,21 +823,28 @@ class DataService:
             pass
             
             # Check if we have a custom sort (index is not strictly increasing monotonic)
+            # AND if the index types are compatible (both numeric)
             if not self._all_datasets_df.index.is_monotonic_increasing:
                  # We have a custom sort. 
-                 # We want the new data, but ordered like the old data where possible.
-                 user_sort_order = self._all_datasets_df.index.tolist()
+                 old_index = self._all_datasets_df.index
+                 new_index = updated_df.index
                  
-                 # New items that weren't in the old DF:
-                 new_items = updated_df.index.difference(self._all_datasets_df.index)
+                 # 1. Identify rows that are in BOTH (intersection) -> keep old order
+                 # use .intersection to preserve order of left argument (old_index)
+                 kept_indices = [x for x in old_index if x in new_index]
                  
-                 # Combine: old order + new items appended at the end
-                 full_order = user_sort_order + new_items.tolist()
+                 # 2. Identify rows that are NEW (difference) -> append to end
+                 # Use set difference for speed, then sort or just append
+                 old_index_set = set(old_index)
+                 newly_added_indices = [x for x in new_index if x not in old_index_set]
                  
-                 # Reindex the UPDATED dataframe to this order.
-                 # Filter full_order to only include items actually in updated_df
-                 valid_order = [idx for idx in full_order if idx in updated_df.index]
-                 updated_df = updated_df.reindex(valid_order)
+                 # 3. Construct the full requested order
+                 full_order = kept_indices + newly_added_indices
+                 
+                 # 4. Reindex using this full order.
+                 # The 'updated_df' contains ALL the data (old items updated + new items).
+                 # This safely reorders it.
+                 updated_df = updated_df.reindex(full_order)
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
