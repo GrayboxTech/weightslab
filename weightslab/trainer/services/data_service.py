@@ -1,4 +1,5 @@
 import io
+from typing import List
 import time
 import torch
 import logging
@@ -509,6 +510,25 @@ class DataService:
             logger.error(f"Error processing row for sample_id {row.get('sample_id', -1)}: {e}", exc_info=True)
             return None
 
+    def _get_unique_tags(self) -> List[str]:
+        """Collect all unique tags currently present in the tracked datasets."""
+        tags = set()
+        try:
+            # Check both loaders for tracked datasets
+            for loader in [self._trn_loader, self._tst_loader]:
+                if loader and hasattr(loader, "tracked_dataset"):
+                    tracked_tags = loader.tracked_dataset.sample_statistics.get("tags", {})
+                    for tag_val in tracked_tags.values():
+                        if tag_val:
+                            # Tags can be multiple separated by spaces or just one
+                            # For now, let's treat the whole string as a tag or split it?
+                            # User asked to "select one of those", so likely exact matches.
+                            tags.add(str(tag_val))
+        except Exception as e:
+            logger.warning(f"Error collecting unique tags: {e}")
+        
+        return sorted(list(tags))
+
     def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
         """
         Centralized helper so every code path reports counts consistently.
@@ -524,6 +544,7 @@ class DataService:
             else 0
         )
         in_loop_count = total_count - discarded_count
+        unique_tags = self._get_unique_tags()
 
         return pb2.DataQueryResponse(
             success=True,
@@ -531,6 +552,7 @@ class DataService:
             number_of_all_samples=total_count,
             number_of_samples_in_the_loop=in_loop_count,
             number_of_discarded_samples=discarded_count,
+            unique_tags=unique_tags
         )
 
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
