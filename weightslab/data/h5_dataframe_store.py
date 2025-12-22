@@ -111,7 +111,7 @@ class H5DataFrameStore:
     def _ensure_parent(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _normalize_for_write(self, df: pd.DataFrame, origin: str) -> pd.DataFrame:
+    def _normalize_for_write(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
         df_out = df.copy()
@@ -123,7 +123,6 @@ class H5DataFrameStore:
             df_out.index = df_out.index.astype(int)
         except Exception:
             pass
-        df_out["origin"] = origin
         return df_out
 
     def _normalize_for_read(self, df: pd.DataFrame, origin: str) -> pd.DataFrame:
@@ -132,8 +131,10 @@ class H5DataFrameStore:
         df_out = df.copy()
         if df_out.index.name in (None, "uid"):
             df_out.index.name = "sample_id"
-        if "sample_id" not in df_out.columns:
+        if not isinstance(df_out, pd.Series) and "sample_id" not in df_out.columns:
             df_out["sample_id"] = df_out.index.astype(int)
+        elif isinstance(df_out, pd.Series):
+            df_out = df_out.reset_index().rename(columns={df_out.name: "sample_id"})
         df_out["origin"] = origin
         return df_out
 
@@ -246,7 +247,7 @@ class H5DataFrameStore:
                     raise
 
     def upsert(self, origin: str, df: pd.DataFrame) -> int:
-        df_norm = self._normalize_for_write(df, origin)
+        df_norm = self._normalize_for_write(df)
         if df_norm.empty:
             return 0
 
@@ -258,13 +259,24 @@ class H5DataFrameStore:
                 try:
                     with pd.HDFStore(str(self._path), mode="a") as store:
                         retained = pd.DataFrame()
-                        if key in store:  # TODO (GP): Currently delete stored data, then re-insert rows that will not be updated, then insert new row. Could be optimized with pathkey, i.e., key/sampleid.
+                        if key in store:
                             existing = store.select(key)
                             retained = existing[~existing.index.isin(df_norm.index)] if not existing.empty else pd.DataFrame()
                             store.remove(key)
+                            store.flush()
+                            # Close and reopen the store to fully clear the group
+                            store.close()
+                            store = pd.HDFStore(str(self._path), mode="a")
+                        # Update retained in place with df_norm, then add new rows
                         if not retained.empty:
-                            store.append(key, retained, format="table", data_columns=True, min_itemsize={"tags": 256})
-                        store.append(key, df_norm, format="table", data_columns=True, min_itemsize={"tags": 256})
+                            retained.update(df_norm)
+                            new_idx = df_norm.index.difference(retained.index)
+                            if not new_idx.empty:
+                                for idx in new_idx:
+                                    retained.loc[idx] = df_norm.loc[idx]
+                        else:
+                            retained = df_norm.copy()
+                        store.append(key, retained, format="table", data_columns=True, min_itemsize={"tags": 256})
                         store.flush()
                         self._record_mtime()
                         return len(df_norm)

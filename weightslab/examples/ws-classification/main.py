@@ -294,8 +294,6 @@ if __name__ == "__main__":
 
     val_loss, val_metric = None, None
     test_loss, test_metric = None, None
-    from weightslab.components.global_monitoring import pause_controller
-    pause_controller.resume()  # Ensure monitoring is running
     for train_step in train_range:
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)

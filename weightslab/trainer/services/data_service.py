@@ -1020,11 +1020,15 @@ class DataService:
             try:
                 for sid in request.samples_ids:
                     tags_str = request.string_value or ""
-                    # Save to both train and test tracked datasets
-                    if self._trn_loader and hasattr(self._trn_loader.tracked_dataset, 'set'):
-                        self._trn_loader.tracked_dataset.set(int(sid), "tags", tags_str)
-                    if self._tst_loader and hasattr(self._tst_loader.tracked_dataset, 'set'):
-                        self._tst_loader.tracked_dataset.set(int(sid), "tags", tags_str)
+                    for loader_name, loader in loaders_map.items():
+                        if loader is None:
+                            continue
+                        tracked_ds = getattr(loader, "tracked_dataset", None)
+                        if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                            origin = tracked_ds._dataset_split
+                            if origin in request.sample_origins:
+                                if hasattr(tracked_ds, 'set'):
+                                    tracked_ds.set(int(sid), "tags", tags_str)
             except Exception as e:
                 logger.warning(f"Could not persist tags to tracked dataset: {e}")
 
