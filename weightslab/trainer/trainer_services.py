@@ -11,6 +11,9 @@ from weightslab.trainer.trainer_tools import *
 from weightslab.trainer.experiment_context import ExperimentContext
 from weightslab.trainer.services.experiment_service import ExperimentService
 
+from weightslab.trainer.experiment_context import ExperimentContext
+from weightslab.trainer.services.experiment_service import ExperimentService
+
 # Global logger
 logger = logging.getLogger(__name__)
 
