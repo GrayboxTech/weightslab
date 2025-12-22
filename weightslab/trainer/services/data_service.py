@@ -652,7 +652,24 @@ class DataService:
                                 )
                                 df[col] = converted
 
-                    safe_params["by"] = by
+
+                    # Ensure all sort columns exist
+                    valid_cols = [c for c in by if c in df.columns]
+                    if not valid_cols:
+                        logger.warning("[ApplyDataQuery] No valid sort columns found in %s", by)
+                        return "Failed to sort: columns not found"
+                    
+                    safe_params["by"] = valid_cols
+                    
+                    # Fill NaN values in sort columns to avoid sort failures or inconsistent behaviors
+                    for c in valid_cols:
+                         if df[c].isna().any():
+                             # Use a type-appropriate fill value
+                             if is_numeric_dtype(df[c].dtype):
+                                 df[c] = df[c].fillna(-1e9) # Sort NaNs to start/end depending on order
+                             else:
+                                 df[c] = df[c].fillna("")
+
                     safe_params["inplace"] = True
 
                     logger.debug(
@@ -796,7 +813,31 @@ class DataService:
         updated_df = self._pull_into_all_data_view_df()
 
         if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-            pass 
+            # If the current DF is sorted differently than the default 'sample_id' order,
+            # we should try to maintain that sort order with the new data.
+            # Simple heuristic: if the index has changed (reordered), re-apply it.
+            
+            # 1. Update the new DF with the new data
+            # 2. Reindex the new DF to match the old DF's index order (intersection)
+            # This keeps the user's sort valid for existing items.
+            pass
+            
+            # Check if we have a custom sort (index is not strictly increasing monotonic)
+            if not self._all_datasets_df.index.is_monotonic_increasing:
+                 # We have a custom sort. 
+                 # We want the new data, but ordered like the old data where possible.
+                 user_sort_order = self._all_datasets_df.index.tolist()
+                 
+                 # New items that weren't in the old DF:
+                 new_items = updated_df.index.difference(self._all_datasets_df.index)
+                 
+                 # Combine: old order + new items appended at the end
+                 full_order = user_sort_order + new_items.tolist()
+                 
+                 # Reindex the UPDATED dataframe to this order.
+                 # Filter full_order to only include items actually in updated_df
+                 valid_order = [idx for idx in full_order if idx in updated_df.index]
+                 updated_df = updated_df.reindex(valid_order)
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
