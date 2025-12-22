@@ -55,11 +55,12 @@ class MaskedSampler(Sampler):
 
     def __iter__(self):
         """Iterate over non-deny-listed indices."""
-        # Build a set of deny-listed UIDs for fast lookup
-        deny_listed_uids = {
-            uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
-            if is_denied
-        }
+        # Build a set of deny-listed UIDs for fast lookup via DataFrame
+        deny_listed_uids = set(
+            self.tracked_dataset._stats_df[
+                self.tracked_dataset._stats_df['deny_listed'] == True
+            ].index
+        )
 
         # Iterate through base sampler, yielding only non-denied indices
         for idx in self.base_sampler:
@@ -69,11 +70,12 @@ class MaskedSampler(Sampler):
 
     def __len__(self):
         """Return the number of non-deny-listed samples."""
-        # Count non-denied samples
-        deny_listed_uids = {
-            uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
-            if is_denied
-        }
+        # Count non-denied samples via DataFrame
+        deny_listed_uids = set(
+            self.tracked_dataset._stats_df[
+                self.tracked_dataset._stats_df['deny_listed'] == True
+            ].index
+        )
         total = len(self.base_sampler)
         denied_count = len(deny_listed_uids)
         return max(0, total - denied_count)
@@ -197,6 +199,7 @@ class DataLoaderInterface:
                 compute_hash=compute_hash,
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
+                name=name,
                 **kwargs
             )
             self.tracked_dataset._map_updates_hook_fns.append(
@@ -210,6 +213,7 @@ class DataLoaderInterface:
                 compute_hash=compute_hash,
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
+                name=name,
                 **kwargs
             )
 
