@@ -13,7 +13,7 @@ from threading import Lock
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import get_model, get_dataloader, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.ledgers import get_model, get_dataloader, get_dataloaders, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.ui.weightslab_ui import ui_serve
@@ -27,12 +27,12 @@ def _save_data_statistics(
     model_age: int,
     batch_ids: th.Tensor,
     losses_batch: th.Tensor,
-    preds: th.Tensor,
+    preds: th.Tensor = None,
     lock: Lock = Lock()
 ):
     with lock:
         # Get batch data
-        pred_np = preds.detach().cpu().numpy()
+        pred_np = preds.detach().cpu().numpy() if preds is not None else None
         batch_ids_np = batch_ids.detach().cpu().numpy()
         if not isinstance(losses_batch, dict):
             per_sample_loss_np = losses_batch.detach().cpu().numpy()
@@ -42,33 +42,44 @@ def _save_data_statistics(
             per_sample_loss_np = losses_batch
 
         # Update batch sample stats
-        # Check if model is in training mode
-        is_training = True
-        try:
-            m = get_model()
-            if hasattr(m, "is_training"):
-                is_training = m.is_training()
-            elif hasattr(m, "training"):
-                is_training = m.training
-        except Exception:
-            pass
+        # Check if model is in training mode with grad enabled
+        is_training = th.is_grad_enabled()
 
         name = 'train_loader' if is_training else 'test_loader'
+        try:
+            loader = get_dataloader(name)
 
-        get_dataloader(name).tracked_dataset.update_batch_sample_stats(
-            model_age,
-            batch_ids_np,
-            per_sample_loss_np,
-            pred_np
-        )
-        get_dataloader(name).tracked_dataset.update_sample_stats_ex_batch(
-            batch_ids_np,
-            {
-                "loss/combined": per_sample_loss_np,
-                "pred": pred_np
-            }
-        )
-
+            # TODO (GP): improve this logic to avoid double updates
+            # Improvement here should be to separate dataloaders that generates data from datasets, from data storage, which should be global,
+            # and in the ledger. So that we don't have to try multiple dataloaders to update the same dataset. And we can work on dataloader named Chloe for instance.
+            # https://github.com/GrayboxTech/weightslab/issues/50
+            if set(batch_ids_np) - set(get_dataloader(name).tracked_dataset.unique_ids):
+                nloaders = get_dataloaders()
+                for lname in nloaders:
+                    loader = get_dataloader(lname)
+                    if set(batch_ids_np).issubset(set(loader.tracked_dataset.unique_ids)):
+                        break
+            loader.tracked_dataset.update_batch_sample_stats(
+                model_age,
+                batch_ids_np,
+                per_sample_loss_np,
+                pred_np
+            )
+            loader.tracked_dataset.update_sample_stats_ex_batch(
+                batch_ids_np,
+                {
+                    "loss/combined": per_sample_loss_np,
+                    "pred": pred_np
+                }
+            )
+        except AttributeError as e:
+            logger.warning(
+                "Warning: Could not save data statistics to " +
+                f"tracked dataset: {e}. Please ensure the " +
+                "dataloader has a tracked dataset with " +
+                "`update_batch_sample_stats` and " +
+                "`update_sample_stats_ex_batch` methods, and is_training set."
+            )
 
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
     """
@@ -133,6 +144,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
     elif flag.lower() == 'data' or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
+        kwargs['name'] = reg_name
+
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_dataloader` will create a Proxy if
@@ -204,7 +217,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         return proxy if proxy is not None else get_logger(reg_name)
 
     # Signals: metrics / losses / custom monitors
-    elif 'loss' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
+    elif 'loss' in flag.lower() or flag.lower() in ('criterion', 'signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
         reg_name = kwargs.get('name') or flag
 
@@ -223,8 +236,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     model_age = kw.pop('model_age', None)
                     preds = kw.pop('preds', None)
 
-                    # Original forward
+                    # Original forward of the signal
                     out = original_forward(*a, **kw)
+
+                    if kwargs.get('per_sample', False):
+                        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
 
                     # extract scalar
                     batch_scalar = None
@@ -316,11 +332,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
                 @functools.wraps(original_compute)
                 def new_compute(*a, **kw):
-                    _flag = None
-                    if 'flag' in kw:
-                        _flag = kw.pop('flag', None)
                     out = original_compute(*a, **kw)
-
+                    if kwargs.get('per_sample', False):
+                        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
+                    # extract scalar
                     try:
                         if isinstance(out, th.Tensor):
                             scalar = float(out.detach().cpu().mean().item())
@@ -363,9 +378,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
                 @functools.wraps(original_forward)
                 def new_forward(*a, **kw):
-                    _flag = None
-                    if 'flag' in kw:
-                        _flag = kw.pop('flag', None)
                     out = original_forward(*a, **kw)
 
                     # extract scalar

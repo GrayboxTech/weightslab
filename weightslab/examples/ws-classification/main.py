@@ -101,7 +101,7 @@ if __name__ == "__main__":
 
     # 2) Load hyperparameters (from YAML if present)
     parameters = {}
-    config_path = os.path.join(os.path.dirname(__file__), "mnist_training_config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
@@ -156,10 +156,10 @@ if __name__ == "__main__":
     _optimizer = optim.Adam(model.parameters(), lr=lr)
     optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
 
-    # Data (MNIST train/test)
-    _train_dataset = datasets.MNIST(
+    # Data (MNIST train/val/test)
+    _full_train_dataset = datasets.MNIST(
         root=os.path.join(parameters["root_log_dir"], "data"),
-        train=False,
+        train=True,
         download=True,
         transform=transforms.Compose(
             [
@@ -178,14 +178,31 @@ if __name__ == "__main__":
         ),
     )
 
-    # Read data config in unified style: data.train_loader / data.test_loader
-    train_cfg = parameters.get("data", {}).get("train_loader", {})
-    test_cfg = parameters.get("data", {}).get("test_loader", {})
-    train_bs = train_cfg.get("batch_size", 16)
-    test_bs = test_cfg.get("batch_size", 16)
-    train_shuffle = train_cfg.get("train_shuffle", True)
-    test_shuffle = test_cfg.get("test_shuffle", False)
+    # Split train into train + val (80/20 split)
+    val_split = parameters.get("data", {}).get("val_split", 0.2)
+    train_size = int((1.0 - val_split) * len(_full_train_dataset))
+    val_size = len(_full_train_dataset) - train_size
 
+    _train_dataset, _val_dataset = torch.utils.data.random_split(
+        _full_train_dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+
+    # Read data config for all loaders
+    train_cfg = parameters.get("data", {}).get("train_loader", {})
+    val_cfg = parameters.get("data", {}).get("val_loader", {})
+    test_cfg = parameters.get("data", {}).get("test_loader", {})
+
+    train_bs = train_cfg.get("batch_size", 16)
+    val_bs = val_cfg.get("batch_size", 16)
+    test_bs = test_cfg.get("batch_size", 16)
+
+    train_shuffle = train_cfg.get("shuffle", True)
+    val_shuffle = val_cfg.get("shuffle", False)
+    test_shuffle = test_cfg.get("shuffle", False)
+
+    # Create tracked loaders for train, val, and test
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
@@ -193,6 +210,16 @@ if __name__ == "__main__":
         batch_size=train_bs,
         shuffle=train_shuffle,
         is_training=True,
+        compute_hash=False
+    )
+    val_loader = wl.watch_or_edit(
+        _val_dataset,
+        flag="data",
+        name="val_loader",
+        batch_size=val_bs,
+        shuffle=val_shuffle,
+        is_training=False,
+        compute_hash=False
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -200,19 +227,34 @@ if __name__ == "__main__":
         name="test_loader",
         batch_size=test_bs,
         shuffle=test_shuffle,
+        is_training=False,
+        compute_hash=False
     )
 
-    # Losses & metric (watched objects – they log themselves)
+    # Losses & metrics (watched objects – they log themselves)
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="train_loss/mlt_loss",
         log=True,
     )
+    val_criterion_mlt = wl.watch_or_edit(
+        nn.CrossEntropyLoss(reduction="none"),
+        flag="loss",
+        name="val_loss/mlt_loss",
+        log=True,
+    )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="test_loss/mlt_loss",
+        log=True,
+    )
+
+    val_metric_mlt = wl.watch_or_edit(
+        Accuracy(task="multiclass", num_classes=10).to(device),
+        flag="metric",
+        name="val_metric/mlt_metric",
         log=True,
     )
     test_metric_mlt = wl.watch_or_edit(
@@ -239,22 +281,40 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 STARTING TRAINING")
     print(f"🔄 Evaluation every {eval_every} steps")
+    print(f"� Dataset splits: train={len(_train_dataset)}, val={len(_val_dataset)}, test={len(_test_dataset)}")
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
-    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
-    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
+    val_loader_len = len(val_loader)  # Store length before wrapping with tqdm
+    test_loader_len = len(test_loader)
+
+    val_loader_iter = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
+    test_loader_iter = tqdm.tqdm(test_loader, desc="Testing") if tqdm_display else test_loader
+
+    val_loss, val_metric = None, None
     test_loss, test_metric = None, None
+    from weightslab.components.global_monitoring import pause_controller
+    pause_controller.resume()  # Ensure monitoring is running
     for train_step in train_range:
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
-        # Periodic full eval
-        test_loss, test_metric = None, None
+        # Periodic validation and test evaluation
         if train_step % eval_every == 0:
+            # Validate
+            val_loss, val_metric = test(
+                val_loader_iter,
+                model,
+                val_criterion_mlt,
+                val_metric_mlt,
+                device,
+                val_loader_len
+            )
+
+            # Test (less frequent or same as val)
             test_loss, test_metric = test(
-                test_loader,
+                test_loader_iter,
                 model,
                 test_criterion_mlt,
                 test_metric_mlt,
@@ -268,15 +328,19 @@ if __name__ == "__main__":
                 f"Training.. " +
                 f"Step {train_step}: " +
                 f"| Train Loss: {train_loss:.4f} " +
+                (f"| Val Loss: {val_loss:.4f} " if val_loss is not None else '') +
+                (f"| Val Acc: {val_metric:.2f}% " if val_metric is not None else '') +
                 (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
-                (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
+                (f"| Test Acc: {test_metric:.2f}% " if test_metric is not None else '')
             )
         elif tqdm_display:
             train_range.set_description(f"Step")
             train_range.set_postfix(
                 train_loss=f"{train_loss:.4f}",
+                val_loss=f"{val_loss:.4f}" if val_loss is not None else "N/A",
+                val_acc=f"{val_metric:.2f}%" if val_metric is not None else "N/A",
                 test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
-                acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
+                test_acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
             )
 
     print("\n" + "=" * 60)

@@ -98,10 +98,8 @@ class GuardContext:
         # The exact logic requested by the user:
         if self.for_training:
             self.model.set_tracking_mode(TrackingMode.TRAIN)
-            self.model.train()
         else:
             self.model.set_tracking_mode(TrackingMode.EVAL)
-            self.model.eval()
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         """

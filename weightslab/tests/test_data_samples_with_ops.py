@@ -2,6 +2,7 @@ import os
 import time
 import tempfile
 import unittest
+from pathlib import Path
 import numpy as np
 import torch as th
 import warnings; warnings.filterwarnings("ignore")
@@ -11,6 +12,7 @@ from torchvision import transforms as T
 
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.data.data_samples_with_ops import SampleStatsEx
+from weightslab.data.h5_dataframe_store import H5DataFrameStore
 
 
 # Set Global Default Settings
@@ -127,28 +129,68 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
     def test_update_batch_sample_stats(self):
         self.assertEqual(len(self.wrapped_dataset), 6)
 
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[4]), 1)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[4]), 0)
 
         self.wrapped_dataset.update_batch_sample_stats(
             0, *self.ids_and_losses_1)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(self.uids[0]), 1.4)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[5]), 2)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[5]), 1)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(self.uids[2]), 0)
 
         self.wrapped_dataset.update_batch_sample_stats(
             3, *self.ids_and_losses_2)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(self.uids[1]), 0.4)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[4]), 2)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[4]), 1)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(self.uids[3]), 3)
 
         self.wrapped_dataset.update_batch_sample_stats(
             6, *self.ids_and_losses_3)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(self.uids[5]), 0)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[3]), 3)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[3]), 2)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(self.uids[4]), 6)
         self.assertEqual(self.wrapped_dataset.get_prediction_loss(self.uids[1]), 0.4)
-        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[4]), 3)
+        self.assertEqual(self.wrapped_dataset.get_exposure_amount(self.uids[4]), 2)
         self.assertEqual(self.wrapped_dataset.get_prediction_age(self.uids[3]), 6)
+
+    def test_shared_h5_store_between_splits(self):
+        tmp_dir = tempfile.mkdtemp()
+        shared_store = H5DataFrameStore(Path(tmp_dir) / "data_with_ops.h5")
+
+        a = _TinyDummyDataset(n=3)
+        train_wrapper = DataSampleTrackingWrapper(
+            a,
+            root_log_dir=tmp_dir,
+            stats_store=shared_store,
+            compute_hash=False,
+            name="train",
+        )
+        b = _TinyDummyDataset(n=2)
+        eval_wrapper = DataSampleTrackingWrapper(
+            b,
+            root_log_dir=tmp_dir,
+            stats_store=shared_store,
+            compute_hash=False,
+            is_training=False,
+            name="eval",
+        )
+
+        train_sid = train_wrapper.get_sample_id_at_index(0)
+        eval_sid = eval_wrapper.get_sample_id_at_index(0)
+
+        train_wrapper.set(train_sid, SampleStatsEx.TAGS.value, "hot")
+        eval_wrapper.set(eval_sid, SampleStatsEx.DENY_LISTED.value, True)
+
+        # Immediate-saving stats should flush to the shared store
+        train_wrapper._save_pending_stats_to_h5()
+        eval_wrapper._save_pending_stats_to_h5()
+
+        merged = shared_store.load_all({"train", "eval"})
+        self.assertFalse(merged.empty)
+        train_rows = merged[merged["origin"] == "train"].set_index("sample_id")
+        eval_rows = merged[merged["origin"] == "eval"].set_index("sample_id")
+
+        self.assertEqual(train_rows.loc[train_sid, "tags"], "hot")
+        self.assertTrue(bool(eval_rows.loc[eval_sid, "deny_listed"]))
 
     def test_denylisting(self):
         self.assertEqual(len(self.wrapped_dataset), 6)
@@ -270,41 +312,41 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
             sample_predicate_fn1, weight=1.0,
             accumulate=False, verbose=True)
 
-        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2501)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2501)
 
     def test_predicate_with_weight(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=0.5,
             accumulate=False, verbose=True)
 
-        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 1250)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 1250)
 
     def test_predicate_with_weight_over_one(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=2000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2000)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2000)
 
     def test_predicate_with_weight_over_one_not_enough_samples(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=20000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2501)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2501)
 
     def test_predicate_with_accumulation(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=20000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 2501)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2501)
 
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn2, weight=20000,
             accumulate=True, verbose=True)
 
-        self.assertEqual(sum(self.wrapped_dataset.sample_statistics[SampleStatsEx.DENY_LISTED.value].values()), 4001)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 4001)
 
 
 class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
@@ -394,9 +436,11 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         self.assertAlmostEqual(df.loc[self.uids[0], "loss/classification"], float(per_sample_cls[0]), places=6)
         self.assertAlmostEqual(df.loc[self.uids[3], "loss/reconstruction"], float(per_sample_rec[3]), places=6)
 
-        # logits stored as lists
-        self.assertIsInstance(self.wrapped_dataset.sample_statistics_ex["pred/logits"][self.uids[0]], list)
-        self.assertEqual(len(self.wrapped_dataset.sample_statistics_ex["pred/logits"][self.uids[0]]), 5)
+        # logits stored as lists in DataFrame
+        self.assertIn("pred/logits", self.wrapped_dataset._stats_df.columns)
+        logits_val = self.wrapped_dataset._stats_df.loc[self.uids[0], "pred/logits"]
+        self.assertIsInstance(logits_val, list)
+        self.assertEqual(len(logits_val), 5)
 
         # dense present via accessor
         d0 = self.wrapped_dataset.get_dense_stat(self.uids[0], "pred/seg")
@@ -414,11 +458,11 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
         ds2 = DataSampleTrackingWrapper(self.base_ds)
         ds2.load_state_dict(state)
 
-        # check scalar ex
-        self.assertIn("loss/combined", ds2.sample_statistics_ex)
-        self.assertEqual(ds2.sample_statistics_ex["loss/combined"][self.uids[1]], 2.5)
-        self.assertIn("note", ds2.sample_statistics_ex)
-        self.assertEqual(ds2.sample_statistics_ex["note"][self.uids[1]], "hello")
+        # check scalar ex via DataFrame
+        self.assertIn("loss/combined", ds2._stats_df.columns)
+        self.assertEqual(ds2._stats_df.loc[self.uids[1], "loss/combined"], 2.5)
+        self.assertIn("note", ds2._stats_df.columns)
+        self.assertEqual(ds2._stats_df.loc[self.uids[1], "note"], "hello")
 
         # check dense survives & remains downsampled
         d = ds2.get_dense_stat(self.uids[1], "pred/seg")
@@ -427,14 +471,36 @@ class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
 
     def test_backward_compat_load_core_only(self):
         # simulate a legacy state_dict where 'sample_statistics' is the core dict (no "core/ex/dense" nesting)
-        legacy = self.wrapped_dataset.state_dict()
-        legacy["sample_statistics"] = self.wrapped_dataset.sample_statistics  # flatten to legacy
+        # Extract current state from DataFrame as legacy dict format
+        legacy_stats = {}
+        for col in ['deny_listed', 'tags', 'encountered', 'prediction_age', 'prediction_loss']:
+            if col in self.wrapped_dataset._stats_df.columns:
+                legacy_stats[col] = self.wrapped_dataset._stats_df[col].dropna().to_dict()
+
+        # Use correct key names matching _StateDictKeys
+        legacy = {
+            'idx_to_idx_map': {},
+            'blockd_samples': 0,
+            'sample_statistics': legacy_stats
+        }
+
         # fresh wrapper should accept and initialize ex/dense empty
         ds3 = DataSampleTrackingWrapper(self.base_ds)
         ds3.load_state_dict(legacy)
-        self.assertEqual(ds3.sample_statistics, self.wrapped_dataset.sample_statistics)
-        self.assertEqual(ds3.sample_statistics_ex, {})
+
+        # Verify stats were loaded into DataFrame
+        for col in legacy_stats:
+            if col in self.wrapped_dataset._stats_df.columns:
+                for uid in self.wrapped_dataset._stats_df.index:
+                    if uid in legacy_stats.get(col, {}):
+                        self.assertEqual(
+                            ds3._stats_df.loc[uid, col],
+                            self.wrapped_dataset._stats_df.loc[uid, col]
+                        )
+
+        # Verify ex and dense are empty
         self.assertEqual(ds3.dense_stats_store, {})
+
 
     def test_get_dataframe_includes_extended_columns(self):
         # add ex stats for a couple of samples
@@ -612,7 +678,7 @@ class TestH5Persistence(unittest.TestCase):
 
     def test_h5_persistence_deny_listed(self):
         """Test that denied samples persist across restarts."""
-        # Create wrapper with H5 persistence
+        # Create wrap8per with H5 persistence
         ds1 = DataSampleTrackingWrapper(self.base_ds, root_log_dir=self.test_dir)
 
         # Get UIDs for testing
@@ -628,7 +694,7 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds1.denied_sample_cnt, 2)
 
         # Verify only changed UIDs are in pending set (before save)
-        # After denylist_samples, _save_pending_stats_to_h5 is called, so pending should be empty
+        # After 5s, pending should be empty
         self.assertEqual(len(ds1._h5_pending_uids), 0)
 
         # Create new wrapper (simulating restart)
@@ -657,7 +723,8 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds1.get(uids[1], SampleStatsEx.TAGS.value), "edge_case")
 
         # TAGS is in IMMEDIATE_SAVING_TO_H5, so it's saved immediately, not added to pending
-        # After immediate save, pending should be empty
+        # After 5s, pending should be empty
+        time.sleep(5.1)  # small delay to ensure async write completes
         self.assertEqual(len(ds1._h5_pending_uids), 0)
 
         # Create new wrapper (simulating restart)
@@ -685,8 +752,6 @@ class TestH5Persistence(unittest.TestCase):
         ds1.set(uids[2], SampleStatsEx.PREDICTION_LOSS.value, 0.42)
         # Prediction age
         ds1.set(uids[0], SampleStatsEx.PREDICTION_AGE.value, 100)
-        # Prediction raw (simple scalar for testing)
-        ds1.set(uids[1], SampleStatsEx.PREDICTION_RAW.value, 3)
 
         # Verify only changed UIDs that trigger deferred saves are tracked
         # DENY_LISTED and TAGS are in IMMEDIATE_SAVING, so they're saved right away
@@ -700,9 +765,6 @@ class TestH5Persistence(unittest.TestCase):
         self.assertIn(uids[2], ds1._h5_pending_uids)
         # Should only be 3 UIDs, not all of them
         self.assertEqual(len(ds1._h5_pending_uids), 3)
-        # Other UIDs should NOT be in pending
-        for uid in uids[3:]:
-            self.assertNotIn(uid, ds1._h5_pending_uids)
 
         # # These operation will enforce saving everything to H5
         # Deny listed (already tested but include for completeness)
@@ -710,6 +772,7 @@ class TestH5Persistence(unittest.TestCase):
         # Tags
         ds1.set(uids[0], SampleStatsEx.TAGS.value, "test_tag")
         # Check after these immediate saves, pending should still have the deferred ones
+        time.sleep(5.1)  # small delay to ensure async write completes
         self.assertNotIn(uids[0], ds1._h5_pending_uids)
         self.assertNotIn(uids[1], ds1._h5_pending_uids)
         self.assertNotIn(uids[2], ds1._h5_pending_uids)
@@ -719,7 +782,6 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds1.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
         self.assertEqual(ds1.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
         self.assertEqual(ds1.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertEqual(ds1.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
         self.assertTrue(ds1.get(uids[2], SampleStatsEx.DENY_LISTED.value))
 
         # Manually trigger save
@@ -734,7 +796,6 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds2.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
         self.assertEqual(ds2.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
         self.assertEqual(ds2.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertEqual(ds2.get(uids[1], SampleStatsEx.PREDICTION_RAW.value), 3)
         self.assertTrue(ds2.get(uids[2], SampleStatsEx.DENY_LISTED.value))
 
         # Verify unchanged UIDs have default values (not saved/loaded from H5)

@@ -36,16 +36,6 @@ class ExperimentContext:
         `self` (model, train/test dataloaders, optimizer, hyperparams,
         logger). Raises RuntimeError when mandatory components are missing.
         """
-        # If we already have components and at least one loader is non-None, keep them.
-        # This avoids re-resolving every time, but lets us recover from an early
-        # "no dataloaders yet" snapshot.
-        if getattr(self, "_components", None) and self._components:
-            tl = self._components.get("train_loader")
-            vl = self._components.get("test_loader")
-            if tl is not None or vl is not None:
-                return
-            # else: we had components but no loaders – try resolving again
-
         from weightslab.backend.ledgers import (
             get_hyperparams,
             list_hyperparams,
@@ -73,30 +63,14 @@ class ExperimentContext:
             model = None
 
         # resolve dataloaders (prefer explicit names 'train' / 'eval' / 'test' / 'train_loader' / 'test_loader')
-        train_loader = None
-        test_loader = None
+        data_loaders = {}
         try:
             dnames = list_dataloaders()
-            if "train" in dnames:
-                train_loader = get_dataloader("train")
-            elif "train_loader" in dnames:
-                train_loader = get_dataloader("train_loader")
-            elif len(dnames) == 1:
-                train_loader = get_dataloader()
-
-            if "eval" in dnames:
-                test_loader = get_dataloader("eval")
-            elif "test_loader" in dnames:
-                test_loader = get_dataloader("test_loader")
-            elif "test" in dnames:
-                test_loader = get_dataloader("test")
-            elif "test_loader" in dnames:
-                test_loader = get_dataloader("test_loader")
-            elif len(dnames) == 1 and train_loader is not None:
-                test_loader = train_loader
+            for dname in dnames:
+                data_loaders[dname] = get_dataloader(dname)  # pre-load to catch errors early
         except Exception:
-            train_loader = None
-            test_loader = None
+            logger.error("Error while listing/resolving dataloaders", exc_info=True)
+            pass
 
         # resolve optimizer
         optimizer = None
@@ -133,12 +107,11 @@ class ExperimentContext:
 
         self._components = {
             "model": model,
-            "train_loader": train_loader,
-            "test_loader": test_loader,
             "optimizer": optimizer,
             "hyperparams": hyperparams,
             "signal_logger": signal_logger,
         }
+        self._components.update(data_loaders)  # add all dataloaders found
 
         # Build hyper-parameter descriptors used by the protocol. Use
         # ledger-backed hyperparams when available, with safe fallbacks.
@@ -162,6 +135,7 @@ class ExperimentContext:
 
             return _g
 
+        # TODO (GP): expand hyper-parameters exposed here
         self.hyper_parameters = {
             ("Experiment Name", "experiment_name", "text", lambda: _hp_getter("experiment_name", "Anonymous")()),
             ("Left Training Steps", "training_left", "number", _hp_getter("training_steps_to_do", 999)),

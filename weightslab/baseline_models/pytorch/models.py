@@ -1825,3 +1825,59 @@ class TinyYOLO(nn.Module):
                 if iou > iou_thresh:
                     suppressed[j] = True
         return keep
+
+
+class Yolov11(nn.Module):
+    """Lightweight wrapper around Ultralytics YOLOv11.
+
+    Loads a YOLOv11 checkpoint via ``ultralytics`` and exposes the underlying
+    PyTorch module so it can be used like any other `nn.Module` in WeightsLab.
+
+    Args:
+        variant: Model name or path accepted by ``ultralytics.YOLO``
+        device: Optional torch device string or torch.device to place the model
+        img_size: Nominal square input resolution for metadata only
+    """
+
+    def __init__(self, variant: str = "yolo11n.pt", device=None, img_size: int = 640):
+        super().__init__()
+        try:
+            from ultralytics import YOLO  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise ImportError(
+                "Ultralytics is required for Yolov11 baseline. Install with: pip install ultralytics"
+            ) from exc
+
+        self.task_type = "detection"
+        self.input_shape = (1, 3, img_size, img_size)
+
+        self.yolo = YOLO(variant)
+        self.model = self.yolo.model
+
+        if device is not None:
+            self.model.to(device)
+
+    def forward(self, x: torch.Tensor):
+        # Delegate to the underlying YOLOv11 torch model to keep gradients intact
+        return self.model(x)
+
+    @torch.no_grad()
+    def predict(self, x, **kwargs):
+        """Convenience inference wrapper using Ultralytics predict pipeline."""
+        return self.yolo.predict(x, **kwargs)
+
+
+if __name__ == "__main__":
+    model = Yolov11()
+
+    # Predict with the model
+    results = model.yolo("https://ultralytics.com/images/bus.jpg")  # predict on an image
+
+    # Access the results
+    for result in results:
+        xywh = result.boxes.xywh  # center-x, center-y, width, height
+        xywhn = result.boxes.xywhn  # normalized
+        xyxy = result.boxes.xyxy  # top-left-x, top-left-y, bottom-right-x, bottom-right-y
+        xyxyn = result.boxes.xyxyn  # normalized
+        names = [result.names[cls.item()] for cls in result.boxes.cls.int()]  # class name of each box
+        confs = result.boxes.conf  # confidence score of each box

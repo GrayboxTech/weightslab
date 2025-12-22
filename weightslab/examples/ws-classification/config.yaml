@@ -14,11 +14,14 @@ is_training: true
 
 data:
   train_loader:
-    train_shuffle: true
+    train_shuffle: false
+    batch_size: 16
+  val_loader:
+    train_shuffle: false
     batch_size: 16
   test_loader:
     test_shuffle: false
-    batch_size: 8
+    batch_size: 16
     drop_last: false
 
 optimizer:

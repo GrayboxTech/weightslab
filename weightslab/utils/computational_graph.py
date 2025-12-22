@@ -8,6 +8,7 @@ import logging
 
 
 from torch.fx import GraphModule
+from torch._C import _onnx as _C_onnx
 from typing import Iterable, List, Tuple, Dict, Optional
 from copy import deepcopy
 
@@ -47,6 +48,7 @@ def _export_model_to_onnx_temp(
             opset_version=opset_version,
             do_constant_folding=False,
             input_names=['input'],
+            training=_C_onnx.TrainingMode.PRESERVE,
             output_names=['output'],
             verbose=False
         )
@@ -352,8 +354,8 @@ def _propagate_constraints_through_dependencies(
                 'outgoing': {}
             }
         for cname, cval in native_constraints.items():
-            if cname not in propagated_constraints[module_id]['outgoing']:
-                propagated_constraints[module_id]['outgoing'][cname] = cval
+            if cname not in propagated_constraints[module_id].get('outgoing', {}):
+                propagated_constraints[module_id].get('outgoing', {})[cname] = cval
 
         # BFS to propagate OUTGOING constraints downstream
         queue = [(module_id, native_constraints.copy(), {module_id})]  # (current_id, outgoing_constraints, visited)
@@ -369,8 +371,8 @@ def _propagate_constraints_through_dependencies(
                 }
             # Current node retains its OUTGOING constraints (merge once)
             for constraint_name, constraint_value in current_constraints.items():
-                if constraint_name not in propagated_constraints[current_id]['outgoing']:
-                    propagated_constraints[current_id]['outgoing'][constraint_name] = constraint_value
+                if constraint_name not in propagated_constraints[current_id].get('outgoing', {}):
+                    propagated_constraints[current_id].get('outgoing', {})[constraint_name] = constraint_value
 
             # Propagate downstream with different rules for each dependency type
             if current_id in forward_edges:
@@ -384,15 +386,15 @@ def _propagate_constraints_through_dependencies(
                         if dep_type == DepType.INCOMING:
                             # INCOMING: dst receives current OUTGOING as INCOMING; do not continue further
                             for constraint_name, constraint_value in current_constraints.items():
-                                if constraint_name not in propagated_constraints[next_id]['incoming']:
-                                    propagated_constraints[next_id]['incoming'][constraint_name] = constraint_value
+                                if constraint_name not in propagated_constraints[next_id].get('incoming', {}):
+                                    propagated_constraints[next_id].get('incoming', {})[constraint_name] = constraint_value
                             # stop propagation here (no enqueue)
                         else:
                             # SAME and REC: pass-through → dst gets only OUTGOING constraint (not incoming), and continue
                             for constraint_name, constraint_value in current_constraints.items():
-                                if constraint_name not in propagated_constraints[next_id]['outgoing']:
-                                    propagated_constraints[next_id]['outgoing'][constraint_name] = constraint_value
-                                    propagated_constraints[next_id]['incoming'][constraint_name] = constraint_value
+                                if constraint_name not in propagated_constraints[next_id].get('outgoing', {}):
+                                    propagated_constraints[next_id].get('outgoing', {})[constraint_name] = constraint_value
+                                    propagated_constraints[next_id].get('incoming', {})[constraint_name] = constraint_value
                             visited_set_copy = visited_set.copy()
                             visited_set_copy.add(next_id)
                             queue.append((next_id, current_constraints.copy(), visited_set_copy))
