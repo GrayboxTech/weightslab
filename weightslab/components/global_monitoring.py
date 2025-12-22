@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import list_hyperparams, get_hyperparams, set_hyperparam
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
 
 from weightslab.components.tracking import TrackingMode
 
@@ -22,6 +22,7 @@ class PauseController:
     """
     def __init__(self):
         self._event = Event()
+        self._event.set() # Set by default so training starts running
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
@@ -30,12 +31,14 @@ class PauseController:
     def pause(self):
         print('\nTraining paused.')
         self._event.clear()
-        set_hyperparam(None, 'is_training', False)
+        name = resolve_hp_name()
+        set_hyperparam(name, 'is_training', False)
 
     def resume(self):
         print('\nTraining resumed.')
         self._event.set()
-        set_hyperparam(None, 'is_training', True)
+        name = resolve_hp_name()
+        set_hyperparam(name, 'is_training', True)
 
     def is_paused(self):
         return not self._event.is_set()
@@ -120,7 +123,7 @@ class GuardContext:
             # decrement training steps and store result in ledgered hyperparams
             try:
                 # resolve a sensible hyperparam set name (reuse helper in this module)
-                name = _resolve_hp_name()
+                name = resolve_hp_name()
                 if name is not None:
                     try:
                         hp_handle = get_hyperparams(name)
@@ -179,20 +182,11 @@ guard_testing_context = GuardContext(for_training=False)
 
 _pause_sync_thread_started = False
 
-def _resolve_hp_name() -> str | None:
-    names = list_hyperparams()
-    if 'main' in names:
-        return 'main'
-    if 'experiment' in names:
-        return 'experiment'
-    if len(names) == 1:
-        return names[0]
-    return None
 
 def _pause_hp_sync_loop(poll_interval: float = 0.5):
     while True:
         try:
-            name = _resolve_hp_name()
+            name = resolve_hp_name()
             if name is None:
                 time.sleep(poll_interval)
                 continue
@@ -224,9 +218,13 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
             # Drive controller from ledger when ledger explicitly sets the flag
             if isinstance(hp_is_training, bool):
                 if controller_paused and hp_is_training:
-                    controller_running = False
+                    pause_controller.resume()
                 elif controller_running and not hp_is_training:
-                    controller_running = True
+                    pause_controller.pause()
+
+            # Re-evaluate controller state after potential changes
+            controller_paused = pause_controller.is_paused()
+            controller_running = not controller_paused
 
             # Propagate controller state back to ledger if it differs
             if not isinstance(hp_is_training, bool) or hp_is_training != controller_running:

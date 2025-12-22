@@ -308,6 +308,7 @@ message DataSamplesResponse {
 enum SampleEditType {
   EDIT_OVERRIDE = 0;
   EDIT_ACCUMULATE = 1;
+  EDIT_REMOVE = 2;
 }
 
 message DataEditsRequest {

@@ -16,7 +16,7 @@ from weightslab.backend.ledgers import (
     get_dataloaders,
     register_model,
     list_models,
-    list_hyperparams,
+    resolve_hp_name,
     set_hyperparam,
 )
 
@@ -430,13 +430,7 @@ class CheckpointManager(object):
         try:
             hp_name = hyperparams_name
             if hp_name is None:
-                names = list_hyperparams()
-                if 'main' in names:
-                    hp_name = 'main'
-                elif 'experiment' in names:
-                    hp_name = 'experiment'
-                elif len(names) == 1:
-                    hp_name = names[0]
+                hp_name = resolve_hp_name()
 
             if hp_name is not None:
                 try:

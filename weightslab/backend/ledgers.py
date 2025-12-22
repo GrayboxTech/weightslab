@@ -293,10 +293,18 @@ class Ledger:
         """
         with self._lock:
             if name is None:
-                name = list(self._hyperparams.keys())[0]
-            if name not in self._hyperparams:
-                raise KeyError(f'no hyperparams registered under {name}')
-            hp = self._hyperparams[name]
+                from weightslab.backend.ledgers import resolve_hp_name
+                name = resolve_hp_name()
+
+            if name is None or name not in self._hyperparams:
+                # If still None and we have sets, take the first as ultimate fallback
+                keys = list(self._hyperparams.keys())
+                if not name and keys:
+                    name = keys[0]
+                else:
+                    raise KeyError(f'no hyperparams registered under {name or "None"}')
+
+            hp = self._hyperparams.get(name)
             # if proxy, get underlying dict
             if isinstance(hp, Proxy):
                 hp = hp.get()
@@ -561,6 +569,21 @@ def get_hyperparams(name: Optional[str] = None) -> Any:
 
 def list_hyperparams() -> List[str]:
     return GLOBAL_LEDGER.list_hyperparams()
+
+def resolve_hp_name() -> str | None:
+    """Resolve a sensible hyperparam set name from the ledger.
+    Checks for 'main', then 'experiment', then falls back to the first registered name.
+    """
+    names = list_hyperparams()
+    if not names:
+        return None
+    if 'main' in names:
+        return 'main'
+    if 'experiment' in names:
+        return 'experiment'
+    # If we have any names at all, returning the first one is better than returning None
+    # and causing a "Cannot resolve hyperparams name" error in the UI.
+    return names[0]
 
 def set_hyperparam(name: str, key_path: str, value: Any) -> None:
     try:

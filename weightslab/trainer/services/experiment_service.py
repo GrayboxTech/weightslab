@@ -93,18 +93,18 @@ class ExperimentService:
         if request.HasField("hyper_parameter_change"):
             with weightslab_rlock:
                 hyper_parameters = request.hyper_parameter_change.hyper_parameters
-                from weightslab.backend.ledgers import set_hyperparam, list_hyperparams
-
+                from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name
                 hp_name = None
                 if self._ctx.exp_name:
                     hp_name = self._ctx.exp_name
                 else:
-                    hps = list_hyperparams()
-                    if len(hps) == 1:
-                        hp_name = hps[0]
+                    hp_name = resolve_hp_name()
 
                 if hp_name is None:
-                    return pb2.CommandResponse(success=False, message="Cannot resolve hyperparams name")
+                    hps = list_hyperparams()
+                    detailed_msg = f"Cannot find an active hyperparameter set (LEDGER_HPS={hps}, CTX_EXP={self._ctx.exp_name})"
+                    logger.error(detailed_msg)
+                    return pb2.CommandResponse(success=False, message=detailed_msg)
 
                 try:
                     if hyper_parameters.HasField("is_training"):

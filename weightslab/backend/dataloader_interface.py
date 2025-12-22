@@ -25,7 +25,6 @@ from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
-    list_hyperparams,
 )
 
 
@@ -79,6 +78,36 @@ class MaskedSampler(Sampler):
         total = len(self.base_sampler)
         denied_count = len(deny_listed_uids)
         return max(0, total - denied_count)
+
+
+class MutableBatchSampler:
+    """A simple mutable batch sampler that yields lists of indices.
+
+    Changing the `batch_size` attribute at runtime will affect
+    subsequent iterations.
+    """
+
+    def __init__(self, base_sampler, batch_size, drop_last=False):
+        self.base_sampler = base_sampler
+        self.batch_size = int(batch_size)
+        self.drop_last = bool(drop_last)
+
+    def __iter__(self):
+        batch = []
+        for idx in self.base_sampler:
+            batch.append(idx)
+            if len(batch) >= int(self.batch_size):
+                yield list(batch)
+        if batch and not self.drop_last:
+            yield list(batch)
+
+    def __len__(self):
+        try:
+            total = len(self.base_sampler)
+            b = max(1, int(self.batch_size))
+            return (total + b - 1) // b
+        except Exception:
+            raise TypeError("len not supported for this sampler")
 
 
 class DataLoaderInterface:
@@ -399,8 +428,8 @@ class DataLoaderInterface:
             return
 
         try:
-            params = list_hyperparams()
-            if not params:
+            hp_name = resolve_hp_name()
+            if hp_name is None:
                 # no hyperparams; optionally use a default
                 try:
                     self.set_batch_size(64)
@@ -408,7 +437,7 @@ class DataLoaderInterface:
                     pass
                 return
 
-            latest = get_hyperparams(params[0])
+            latest = get_hyperparams(hp_name)
             data_cfg = latest.get("data", {})
             if self._ledger_name in data_cfg:
                 bs = data_cfg[self._ledger_name].get("batch_size", None)
