@@ -520,10 +520,11 @@ class DataService:
                     tracked_tags = loader.tracked_dataset.sample_statistics.get("tags", {})
                     for tag_val in tracked_tags.values():
                         if tag_val:
-                            # Tags can be multiple separated by spaces or just one
-                            # For now, let's treat the whole string as a tag or split it?
-                            # User asked to "select one of those", so likely exact matches.
-                            tags.add(str(tag_val))
+                            # Tags are stored as comma-separated strings
+                            for t in str(tag_val).split(','):
+                                clean_t = t.strip()
+                                if clean_t:
+                                    tags.add(clean_t)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
         
@@ -927,136 +928,97 @@ class DataService:
         """
         Edit sample metadata (tags, deny_listed, etc.).
         """
-
-        # Make sure dataframe + editable wrappers are initialized
         if self._all_datasets_df is None:
             self._initialize_data_service()
 
         self._ctx.ensure_components()
         components = self._ctx.components
+        train_loader = components.get("train_loader")
+        test_loader = components.get("test_loader")
 
-        # Only support editing these stats for now
         if request.stat_name not in ["tags", "deny_listed"]:
             return pb2.DataEditsResponse(
                 success=False,
                 message="Only 'tags' and 'deny_listed' stat editing is supported",
             )
 
-        # Normalize tag clearing (empty/None) so UI can remove tags by sending ""
         if request.stat_name == "tags":
             request.string_value = request.string_value or ""
 
-        # We currently do not implement accumulate semantics
-        if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
-            return pb2.DataEditsResponse(
-                success=False,
-                message="Accumulate tagging not supported",
-            )
-
-        train_loader = components.get("train_loader")
-        test_loader = components.get("test_loader")
-
         # ---------------------------------------------------------------------
-        # 1) Apply edits to the underlying editable dataset wrapper
+        # 1) Apply edits to the underlying editable dataset wrapper (H5 persistence)
         # ---------------------------------------------------------------------
         for sid, origin in zip(request.samples_ids, request.sample_origins):
             dataset = None
             if origin == "train":
                 dataset = getattr(train_loader, "tracked_dataset", train_loader) if train_loader else None
-            elif origin in ("test", "eval"):  # accept both, see below
+            elif origin in ("test", "eval"):
                 dataset = getattr(test_loader, "tracked_dataset", test_loader) if test_loader else None
 
-            if dataset is None:
-                continue
+            if dataset is None: continue
 
             try:
                 if hasattr(dataset, "set"):
                     if request.stat_name == "tags":
-                        dataset.set(sid, "tags", request.string_value)
+                        new_val = request.string_value
+                        current_tags_str = dataset.sample_statistics.get("tags", {}).get(sid, "")
+                        current_tags = [t.strip() for t in str(current_tags_str).split(',') if t.strip()]
+                        
+                        if request.type == pb2.SampleEditType.EDIT_ACCUMULATE and new_val:
+                            if new_val not in current_tags:
+                                current_tags.append(new_val)
+                            new_val = ", ".join(current_tags)
+                        elif request.type == pb2.SampleEditType.EDIT_REMOVE and new_val:
+                            if new_val in current_tags:
+                                current_tags.remove(new_val)
+                            new_val = ", ".join(current_tags)
+                        
+                        dataset.set(sid, "tags", new_val)
                     elif request.stat_name == "deny_listed":
                         dataset.set(sid, "deny_listed", request.bool_value)
-                else:
-                    logger.warning(
-                        f"[EditDataSample] Dataset for origin={origin} does not support 'set'; "
-                        "only DataFrame will be updated."
-                    )
             except Exception as e:
                 logger.warning(f"Could not edit sample {sid}: {e}")
 
         # ---------------------------------------------------------------------
-        # 2) Mirror edits into the in-memory DataFrame (used by the UI / agent)
+        # 2) Mirror edits into the in-memory DataFrame
         # ---------------------------------------------------------------------
         with self._lock:
             if self._all_datasets_df is not None:
-                # If origin/sample_id are in the index, use index levels
                 uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
-
                 for sid, origin in zip(request.samples_ids, request.sample_origins):
-                    value = (
-                        request.string_value
-                        if request.stat_name == "tags"
-                        else request.bool_value
-                    )
+                    if request.stat_name == "tags":
+                        new_val = request.string_value
+                        if (request.type == pb2.SampleEditType.EDIT_ACCUMULATE or request.type == pb2.SampleEditType.EDIT_REMOVE) and new_val:
+                            try:
+                                if uses_multiindex:
+                                    current_val = self._all_datasets_df.loc[(origin, sid), "tags"]
+                                else:
+                                    current_val = self._all_datasets_df.loc[sid, "tags"]
+                            except KeyError:
+                                current_val = ""
+                            
+                            if pd.isna(current_val): current_val = ""
+                            current_tags = [t.strip() for t in str(current_val).split(',') if t.strip()]
+                            
+                            if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
+                                if new_val not in current_tags:
+                                    current_tags.append(new_val)
+                            else: # EDIT_REMOVE
+                                if new_val in current_tags:
+                                    current_tags.remove(new_val)
+                                    
+                            new_val = ", ".join(current_tags)
+                        target_val = new_val
+                    else:
+                        target_val = request.bool_value
 
                     try:
-                        if uses_multiindex and set(self._all_datasets_df.index.names) >= {"origin", "sample_id"}:
-                            # MultiIndex: select rows by index
-                            idx = (origin, sid)
-                            # (use .loc on the index tuple directly)
-                            self._all_datasets_df.loc[idx, request.stat_name] = value
+                        if uses_multiindex:
+                            self._all_datasets_df.loc[(origin, sid), request.stat_name] = target_val
                         else:
-                            # Fallback: origin / sample_id as columns
-                            mask = (
-                                (self._all_datasets_df["sample_id"] == sid)
-                                & (self._all_datasets_df["origin"] == origin)
-                            )
-                            self._all_datasets_df.loc[mask, request.stat_name] = value
-
-                    except Exception as e:
-                        logger.debug(
-                            f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
-                        )
-
-                # Debug AFTER the updates
-                try:
-                    ids = list(request.samples_ids)
-                    origins = list(request.sample_origins)
-
-                    debug_rows = self._all_datasets_df[
-                        (self._all_datasets_df["sample_id"].isin(ids))
-                        & (self._all_datasets_df["origin"].isin(origins))
-                    ]
-                    logger.debug(
-                        "[DEBUG EditDataSample] Updated rows:\n%s",
-                        debug_rows[["sample_id", "origin", "tags", "deny_listed"]].head(),
-                    )
-
-                    if request.stat_name == "tags":
-                        tagged = self._all_datasets_df[
-                            self._all_datasets_df["tags"] == request.string_value
-                        ]
-                        logger.debug(
-                            "[DEBUG EditDataSample] rows with tags == %r right after edit: %d",
-                            request.string_value,
-                            len(tagged),
-                        )
-                except Exception as e:
-                    logger.debug(f"[DEBUG EditDataSample] Could not inspect updated rows: {e}")
-
-        # ------------------------------------------------------------------
-        # 4) Persist tag edits to the tracked dataset (auto-sync to H5)
-        # ------------------------------------------------------------------
-        if request.stat_name == "tags" and request.samples_ids:
-            try:
-                for sid in request.samples_ids:
-                    tags_str = request.string_value or ""
-                    # Save to both train and test tracked datasets
-                    if self._trn_loader and hasattr(self._trn_loader.tracked_dataset, 'set'):
-                        self._trn_loader.tracked_dataset.set(int(sid), "tags", tags_str)
-                    if self._tst_loader and hasattr(self._tst_loader.tracked_dataset, 'set'):
-                        self._tst_loader.tracked_dataset.set(int(sid), "tags", tags_str)
-            except Exception as e:
-                logger.warning(f"Could not persist tags to tracked dataset: {e}")
+                            self._all_datasets_df.loc[sid, request.stat_name] = target_val
+                    except KeyError:
+                        pass
 
         return pb2.DataEditsResponse(
             success=True,
