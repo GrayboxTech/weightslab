@@ -264,9 +264,6 @@ class H5DataFrameStore:
                             retained = existing[~existing.index.isin(df_norm.index)] if not existing.empty else pd.DataFrame()
                             store.remove(key)
                             store.flush()
-                            # Close and reopen the store to fully clear the group
-                            store.close()
-                            store = pd.HDFStore(str(self._path), mode="a")
                         # Update retained in place with df_norm, then add new rows
                         if not retained.empty:
                             retained.update(df_norm)
@@ -276,6 +273,8 @@ class H5DataFrameStore:
                                     retained.loc[idx] = df_norm.loc[idx]
                         else:
                             retained = df_norm.copy()
+                        # Remove any duplicate indices (keep last, i.e., new rows)
+                        retained = retained[~retained.index.duplicated(keep='last')]
                         store.append(key, retained, format="table", data_columns=True, min_itemsize={"tags": 256})
                         store.flush()
                         self._record_mtime()
