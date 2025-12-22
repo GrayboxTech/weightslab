@@ -1219,7 +1219,7 @@ class DataSampleTrackingWrapper(Dataset):
                   f'denied ids {list(override_denied_sample_ids)[:20]}')
 
         self.denylist_samples(
-            override_denied_sample_ids, override=True)
+            override_denied_sample_ids)
         logger.debug(f"DataSampleTrackingWrapper.apply_weighted_predicate #len {len(self)}")
 
     def _get_stats_dataframe(self, limit: int = -1):
