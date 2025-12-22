@@ -144,16 +144,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Auto-inject root_log_dir from hyperparameters if not provided
         if 'root_log_dir' not in kwargs:
             try:
-                from weightslab.backend.ledgers import list_hyperparams
-                hps = list_hyperparams()
-                if hps:
-                    # Get the first hyperparameters object (usually there's only one)
-                    if isinstance(hps, dict):
-                        hp_name = list(hps.keys())[0]
-                        hp_dict = hps[hp_name]
-                    else:
-                        hp_name = hps[0]
-                        hp_dict = get_hyperparams(hp_name)
+                from weightslab.backend.ledgers import list_hyperparams, resolve_hp_name
+                hp_name = resolve_hp_name()
+                if hp_name:
+                    hp_dict = get_hyperparams(hp_name)
                     if isinstance(hp_dict, dict) and 'root_log_dir' in hp_dict:
                         kwargs['root_log_dir'] = hp_dict['root_log_dir']
             except Exception:

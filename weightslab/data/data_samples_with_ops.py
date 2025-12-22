@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
-from weightslab.backend.ledgers import get_hyperparams
+from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
 
 
 # Global logger
@@ -353,10 +353,11 @@ class DataSampleTrackingWrapper(Dataset):
     def _resolve_root_log_dir(self) -> Optional[Path]:
         """Resolve root log directory from hyperparams if not provided."""
         try:
-            hp = get_hyperparams()
+            hp_name = resolve_hp_name()
+            hp = get_hyperparams(hp_name) if hp_name else None
             if hp is not None:
-                if hasattr(hp, 'get'):
-                    hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    hp_dict = hp.get()
                 else:
                     hp_dict = hp if isinstance(hp, dict) else None
 
@@ -376,10 +377,11 @@ class DataSampleTrackingWrapper(Dataset):
     def _get_experiment_dump_to_train_steps_ratio(self) -> Optional[Path]:
         """Resolve root log directory from hyperparams if not provided."""
         try:
-            hp = get_hyperparams()
+            hp_name = resolve_hp_name()
+            hp = get_hyperparams(hp_name) if hp_name else None
             if hp is not None:
-                if hasattr(hp, 'get'):
-                    hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    hp_dict = hp.get()
                 else:
                     hp_dict = hp if isinstance(hp, dict) else None
 
@@ -538,26 +540,9 @@ class DataSampleTrackingWrapper(Dataset):
         if isinstance(stat_value, np.ndarray) and stat_value.ndim == 0:
             stat_value = stat_value.item()
 
-        # Normalize multi-element arrays for stats that need to be saved to H5
-        # For PREDICTION_LOSS in segmentation, use mean of per-pixel losses
-        if not (stat_name in SAMPLES_STATS_TO_SAVE_TO_H5 and
-                isinstance(stat_value, np.ndarray) and
-                stat_value.size > 1):
-            # No special handling needed, proceed with the original value
-            pass
-        elif stat_name == SampleStatsEx.PREDICTION_LOSS.value:
-            # Convert per-pixel losses to mean loss for H5 storage
-            if isinstance(stat_value, (th.Tensor, np.ndarray)) and stat_value.size > 1:
-                # logger.debug(f"PREDICTION_LOSS is a multi-element array (size={stat_value.size}) for sample_id={sample_id}. Converting to mean loss for H5 storage.")
-                # Convert tensor to numpy if needed
-                if isinstance(stat_value, th.Tensor):
-                    stat_value = stat_value.detach().cpu().numpy()
-                # Compute mean for scalar storage
-                stat_value = float(np.mean(stat_value))
-        else:
-            # For other stats, skip multi-element arrays
-            logger.warning(f"Skipping multi-element array for stat '{stat_name}' (size={stat_value.size})")
-            return
+        # For PREDICTION_LOSS in segmentation, we used to squash to mean here for H5.
+        # NOW: We keep the full array in memory for UI/Heatmaps, and squash only during H5 saving.
+        pass
 
         # Debug logging for tags
         if stat_name == SampleStatsEx.TAGS or stat_name == SampleStatsEx.TAGS.value:

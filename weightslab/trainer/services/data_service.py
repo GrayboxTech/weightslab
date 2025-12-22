@@ -384,10 +384,6 @@ class DataService:
                     raw_data_bytes = transformed_data_bytes
                     raw_shape = transformed_shape
 
-            stats_to_retrieve = request.stats_to_retrieve
-            if not stats_to_retrieve:
-                stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
-
             # Determine task type early so we can conditionally send stats
             base_task_type = getattr(
                 dataset,
@@ -395,6 +391,25 @@ class DataService:
                 getattr(self._ctx.components.get("model"), "task_type", "classification"),
             )
             task_type = _infer_task_type_from_label(label, default=base_task_type)
+
+            stats_to_retrieve = list(request.stats_to_retrieve)
+            if not stats_to_retrieve:
+                stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
+                if task_type == "segmentation":
+                    # For segmentation: ALWAYS try to retrieve extended loss stats
+                    for s in ["mean_loss", "median_loss", "max_loss", "min_loss", "std_loss",
+                             "num_classes_present", "dominant_class", "dominant_class_ratio", "background_ratio"]:
+                        if s not in stats_to_retrieve:
+                            stats_to_retrieve.append(s)
+                    
+                    # Also pre-emptively include per-class loss columns if we can find num_classes
+                    num_classes = getattr(dataset, "num_classes", 
+                                         getattr(self._ctx.components.get("model"), "num_classes", None))
+                    if num_classes is not None:
+                        for i in range(int(num_classes)):
+                            col_name = f"loss_class_{i}"
+                            if col_name not in stats_to_retrieve:
+                                stats_to_retrieve.append(col_name)
 
             for stat_name in stats_to_retrieve:
                 stat = _get_stat_from_row(row, stat_name)
@@ -778,12 +793,10 @@ class DataService:
         if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
 
-        # Just this line, will mess any filtering/ordering that is being applied
         updated_df = self._pull_into_all_data_view_df()
 
-        # Order the rows in updated_df the order in self._all_datasets_df but
-        # also make sure that we only keep the rows that are in self._all_datasets_df
-        updated_df = updated_df.reindex(self._all_datasets_df.index, copy=False)
+        if self._all_datasets_df is not None and not self._all_datasets_df.empty:
+            pass 
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
