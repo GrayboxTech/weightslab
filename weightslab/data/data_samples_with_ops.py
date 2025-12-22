@@ -436,7 +436,7 @@ class DataSampleTrackingWrapper(Dataset):
         for c in self._stats_df.columns:
             if c not in other._stats_df.columns:
                 return False
-            if not (self._stats_df[c] == other._stats_df[c]).all():
+            if not (other._stats_df[c].astype(str) == self._stats_df[c].astype(str)).all():
                 return False
         wrapped_equal = (self.wrapped_dataset is other.wrapped_dataset or
                         type(self.wrapped_dataset) == type(other.wrapped_dataset))
@@ -792,7 +792,7 @@ class DataSampleTrackingWrapper(Dataset):
             # Check if value exists in DataFrame
             if sample_id in self._stats_df.index and stat_name in self._stats_df.columns:
                 value = self._stats_df.loc[sample_id, stat_name]
-                if pd.notna(np.asanyarray(value).all()):
+                if pd.notna(np.asanyarray(value)).all():
                     # Handle array fix
                     if isinstance(value, np.ndarray) and value.size == 1:
                         return value.item()
