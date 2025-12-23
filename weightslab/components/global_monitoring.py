@@ -6,12 +6,12 @@ import time
 import logging
 
 from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
-
 from weightslab.components.tracking import TrackingMode
 
+
+# Module-level logger
 logger = logging.getLogger(__name__)
-
-
+# Global locks
 weightslab_rlock = RLock()
 weightslab_lock = Lock()
 
@@ -22,7 +22,8 @@ class PauseController:
     """
     def __init__(self):
         self._event = Event()
-        self._event.set() # Set by default so training starts running
+        self._event.clear()
+        # self._event.set() # Set by default so training starts running
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
@@ -211,7 +212,7 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 time.sleep(poll_interval)
                 continue
 
-            hp_is_training = hp.get('is_training')
+            hp_is_training = hp.get('is_training', True)
             controller_paused = pause_controller.is_paused()
             controller_running = not controller_paused
 

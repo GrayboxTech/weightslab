@@ -281,8 +281,6 @@ if __name__ == "__main__":
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 500)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
-    parameters["is_training"] = lambda: not pause_controller.is_paused()
-
     parameters.setdefault("number_of_workers", 4)
     parameters.setdefault("num_classes", 6)      # adjust to your label set
     parameters.setdefault("ignore_index", 255)   # if you have void pixels

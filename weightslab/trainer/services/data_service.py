@@ -1,5 +1,4 @@
 import io
-from typing import List
 import time
 import torch
 import logging
@@ -12,9 +11,11 @@ import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
 
+from typing import List
 from pathlib import Path
 from concurrent import futures
 from torchvision import transforms
+
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image
@@ -119,7 +120,7 @@ def _infer_task_type_from_label(label, default="classification"):
     if arr.ndim == 0 or arr.size == 1:
         return "classification"
 
-    # 2D integer-ish → very likely segmentation mask
+    # 2D integer-ish → very likely segmentation mask or detection
     if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
         return "segmentation"
 
@@ -181,13 +182,7 @@ class DataService:
         self.df_lock = threading.RLock()
 
         # Dynamically get all available data loaders from the ledger
-        loader_names = get_dataloaders()
-        self._loaders = {name: self._ctx.components.get(name) for name in loader_names}
-
-        if not self._loaders:
-            logger.warning("DataService initialized without any data loaders.")
-        else:
-            logger.info(f"DataService found loaders: {list(self._loaders.keys())}")
+        self._update_loaders()
 
         self._root_log_dir = self._resolve_root_log_dir()
         self._h5_path = self._resolve_h5_path()
@@ -200,6 +195,15 @@ class DataService:
 
         self._last_internals_update_time = None
         logger.info("DataService initialized.")
+
+    def _update_loaders(self):
+        """Dynamically discover all data loaders from the ledger."""
+        loader_names = get_dataloaders()
+        self._loaders = {name: self._ctx.components.get(name) for name in loader_names}
+        if not self._loaders:
+            logger.warning("DataService initialized without any data loaders.")
+        else:
+            logger.info(f"DataService found loaders: {list(self._loaders.keys())}")
 
     def _initialize_data_service(self):
         """Recreate the in-memory dataframe view from the shared H5 store."""
@@ -293,6 +297,9 @@ class DataService:
             """
             if self._stats_store is None:
                 return pd.DataFrame()
+
+            # Update loaders
+            self._update_loaders()
 
             # Dynamically discover all loader origins from tracked datasets
             origins = []
@@ -437,7 +444,7 @@ class DataService:
             stats_to_retrieve = list(request.stats_to_retrieve)
             if not stats_to_retrieve:
                 stats_to_retrieve = [col for col in df_columns if col not in ['sample_id', 'origin']]
-                if task_type == "segmentation":
+                if task_type != "classification":
                     # For segmentation: ALWAYS try to retrieve extended loss stats
                     for s in ["mean_loss", "median_loss", "max_loss", "min_loss", "std_loss",
                              "num_classes_present", "dominant_class", "dominant_class_ratio", "background_ratio"]:
@@ -465,12 +472,14 @@ class DataService:
                 stat = _get_stat_from_row(row, stat_name)
                 if stat is not None:
                     data_stats.append(stat)
+
                 elif stat_name == "tags":
                     # Always send tags, even if empty, so frontend shows it in metadata
                     data_stats.append(pb2.DataStat(
                         name="tags", type="string", shape=[1], value_string=""
                     ))
-                elif task_type == "segmentation":
+
+                else:
                     # For segmentation: send extended loss stats and per-class losses even if null
                     if stat_name in ["mean_loss", "median_loss", "max_loss", "min_loss", "std_loss",
                                      "num_classes_present", "dominant_class", "dominant_class_ratio", "background_ratio"]:
@@ -490,10 +499,13 @@ class DataService:
             data_stats.append(pb2.DataStat(
                 name='task_type', type='string', shape=[1], value_string=str(task_type)))
 
+            # ====================================================================
+            # ========================== Labels ==================================
             # Encode label safely depending on task_type  (GT mask / label)
-            label_arr = np.array(label.cpu() if hasattr(label, 'cpu') else label)
-
-            if task_type == "segmentation":
+            if task_type != "classification":
+                label_arr = dataset.get_target_mask(sample_id) if hasattr(dataset, "get_target_mask") else None
+                if not isinstance(label_arr, np.ndarray):
+                    label_arr = np.array(label_arr.detach().cpu())
                 # Treat label as segmentation mask → array stat
                 data_stats.append(pb2.DataStat(
                     name='label',
@@ -523,7 +535,7 @@ class DataService:
                     logger.warning(f"Could not infer num_classes for sample {sample_id}: {e}")
             else:
                 # Classification / other scalar-like labels
-                label_arr = np.asarray(label_arr)
+                label_arr = np.array(label.cpu() if hasattr(label, 'cpu') else label)
                 if label_arr.size == 1:
                     label_val = float(label_arr.reshape(-1)[0])
                     data_stats.append(pb2.DataStat(
@@ -541,9 +553,11 @@ class DataService:
                         value=label_arr.astype(float).ravel().tolist(),
                     ))
 
+            # ====================================================================
+            # ======================== Segmentations =============================
             # Predicted mask for segmentation (if available)
-            if task_type == "segmentation" and hasattr(dataset, "get_prediction_mask"):
-                try:
+            try:
+                if task_type != "classification" and hasattr(dataset, "get_prediction_mask"):
                     pred_mask = dataset.get_prediction_mask(sample_id)
                     if pred_mask is not None:
                         pred_arr = np.asarray(
@@ -558,11 +572,38 @@ class DataService:
                                 value=pred_arr.astype(float).ravel().tolist(),
                             )
                         )
-                except Exception as e:
-                    logger.warning(
-                        f"Could not get prediction mask for sample {sample_id}: {e}"
-                    )
+                else:
+                    # Classification / other scalar-like labels
+                    pred = dataset.get(sample_id, stat_name='prediction_raw')
+                    if pred is not None:
+                        if isinstance(pred, np.ndarray) and pred.size == 1 or isinstance(pred, (int, float)):
+                            pred_val = int(pred.reshape(-1)[0])
+                            data_stats.append(
+                                pb2.DataStat(
+                                    name='pred',
+                                    type='scalar',
+                                    shape=[1],
+                                    value=[pred_val],
+                                )
+                            )
+                        else:
+                            # Fallback for non-scalar labels in non-segmentation tasks
+                            data_stats.append(
+                                pb2.DataStat(
+                                    name='pred',
+                                    type='array',
+                                    shape=list(pred.shape),
+                                    value=pred.astype(float).ravel().tolist(),
+                                )
+                            )
 
+            except Exception as e:
+                logger.warning(
+                    f"Could not get prediction for sample {sample_id}: {e}"
+                )
+
+            # ====================================================================
+            # ========================== Processing ==============================
             if raw_data_bytes:
                 data_stats.append(pb2.DataStat(
                     name='raw_data', type='bytes', shape=raw_shape,
@@ -977,9 +1018,7 @@ class DataService:
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
             # Use more workers for I/O-bound image processing (CPU count * 2)
-            import os
             max_workers = max(min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8), 1)
-
             with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 results = executor.map(self._process_sample_row, tasks, timeout=30)
                 data_records = [res for res in results if res is not None]
@@ -1184,13 +1223,10 @@ class DataService:
         Return the list of available dataset splits (train, test, val, etc.)
         """
         try:
-            from weightslab.backend.ledgers import get_dataloaders
-
             split_names = []
-            loader_names = get_dataloaders()
+            self._update_loaders()
 
-            for loader_name in loader_names:
-                loader = self._ctx.components.get(loader_name)
+            for _, loader in self._loaders.items():
                 if loader is None:
                     continue
 

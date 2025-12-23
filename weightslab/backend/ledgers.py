@@ -581,7 +581,7 @@ def resolve_hp_name() -> str | None:
         return 'experiment'
     # If we have any names at all, returning the first one is better than returning None
     # and causing a "Cannot resolve hyperparams name" error in the UI.
-    return names[0]
+    return names[-1]  # first is empty proxy parameters generated at init
 
 def set_hyperparam(name: str, key_path: str, value: Any) -> None:
     try:

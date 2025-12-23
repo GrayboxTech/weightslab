@@ -212,6 +212,7 @@ class TriggersTracker(Tracker):
 
         if self.disabled:
             return
+
         # Assumes that triggers per neuron have been pre-processed already.
         # Shape is expected to be in the form [batch_size x neuron_count]
         if len(tensor.shape) > 2:
@@ -225,9 +226,9 @@ class TriggersTracker(Tracker):
                 tensor = tensor[None, None]  # Add one dim
             bs = tensor.shape[0]
             self.triggrs_by_neuron += th.sum(
-                tensor, dim=(0, )).view(-1).long().to(self.device)
+                tensor, dim=(0, )).view(-1).long()
             self.updates_by_neuron += th.ones(
-                self.number_of_neurons).long().to(self.device) * bs
+                self.number_of_neurons).long().to(tensor.device) * bs
         except RuntimeError as err:
             raise err
 

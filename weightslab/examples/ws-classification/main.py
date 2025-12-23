@@ -11,6 +11,7 @@ import torch.optim as optim
 import yaml
 
 import weightslab as wl
+
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
 from torchvision import datasets, transforms
@@ -65,8 +66,8 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
-    with guard_testing_context, torch.no_grad():
-        for (inputs, ids, labels) in loader:
+    for (inputs, ids, labels) in loader:
+        with guard_testing_context, torch.no_grad():
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -112,9 +113,8 @@ if __name__ == "__main__":
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 1000)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
-    # FORCE training to start in "running" mode
-    parameters["is_training"] = True
 
+    # Experiment name
     exp_name = parameters["experiment_name"]
 
     # Device selection

@@ -259,7 +259,7 @@ class H5DataFrameStore:
                             if not frames:
                                 return pd.DataFrame()
 
-                            return pd.concat(frames, ignore_index=False)
+                            return pd.concat(frames, ignore_index=False).sort_index()
                     except (FileNotFoundError, OSError, KeyError) as exc:
                         if not non_blocking:
                             logger.warning(f"[H5DataFrameStore] Failed to load multiple origins from {self._path}: {exc}")
