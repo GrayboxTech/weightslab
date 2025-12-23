@@ -3,7 +3,6 @@ import os
 import time
 import warnings; warnings.filterwarnings("ignore")
 import unittest
-import tempfile
 import torch as th
 import torch.optim as opt
 

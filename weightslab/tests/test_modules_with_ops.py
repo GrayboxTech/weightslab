@@ -1,7 +1,6 @@
 """ Tests for modules with operations. """
 import time
 import warnings; warnings.filterwarnings("ignore")
-import tempfile
 import unittest
 import torch as th
 

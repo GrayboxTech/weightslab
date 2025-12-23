@@ -3,7 +3,6 @@ import time
 import tqdm
 import warnings; warnings.filterwarnings("ignore")
 import unittest
-import tempfile
 import torch as th
 import weightslab as wl
 

@@ -2,7 +2,6 @@
 import time
 import shutil
 import unittest
-import tempfile
 import warnings; warnings.filterwarnings("ignore")
 import torch as th
 
