@@ -407,9 +407,6 @@ if __name__ == "__main__":
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    # --- 8) Training loop ---
-    pause_controller.resume()
-
     # ================
     # 7. Testing Loop
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()

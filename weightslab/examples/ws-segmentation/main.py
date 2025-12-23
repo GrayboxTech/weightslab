@@ -135,7 +135,7 @@ class BDD100kSegDataset(Dataset):
         self.ignore_index = ignore_index
         self.task_type = "segmentation"
 
-        img_dir = os.path.join(root, "images_1280x720", split)
+        img_dir = os.path.join(root, "images", split)
         lbl_dir = os.path.join(root, "labels", split)
 
         image_files = [
@@ -269,7 +269,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
 # =============================================================================
 if __name__ == "__main__":
     # --- 1) Load hyperparameters from YAML (if present) ---
-    config_path = os.path.join(os.path.dirname(__file__), "bdd_seg_training_config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
@@ -489,9 +489,6 @@ if __name__ == "__main__":
     print(f"💾 Logs will be saved to: {log_dir}")
     print(f"📂 Data root: {data_root}")
     print("=" * 60 + "\n")
-
-    # --- 8) Training loop ---
-    pause_controller.resume()
 
     # ================
     # 7. Training Loop
