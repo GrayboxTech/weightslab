@@ -22,7 +22,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
 
         # Init Variables
         self.stamp = time.time()
-        self.test_dir = tempfile.mkdtemp()
+        self.test_dir = '/tmp/utests/'
         self.all_layers = {}
 
     def tearDown(self):

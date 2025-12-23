@@ -22,7 +22,7 @@ from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 # Set Global Default Settings
 th.manual_seed(42)  # Set SEED
-TMP_DIR = tempfile.mkdtemp()
+TMP_DIR = '/tmp/utests/'
 
 
 class NetworkWithOpsTest(unittest.TestCase):

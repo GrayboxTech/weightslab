@@ -187,7 +187,7 @@ class DataLoaderInterface:
 
         if isinstance(data_loader_or_dataset, DataLoader):
             logger.warning(
-                "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !!"
+                "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !! "
                 "Otherwise, prefer passing a Dataset and let the interface build the DataLoader."
                 )
             # User-supplied dataloader

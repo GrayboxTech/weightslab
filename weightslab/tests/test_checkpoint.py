@@ -28,7 +28,7 @@ class CheckpointManagerTest(unittest.TestCase):
 
         # Init Variables
         self.stamp = time.time()
-        self.temporary_directory = tempfile.mkdtemp()
+        self.temporary_directory = '/tmp/utests/'
 
         # Initialize the checkpoint manager
         self.checkpoint_manager = CheckpointManager(self.temporary_directory)
@@ -132,7 +132,7 @@ class CheckpointManagerTest(unittest.TestCase):
 
     def test_three_dumps_one_load(self):
         # Dump a untrained model into checkpoint.
-        self.checkpoint_manager = CheckpointManager(tempfile.mkdtemp())
+        self.checkpoint_manager = CheckpointManager('/tmp/utests/')
         self.assertFalse(self.checkpoint_manager.id_to_path)
         self.checkpoint_manager.dump(
             model_name='exp_model',

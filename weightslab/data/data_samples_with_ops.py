@@ -868,8 +868,10 @@ class DataSampleTrackingWrapper(Dataset):
                 # Return default
                 return ''
 
-            else:
-                raise KeyError(f"Stat {stat_name} not found for sample_id {sample_id}")
+            elif value is None:
+                return None
+
+            raise KeyError(f"Stat {stat_name} not found for sample_id {sample_id}")
 
     def get_prediction_age(self, sample_id: int) -> int:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_AGE, raw=True)
