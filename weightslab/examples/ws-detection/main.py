@@ -7,22 +7,18 @@ import logging
 import tqdm
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torchvision.ops as ops
 import yaml
-import numpy as np
 
 import weightslab as wl
 from torchvision import transforms
-from torchmetrics import JaccardIndex
 from torch.utils.data import Dataset
 from PIL import Image
 from pathlib import Path
 
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
-    guard_testing_context,
-    pause_controller,
+    guard_testing_context
 )
 from weightslab.baseline_models.pytorch.models import Yolov11
 
@@ -301,7 +297,7 @@ def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_
 # =============================================================================
 if __name__ == "__main__":
     # --- 1) Load hyperparameters from YAML (if present) ---
-    config_path = os.path.join(os.path.dirname(__file__), "inference_config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
