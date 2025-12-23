@@ -550,12 +550,14 @@ class DataService:
                             pred_mask.cpu() if hasattr(pred_mask, "cpu") else pred_mask
                         )
 
-                        data_stats.append(pb2.DataStat(
-                            name='pred_mask',
-                            type='array',
-                            shape=list(pred_arr.shape),
-                            value=pred_arr.astype(float).ravel().tolist(),
-                        ))
+                        data_stats.append(
+                            pb2.DataStat(
+                                name='pred_mask',
+                                type='array',
+                                shape=list(pred_arr.shape),
+                                value=pred_arr.astype(float).ravel().tolist(),
+                            )
+                        )
                 except Exception as e:
                     logger.warning(
                         f"Could not get prediction mask for sample {sample_id}: {e}"

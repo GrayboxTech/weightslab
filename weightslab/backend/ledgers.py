@@ -44,9 +44,9 @@ class Proxy:
                 except Exception:
                     pass
 
-    def get(self) -> Any:
+    def get(self, default=None) -> Any:
         with self._lock:
-            return self._obj
+            return self._obj if self._obj is not None and default is not None else default
 
     def __getattr__(self, item):
         with self._lock:
@@ -301,13 +301,11 @@ class Ledger:
                 keys = list(self._hyperparams.keys())
                 if not name and keys:
                     name = keys[0]
-                else:
-                    raise KeyError(f'no hyperparams registered under {name or "None"}')
 
-            hp = self._hyperparams.get(name)
+            hp = self._hyperparams.get(name, {})
             # if proxy, get underlying dict
             if isinstance(hp, Proxy):
-                hp = hp.get()
+                hp = hp.get(default={})  # Prevent raising error if not yet set
             parts = key_path.split('.') if key_path else []
             cur = hp
             for p in parts[:-1]:
@@ -576,7 +574,7 @@ def resolve_hp_name() -> str | None:
     """
     names = list_hyperparams()
     if not names:
-        return None
+        return 'unknown'
     if 'main' in names:
         return 'main'
     if 'experiment' in names:

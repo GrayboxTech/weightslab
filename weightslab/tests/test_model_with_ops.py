@@ -3,7 +3,6 @@ import os
 import time
 import warnings; warnings.filterwarnings("ignore")
 import unittest
-import tempfile
 import torch as th
 import torch.optim as opt
 
@@ -22,7 +21,7 @@ from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 # Set Global Default Settings
 th.manual_seed(42)  # Set SEED
-TMP_DIR = tempfile.mkdtemp()
+TMP_DIR = '/tmp/utests/'; os.makedirs('/tmp/utests/', exists_ok=True)
 
 
 class NetworkWithOpsTest(unittest.TestCase):

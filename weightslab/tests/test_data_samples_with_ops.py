@@ -1,6 +1,5 @@
 import os
 import time
-import tempfile
 import unittest
 from pathlib import Path
 import numpy as np
@@ -17,7 +16,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 
 # Set Global Default Settings
 th.manual_seed(42)  # Set SEED
-TMP_DIR = tempfile.mkdtemp()
+TMP_DIR = '/tmp/utests/'; os.makedirs('/tmp/utests/', exists_ok=True)
 DEVICE = th.device("cuda" if th.cuda.is_available() else "cpu")
 
 
@@ -153,7 +152,7 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
         self.assertEqual(self.wrapped_dataset.get_prediction_age(self.uids[3]), 6)
 
     def test_shared_h5_store_between_splits(self):
-        tmp_dir = tempfile.mkdtemp()
+        tmp_dir = '/tmp/utests/'; os.makedirs('/tmp/utests/', exists_ok=True)
         shared_store = H5DataFrameStore(Path(tmp_dir) / "data_with_ops.h5")
 
         a = _TinyDummyDataset(n=3)
@@ -673,7 +672,7 @@ class TestH5Persistence(unittest.TestCase):
     """Test H5 persistence of SampleStatsEx across restarts."""
 
     def setUp(self):
-        self.test_dir = tempfile.mkdtemp()
+        self.test_dir = '/tmp/utests/'; os.makedirs('/tmp/utests/', exists_ok=True)
         self.base_ds = DummyDataset()
 
     def test_h5_persistence_deny_listed(self):

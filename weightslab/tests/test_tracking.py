@@ -1,8 +1,8 @@
 """ Test tracking related interfaces and classes. """
+import os
 import time
 import shutil
 import unittest
-import tempfile
 import warnings; warnings.filterwarnings("ignore")
 import torch as th
 
@@ -30,7 +30,7 @@ class TriggersTrackerTest(unittest.TestCase):
         self.batch_size = 2
         self.device = DEVICE
         self.triggers_tracker = TriggersTracker(2, self.device)
-        self.test_dir = tempfile.mkdtemp()
+        self.test_dir = '/tmp/utests/'; os.makedirs('/tmp/utests/', exists_ok=True)
         self.stamp = time.time()
 
     def tearDown(self):
@@ -155,7 +155,7 @@ class TriggersTrackerClazzAndSampleIDTest(unittest.TestCase):
         self.batch_size = 2
         self.device = th.device("cpu")
         self.triggers_tracker = TriggersTrackerClazzAndSampleID(2, self.device)
-        self.test_dir = tempfile.mkdtemp()
+        self.test_dir = '/tmp/utests/'; os.makedirs('/tmp/utests/', exists_ok=True)
 
     def tearDown(self):
         shutil.rmtree(self.test_dir)
