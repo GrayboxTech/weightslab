@@ -27,7 +27,7 @@ class CheckpointManagerTest(unittest.TestCase):
 
         # Init Variables
         self.stamp = time.time()
-        self.temporary_directory = '/tmp/utests/'
+        self.temporary_directory = '/tmp/utests/'; os.makedirs('/tmp/utests/', exist_ok=True)
 
         # Initialize the checkpoint manager
         self.checkpoint_manager = CheckpointManager(self.temporary_directory)

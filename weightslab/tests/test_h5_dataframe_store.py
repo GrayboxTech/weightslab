@@ -1,3 +1,4 @@
+import os
 import shutil
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 
 class TestH5DataFrameStore(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = '/tmp/utests/'
+        self.tmpdir = '/tmp/utests/'; os.makedirs('/tmp/utests/', exist_ok=True)
         self.h5_path = Path(self.tmpdir) / "data_with_ops.h5"
         self.store = H5DataFrameStore(self.h5_path)
 
