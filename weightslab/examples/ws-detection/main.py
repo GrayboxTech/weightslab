@@ -6,15 +6,15 @@ import logging
 
 import tqdm
 import torch
-import torch.nn as nn
-import torchvision.ops as ops
 import yaml
 
-import weightslab as wl
-from torchvision import transforms
+from torch import nn
+from torchvision import ops, transforms
 from torch.utils.data import Dataset
 from PIL import Image
 from pathlib import Path
+
+import weightslab as wl
 
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
@@ -128,8 +128,8 @@ class GIoULoss(nn.Module):
                 return batch_losses.mean()
             elif self.reduction == "sum":
                 return batch_losses.sum()
-            else:  # "none"
-                return batch_losses
+
+            return batch_losses
 
         # Handle single image inputs [M, 4] and [N, 4]
         elif pred_boxes.dim() == 2 and target_boxes.dim() == 2:
@@ -140,6 +140,10 @@ class GIoULoss(nn.Module):
                 f"pred_boxes and target_boxes must have dims 2 (single) or 3 (batched). "
                 f"Got pred_boxes.dim()={pred_boxes.dim()}, target_boxes.dim()={target_boxes.dim()}"
             )
+
+    def compute(self):
+        """Placeholder for compatibility."""
+        pass
 
 
 class COCOBBoxSegmentationDataset(Dataset):
@@ -218,14 +222,14 @@ class COCOBBoxSegmentationDataset(Dataset):
         anns = self.coco.loadAnns(ann_ids)
 
         # Build mask from bboxes
-        H, W = img_info["height"], img_info["width"]
-        mask = self._build_mask(anns, H, W)[None, ...]  # Add channel dim
+        h, w = img_info["height"], img_info["width"]
+        mask = self._build_mask(anns, h, w)[None, ...]  # Add channel dim
 
         if self.mask_transform:
-            mask = self.mask_transform(mask)
+            transformed_mask = self.mask_transform(mask)
         else:
             # ToTensor would cast to float; keep long for class ids
-            mask = mask
+            transformed_mask = mask
 
         target = {
             "boxes": torch.tensor([
@@ -239,7 +243,7 @@ class COCOBBoxSegmentationDataset(Dataset):
             "image_id": torch.tensor([image_id], dtype=torch.int64),
         }
 
-        return image_t, mask, target
+        return image_t, transformed_mask, target
 
 
 logging.basicConfig(level=logging.ERROR)
@@ -265,13 +269,13 @@ def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_
             preds = outputs.boxes.xyxy[None]
 
             # Create clean segmentation mask from detected boxes (no labels)
-            H, W = inputs.shape[2], inputs.shape[3]
-            segmentation = torch.zeros((1, H, W), dtype=torch.int64, device=device)
+            h, w = inputs.shape[2], inputs.shape[3]
+            segmentation = torch.zeros((1, h, w), dtype=torch.int64, device=device)
 
             for box, cls in zip(outputs.boxes.xyxy, outputs.boxes.cls):
                 x1, y1, x2, y2 = box.int()
                 x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(W, x2), min(H, y2)
+                x2, y2 = min(w, x2), min(h, y2)
                 if x2 > x1 and y2 > y1:
                     segmentation[0, y1:y2, x1:x2] = int(cls) + 1  # +1 to avoid background class 0
 
