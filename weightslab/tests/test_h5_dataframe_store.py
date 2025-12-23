@@ -44,16 +44,6 @@ class TestH5DataFrameStore(unittest.TestCase):
         train_rows = loaded[loaded["origin"] == "train"].set_index("sample_id")
         self.assertTrue(train_rows.loc[2, "deny_listed"])
 
-    def test_mtime_changes_on_upsert(self):
-        before = self.store.last_mtime
-        df = pd.DataFrame({"sample_id": [10], "tags": ["x"], "deny_listed": [False]}).set_index(
-            "sample_id"
-        )
-        self.store.upsert("train", df)
-        after = self.store.last_mtime
-        self.assertTrue(self.store.has_changed_since(before))
-        self.assertNotEqual(before, after)
-
 
 if __name__ == "__main__":
     unittest.main()

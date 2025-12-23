@@ -1,13 +1,12 @@
-import tempfile
 import shutil
-from pathlib import Path
 import unittest
-
 import numpy as np
 import pandas as pd
 
-from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper, SampleStatsEx
+from pathlib import Path
 from torch.utils.data import Dataset
+
+from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper, SampleStatsEx
 
 
 class TinyDataset(Dataset):
@@ -30,7 +29,7 @@ def _make_wrapper(tmpdir: Path) -> DataSampleTrackingWrapper:
 
 class TestH5Persistence(unittest.TestCase):
     def test_h5_atomic_write_basic(self):
-        tmpdir = Path(tempfile.mkdtemp())
+        tmpdir = Path('/tmp/utests/')
         try:
             w = _make_wrapper(tmpdir)
             # Update a couple of sample stats
@@ -55,7 +54,7 @@ class TestH5Persistence(unittest.TestCase):
 
 
     def test_h5_corruption_recovery(self):
-        tmpdir = Path(tempfile.mkdtemp())
+        tmpdir = Path('/tmp/utests/')
         try:
             w = _make_wrapper(tmpdir)
             sid = w.get_sample_id_at_index(0)

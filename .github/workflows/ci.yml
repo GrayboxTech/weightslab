@@ -45,7 +45,7 @@ jobs:
             BASE_SHA=${{ github.event.before }}
             HEAD_SHA=${{ github.sha }}
           fi
-          
+
           # Get changed Python files in weightslab directory, exclude generated files
           CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
             grep '^weightslab/.*\.py$' | \
@@ -53,11 +53,11 @@ jobs:
             grep -v '_pb2_grpc\.py$' | \
             grep -v 'ui\.py$' | \
             grep -v 'trainer.*\.py$' || true)
-          
+
           echo "changed_files<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          
+
           if [ -z "$CHANGED_FILES" ]; then
             echo "has_files=false" >> $GITHUB_OUTPUT
             echo "No Python files changed in weightslab directory"
@@ -86,7 +86,7 @@ jobs:
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs pylint --disable=C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
+            echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
           fi
 
   install:

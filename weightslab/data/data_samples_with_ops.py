@@ -128,6 +128,7 @@ class SampleStats:
     ]
 
     DEFAULTS = {
+        # No None values for h5
         Ex.DENY_LISTED.value: False,
         Ex.TAGS.value: '',
         Ex.ENCOUNTERED.value: 0,
@@ -154,6 +155,7 @@ SampleStatsEx = SampleStats.Ex
 SAMPLES_STATS_TO_SAVE_TO_H5 = SampleStats.TO_SAVE_TO_H5
 SAMPLES_STATS_DEFAULTS = SampleStats.DEFAULTS
 SAMPLES_STATS_DEFAULTS_TYPES = SampleStats.DEFAULTS_TYPES
+
 
 # I just like it when the enum values have the same name leghts.
 class _StateDictKeys(str, Enum):
@@ -231,7 +233,7 @@ class DataSampleTrackingWrapper(Dataset):
 
             # If no shared store provided, create one pointing to the same path
             if self._stats_store is None:
-                self._stats_store = H5DataFrameStore(self._h5_path)
+                self._stats_store = H5DataFrameStore(self._h5_path, lock_timeout=10.0)
 
         # Experiment dump to train steps ratio from hyperparams
         self.experiment_dump_to_train_steps_ratio = self._get_experiment_dump_to_train_steps_ratio()
@@ -342,8 +344,26 @@ class DataSampleTrackingWrapper(Dataset):
                         logger.debug(
                             f"[DataSampleTrackingWrapper] Loaded {len(existing_df_filtered)} existing rows from H5 for {self._dataset_split}"
                         )
+
+                    # Initialize missing rows in H5 store
+                    missing_uids = current_uids - set(existing_df_filtered.index)
+                    if missing_uids:
+                        df_missing = self._stats_df.loc[list(missing_uids), cols_to_save].copy()
+                        df_missing["sample_id"] = df_missing.index
+                        df_missing.set_index("sample_id", inplace=True)
+                        written = self._stats_store.upsert(self._dataset_split, df_missing)
+                        logger.info(
+                            f"[DataSampleTrackingWrapper] Initialized {written} new rows in H5 for {self._dataset_split}"
+                        )
+                else:
+                    # No existing data, initialize all UIDs in H5
+                    df_init.set_index("sample_id", inplace=True)
+                    written = self._stats_store.upsert(self._dataset_split, df_init)
+                    logger.info(
+                        f"[DataSampleTrackingWrapper] Initialized all {written} unique IDs in H5 for {self._dataset_split}"
+                    )
             except Exception as e:
-                logger.debug(f"[DataSampleTrackingWrapper] Could not filter existing H5 rows: {e}")
+                logger.debug(f"[DataSampleTrackingWrapper] Could not initialize H5 rows: {e}")
         # Count denied samples in self._stats_df
         if SampleStatsEx.DENY_LISTED.value in self._stats_df.columns:
             self.denied_sample_cnt = int(self._stats_df[SampleStatsEx.DENY_LISTED.value].sum())
@@ -471,10 +491,11 @@ class DataSampleTrackingWrapper(Dataset):
     def _resolve_root_log_dir(self) -> Optional[Path]:
         """Resolve root log directory from hyperparams if not provided."""
         try:
-            hp = get_hyperparams()
+            hp_name = resolve_hp_name()
+            hp = get_hyperparams(hp_name) if hp_name else None
             if hp is not None:
-                if hasattr(hp, 'get'):
-                    hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    hp_dict = hp.get()
                 else:
                     hp_dict = hp if isinstance(hp, dict) else None
 
@@ -494,10 +515,11 @@ class DataSampleTrackingWrapper(Dataset):
     def _get_experiment_dump_to_train_steps_ratio(self) -> Optional[Path]:
         """Resolve root log directory from hyperparams if not provided."""
         try:
-            hp = get_hyperparams()
+            hp_name = resolve_hp_name()
+            hp = get_hyperparams(hp_name) if hp_name else None
             if hp is not None:
-                if hasattr(hp, 'get'):
-                    hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    hp_dict = hp.get()
                 else:
                     hp_dict = hp if isinstance(hp, dict) else None
 
@@ -676,7 +698,6 @@ class DataSampleTrackingWrapper(Dataset):
                 map_update_hook_fn(**map_update_hook_fn_params)
 
         self.idx_to_idx_remapp = {}
-        # sample_id_2_denied = self.sample_statistics[SampleStatsEx.DENY_LISTED]
         denied_sample_uids = {}  # {sid for sid, val in sample_id_2_denied.items() if val}
         delta = 0
         for idx, uid in enumerate(self.unique_ids):
@@ -727,6 +748,27 @@ class DataSampleTrackingWrapper(Dataset):
         # Normalize 0-d numpy arrays
         if isinstance(stat_value, np.ndarray) and stat_value.ndim == 0:
             stat_value = stat_value.item()
+
+        # Normalize multi-element arrays for stats that need to be saved to H5
+        # For PREDICTION_LOSS in segmentation, use mean of per-pixel losses
+        if not (stat_name in SAMPLES_STATS_TO_SAVE_TO_H5 and
+                isinstance(stat_value, np.ndarray) and
+                stat_value.size > 1):
+            # No special handling needed, proceed with the original value
+            pass
+        elif stat_name == SampleStatsEx.PREDICTION_LOSS.value:
+            # Convert per-pixel losses to mean loss for H5 storage
+            if isinstance(stat_value, (th.Tensor, np.ndarray)) and stat_value.size > 1:
+                # logger.debug(f"PREDICTION_LOSS is a multi-element array (size={stat_value.size}) for sample_id={sample_id}. Converting to mean loss for H5 storage.")
+                # Convert tensor to numpy if needed
+                if isinstance(stat_value, th.Tensor):
+                    stat_value = stat_value.detach().cpu().numpy()
+                # Compute mean for scalar storage
+                stat_value = float(np.mean(stat_value))
+        else:
+            # For other stats, skip multi-element arrays
+            logger.warning(f"Skipping multi-element array for stat '{stat_name}' (size={stat_value.size})")
+            return
 
         # Skip multi-element arrays for H5-saved stats
         if (stat_name in SAMPLES_STATS_TO_SAVE_TO_H5 and
@@ -826,8 +868,10 @@ class DataSampleTrackingWrapper(Dataset):
                 # Return default
                 return ''
 
-            else:
-                raise KeyError(f"Stat {stat_name} not found for sample_id {sample_id}")
+            elif value is None:
+                return None
+
+            raise KeyError(f"Stat {stat_name} not found for sample_id {sample_id}")
 
     def get_prediction_age(self, sample_id: int) -> int:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_AGE, raw=True)

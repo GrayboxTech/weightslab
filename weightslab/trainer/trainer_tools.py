@@ -23,19 +23,32 @@ def get_hyper_parameters_pb(
     hyper_parameters_pb2 = []
     for (label, name, type_, getter) in hype_parameters_desc_tuple:
         hyper_parameter_pb2 = None
+        value = getter()
         if type_ == "text":
             hyper_parameter_pb2 = pb2.HyperParameterDesc(
                 label=label,
                 name=name,
                 type=type_,
-                string_value=getter()
+                string_value=str(value) if value is not None else ""
             )
         else:
+            # For numerical values, ensure we pass a float to gRPC to avoid "must be real number" errors
+            try:
+                if value is None:
+                    num_val = 0.0
+                elif isinstance(value, (int, float, bool)):
+                    num_val = float(value)
+                else:
+                    # Try parsing string if necessary
+                    num_val = float(str(value))
+            except (ValueError, TypeError):
+                num_val = 0.0
+
             hyper_parameter_pb2 = pb2.HyperParameterDesc(
                 label=label,
                 name=name,
                 type=type_,
-                numerical_value=getter()
+                numerical_value=num_val
             )
         hyper_parameters_pb2.append(hyper_parameter_pb2)
 
