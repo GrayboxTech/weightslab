@@ -576,7 +576,17 @@ class DataService:
                     # Classification / other scalar-like labels
                     pred = dataset.get(sample_id, stat_name='prediction_raw')
                     if pred is not None:
-                        if isinstance(pred, np.ndarray) and pred.size == 1 or isinstance(pred, (int, float)):
+                        if isinstance(pred, (int, float)):
+                            pred_val = pred
+                            data_stats.append(
+                                pb2.DataStat(
+                                    name='pred',
+                                    type='scalar',
+                                    shape=[1],
+                                    value=[pred_val],
+                                )
+                            )
+                        elif isinstance(pred, np.ndarray) and pred.size == 1:
                             pred_val = int(pred.reshape(-1)[0])
                             data_stats.append(
                                 pb2.DataStat(
