@@ -737,10 +737,10 @@ class DataSampleTrackingWrapper(Dataset):
         if th is not None and isinstance(arr, th.Tensor):
             arr = arr.cpu().numpy()
         if isinstance(arr, np.ndarray):
-            if arr.shape[0] == 0:
-                return None
-            elif arr.size == 1:
+            if arr.size == 1:
                 pass
+            elif arr.shape[0] == 0:
+                return None
             elif np.issubdtype(arr.dtype, np.floating):
                 # Normalize float arrays in [0, 1] to [0, 255] uint8
                 if arr.min() >= 0.0 and arr.max() <= 1.0:
