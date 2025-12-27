@@ -391,8 +391,8 @@ class DataService:
                 tensor, label = data
             elif len(data) == 3:
                 tensor, _ , label= data
-            elif len(data) == 4:
-                tensor, _, label, _ = data
+            elif len(data) >= 4:
+                tensor, _, label, *_ = data  # rest can hold boxes, meta, etc.
 
             if request.include_transformed_data:
                 img = torch.tensor(tensor) if not isinstance(tensor, torch.Tensor) else tensor

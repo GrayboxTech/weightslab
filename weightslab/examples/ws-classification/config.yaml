@@ -10,17 +10,17 @@ experiment_dump_to_train_steps_ratio: 200
 skip_checkpoint_load: true
 
 # start training immediately or not
-is_training: false
+is_training: true
 
 data:
   train_loader:
-    train_shuffle: false
+    shuffle: false
     batch_size: 16
   val_loader:
-    train_shuffle: false
+    shuffle: false
     batch_size: 16
   test_loader:
-    test_shuffle: false
+    shuffle: false
     batch_size: 16
     drop_last: false
 

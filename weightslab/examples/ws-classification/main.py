@@ -298,27 +298,27 @@ if __name__ == "__main__":
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
-        # Periodic validation and test evaluation
-        if train_step % eval_every == 0:
-            # Validate
-            val_loss, val_metric = test(
-                val_loader_iter,
-                model,
-                val_criterion_mlt,
-                val_metric_mlt,
-                device,
-                val_loader_len
-            )
+        # # Periodic validation and test evaluation
+        # if train_step % eval_every == 0:
+        #     # Validate
+        #     val_loss, val_metric = test(
+        #         val_loader_iter,
+        #         model,
+        #         val_criterion_mlt,
+        #         val_metric_mlt,
+        #         device,
+        #         val_loader_len
+        #     )
 
-            # Test (less frequent or same as val)
-            test_loss, test_metric = test(
-                test_loader_iter,
-                model,
-                test_criterion_mlt,
-                test_metric_mlt,
-                device,
-                test_loader_len
-            )
+        #     # Test (less frequent or same as val)
+        #     test_loss, test_metric = test(
+        #         test_loader_iter,
+        #         model,
+        #         test_criterion_mlt,
+        #         test_metric_mlt,
+        #         device,
+        #         test_loader_len
+        #     )
 
         # Verbose
         if verbose and not tqdm_display:

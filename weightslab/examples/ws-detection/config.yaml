@@ -6,12 +6,12 @@ image_size: 128
 tqdm_display: true
 
 # start training immediately or not
-is_training: false
+is_training: true
 
 data:
   train_loader:
     batch_size: 1
-    shuffle: true
+    shuffle: false
     num_workers: 2
     images_dir: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/images/val2017
     annotations_file: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/annotations/instances_val2017.json
