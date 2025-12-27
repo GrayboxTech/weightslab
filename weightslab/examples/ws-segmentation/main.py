@@ -21,7 +21,6 @@ from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context,
-    pause_controller,
 )
 
 logging.basicConfig(level=logging.ERROR)
