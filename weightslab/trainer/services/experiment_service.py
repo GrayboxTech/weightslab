@@ -107,13 +107,6 @@ class ExperimentService:
                     return pb2.CommandResponse(success=False, message=detailed_msg)
 
                 try:
-                    if hyper_parameters.HasField("is_training"):
-                        if hyper_parameters.is_training:
-                            pause_controller.resume()
-                        else:
-                            pause_controller.pause()
-                        set_hyperparam(hp_name, "is_training", hyper_parameters.is_training)
-
                     if hyper_parameters.HasField("training_steps_to_do"):
                         set_hyperparam(
                             hp_name,

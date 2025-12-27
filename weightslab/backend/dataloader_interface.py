@@ -410,14 +410,16 @@ class DataLoaderInterface:
     def __iter__(self) -> Iterator:
         """Return an iterator over batches (delegates to the wrapped dataloader)."""
         self._sync_batch_size_from_ledger()
+        res = iter(self.dataloader)
         self._wait_if_paused()
-        return iter(self.dataloader)
+        return res
 
     def __next__(self) -> Any:
         """Retrieve the next batch; used when iterating directly over the interface."""
         self._sync_batch_size_from_ledger()
+        res = self._next_batch()
         self._wait_if_paused()
-        return self._next_batch()
+        return res
 
     # -------------------------------------------------------------------------
     # Ledger / pause helpers

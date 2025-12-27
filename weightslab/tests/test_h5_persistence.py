@@ -1,4 +1,5 @@
 import shutil
+import tempfile
 import unittest
 import numpy as np
 import pandas as pd
@@ -29,7 +30,7 @@ def _make_wrapper(tmpdir: Path) -> DataSampleTrackingWrapper:
 
 class TestH5Persistence(unittest.TestCase):
     def test_h5_atomic_write_basic(self):
-        tmpdir = Path('/tmp/utests/')
+        tmpdir = Path(tempfile.mkdtemp())
         try:
             w = _make_wrapper(tmpdir)
             # Update a couple of sample stats
@@ -54,7 +55,7 @@ class TestH5Persistence(unittest.TestCase):
 
 
     def test_h5_corruption_recovery(self):
-        tmpdir = Path('/tmp/utests/')
+        tmpdir = Path(tempfile.mkdtemp())
         try:
             w = _make_wrapper(tmpdir)
             sid = w.get_sample_id_at_index(0)

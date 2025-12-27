@@ -202,9 +202,10 @@ class CheckpointManager(object):
             # If ledger returned a Proxy-like wrapper, try to get underlying object
             try:
                 underlying = getattr(model, 'get', None)
+                model_obj = None
                 if callable(underlying):
                     model_obj = model.get()
-                else:
+                if model_obj is None:
                     model_obj = model
             except Exception:
                 model_obj = model

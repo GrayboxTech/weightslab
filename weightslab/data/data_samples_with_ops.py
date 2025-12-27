@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import tempfile
 import torch as th
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
-from weightslab.backend.ledgers import get_hyperparams
+from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
 
 
 # Global logger
@@ -24,6 +25,7 @@ _UID_CNT = 0
 
 # Global UID registry to detect overlaps with train set within a process
 GLOBAL_UID_REGISTRY: Dict[str, Set[int]] = {}
+
 
 def _detect_dataset_split(ds) -> str:
     """Best-effort split detection for common datasets. Returns actual split name or 'unknown'."""
@@ -150,6 +152,7 @@ class SampleStats:
         Ex.TARGET.value: int | np.ndarray,
     }
 
+
 # Backward-compatible aliases
 SampleStatsEx = SampleStats.Ex
 SAMPLES_STATS_TO_SAVE_TO_H5 = SampleStats.TO_SAVE_TO_H5
@@ -225,6 +228,14 @@ class DataSampleTrackingWrapper(Dataset):
         self._tags_mapping = tags_mapping or {}
         self._is_binary_labels = len(self._tags_mapping) == 1 if self._tags_mapping else False
 
+        if self._root_log_dir is None or not os.path.exists(self._root_log_dir):
+            logger.warning(
+                "[DataSampleTrackingWrapper] No valid root_log_dir provided and could not resolve one from hyperparams. "
+                "H5 persistence of sample statistics is disabled."
+            )
+            self._root_log_dir = Path(tempfile.mkdtemp())
+            logger.info(f"[DataSampleTrackingWrapper] Using temporary directory {self._root_log_dir} for H5 persistence. Please copy final results in a safe location after training.")
+
         if self._root_log_dir:
             data_dir = self._root_log_dir / "checkpoints" / "data"
             data_dir.mkdir(parents=True, exist_ok=True)
@@ -234,6 +245,13 @@ class DataSampleTrackingWrapper(Dataset):
             # If no shared store provided, create one pointing to the same path
             if self._stats_store is None:
                 self._stats_store = H5DataFrameStore(self._h5_path, lock_timeout=10.0)
+
+        if self._h5_path is None:
+            logger.error(
+                "[DataSampleTrackingWrapper] No root_log_dir provided and could not resolve one from hyperparams. "
+                "H5 persistence of sample statistics is disabled."
+            )
+            raise ValueError("H5 persistence requires a valid root_log_dir.")
 
         # Experiment dump to train steps ratio from hyperparams
         self.experiment_dump_to_train_steps_ratio = self._get_experiment_dump_to_train_steps_ratio()
@@ -721,6 +739,8 @@ class DataSampleTrackingWrapper(Dataset):
         if isinstance(arr, np.ndarray):
             if arr.size == 1:
                 pass
+            elif arr.shape[0] == 0:
+                return None
             elif np.issubdtype(arr.dtype, np.floating):
                 # Normalize float arrays in [0, 1] to [0, 255] uint8
                 if arr.min() >= 0.0 and arr.max() <= 1.0:
@@ -851,7 +871,7 @@ class DataSampleTrackingWrapper(Dataset):
                         value = self._getitem_raw(id=sample_id)[2]
                     else:
                         value = self[index][2]  # 0 -> data; 1 -> index; 2 -> label
-                self._stats_df.loc[sample_id, stat_name] = value
+                self._stats_df.loc[sample_id, stat_name] = self._normalize_and_cast_for_df(value)
                 return value
 
             elif stat_name == SampleStatsEx.SAMPLE_ID:
@@ -868,10 +888,7 @@ class DataSampleTrackingWrapper(Dataset):
                 # Return default
                 return ''
 
-            elif value is None:
-                return None
-
-            raise KeyError(f"Stat {stat_name} not found for sample_id {sample_id}")
+            return None
 
     def get_prediction_age(self, sample_id: int) -> int:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_AGE, raw=True)
@@ -935,6 +952,7 @@ class DataSampleTrackingWrapper(Dataset):
             return False
         if predct_batch is None:
             predct_batch = [None] * len(ids_batch)
+
         for sample_identifier, sample_loss, sample_pred in zip(ids_batch, losses_batch, predct_batch):
             # patch for segmentation
             if isinstance(sample_pred, np.ndarray):
@@ -1417,12 +1435,193 @@ class DataSampleTrackingWrapper(Dataset):
     def get_sample_id_at_index(self, index: int) -> int:
         return int(self.unique_ids[index])
 
+    def infer_num_classes(self, sample_limit: int = 128) -> int:
+        """Infer the number of classes for this dataset/wrapper.
+
+        Priority order:
+        1. Use `wrapped_dataset.num_classes` if available
+        2. If tag-based binary classification, return 2
+        3. If `tags_mapping` is provided, infer from mapping values/size
+        4. Scan up to `sample_limit` samples' targets/masks
+        5. Fallback to 1
+
+        The result is cached in `_num_classes_cache`.
+        """
+        # Cached value
+        if hasattr(self, "_num_classes_cache") and isinstance(getattr(self, "_num_classes_cache"), (int, np.integer)):
+            return int(getattr(self, "_num_classes_cache"))
+
+        # 1) Dataset-provided attribute
+        try:
+            ds_nc = getattr(self.wrapped_dataset, "num_classes", None)
+            if isinstance(ds_nc, (int, np.integer)) and int(ds_nc) > 0:
+                self._num_classes_cache = int(ds_nc)
+                return self._num_classes_cache
+        except Exception:
+            pass
+
+        # 2) Binary via tags flag
+        try:
+            if getattr(self, "_is_binary_labels", False):
+                self._num_classes_cache = 2
+                return self._num_classes_cache
+        except Exception:
+            pass
+
+        # 3) Mapping-based inference
+        try:
+            mapping = getattr(self, "_tags_mapping", None)
+            if mapping:
+                # Prefer values if they are ints; else use key count
+                try:
+                    vals = list(mapping.values())
+                    int_vals = [int(v) for v in vals if isinstance(v, (int, np.integer))]
+                    if int_vals:
+                        # If values are contiguous 0..K-1, return max+1; else unique count
+                        uniq = sorted(set(int_vals))
+                        inferred = (max(uniq) + 1) if max(uniq) == (len(uniq) - 1) else len(uniq)
+                        self._num_classes_cache = int(inferred)
+                        return self._num_classes_cache
+                except Exception:
+                    pass
+                self._num_classes_cache = max(2, len(mapping))
+                return self._num_classes_cache
+        except Exception:
+            pass
+
+        # 4) Scan targets/masks for fallback
+        try:
+            max_id = -1
+            uniq_labels: Set[int] = set()
+            n = min(len(self.wrapped_dataset), int(sample_limit))
+            for i in range(n):
+                data = self.wrapped_dataset[i]
+                if not isinstance(data, tuple) or len(data) < 2:
+                    continue
+                target = data[1]
+
+                # Convert to numpy
+                if isinstance(target, th.Tensor):
+                    tnp = target.detach().cpu().numpy()
+                elif isinstance(target, dict):
+                    # Skip dict targets here (e.g., detection extras); masks are usually second element
+                    tnp = None
+                else:
+                    try:
+                        tnp = np.asarray(target)
+                    except Exception:
+                        tnp = None
+
+                if tnp is None:
+                    continue
+
+                if tnp.ndim >= 2:
+                    # Segmentation mask: infer from max id
+                    try:
+                        max_id = max(max_id, int(tnp.max()))
+                    except Exception:
+                        pass
+                else:
+                    # Classification labels: collect uniques
+                    try:
+                        uniq_labels.update(int(x) for x in np.ravel(tnp))
+                    except Exception:
+                        pass
+
+            if max_id >= 0:
+                self._num_classes_cache = int(max_id + 1)
+                return self._num_classes_cache
+            if uniq_labels:
+                self._num_classes_cache = int(max(uniq_labels) + 1)
+                return self._num_classes_cache
+        except Exception as e:
+            logger.debug(f"[DataSampleTrackingWrapper] num_classes inference failed: {e}")
+
+        # 5) Fallback
+        self._num_classes_cache = 1
+        return self._num_classes_cache
+
+    @property
+    def num_classes(self) -> int:
+        """Expose inferred number of classes as a property."""
+        return self.infer_num_classes()
+
+    def get_mask(self, sample_id, pred_raw):
+        # Check if prediction_raw is a numpy array (could be bboxes)
+        if isinstance(pred_raw, np.ndarray) and (pred_raw.ndim == 2 or pred_raw.ndim == 3) and pred_raw.shape[-1] >= 4:
+            # pred_raw appears to be bboxes (N, 4+) format
+            # Get the item (image) to determine mask dimensions
+            index = self.get_index_from_sample_id(sample_id)
+            raw_data = self.wrapped_dataset[index]
+
+            # Extract the item (first element of the tuple)
+            if isinstance(raw_data, tuple):
+                item = raw_data[0]
+            else:
+                item = raw_data
+
+            # Convert item to numpy to get shape
+            item_np = _to_numpy_safe(item)
+            if item_np is not None:
+                # Determine height and width from item
+                if item_np.ndim == 3:
+                    # Channels-first format: (C, H, W)
+                    if item_np.shape[0] < item_np.shape[1]:
+                        _, height, width = item_np.shape
+                    else:
+                        # Channels-last format: (H, W, C)
+                        height, width, _ = item_np.shape
+                elif item_np.ndim == 2:
+                    # Grayscale: (H, W)
+                    height, width = item_np.shape
+                else:
+                    # Cannot determine dimensions
+                    return pred_raw
+
+                # Generate segmentation map from bboxes
+                segmentation_map = np.zeros((height, width), dtype=np.int64)
+
+                # Return segmentation map directly if it matches pred_raw shape
+                if segmentation_map.shape == pred_raw.shape[-2:]:  # B, C, H, W
+                    return pred_raw
+
+                # Generate segmentation map from bboxes
+                for bbox_data in pred_raw[0]:
+                    x1, y1, x2, y2 = bbox_data[:4].astype(int)
+                    # Extract class id if available, otherwise use 1
+                    class_id = int(bbox_data[4]) if len(bbox_data) > 4 else 1
+
+                    # Clip to valid image bounds
+                    x1 = max(0, min(x1, width - 1))
+                    y1 = max(0, min(y1, height - 1))
+                    x2 = max(0, min(x2, width))
+                    y2 = max(0, min(y2, height))
+
+                    # Fill the bounding box region
+                    if x2 > x1 and y2 > y1:
+                        segmentation_map[y1:y2, x1:x2] = class_id
+
+                return segmentation_map
+        # Not bounding boxes, return as is
+        return pred_raw
+
+    def get_target_mask(self, sample_id):
+        # Detection: check if target contains bboxes
+        target_raw = self.get(sample_id=sample_id, stat_name=SampleStatsEx.TARGET, raw=True)
+
+        return self.get_mask(sample_id, target_raw)
+
     def get_prediction_mask(self, sample_id, task_name=None):
+        # Segmentation
         if task_name:
             key = f"pred/{task_name}"
             if key in self.dense_stats_store:
                 return self.dense_stats_store[key].get(sample_id)
-        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_RAW, raw=True)
+
+        # Detection: check if prediction_raw contains bboxes
+        pred_raw = self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_RAW, raw=True)
+
+        return self.get_mask(sample_id, pred_raw)
 
     def flush_stats_to_h5(self):
         """Explicitly flush pending stats to H5 (e.g., before training checkpoint).

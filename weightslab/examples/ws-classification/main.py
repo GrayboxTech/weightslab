@@ -11,6 +11,7 @@ import torch.optim as optim
 import yaml
 
 import weightslab as wl
+
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
 from torchvision import datasets, transforms
@@ -65,8 +66,8 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
-    with guard_testing_context, torch.no_grad():
-        for (inputs, ids, labels) in loader:
+    for (inputs, ids, labels) in loader:
+        with guard_testing_context, torch.no_grad():
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -112,9 +113,8 @@ if __name__ == "__main__":
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 1000)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
-    # FORCE training to start in "running" mode
-    parameters["is_training"] = True
 
+    # Experiment name
     exp_name = parameters["experiment_name"]
 
     # Device selection
@@ -298,27 +298,27 @@ if __name__ == "__main__":
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
-        # Periodic validation and test evaluation
-        if train_step % eval_every == 0:
-            # Validate
-            val_loss, val_metric = test(
-                val_loader_iter,
-                model,
-                val_criterion_mlt,
-                val_metric_mlt,
-                device,
-                val_loader_len
-            )
+        # # Periodic validation and test evaluation
+        # if train_step % eval_every == 0:
+        #     # Validate
+        #     val_loss, val_metric = test(
+        #         val_loader_iter,
+        #         model,
+        #         val_criterion_mlt,
+        #         val_metric_mlt,
+        #         device,
+        #         val_loader_len
+        #     )
 
-            # Test (less frequent or same as val)
-            test_loss, test_metric = test(
-                test_loader_iter,
-                model,
-                test_criterion_mlt,
-                test_metric_mlt,
-                device,
-                test_loader_len
-            )
+        #     # Test (less frequent or same as val)
+        #     test_loss, test_metric = test(
+        #         test_loader_iter,
+        #         model,
+        #         test_criterion_mlt,
+        #         test_metric_mlt,
+        #         device,
+        #         test_loader_len
+        #     )
 
         # Verbose
         if verbose and not tqdm_display:

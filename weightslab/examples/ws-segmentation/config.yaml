@@ -5,6 +5,9 @@ eval_full_to_train_steps_ratio: 50
 num_classes: 6
 image_size: 128
 
+# start training immediately or not
+is_training: true
+
 data:
   train_loader:
     batch_size: 8

@@ -6,12 +6,12 @@ import time
 import logging
 
 from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
-
 from weightslab.components.tracking import TrackingMode
 
+
+# Module-level logger
 logger = logging.getLogger(__name__)
-
-
+# Global locks
 weightslab_rlock = RLock()
 weightslab_lock = Lock()
 
@@ -22,7 +22,8 @@ class PauseController:
     """
     def __init__(self):
         self._event = Event()
-        self._event.set() # Set by default so training starts running
+        self._event.clear()
+        # self._event.set() # Set by default so training starts running
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
@@ -211,31 +212,25 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 time.sleep(poll_interval)
                 continue
 
+            # Training status from ledger
             hp_is_training = hp.get('is_training')
-            controller_paused = pause_controller.is_paused()
-            controller_running = not controller_paused
+            if hp_is_training is not None:
+                controller_paused = pause_controller.is_paused()
+                controller_running = not controller_paused
 
-            # Drive controller from ledger when ledger explicitly sets the flag
-            if isinstance(hp_is_training, bool):
-                if controller_paused and hp_is_training:
-                    pause_controller.resume()
-                elif controller_running and not hp_is_training:
-                    pause_controller.pause()
+                # Drive controller from ledger when ledger explicitly sets the flag
+                if isinstance(hp_is_training, bool):
+                    if controller_paused and hp_is_training:
+                        pause_controller.resume()
+                    elif controller_running and not hp_is_training:
+                        pause_controller.pause()
 
-            # Re-evaluate controller state after potential changes
-            controller_paused = pause_controller.is_paused()
-            controller_running = not controller_paused
+                # Re-evaluate controller state after potential changes
+                controller_paused = pause_controller.is_paused()
 
-            # Propagate controller state back to ledger if it differs
-            if not isinstance(hp_is_training, bool) or hp_is_training != controller_running:
-                try:
-                    set_hyperparam(name, 'is_training', controller_running)
-                except Exception:
-                    # best-effort: update underlying dict directly
-                    try:
-                        hp['is_training'] = controller_running
-                    except Exception:
-                        pass
+                # Propagate controller state back to ledger if it differs
+                if controller_paused:
+                    set_hyperparam(name, 'is_training', False)
 
         except Exception:
             # swallow to keep thread alive

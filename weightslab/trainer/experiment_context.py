@@ -145,5 +145,5 @@ class ExperimentContext:
             ("Checkpoint Frequency", "checkpooint_frequency", "number", _hp_getter("experiment_dump_to_train_steps_ratio", 100)),
             ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
             ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 8)),
-            ("Is Training", "is_training", "number", _hp_getter("is_training", 1)),
+            ("Is Training", "is_training", "number", _hp_getter("is_training", 0)),
         }
