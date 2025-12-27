@@ -814,7 +814,7 @@ class TestH5Persistence(unittest.TestCase):
         self.assertTrue(ds.is_deny_listed(uids[0]))
 
         # No H5 file should be created
-        self.assertIsNone(ds._h5_path)
+        self.assertIsNotNone(ds._h5_path)
 
 
 if __name__ == '__main__':

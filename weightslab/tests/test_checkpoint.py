@@ -1,6 +1,7 @@
 import os
 import time
 import tqdm
+import tempfile
 import warnings; warnings.filterwarnings("ignore")
 import unittest
 import torch as th
@@ -131,7 +132,7 @@ class CheckpointManagerTest(unittest.TestCase):
 
     def test_three_dumps_one_load(self):
         # Dump a untrained model into checkpoint.
-        self.checkpoint_manager = CheckpointManager('/tmp/utests/')
+        self.checkpoint_manager = CheckpointManager(tempfile.mkdtemp())
         self.assertFalse(self.checkpoint_manager.id_to_path)
         self.checkpoint_manager.dump(
             model_name='exp_model',
@@ -143,7 +144,7 @@ class CheckpointManagerTest(unittest.TestCase):
         self.assertEqual(self.checkpoint_manager.prnt_id, 0)
 
         # Eval the model pretraining.
-        _, _ = self._eval_n_steps(16)
+        self._eval_n_steps(16)
 
         # Train for 2k samples. Eval on 8k samples.
         self._train_n_steps(32 * 2)
@@ -157,7 +158,7 @@ class CheckpointManagerTest(unittest.TestCase):
 
         # Train for another 2k samples. Eval on 8k samples.
         self._train_n_steps(32 * 2)
-        _, _ = self._eval_n_steps(16)
+        self._eval_n_steps(16)
         self.checkpoint_manager.dump(
             model_name='exp_model',
             optimizer_name='exp_optimizer',
@@ -165,7 +166,7 @@ class CheckpointManagerTest(unittest.TestCase):
         )
         self.assertTrue(2 in self.checkpoint_manager.id_to_path)
 
-        # Load the checkpoint afte first 2k samples. Eval.
+        # Load the checkpoint after first 2k samples. Eval.
         # Then change some hyperparameters and retrain.
         self.checkpoint_manager.load(
             1,
@@ -179,7 +180,7 @@ class CheckpointManagerTest(unittest.TestCase):
         self.assertEqual(self.checkpoint_manager.prnt_id, 1)
         self._set_learning_rate(1e-2)
         self._train_n_steps(32 * 2)
-        _, _ = self._eval_n_steps(16)
+        self._eval_n_steps(16)
         self.checkpoint_manager.dump(
             model_name='exp_model',
             optimizer_name='exp_optimizer',
@@ -189,6 +190,7 @@ class CheckpointManagerTest(unittest.TestCase):
         self.assertEqual(self.checkpoint_manager.id_to_prnt[3], 1)
 
     def test_operate_and_dump_and_load(self):
+        self.checkpoint_manager = CheckpointManager(tempfile.mkdtemp())
         # Dump a untrained model into checkpoint.
         self.assertFalse(self.checkpoint_manager.id_to_path)
         self.checkpoint_manager.dump(

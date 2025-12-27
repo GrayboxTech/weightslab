@@ -233,7 +233,7 @@ class DataSampleTrackingWrapper(Dataset):
                 "[DataSampleTrackingWrapper] No valid root_log_dir provided and could not resolve one from hyperparams. "
                 "H5 persistence of sample statistics is disabled."
             )
-            self._root_log_dir = Path(tempfile.gettempdir())
+            self._root_log_dir = Path(tempfile.mkdtemp())
             logger.info(f"[DataSampleTrackingWrapper] Using temporary directory {self._root_log_dir} for H5 persistence. Please copy final results in a safe location after training.")
 
         if self._root_log_dir:
