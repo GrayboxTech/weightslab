@@ -138,6 +138,9 @@ class ExperimentService:
                             hyper_parameters.checkpont_frequency,
                         )
 
+                    if hyper_parameters.HasField("is_training"):
+                        set_hyperparam(hp_name, "is_training", hyper_parameters.is_training)
+
                 except Exception as e:
                     return pb2.CommandResponse(
                         success=False,

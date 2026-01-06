@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.ERROR)
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_mlt, device):
+def train(loader, model, optimizer, criterion_bin, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
@@ -47,22 +47,49 @@ def train(loader, model, optimizer, criterion_mlt, device):
             preds = outputs.argmax(dim=1, keepdim=True)
 
         # Loss is a watched object => pass metadata for logging/stats
-        loss_batch = criterion_mlt(
+        loss_batch_mlt = criterion_mlt(
             outputs.float(),
             labels.long(),
             model_age=model.get_age(),
             batch_ids=ids,
-            preds=preds,
+            preds=preds
         )
-        loss = loss_batch.mean()
+        wl.save_signals(
+            model_age=model.get_age(),
+            batch_ids=ids,
+            signals=loss_batch_mlt,
+            preds=preds
+        )  # Save per-sample losses as signals manually
+        loss_batch_bin = criterion_bin(
+            outputs[:, 7] if outputs.ndim > 1 else outputs,
+            (labels == 7).float(),
+            model_age=model.get_age(),
+            batch_ids=ids,
+            preds=preds
+        )
+        wl.save_signals(
+            model_age=model.get_age(),
+            batch_ids=ids,
+            signals=loss_batch_bin,
+            preds=preds
+        )  # Save per-sample losses as signals manually
+        total_loss = (loss_batch_mlt + loss_batch_bin)/2.0
+        wl.save_signals(
+            model_age=model.get_age(),
+            batch_ids=ids,
+            signals={'Final_House_Loss': total_loss},
+            preds=preds
+        )  # Save per-sample losses as signals manually
+        total_loss = total_loss.mean()  # Final scalar loss
 
-        loss.backward()
+        # Model
+        total_loss.backward()
         optimizer.step()
 
-    return loss.detach().cpu().item()
+    return total_loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
+def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
@@ -78,6 +105,14 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
             else:
                 preds = outputs.argmax(dim=1, keepdim=True)
 
+            loss_bin_batch = criterion_bin(
+                outputs[:, 7] if outputs.ndim > 1 else outputs,
+                (labels == 7).float(),
+                model_age=model.get_age(),
+                batch_ids=ids,
+                preds=preds,
+            )
+            losses += torch.mean(loss_bin_batch)
             loss_batch = criterion_mlt(
                 outputs,
                 labels,
@@ -238,16 +273,34 @@ if __name__ == "__main__":
         name="train_loss/mlt_loss",
         log=True,
     )
+    train_criterion_bin = wl.watch_or_edit(
+        nn.BCELoss(reduction="none"),
+        flag="loss",
+        name="train_loss/bin_loss",
+        log=True,
+    )
     val_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="val_loss/mlt_loss",
         log=True,
     )
+    val_criterion_bin = wl.watch_or_edit(
+        nn.BCELoss(reduction="none"),
+        flag="loss",
+        name="val_loss/bin_loss",
+        log=True,
+    )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="test_loss/mlt_loss",
+        log=True,
+    )
+    test_criterion_bin = wl.watch_or_edit(
+        nn.BCELoss(reduction="none"),
+        flag="loss",
+        name="test_loss/bin_loss",
         log=True,
     )
 
@@ -292,33 +345,36 @@ if __name__ == "__main__":
     val_loader_iter = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
     test_loader_iter = tqdm.tqdm(test_loader, desc="Testing") if tqdm_display else test_loader
 
+    train_loss = None
     val_loss, val_metric = None, None
     test_loss, test_metric = None, None
     for train_step in train_range:
         # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
+        train_loss = train(train_loader, model, optimizer, train_criterion_bin, train_criterion_mlt, device)
 
-        # # Periodic validation and test evaluation
-        # if train_step % eval_every == 0:
-        #     # Validate
-        #     val_loss, val_metric = test(
-        #         val_loader_iter,
-        #         model,
-        #         val_criterion_mlt,
-        #         val_metric_mlt,
-        #         device,
-        #         val_loader_len
-        #     )
+        # Periodic validation and test evaluation
+        if train_step % eval_every == 0:
+            # Validate
+            val_loss, val_metric = test(
+                val_loader_iter,
+                model,
+                val_criterion_bin,
+                val_criterion_mlt,
+                val_metric_mlt,
+                device,
+                val_loader_len
+            )
 
-        #     # Test (less frequent or same as val)
-        #     test_loss, test_metric = test(
-        #         test_loader_iter,
-        #         model,
-        #         test_criterion_mlt,
-        #         test_metric_mlt,
-        #         device,
-        #         test_loader_len
-        #     )
+            # Test (less frequent or same as val)
+            test_loss, test_metric = test(
+                test_loader_iter,
+                model,
+                test_criterion_bin,
+                test_criterion_mlt,
+                test_metric_mlt,
+                device,
+                test_loader_len
+            )
 
         # Verbose
         if verbose and not tqdm_display:

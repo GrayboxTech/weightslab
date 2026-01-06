@@ -23,63 +23,177 @@ from weightslab.ui.weightslab_ui import ui_serve
 logger = logging.getLogger(__name__)
 
 
-def _save_data_statistics(
+def save_signals(
     model_age: int,
     batch_ids: th.Tensor,
-    losses_batch: th.Tensor,
-    preds: th.Tensor = None,
-    lock: Lock = Lock()
+    signals: th.Tensor | dict,
+    preds: th.Tensor = None
 ):
-    with lock:
-        # Get batch data
-        pred_np = preds.detach().cpu().numpy() if preds is not None else None
-        batch_ids_np = batch_ids.detach().cpu().numpy()
-        if not isinstance(losses_batch, dict):
-            per_sample_loss_np = losses_batch.detach().cpu().numpy()
+    """
+        Save data statistics to the tracked dataset.
+        Args:
+            model_age (int): The age of the model.
+            batch_ids (th.Tensor): The batch ids.
+            signals (th.Tensor): The batch losses.
+            preds (th.Tensor, optional): The batch predictions. Defaults to None.
+    """
+    # Get batch data
+    pred_np = preds.detach().cpu().numpy() if preds is not None else None
+    batch_ids_np = batch_ids.detach().cpu().numpy()
+    if not isinstance(signals, dict):
+        per_sample_loss_np = signals.detach().cpu().numpy()
+    else:
+        for k in signals:
+            signals[k] = signals[k].detach().cpu().numpy()
+        per_sample_loss_np = signals
+
+    # Update batch sample stats
+    # Check if model is in training mode with grad enabled
+    is_training = th.is_grad_enabled()
+
+    name = 'train_loader' if is_training else 'test_loader'  # Train or test, but should be improved to handle val loaders too or others
+    try:
+        loader = get_dataloader(name)
+
+        # TODO (GP): improve this logic to avoid double updates
+        # Improvement here should be to separate dataloaders that generates data from datasets, from data storage, which should be global,
+        # and in the ledger. So that we don't have to try multiple dataloaders to update the same dataset. And we can work on dataloader named Chloe for instance.
+        # https://github.com/GrayboxTech/weightslab/issues/50
+        if set(batch_ids_np) - set(get_dataloader(name).tracked_dataset.unique_ids):
+            nloaders = get_dataloaders()
+            for lname in nloaders:
+                loader = get_dataloader(lname)
+                if set(batch_ids_np).issubset(set(loader.tracked_dataset.unique_ids)):
+                    break
+
+        loader.tracked_dataset.update_batch_sample_stats(
+            model_age,
+            batch_ids_np,
+            per_sample_loss_np,
+            pred_np
+        )
+        signals = per_sample_loss_np if isinstance(per_sample_loss_np, dict) else {
+                "loss/combined": per_sample_loss_np,
+        }
+        signals.update(
+            {
+                "pred": pred_np
+            }
+        )
+        loader.tracked_dataset.update_sample_stats_ex_batch(
+            batch_ids_np,
+            signals
+        )
+    except AttributeError as e:
+        logger.warning(
+            "Warning: Could not save data statistics to " +
+            f"tracked dataset: {e}. Please ensure the " +
+            "dataloader has a tracked dataset with " +
+            "`update_batch_sample_stats` and " +
+            "`update_sample_stats_ex_batch` methods, and is_training set."
+        )
+
+
+def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
+    """
+        Wrapper for forward methods to log and save statistics.
+        Args:
+            original_forward (Callable): The original forward method.
+            kwargs (dict): The keyword arguments passed to the forward method.
+            reg_name (str): The registration name of the signal.
+        Returns:
+            The output of the original forward method.
+    """
+
+    # Remove parameters
+    _ = kw.pop('flag', None)
+    ids = kw.pop('batch_ids', None)
+    model_age = kw.pop('model_age', None)
+    preds = kw.pop('preds', None)
+    manual_signals_batch = kw.pop('signals', None)
+
+    # Original forward of the signal
+    out = original_forward(*a, **kw)
+
+    if kwargs.get('per_sample', False):
+        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
+
+    # extract scalar
+    batch_scalar = manual_signals_batch
+    scalar = None
+    try:
+        # 1. Use manual batch scalar if provided (preferred for complex loss outputs)
+        if batch_scalar is not None:
+            if isinstance(batch_scalar, th.Tensor):
+                batch_scalar = batch_scalar.detach().cpu()
+                if batch_scalar.ndim == 0:
+                    scalar = float(batch_scalar.item())
+                else:
+                    scalar = float(batch_scalar.mean().item())
+            else:
+                try:
+                    import numpy as _np
+                    batch_scalar = _np.array(batch_scalar)
+                    scalar = float(batch_scalar.mean())
+                except Exception:
+                    pass
+        # 2. Otherwise fall back to extracting from 'out'
+        elif isinstance(out, th.Tensor):
+            batch_scalar = out.detach().cpu()
+            if batch_scalar.ndim == 0:
+                scalar = float(batch_scalar.item())
+            else:
+                scalar = float(batch_scalar.mean().item())
         else:
-            for k in losses_batch:
-                losses_batch[k] = losses_batch[k].detach().cpu().numpy()
-            per_sample_loss_np = losses_batch
+            try:
+                import numpy as _np
+                batch_scalar = _np.array(out)
+                scalar = float(batch_scalar.mean())
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-        # Update batch sample stats
-        # Check if model is in training mode with grad enabled
-        is_training = th.is_grad_enabled()
-
-        name = 'train_loader' if is_training else 'test_loader'
+    # log if requested and logger present
+    if kwargs.get('log', False) and scalar is not None:
         try:
-            loader = get_dataloader(name)
+            # try to get a ledger-registered logger
+            logger = None
+            try:
+                logger = get_logger()
+            except Exception:
+                try:
+                    logger = get_logger('main')
+                except Exception:
+                    logger = None
 
-            # TODO (GP): improve this logic to avoid double updates
-            # Improvement here should be to separate dataloaders that generates data from datasets, from data storage, which should be global,
-            # and in the ledger. So that we don't have to try multiple dataloaders to update the same dataset. And we can work on dataloader named Chloe for instance.
-            # https://github.com/GrayboxTech/weightslab/issues/50
-            if set(batch_ids_np) - set(get_dataloader(name).tracked_dataset.unique_ids):
-                nloaders = get_dataloaders()
-                for lname in nloaders:
-                    loader = get_dataloader(lname)
-                    if set(batch_ids_np).issubset(set(loader.tracked_dataset.unique_ids)):
-                        break
-            loader.tracked_dataset.update_batch_sample_stats(
-                model_age,
-                batch_ids_np,
-                per_sample_loss_np,
-                pred_np
-            )
-            loader.tracked_dataset.update_sample_stats_ex_batch(
-                batch_ids_np,
-                {
-                    "loss/combined": per_sample_loss_np,
-                    "pred": pred_np
-                }
-            )
-        except AttributeError as e:
-            logger.warning(
-                "Warning: Could not save data statistics to " +
-                f"tracked dataset: {e}. Please ensure the " +
-                "dataloader has a tracked dataset with " +
-                "`update_batch_sample_stats` and " +
-                "`update_sample_stats_ex_batch` methods, and is_training set."
-            )
+            if logger is not None and hasattr(logger, 'add_scalars'):
+                # attempt to get a sensible global_step
+                step = 0
+                try:
+                    m = get_model()
+                    step = int(m.get_age())
+                except Exception:
+                    step = 0
+                logger.add_scalars(
+                    reg_name,
+                    {reg_name: scalar},
+                    global_step=step
+                )
+        except Exception:
+            pass
+
+    # Save statistics if requested and applicable
+    if batch_scalar is not None and ids is not None and model_age is not None:
+        signals = {reg_name: batch_scalar}
+        save_signals(
+            model_age=model_age,
+            batch_ids=ids,
+            preds=preds,
+            signals=signals
+        )
+    return out
+
 
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
     """
@@ -224,94 +338,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 # New forward with logging and save stats
                 @functools.wraps(original_forward)
                 def new_forward(*a, **kw):
-                    # Remove parameters
-                    _ = kw.pop('flag', None)
-                    ids = kw.pop('batch_ids', None)
-                    model_age = kw.pop('model_age', None)
-                    preds = kw.pop('preds', None)
-                    manual_losses_batch = kw.pop('losses_batch', None)
-
-                    # Original forward of the signal
-                    out = original_forward(*a, **kw)
-
-                    if kwargs.get('per_sample', False):
-                        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
-
-                    # extract scalar
-                    batch_scalar = manual_losses_batch
-                    scalar = None
-                    try:
-                        # 1. Use manual batch scalar if provided (preferred for complex loss outputs)
-                        if batch_scalar is not None:
-                            if isinstance(batch_scalar, th.Tensor):
-                                batch_scalar = batch_scalar.detach().cpu()
-                                if batch_scalar.ndim == 0:
-                                    scalar = float(batch_scalar.item())
-                                else:
-                                    scalar = float(batch_scalar.mean().item())
-                            else:
-                                try:
-                                    import numpy as _np
-                                    batch_scalar = _np.array(batch_scalar)
-                                    scalar = float(batch_scalar.mean())
-                                except Exception:
-                                    pass
-                        # 2. Otherwise fall back to extracting from 'out'
-                        elif isinstance(out, th.Tensor):
-                            batch_scalar = out.detach().cpu()
-                            if batch_scalar.ndim == 0:
-                                scalar = float(batch_scalar.item())
-                            else:
-                                scalar = float(batch_scalar.mean().item())
-                        else:
-                            try:
-                                import numpy as _np
-                                batch_scalar = _np.array(out)
-                                scalar = float(batch_scalar.mean())
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
-                    # log if requested and logger present
-                    if kwargs.get('log', False) and scalar is not None:
-                        try:
-                            # try to get a ledger-registered logger
-                            logger = None
-                            try:
-                                logger = get_logger()
-                            except Exception:
-                                try:
-                                    logger = get_logger('main')
-                                except Exception:
-                                    logger = None
-
-                            if logger is not None and hasattr(logger, 'add_scalars'):
-                                # attempt to get a sensible global_step
-                                step = 0
-                                try:
-                                    m = get_model()
-                                    step = int(m.get_age())
-                                except Exception:
-                                    step = 0
-                                logger.add_scalars(
-                                    reg_name,
-                                    {reg_name: scalar},
-                                    global_step=step
-                                )
-                        except Exception:
-                            pass
-
-                    # Save statistics if requested and applicable
-                    if batch_scalar is not None and ids is not None and model_age is not None:
-                        _save_data_statistics(
-                            model_age=model_age,
-                            batch_ids=ids,
-                            losses_batch=batch_scalar,
-                            preds=preds
-                        )
-                    return out
-
+                    return wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw)
                 obj.forward = new_forward
 
             # register wrapped signal in ledger
@@ -329,7 +356,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             # fall back to hyperparams branch if something unexpected
             pass
 
-
     elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
         reg_name = kwargs.get('name') or flag
@@ -338,98 +364,21 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # wrap forward
         try:
             if hasattr(obj, 'compute') and callable(getattr(obj, 'compute')):
-                original_compute = obj.compute
+                original_forward = obj.compute
 
-                @functools.wraps(original_compute)
-                def new_compute(*a, **kw):
-                    out = original_compute(*a, **kw)
-                    if kwargs.get('per_sample', False):
-                        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
-                    # extract scalar
-                    try:
-                        if isinstance(out, th.Tensor):
-                            scalar = float(out.detach().cpu().mean().item())
-                        else:
-                            try:
-                                import numpy as _np
-                                scalar = float(_np.array(out).mean())
-                            except Exception:
-                                scalar = None
-                    except Exception:
-                        scalar = None
-
-                    if kwargs.get('log', False) and scalar is not None:
-                        try:
-                            logger = None
-                            try:
-                                logger = get_logger()
-                            except Exception:
-                                try:
-                                    logger = get_logger('main')
-                                except Exception:
-                                    logger = None
-                            if logger is not None and hasattr(logger, 'add_scalars'):
-                                step = 0
-                                try:
-                                    m = get_model()
-                                    step = int(m.get_age())
-                                except Exception:
-                                    step = 0
-                                logger.add_scalars(reg_name, {reg_name: scalar}, global_step=step)
-                        except Exception:
-                            pass
-
-                    return out
-
-                obj.compute = new_compute
+                # New forward with logging and save stats
+                @functools.wraps(original_forward)
+                def new_forward(*a, **kw):
+                    return wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw)
+                obj.forward = new_forward
 
             elif hasattr(obj, 'forward') and callable(getattr(obj, 'forward')):
                 original_forward = obj.forward
 
+                # New forward with logging and save stats
                 @functools.wraps(original_forward)
                 def new_forward(*a, **kw):
-                    out = original_forward(*a, **kw)
-
-                    # extract scalar
-                    try:
-                        if isinstance(out, th.Tensor):
-                            scalar = float(out.detach().cpu().mean().item())
-                        else:
-                            try:
-                                import numpy as _np
-                                scalar = float(_np.array(out).mean())
-                            except Exception:
-                                scalar = None
-                    except Exception:
-                        scalar = None
-
-                    # log if requested and logger present
-                    if kwargs.get('log', False) and scalar is not None:
-                        try:
-                            # try to get a ledger-registered logger
-                            logger = None
-                            try:
-                                logger = get_logger()
-                            except Exception:
-                                try:
-                                    logger = get_logger('main')
-                                except Exception:
-                                    logger = None
-
-                            if logger is not None and hasattr(logger, 'add_scalars'):
-                                # attempt to get a sensible global_step
-                                step = 0
-                                try:
-                                    m = get_model()
-                                    step = int(m.get_age())
-                                except Exception:
-                                    step = 0
-                                logger.add_scalars(reg_name, {reg_name: scalar}, global_step=step)
-                        except Exception:
-                            pass
-
-                    return out
-
+                    return wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw)
                 obj.forward = new_forward
 
             # register wrapped signal in ledger

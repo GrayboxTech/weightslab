@@ -288,6 +288,10 @@ class DataService:
             return False, "Training is running; pause to browse or edit data."
         return True, ""
 
+    def _get_data_len(self) -> int:
+        """Get the total number of samples across all tracked datasets."""
+        return self.data_len if hasattr(self, "data_len") else 0
+
     def _pull_into_all_data_view_df(self):
             """Stream stats from the shared H5 store with timeout to avoid blocking training.
 
@@ -300,6 +304,9 @@ class DataService:
 
             # Update loaders
             self._update_loaders()
+
+            # Update data length
+            self.data_len = sum(len(i._obj.wrapped_dataset) for i in self._loaders.values() if i is not None)
 
             # Dynamically discover all loader origins from tracked datasets
             origins = []
@@ -328,6 +335,36 @@ class DataService:
                         df.set_index(["origin", "sample_id"], inplace=True)
                 except Exception as e:
                     logger.warning(f"Failed to set index on streamed dataframe: {e}")
+
+                # Fill in missing rows from loaders up to self.data_len
+                if len(df) < self.data_len:
+                    missing_count = self.data_len - len(df)
+                    logger.debug(f"[DataService] Loaded df has {len(df)} rows but expected {self.data_len}; creating {missing_count} placeholder rows")
+
+                    # Create placeholder rows for missing samples
+                    missing_rows = []
+                    for origin in origins:
+                        for loader_name, loader in self._loaders.items():
+                            if loader is None:
+                                continue
+                            tracked_ds = getattr(loader, "tracked_dataset", None)
+                            if tracked_ds and hasattr(tracked_ds, "_dataset_split") and tracked_ds._dataset_split == origin:
+                                loader_size = len(loader._obj.wrapped_dataset) if hasattr(loader, "_obj") else 0
+                                for sample_idx in range(loader_size):
+                                    if (origin, sample_idx) not in df.index:
+                                        # Create a minimal placeholder row
+                                        missing_rows.append({
+                                            "origin": origin,
+                                            "sample_id": sample_idx,
+                                            "deny_listed": False,
+                                            "tags": ""
+                                        })
+
+                    if missing_rows:
+                        missing_df = pd.DataFrame(missing_rows)
+                        missing_df.set_index(["sample_id"], inplace=True)
+                        df = pd.concat([df, missing_df])
+                        logger.debug(f"[DataService] Added {len(missing_rows)} placeholder rows; total df size now {len(df)}")
 
                 try:
                     self._stats_last_mtime = self._stats_store.path().stat().st_mtime
@@ -656,14 +693,13 @@ class DataService:
         - number_of_discarded_samples: rows with deny_listed == True (if column exists)
         - number_of_samples_in_the_loop: rows not deny_listed
         """
-        total_count = len(df)
+        total_count = self._get_data_len()
         discarded_count = (
             len(df[df.get("deny_listed", False) == True])  # noqa: E712
-            if "deny_listed" in df.columns
+            if df is not None and "deny_listed" in df.columns
             else 0
         )
         in_loop_count = total_count - discarded_count
-        unique_tags = self._get_unique_tags()
 
         return pb2.DataQueryResponse(
             success=True,
@@ -875,7 +911,7 @@ class DataService:
             self._last_internals_update_time = current_time
             return
 
-        updated_df = self._pull_into_all_data_view_df()
+        updated_df = self._pull_into_all_data_view_df()  # new snapshot from h5 data
 
         if self._all_datasets_df is not None and not self._all_datasets_df.empty:
             # If the current DF is sorted differently than the default 'sample_id' order,
@@ -885,7 +921,6 @@ class DataService:
             # 1. Update the new DF with the new data
             # 2. Reindex the new DF to match the old DF's index order (intersection)
             # This keeps the user's sort valid for existing items.
-            pass
 
             # Check if we have a custom sort (index is not strictly increasing monotonic)
             # AND if the index types are compatible (both numeric)
@@ -928,13 +963,14 @@ class DataService:
           - number_of_discarded_samples: rows with deny_listed == True
         """
         with self._lock:
+            self._slowUpdateInternals()
             df = self._all_datasets_df  # authoritative DF, mutated in-place
 
             # 1) No query: just report counts
             if request.query == "":
                 return self._build_success_response(
                     df=df,
-                    message=f"Current dataframe has {len(df)} samples",
+                    message=f"Current dataframe has {self._get_data_len()} samples",
                 )
 
             try:
@@ -1029,7 +1065,7 @@ class DataService:
 
             # Use more workers for I/O-bound image processing (CPU count * 2)
             max_workers = max(min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8), 1)
-            with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            with futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="get_data_samples_worker") as executor:
                 results = executor.map(self._process_sample_row, tasks, timeout=30)
                 data_records = [res for res in results if res is not None]
 
