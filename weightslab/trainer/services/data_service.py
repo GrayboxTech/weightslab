@@ -20,7 +20,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
-from weightslab.backend.ledgers import get_dataloaders
+from weightslab.backend.ledgers import get_dataloaders, get_dataframe
 
 
 # Get global logger
@@ -288,10 +288,6 @@ class DataService:
             return False, "Training is running; pause to browse or edit data."
         return True, ""
 
-    def _get_data_len(self) -> int:
-        """Get the total number of samples across all tracked datasets."""
-        return self.data_len if hasattr(self, "data_len") else 0
-
     def _pull_into_all_data_view_df(self):
             """Stream stats from the shared H5 store with timeout to avoid blocking training.
 
@@ -305,27 +301,10 @@ class DataService:
             # Update loaders
             self._update_loaders()
 
-            # Update data length
-            self.data_len = sum(len(i._obj.wrapped_dataset) for i in self._loaders.values() if i is not None)
-
-            # Dynamically discover all loader origins from tracked datasets
-            origins = []
-            for _, loader in self._loaders.items():
-                if loader is not None:
-                    tracked_ds = getattr(loader, "tracked_dataset", None)
-                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
-                        origin = tracked_ds._dataset_split
-                        if origin not in origins:
-                            origins.append(origin)
-
-            if not origins:
-                logger.warning("[DataService] No dataset origins found from loaders")
-                return pd.DataFrame()
-
             # Attempt non-blocking read from H5 store
             # If H5 is locked (training writing), timeout and return cached snapshot
             try:
-                df = self._stats_store.load_all(origins, non_blocking=False)
+                df = get_dataframe().get_combined_df()
                 if df.empty:
                     return df
 
@@ -335,36 +314,6 @@ class DataService:
                         df.set_index(["origin", "sample_id"], inplace=True)
                 except Exception as e:
                     logger.warning(f"Failed to set index on streamed dataframe: {e}")
-
-                # Fill in missing rows from loaders up to self.data_len
-                if len(df) < self.data_len:
-                    missing_count = self.data_len - len(df)
-                    logger.debug(f"[DataService] Loaded df has {len(df)} rows but expected {self.data_len}; creating {missing_count} placeholder rows")
-
-                    # Create placeholder rows for missing samples
-                    missing_rows = []
-                    for origin in origins:
-                        for loader_name, loader in self._loaders.items():
-                            if loader is None:
-                                continue
-                            tracked_ds = getattr(loader, "tracked_dataset", None)
-                            if tracked_ds and hasattr(tracked_ds, "_dataset_split") and tracked_ds._dataset_split == origin:
-                                loader_size = len(loader._obj.wrapped_dataset) if hasattr(loader, "_obj") else 0
-                                for sample_idx in range(loader_size):
-                                    if (origin, sample_idx) not in df.index:
-                                        # Create a minimal placeholder row
-                                        missing_rows.append({
-                                            "origin": origin,
-                                            "sample_id": sample_idx,
-                                            "deny_listed": False,
-                                            "tags": ""
-                                        })
-
-                    if missing_rows:
-                        missing_df = pd.DataFrame(missing_rows)
-                        missing_df.set_index(["sample_id"], inplace=True)
-                        df = pd.concat([df, missing_df])
-                        logger.debug(f"[DataService] Added {len(missing_rows)} placeholder rows; total df size now {len(df)}")
 
                 try:
                     self._stats_last_mtime = self._stats_store.path().stat().st_mtime
@@ -693,7 +642,7 @@ class DataService:
         - number_of_discarded_samples: rows with deny_listed == True (if column exists)
         - number_of_samples_in_the_loop: rows not deny_listed
         """
-        total_count = self._get_data_len()
+        total_count = len(df)
         discarded_count = (
             len(df[df.get("deny_listed", False) == True])  # noqa: E712
             if df is not None and "deny_listed" in df.columns
@@ -911,42 +860,7 @@ class DataService:
             self._last_internals_update_time = current_time
             return
 
-        updated_df = self._pull_into_all_data_view_df()  # new snapshot from h5 data
-
-        if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-            # If the current DF is sorted differently than the default 'sample_id' order,
-            # we should try to maintain that sort order with the new data.
-            # Simple heuristic: if the index has changed (reordered), re-apply it.
-
-            # 1. Update the new DF with the new data
-            # 2. Reindex the new DF to match the old DF's index order (intersection)
-            # This keeps the user's sort valid for existing items.
-
-            # Check if we have a custom sort (index is not strictly increasing monotonic)
-            # AND if the index types are compatible (both numeric)
-            if not self._all_datasets_df.index.is_monotonic_increasing:
-                 # We have a custom sort.
-                 old_index = self._all_datasets_df.index
-                 new_index = updated_df.index
-
-                 # 1. Identify rows that are in BOTH (intersection) -> keep old order
-                 # use .intersection to preserve order of left argument (old_index)
-                 kept_indices = [x for x in old_index if x in new_index]
-
-                 # 2. Identify rows that are NEW (difference) -> append to end
-                 # Use set difference for speed, then sort or just append
-                 old_index_set = set(old_index)
-                 newly_added_indices = [x for x in new_index if x not in old_index_set]
-
-                 # 3. Construct the full requested order
-                 full_order = kept_indices + newly_added_indices
-
-                 # 4. Reindex using this full order.
-                 # The 'updated_df' contains ALL the data (old items updated + new items).
-                 # This safely reorders it.
-                 updated_df = updated_df.reindex(full_order)
-
-        self._all_datasets_df = updated_df
+        self._all_datasets_df = self._pull_into_all_data_view_df()  # new snapshot from data
         self._last_internals_update_time = current_time
 
     def ApplyDataQuery(self, request, context):
@@ -970,7 +884,7 @@ class DataService:
             if request.query == "":
                 return self._build_success_response(
                     df=df,
-                    message=f"Current dataframe has {self._get_data_len()} samples",
+                    message=f"Current dataframe has {len(df)} samples",
                 )
 
             try:

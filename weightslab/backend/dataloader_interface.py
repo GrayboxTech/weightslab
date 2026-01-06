@@ -55,11 +55,10 @@ class MaskedSampler(Sampler):
     def __iter__(self):
         """Iterate over non-deny-listed indices."""
         # Build a set of deny-listed UIDs for fast lookup via DataFrame
-        deny_listed_uids = set(
-            self.tracked_dataset._stats_df[
-                self.tracked_dataset._stats_df['deny_listed'] == True
-            ].index
-        )
+        df_view = self.tracked_dataset._get_df_view()
+        deny_listed_uids = set()
+        if not df_view.empty and 'deny_listed' in df_view.columns:
+            deny_listed_uids = set(df_view[df_view['deny_listed'] == True].index)
 
         # Iterate through base sampler, yielding only non-denied indices
         for idx in self.base_sampler:
@@ -70,11 +69,10 @@ class MaskedSampler(Sampler):
     def __len__(self):
         """Return the number of non-deny-listed samples."""
         # Count non-denied samples via DataFrame
-        deny_listed_uids = set(
-            self.tracked_dataset._stats_df[
-                self.tracked_dataset._stats_df['deny_listed'] == True
-            ].index
-        )
+        df_view = self.tracked_dataset._get_df_view()
+        deny_listed_uids = set()
+        if not df_view.empty and 'deny_listed' in df_view.columns:
+            deny_listed_uids = set(df_view[df_view['deny_listed'] == True].index)
         total = len(self.base_sampler)
         denied_count = len(deny_listed_uids)
         return max(0, total - denied_count)

@@ -1,5 +1,4 @@
 import os
-import re
 import time
 import logging
 import tempfile
@@ -16,6 +15,24 @@ from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
+from weightslab.data.dataframe_manager import LEDGER_MANAGER
+from weightslab.data.data_utils import (
+    _detect_dataset_split,
+    _is_scalarish,
+    _is_dense_array,
+    _to_numpy_safe,
+    _downsample_nn,
+    _matches_pattern,
+    _filter_columns_by_patterns,
+)
+from weightslab.data.sample_stats import (
+    SampleStats,
+    SampleStatsEx,
+    SAMPLES_STATS_TO_SAVE_TO_H5,
+    SAMPLES_STATS_DEFAULTS,
+    SAMPLES_STATS_DEFAULTS_TYPES,
+    SAMPLE_STATS_ALL,
+)
 
 
 # Global logger
@@ -24,396 +41,7 @@ SamplePredicateFn = Callable[[], bool]
 global _UID_CNT
 _UID_CNT = 0
 
-# Global UID registry to detect overlaps with train set within a process
 GLOBAL_UID_REGISTRY: Dict[str, Set[int]] = {}
-
-
-class LedgeredDataFrameManager:
-    """Central in-memory ledger shared across all loaders/splits.
-
-    - Maintains a single MultiIndex DataFrame keyed by (origin, sample_id).
-    - Tracks dirty (origin, sample_id) pairs and flushes H5 on thresholds.
-    - Heavy blobs stay out of this DF; only scalar/metadata columns live here.
-    """
-
-    def __init__(self, flush_interval: float = 5.0, flush_max_rows: int = 200):
-        self._df: pd.DataFrame = pd.DataFrame()
-        self._store: H5DataFrameStore | None = None
-        self._pending: Set[tuple[str, int]] = set()
-        self._lock = threading.RLock()
-        self._flush_interval = flush_interval
-        self._flush_max_rows = flush_max_rows
-        self._flush_thread: threading.Thread | None = None
-        self._flush_stop = threading.Event()
-
-    def set_store(self, store: H5DataFrameStore):
-        with self._lock:
-            if self._store is None:
-                self._store = store
-
-    def register_split(self, origin: str, df: pd.DataFrame, store: H5DataFrameStore | None = None):
-        """Merge a split-local DF into the global ledger, tagging with origin."""
-        with self._lock:
-            if store is not None:
-                self.set_store(store)
-        self.upsert_df(origin, df)
-
-        self._ensure_flush_thread()
-
-    def upsert_df(self, origin: str, df: pd.DataFrame):
-        """Upsert an entire split dataframe into the global ledger."""
-        if df is None or df.empty:
-            return
-        with self._lock:
-            df_local = df.copy()
-            df_local["origin"] = origin
-            df_local = df_local.reset_index().set_index(["origin", "sample_id"])
-
-            if self._df.empty:
-                self._df = df_local
-            else:
-                # Align columns (union)
-                for col in df_local.columns:
-                    if col not in self._df.columns:
-                        self._df[col] = np.nan
-                for col in self._df.columns:
-                    if col not in df_local.columns:
-                        df_local[col] = np.nan
-
-                self._df = pd.concat([self._df, df_local], axis=0)
-                self._df = self._df[~self._df.index.duplicated(keep="last")]
-                self._df.sort_index(inplace=True)
-
-    def upsert_row(self, origin: str, sample_id: int, row: pd.Series):
-        """Upsert a single row into the global ledger."""
-        if row is None or row.empty:
-            return
-        with self._lock:
-            row_df = row.to_frame().T.copy()
-            row_df["sample_id"] = sample_id
-            row_df["origin"] = origin
-            row_df = row_df.set_index(["origin", "sample_id"])
-
-            if self._df.empty:
-                self._df = row_df
-            else:
-                for col in row_df.columns:
-                    if col not in self._df.columns:
-                        self._df[col] = np.nan
-                for col in self._df.columns:
-                    if col not in row_df.columns:
-                        row_df[col] = np.nan
-
-                self._df = pd.concat([self._df, row_df], axis=0)
-                self._df = self._df[~self._df.index.duplicated(keep="last")]
-
-    def mark_dirty(self, origin: str, sample_id: int):
-        with self._lock:
-            self._pending.add((origin, int(sample_id)))
-
-    def _ensure_flush_thread(self):
-        if self._flush_thread and self._flush_thread.is_alive():
-            return
-
-        def _worker():
-            while not self._flush_stop.is_set():
-                try:
-                    self._flush_stop.wait(timeout=self._flush_interval)
-                    self.flush_if_needed()
-                except Exception as e:
-                    logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}")
-
-        self._flush_thread = threading.Thread(target=_worker, daemon=True, name="Ledger-Flush")
-        self._flush_thread.start()
-
-    def stop(self):
-        self._flush_stop.set()
-        if self._flush_thread:
-            self._flush_thread.join(timeout=2.0)
-
-    def get_combined_df(self) -> pd.DataFrame:
-        with self._lock:
-            return self._df.copy()
-
-    def _coerce_df_for_h5(self, df: pd.DataFrame) -> pd.DataFrame:
-        df2 = df.copy()
-        for col, default in SAMPLES_STATS_DEFAULTS.items():
-            if col in df2.columns:
-                try:
-                    if df2[col].isna().any():
-                        df2[col] = df2[col].fillna(default)
-                except Exception:
-                    pass
-        for col, dtype in SAMPLES_STATS_DEFAULTS_TYPES.items():
-            if col in df2.columns:
-                try:
-                    if dtype is str:
-                        df2[col] = df2[col].astype(str)
-                    else:
-                        df2[col] = df2[col].astype(dtype)
-                except Exception:
-                    pass
-        return df2
-
-    def _should_flush(self) -> bool:
-        with self._lock:
-            total_pending = len(self._pending)
-        return total_pending >= self._flush_max_rows or total_pending > 0
-
-    def flush_if_needed(self, force: bool = False):
-        if not force and not self._should_flush():
-            return
-        with self._lock:
-            if self._store is None or self._df.empty or not self._pending:
-                return
-            work = list(self._pending)
-            self._pending.clear()
-            df_snapshot = self._df
-
-        # Group pending by origin
-        by_origin: Dict[str, list[int]] = {}
-        for origin, sid in work:
-            by_origin.setdefault(origin, []).append(sid)
-
-        for origin, ids in by_origin.items():
-            try:
-                if not ids:
-                    continue
-                cols_to_save = _filter_columns_by_patterns(df_snapshot.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
-                if not cols_to_save:
-                    continue
-
-                idx = df_snapshot.index
-                mask = (idx.get_level_values("origin") == origin) & (idx.get_level_values("sample_id").isin(ids))
-                df_update = df_snapshot.loc[mask, cols_to_save].copy()
-                if df_update.empty:
-                    continue
-                df_update = df_update.droplevel("origin")
-                df_update["sample_id"] = df_update.index
-
-                def _coerce_scalar_cell(v):
-                    try:
-                        if isinstance(v, np.ndarray):
-                            if v.size == 0:
-                                return None
-                            try:
-                                return v.item()
-                            except Exception:
-                                return np.ravel(v)[0].item() if v.dtype.kind in ('b', 'i', 'u', 'f') else str(v)
-                        if isinstance(v, (list, tuple)):
-                            return v[0] if len(v) else None
-                    except Exception:
-                        pass
-                    return v
-
-                df_update = df_update.map(_coerce_scalar_cell)
-                df_update = self._coerce_df_for_h5(df_update)
-                df_update.set_index("sample_id", inplace=True)
-                written = self._store.upsert(origin, df_update)
-                logger.debug(f"[LedgeredDataFrameManager] Flushed {written} rows (origin={origin})")
-            except Exception as e:
-                logger.error(f"[LedgeredDataFrameManager] Failed flush for origin={origin}: {e}")
-
-
-# Singleton manager for this process
-LEDGER_MANAGER = LedgeredDataFrameManager()
-
-
-def _detect_dataset_split(ds) -> str:
-    """Best-effort split detection for common datasets. Returns actual split name or 'unknown'."""
-    # Check .train boolean attribute (common in torchvision datasets)
-    train_attr = getattr(ds, 'train', None)
-    if train_attr is True:
-        return 'train'
-    if train_attr is False:
-        # Could be test, val, or eval - check for more specific attribute
-        split = getattr(ds, 'split', None)
-        if isinstance(split, str) and split.strip():
-            return split.strip().lower()
-        return 'test'  # Default fallback for train=False
-
-    # Check .split attribute (e.g., 'train', 'val', 'test', 'validation', etc.)
-    split = getattr(ds, 'split', None)
-    if isinstance(split, str) and split.strip():
-        return split.strip().lower()
-
-    # Check common alternative attributes
-    for attr_name in ['mode', 'subset', 'dataset_type']:
-        val = getattr(ds, attr_name, None)
-        if isinstance(val, str) and val.strip():
-            return val.strip().lower()
-
-    return 'unknown'
-
-
-def _is_scalarish(x) -> bool:
-    if isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_)):
-        return True
-    if isinstance(x, str):
-        return len(x) <= 256
-    if isinstance(x, np.ndarray) and x.ndim == 0:
-        return True
-    return False
-
-
-def _is_dense_array(x) -> bool:
-    return isinstance(x, np.ndarray) and x.ndim >= 2
-
-
-def _to_numpy_safe(x):
-    if isinstance(x, np.ndarray):
-        return x
-    if isinstance(x, (list, tuple)):
-        try:
-            return np.asarray(x)
-        except Exception:
-            return None
-    try:
-        if isinstance(x, th.Tensor):
-            return x.detach().cpu().numpy()
-    except Exception:
-        pass
-    return None
-
-
-def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
-    """
-    Downsample 2D/3D arrays using simple striding (nearest-neighbor-like).
-    Keeps channels if present. Avoids heavy deps.
-    """
-    if arr.ndim == 2:
-        H, W = arr.shape
-        scale = max(1, int(np.ceil(max(H, W) / max_hw)))
-        return arr[::scale, ::scale]
-    if arr.ndim == 3:
-        # detect channels-first
-        if arr.shape[0] < arr.shape[1]:
-            C, H, W = arr.shape
-            scale = max(1, int(np.ceil(max(H, W) / max_hw)))
-            return arr[:, ::scale, ::scale]
-        else:
-            H, W, C = arr.shape
-            scale = max(1, int(np.ceil(max(H, W) / max_hw)))
-            return arr[::scale, ::scale, :]
-    return arr
-
-
-def _filter_columns_by_patterns(columns: list, patterns: list) -> list:
-    """
-    Filter columns by matching against patterns in SAMPLES_STATS_TO_SAVE_TO_H5.
-    Patterns can be exact strings or regex patterns.
-
-    Args:
-        columns: List of column names to filter
-        patterns: List of patterns (strings or regex patterns from SAMPLES_STATS_TO_SAVE_TO_H5)
-
-    Returns:
-        List of columns that match any pattern
-    """
-    matched_cols = []
-    for col in columns:
-        for pattern in patterns:
-            try:
-                # Try exact match first
-                if col == pattern:
-                    matched_cols.append(col)
-                    break
-                # Try regex match
-                if re.search(pattern, col):
-                    matched_cols.append(col)
-                    break
-            except re.error:
-                # If pattern is not valid regex, skip it
-                pass
-    return matched_cols
-
-
-def _matches_pattern(name: str, patterns: list) -> bool:
-    """
-    Check if a name matches any pattern in the list.
-    Patterns can be exact strings or regex patterns.
-
-    Args:
-        name: The name to check
-        patterns: List of patterns (strings or regex patterns from SAMPLES_STATS_TO_SAVE_TO_H5)
-
-    Returns:
-        True if name matches any pattern
-    """
-    for pattern in patterns:
-        try:
-            # Try exact match first
-            if name == pattern:
-                return True
-            # Try regex match
-            if re.search(pattern, name):
-                return True
-        except re.error:
-            # If pattern is not valid regex, skip it
-            pass
-    return False
-
-
-class SampleStats:
-    class Ex(str, Enum):
-        PREDICTION_AGE = "prediction_age"
-        PREDICTION_LOSS_VALUE = "prediction_loss_values"
-        PREDICTION_LOSS_NAME = "prediction_loss_names"
-
-        PREDICTION_RAW = "prediction_raw"
-        TARGET = "target"
-        SAMPLE_ID = "sample_id"
-        DENY_LISTED = "deny_listed"
-        ENCOUNTERED = "encountered"
-        TAGS = "tags"
-
-        @classmethod
-        def ALL(cls):
-            return list(map(lambda c: c.value, cls))
-
-    TO_SAVE_TO_H5 = [
-        Ex.DENY_LISTED.value,
-        Ex.TAGS.value,
-        Ex.ENCOUNTERED.value,
-        Ex.PREDICTION_LOSS_VALUE.value,
-        Ex.PREDICTION_LOSS_NAME.value,
-        ".*loss.*",  # Any other loss-related stats
-        Ex.PREDICTION_AGE.value,
-    ]
-
-    DEFAULTS = {
-        # No None values for h5
-        Ex.DENY_LISTED.value: False,
-        Ex.TAGS.value: '',
-        Ex.ENCOUNTERED.value: 0,
-        Ex.PREDICTION_LOSS_VALUE.value: [-1.0],
-        Ex.PREDICTION_LOSS_NAME.value: [''],
-        Ex.PREDICTION_AGE.value: -1,
-
-        Ex.TARGET.value: None,
-        Ex.PREDICTION_RAW.value: None,
-    }
-
-    DEFAULTS_TYPES = {
-        Ex.DENY_LISTED.value: bool,
-        Ex.TAGS.value: str,
-        Ex.ENCOUNTERED.value: int,
-        Ex.PREDICTION_AGE.value: int,
-        Ex.PREDICTION_LOSS_VALUE.value: list,
-        Ex.PREDICTION_LOSS_NAME.value: list,
-
-        Ex.PREDICTION_RAW.value: int | np.ndarray,
-        Ex.TARGET.value: int | np.ndarray,
-    }
-
-
-# Backward-compatible aliases
-SampleStatsEx = SampleStats.Ex
-SAMPLES_STATS_TO_SAVE_TO_H5 = SampleStats.TO_SAVE_TO_H5
-SAMPLES_STATS_DEFAULTS = SampleStats.DEFAULTS
-SAMPLES_STATS_DEFAULTS_TYPES = SampleStats.DEFAULTS_TYPES
-
-
 # I just like it when the enum values have the same name leghts.
 class _StateDictKeys(str, Enum):
     IDX_TO_IDX_MAP = "idx_to_idx_map"
@@ -434,6 +62,8 @@ class DataSampleTrackingWrapper(Dataset):
         is_training: Whether this is a training dataset
         compute_hash: Whether to compute content-based UIDs (slower but more robust)
         use_tags: Enable tag-based labeling from H5-stored tags
+        load_every_data: Load all existing data from H5 on initialization
+        name: Name of the dataset split (e.g., 'train', 'test', etc.)
         tags_mapping: Dict mapping tag strings to label integers
             - If only 1 tag specified: binary classification (tag → 1, others → 0)
             - If multiple tags: multiclass classification using the mapping
@@ -464,6 +94,7 @@ class DataSampleTrackingWrapper(Dataset):
         use_tags: bool = False,
         tags_mapping: Optional[Dict[str, int]] = None,
         stats_store: Optional[H5DataFrameStore] = None,
+        load_every_data: bool = False,
         name: Optional[str] = 'unknown',
         **_,
     ):
@@ -548,8 +179,6 @@ class DataSampleTrackingWrapper(Dataset):
         self._denied_samples_ids = set()
         self.denied_sample_cnt = 0
         self.idx_to_idx_remapp = dict()
-        # Dense arrays (masks, etc.) kept separate for efficiency
-        self.dense_stats_store: Dict[str, Dict[int, np.ndarray]] = {}
         self._ex_columns_cache: Set[str] = set()
         self._map_updates_hook_fns = []
         self._df_lock = threading.RLock()
@@ -567,15 +196,15 @@ class DataSampleTrackingWrapper(Dataset):
             row = {"sample_id": int(uid)}
             row.update(SampleStats.DEFAULTS)
             default_data.append(row)
-        self._stats_df = pd.DataFrame(default_data).set_index("sample_id")
+        init_df = pd.DataFrame(default_data).set_index("sample_id")
 
         # Register this split with the global ledger manager (shared across loaders)
-        LEDGER_MANAGER.register_split(self._dataset_split, self._stats_df, self._stats_store)
+        LEDGER_MANAGER.register_split(self._dataset_split, init_df, self._stats_store)
 
         # Initialize H5 with default dataframe containing all UIDs
-        if self._stats_store:
-            cols_to_save = _filter_columns_by_patterns(self._stats_df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
-            df_init = self._stats_df[cols_to_save].copy()
+        if self._stats_store and load_every_data:
+            cols_to_save = _filter_columns_by_patterns(init_df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
+            df_init = init_df[cols_to_save].copy()
             df_init["sample_id"] = df_init.index
 
             # Only initialize rows that are missing in the shared store
@@ -601,14 +230,12 @@ class DataSampleTrackingWrapper(Dataset):
                             if "sample_id" in existing_df.columns:
                                 existing_df = existing_df.set_index("sample_id")
 
-                    # Merge existing data into self._stats_df (existing data takes precedence)
+                    # Merge existing data into the global ledger (existing data takes precedence)
                     current_uids = set(int(u) for u in self.unique_ids)
                     existing_df_filtered = existing_df[existing_df.index.isin(current_uids)]
                     if not existing_df_filtered.empty:
-                        # Update self._stats_df with existing values
-                        for col in existing_df_filtered.columns:
-                            if col in self._stats_df.columns:
-                                self._stats_df.update(existing_df_filtered[[col]])
+                        # Push existing data into ledger
+                        LEDGER_MANAGER.upsert_df(self._dataset_split, existing_df_filtered)
                         logger.debug(
                             f"[DataSampleTrackingWrapper] Loaded {len(existing_df_filtered)} existing rows from H5 for {self._dataset_split}"
                         )
@@ -616,7 +243,7 @@ class DataSampleTrackingWrapper(Dataset):
                     # Initialize missing rows in H5 store
                     missing_uids = current_uids - set(existing_df_filtered.index)
                     if missing_uids:
-                        df_missing = self._stats_df.loc[list(missing_uids), cols_to_save].copy()
+                        df_missing = init_df.loc[list(missing_uids), cols_to_save].copy()
                         df_missing["sample_id"] = df_missing.index
                         df_missing.set_index("sample_id", inplace=True)
                         written = self._stats_store.upsert(self._dataset_split, df_missing)
@@ -632,9 +259,10 @@ class DataSampleTrackingWrapper(Dataset):
                     )
             except Exception as e:
                 logger.debug(f"[DataSampleTrackingWrapper] Could not initialize H5 rows: {e}")
-        # Count denied samples in self._stats_df
-        if SampleStatsEx.DENY_LISTED.value in self._stats_df.columns:
-            self.denied_sample_cnt = int(self._stats_df[SampleStatsEx.DENY_LISTED.value].sum())
+        # Count denied samples from ledger
+        denied_df = LEDGER_MANAGER.get_split_df(self._dataset_split)
+        if not denied_df.empty and SampleStatsEx.DENY_LISTED.value in denied_df.columns:
+            self.denied_sample_cnt = int(denied_df[SampleStatsEx.DENY_LISTED.value].sum())
         else:
             self.denied_sample_cnt = 0
         # Update idx_to_idx mapping
@@ -657,7 +285,8 @@ class DataSampleTrackingWrapper(Dataset):
         # Log tag-based labeling configuration if enabled
         if self._use_tags:
             with self._df_lock:
-                tags_count = sum(1 for tag in self._stats_df[SampleStatsEx.TAGS.value] if tag)
+                tags_df = LEDGER_MANAGER.get_split_df(self._dataset_split)
+                tags_count = 0 if tags_df.empty or SampleStatsEx.TAGS.value not in tags_df.columns else sum(1 for tag in tags_df[SampleStatsEx.TAGS.value] if tag)
             if self._is_binary_labels:
                 target_tag = list(self._tags_mapping.keys())[0]
                 logger.info(
@@ -682,12 +311,16 @@ class DataSampleTrackingWrapper(Dataset):
         # Compare wrapped dataset by identity (same object) or type
         if not isinstance(other, DataSampleTrackingWrapper):
             return False
+        self_df = self._get_df_view()
+        other_df = other._get_df_view()
 
-        for c in self._stats_df.columns:
-            if c not in other._stats_df.columns:
-                return False
-            if not (other._stats_df[c].astype(str) == self._stats_df[c].astype(str)).all():
-                return False
+        # Align columns
+        cols = set(self_df.columns) | set(other_df.columns)
+        self_df = self_df.reindex(columns=cols)
+        other_df = other_df.reindex(columns=cols)
+        if not self_df.fillna("<NA>").astype(str).equals(other_df.fillna("<NA>").astype(str)):
+            return False
+
         wrapped_equal = (self.wrapped_dataset is other.wrapped_dataset or
                         type(self.wrapped_dataset) == type(other.wrapped_dataset))
 
@@ -814,30 +447,34 @@ class DataSampleTrackingWrapper(Dataset):
 
     def state_dict(self) -> Dict:
         with self._df_lock:
-            # Extract core stats (from SAMPLES_STATS_TO_SAVE_TO_H5)
-            core = {}
-            matched_cols = _filter_columns_by_patterns(self._stats_df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
-            for stat_name in matched_cols:
-                core[stat_name] = self._stats_df[stat_name].dropna().to_dict()
+            df = self._get_df_view()
 
-            # Extract ex stats (columns not in core)
-            ex = {}
-            for col in self._ex_columns_cache:
-                if col in self._stats_df.columns and not _matches_pattern(col, SAMPLES_STATS_TO_SAVE_TO_H5):
-                    ex[col] = self._stats_df[col].dropna().to_dict()
+        # Extract core stats (from SAMPLES_STATS_TO_SAVE_TO_H5)
+        core = {}
+        matched_cols = _filter_columns_by_patterns(df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
+        for stat_name in matched_cols:
+            core[stat_name] = df[stat_name].dropna().to_dict()
 
-            return {
-                _StateDictKeys.IDX_TO_IDX_MAP.value: self.idx_to_idx_remapp,
-                _StateDictKeys.BLOCKD_SAMPLES.value: self.denied_sample_cnt,
-                _StateDictKeys.SAMPLES_STATSS.value: {
-                    "core": core,
-                    "ex": ex,
-                    "dense": {
-                        k: {int(sid): v for sid, v in inner.items()}
-                        for k, inner in self.dense_stats_store.items()
-                    }
+        # Extract ex stats (columns not in core)
+        ex = {}
+        for col in self._ex_columns_cache:
+            if col in df.columns and not _matches_pattern(col, SAMPLES_STATS_TO_SAVE_TO_H5):
+                ex[col] = df[col].dropna().to_dict()
+
+        dense = LEDGER_MANAGER.get_dense_map(self._dataset_split)
+
+        return {
+            _StateDictKeys.IDX_TO_IDX_MAP.value: self.idx_to_idx_remapp,
+            _StateDictKeys.BLOCKD_SAMPLES.value: self.denied_sample_cnt,
+            _StateDictKeys.SAMPLES_STATSS.value: {
+                "core": core,
+                "ex": ex,
+                "dense": {
+                    k: {int(sid): v for sid, v in inner.items()}
+                    for k, inner in dense.items()
                 },
-            }
+            },
+        }
 
     def load_state_dict(self, state_dict: Dict):
         self.dataframe = None
@@ -850,54 +487,50 @@ class DataSampleTrackingWrapper(Dataset):
         samples_stats_payload = state_dict[_StateDictKeys.SAMPLES_STATSS]
 
         # Backward compatibility: accept either flat or nested dict
-        with self._df_lock:
-            if isinstance(samples_stats_payload, dict) and "core" in samples_stats_payload:
-                # Newer format with core/ex/dense
-                core_stats = samples_stats_payload.get("core", {})
-                ex_stats = samples_stats_payload.get("ex", {})
+        if isinstance(samples_stats_payload, dict) and "core" in samples_stats_payload:
+            # Newer format with core/ex/dense
+            core_stats = samples_stats_payload.get("core", {})
+            ex_stats = samples_stats_payload.get("ex", {})
 
-                # Load core stats into DataFrame
-                for stat_name, uid_dict in core_stats.items():
-                    if stat_name not in self._stats_df.columns:
-                        self._stats_df[stat_name] = None
-                    for uid, value in uid_dict.items():
-                        uid = int(uid)
-                        if uid in self._stats_df.index:
-                            self._stats_df.loc[uid, stat_name] = value
+            # Load core stats into ledger
+            for stat_name, uid_dict in core_stats.items():
+                for uid, value in uid_dict.items():
+                    uid_int = int(uid)
+                    self._set_values(uid_int, {stat_name: value})
 
-                # Load ex stats into DataFrame
-                for stat_name, uid_dict in ex_stats.items():
-                    if stat_name not in self._stats_df.columns:
-                        self._stats_df[stat_name] = None
-                        self._ex_columns_cache.add(stat_name)
-                    for uid, value in uid_dict.items():
-                        uid = int(uid)
-                        if uid in self._stats_df.index:
-                            self._stats_df.loc[uid, stat_name] = value
+            # Load ex stats into ledger
+            for stat_name, uid_dict in ex_stats.items():
+                self._ex_columns_cache.add(stat_name)
+                for uid, value in uid_dict.items():
+                    uid_int = int(uid)
+                    self._set_values(uid_int, {stat_name: value})
 
-                # Load dense stats
-                dense = samples_stats_payload.get("dense", {})
-                self.dense_stats_store = {
-                    k: {int(sid): np.asarray(v) for sid, v in inner.items()}
-                    for k, inner in dense.items()
-                }
-            else:
-                # Legacy checkpoints stored only the core dict
-                for stat_name, uid_dict in samples_stats_payload.items():
-                    if stat_name not in self._stats_df.columns:
-                        self._stats_df[stat_name] = None
-                    for uid, value in uid_dict.items():
-                        uid = int(uid)
-                        if uid in self._stats_df.index:
-                            self._stats_df.loc[uid, stat_name] = value
-                self.dense_stats_store = {}
+            # Load dense stats
+            dense = samples_stats_payload.get("dense", {})
+            for key, inner in dense.items():
+                for sid, val in inner.items():
+                    self._set_dense(key, int(sid), np.asarray(val))
+        else:
+            # Legacy checkpoints stored only the core dict
+            for stat_name, uid_dict in samples_stats_payload.items():
+                for uid, value in uid_dict.items():
+                    uid_int = int(uid)
+                    self._set_values(uid_int, {stat_name: value})
+
+        # Refresh denied count
+        df_after = self._get_df_view()
+        if not df_after.empty and SampleStatsEx.DENY_LISTED.value in df_after.columns:
+            self.denied_sample_cnt = int(df_after[SampleStatsEx.DENY_LISTED.value].sum())
+        else:
+            self.denied_sample_cnt = 0
 
 
     def get_stat_value_at_percentile(self, stat_name: str, percentile: float):
         with self._df_lock:
-            if stat_name not in self._stats_df.columns:
+            df = self._get_df_view()
+            if stat_name not in df.columns:
                 return 0
-            values = sorted(self._stats_df[stat_name].dropna().tolist())
+            values = sorted(df[stat_name].dropna().tolist())
         if not values:
             return 0
         percentile_index = int(percentile * len(values))
@@ -970,14 +603,49 @@ class DataSampleTrackingWrapper(Dataset):
                 arr = arr[None]  # 1, H, W
         return arr
 
+    def _get_df_view(self, limit: int = -1) -> pd.DataFrame:
+        """Convenience accessor for this split's ledger slice."""
+        return LEDGER_MANAGER.get_split_df(self._dataset_split, limit=limit)
+
+    def _get_columns(self) -> Set[str]:
+        return set(LEDGER_MANAGER.get_columns(self._dataset_split))
+
+    def _get_value(self, sample_id: int, key: str):
+        return LEDGER_MANAGER.get_value(self._dataset_split, sample_id, key)
+
+    def _set_values(self, sample_id: int, updates: Dict[str, Any]):
+        """Write scalar updates into the shared ledger and mark pending H5 rows (optimized)."""
+        if not updates:
+            return
+        LEDGER_MANAGER.update_values(self._dataset_split, sample_id, updates)
+
+        # Track extended columns and check for H5-saveable stats in one pass
+        needs_h5_flush = False
+        for col in updates:
+            if col not in SAMPLE_STATS_ALL and col not in SAMPLES_STATS_TO_SAVE_TO_H5:
+                self._ex_columns_cache.add(col)
+
+            # Check if this column needs H5 persistence (only once, not per key)
+            if not needs_h5_flush and _matches_pattern(col, SAMPLES_STATS_TO_SAVE_TO_H5):
+                needs_h5_flush = True
+
+        # Mark dirty for H5 persistence if any update column matches
+        if needs_h5_flush:
+            self._h5_pending_uids.add(sample_id)
+            LEDGER_MANAGER.mark_dirty(self._dataset_split, sample_id)
+
+    def _set_dense(self, key: str, sample_id: int, value: np.ndarray):
+        LEDGER_MANAGER.set_dense(self._dataset_split, key, sample_id, value)
+
+    def _get_dense(self, key: str, sample_id: int) -> Optional[np.ndarray]:
+        return LEDGER_MANAGER.get_dense(self._dataset_split, key, sample_id)
+
     def _sync_row_to_ledger(self, sample_id: int):
         """Push the latest row for this sample into the global ledger."""
         try:
-            with self._df_lock:
-                if sample_id in self._stats_df.index:
-                    LEDGER_MANAGER.upsert_row(self._dataset_split, sample_id, self._stats_df.loc[sample_id])
+            LEDGER_MANAGER.mark_dirty(self._dataset_split, sample_id)
         except Exception as e:
-            logger.debug(f"[DataSampleTrackingWrapper] Failed to sync row {sample_id} to ledger: {e}")
+            logger.debug(f"[DataSampleTrackingWrapper] Failed to mark row {sample_id} dirty: {e}")
 
     def set(self, sample_id: int, stat_name: str, stat_value, raw: bool = True):
         # When raw=False, remap sample_id from dataloader index to original sample_id
@@ -991,49 +659,35 @@ class DataSampleTrackingWrapper(Dataset):
             stat_value = stat_value.item()
 
         # Normalize multi-element arrays for stats that need to be saved to H5
-        # For PREDICTION_LOSS in segmentation, use mean of per-pixel losses
-        if not (_matches_pattern(stat_name, SAMPLES_STATS_TO_SAVE_TO_H5) and
-                isinstance(stat_value, np.ndarray) and
-                stat_value.size > 1):
-            # No special handling needed, proceed with the original value
-            pass
-        elif stat_name == SampleStatsEx.PREDICTION_LOSS.value:
-            # Convert per-pixel losses to mean loss for H5 storage
-            if isinstance(stat_value, (th.Tensor, np.ndarray)) and stat_value.size > 1:
-                # logger.debug(f"PREDICTION_LOSS is a multi-element array (size={stat_value.size}) for sample_id={sample_id}. Converting to mean loss for H5 storage.")
-                # Convert tensor to numpy if needed
-                if isinstance(stat_value, th.Tensor):
-                    stat_value = stat_value.detach().cpu().numpy()
-                # Compute mean for scalar storage
-                stat_value = float(np.mean(stat_value))
-        else:
-            # For other stats, skip multi-element arrays
-            logger.warning(f"Skipping multi-element array for stat '{stat_name}' (size={stat_value.size})")
-            return
+        # Check pattern match once, reuse result (optimization: avoid double-check)
+        is_h5_stat = _matches_pattern(stat_name, SAMPLES_STATS_TO_SAVE_TO_H5)
+        has_multi_element = isinstance(stat_value, np.ndarray) and stat_value.size > 1
 
-        # Skip multi-element arrays for H5-saved stats
-        if (_matches_pattern(stat_name, SAMPLES_STATS_TO_SAVE_TO_H5) and
-                isinstance(stat_value, np.ndarray) and
-                stat_value.size > 1):
-            if stat_name != SampleStatsEx.PREDICTION_LOSS.value:
+        # For PREDICTION_LOSS in segmentation, use mean of per-pixel losses
+        if is_h5_stat and has_multi_element:
+            if stat_name == SampleStatsEx.PREDICTION_LOSS.value:
+                # Convert per-pixel losses to mean loss for H5 storage
+                if isinstance(stat_value, (th.Tensor, np.ndarray)):
+                    # Convert tensor to numpy if needed
+                    if isinstance(stat_value, th.Tensor):
+                        stat_value = stat_value.detach().cpu().numpy()
+                    # Compute mean for scalar storage
+                    stat_value = float(np.mean(stat_value))
+            else:
+                # For other stats, skip multi-element arrays
                 logger.warning(f"Skipping multi-element array for stat '{stat_name}' (size={stat_value.size})")
                 return
 
         with self._df_lock:
-            # Get previous value for deny_listed tracking
-            prev_value = None
-            if sample_id in self._stats_df.index and stat_name in self._stats_df.columns:
-                prev_value = self._stats_df.loc[sample_id, stat_name]
+            prev_value = self._get_value(sample_id, stat_name)
 
             # Update deny_listed count
-            if stat_name == SampleStatsEx.DENY_LISTED and pd.notna(prev_value) and prev_value != stat_value:
-                self._handle_deny_listed_updates(stat_value)
+            try:
+                if stat_name == SampleStatsEx.DENY_LISTED and pd.notna(prev_value) and prev_value != stat_value:
+                    self._handle_deny_listed_updates(stat_value)
+            except Exception:
+                pass
 
-            # Ensure column exists
-            if stat_name not in self._stats_df.columns:
-                self._stats_df[stat_name] = None
-
-            # Set the value in DataFrame
             clean_value = None if not isinstance(stat_value, (np.ndarray, th.Tensor)) and stat_value == '' else stat_value
 
             # Normalize and cast arrays/tensors for DataFrame
@@ -1048,20 +702,8 @@ class DataSampleTrackingWrapper(Dataset):
                 except Exception:
                     pass
 
-            # If clean_value is a list (from array), ensure column dtype is object
-            if isinstance(clean_value, (list, np.ndarray)):
-                if stat_name not in self._stats_df.columns or self._stats_df[stat_name].dtype != 'O':
-                    self._stats_df[stat_name] = self._stats_df[stat_name].astype('object')
-            self._stats_df.loc[sample_id, stat_name] = clean_value
-
-            # Keep the global ledger in sync
-            self._sync_row_to_ledger(sample_id)
-
-            # Track UIDs with changes to SAMPLES_STATS_TO_SAVE_TO_H5
-            if _matches_pattern(stat_name, SAMPLES_STATS_TO_SAVE_TO_H5):
-                if sample_id not in self._h5_pending_uids:
-                    self._h5_pending_uids.add(sample_id)
-                LEDGER_MANAGER.mark_dirty(self._dataset_split, sample_id)
+            # Persist through ledger
+            self._set_values(sample_id, {stat_name: clean_value})
 
         # Note: H5 saves are now handled by background flush thread (~every 5s)
         # This keeps training loop fast and decouples from I/O
@@ -1077,14 +719,11 @@ class DataSampleTrackingWrapper(Dataset):
             index = self.unique_id_to_index.get(sample_id)
 
         with self._df_lock:
-            # Check if value exists in DataFrame
-            if sample_id in self._stats_df.index and stat_name in self._stats_df.columns:
-                value = self._stats_df.loc[sample_id, stat_name]
-                if pd.notna(np.asanyarray(value)).all():
-                    # Handle array fix
-                    if isinstance(value, np.ndarray) and value.size == 1:
-                        return value.item()
-                    return value
+            value = self._get_value(sample_id, stat_name)
+            if value is not None and pd.notna(np.asanyarray(value)).all():
+                if isinstance(value, np.ndarray) and value.size == 1:
+                    return value.item()
+                return value
 
             # Lazy-load certain stats on-demand
             if stat_name == SampleStatsEx.TARGET:
@@ -1097,7 +736,7 @@ class DataSampleTrackingWrapper(Dataset):
                         value = self._getitem_raw(id=sample_id)[2]
                     else:
                         value = self[index][2]  # 0 -> data; 1 -> index; 2 -> label
-                self._stats_df.loc[sample_id, stat_name] = self._normalize_and_cast_for_df(value)
+                self._set_values(sample_id, {stat_name: self._normalize_and_cast_for_df(value)})
                 return value
 
             elif stat_name == SampleStatsEx.SAMPLE_ID:
@@ -1159,16 +798,13 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Update encounter count
         with self._df_lock:
-            if actual_sample_id in self._stats_df.index and SampleStatsEx.ENCOUNTERED in self._stats_df.columns:
-                current = self._stats_df.loc[actual_sample_id, SampleStatsEx.ENCOUNTERED]
-                exposure_amount = 1 if pd.isna(current) else (int(current) + 1)
-            else:
-                exposure_amount = 1
+            current = self._get_value(actual_sample_id, SampleStatsEx.ENCOUNTERED)
+            exposure_amount = 1 if current is None or pd.isna(current) else (int(current) + 1)
             self.set(sample_id, SampleStatsEx.ENCOUNTERED.value, exposure_amount)
 
         # Ensure deny_listed exists
         with self._df_lock:
-            if sample_id not in self._stats_df.index or SampleStatsEx.DENY_LISTED not in self._stats_df.columns or pd.isna(self._stats_df.loc[sample_id, SampleStatsEx.DENY_LISTED]):
+            if self._get_value(sample_id, SampleStatsEx.DENY_LISTED) is None:
                 self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
 
     def update_batch_sample_stats(self, model_age, ids_batch, signals_batch, preds_batch=None):
@@ -1197,7 +833,6 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.PREDICTION_AGE.value: model_age,
                     SampleStatsEx.PREDICTION_RAW.value: sample_pred,
                     SampleStatsEx.PREDICTION_LOSS_VALUE.value: sample_signal.values(),
-                    SampleStatsEx.PREDICTION_LOSS_NAME.value: sample_signal.keys()
                 }
             )
 
@@ -1275,7 +910,7 @@ class DataSampleTrackingWrapper(Dataset):
         """
         Extended per-sample stats.
         - Scalar-ish values -> added as DataFrame columns
-        - Dense arrays (ndim>=2) -> stored in dense_stats_store
+                - Dense arrays (ndim>=2) -> stored in global dense store
           (downsampled)
         """
         for key, val in (sample_stats_ex or {}).items():
@@ -1291,11 +926,7 @@ class DataSampleTrackingWrapper(Dataset):
 
             # Dense arrays (e.g., segmentation mask / reconstruction)
             if _is_dense_array(np_val):
-                if key not in self.dense_stats_store:
-                    self.dense_stats_store[key] = {}
-                self.dense_stats_store[key][sample_id] = _downsample_nn(
-                    np_val, max_hw=96
-                )
+                self._set_dense(key, sample_id, _downsample_nn(np_val, max_hw=96))
                 continue
 
             # Scalar-ish -> add to DataFrame
@@ -1303,23 +934,16 @@ class DataSampleTrackingWrapper(Dataset):
                 if isinstance(val, np.ndarray) and val.ndim == 0:
                     val = val.item()
                 with self._df_lock:
-                    if key not in self._stats_df.columns:
-                        self._stats_df[key] = None
-                    self._stats_df.loc[sample_id, key] = val
+                    self._set_values(sample_id, {key: val})
                 self._ex_columns_cache.add(key)
-                self._sync_row_to_ledger(sample_id)
                 continue
 
             # Small vectors -> list, store in DataFrame
             if (isinstance(np_val, np.ndarray) and
                     np_val.ndim == 1 and np_val.size <= 64):
                 with self._df_lock:
-                    if key not in self._stats_df.columns:
-                        self._stats_df[key] = object  # Allow list/array storage
-                    # Use .at instead of .loc to prevent list expansion
-                    self._stats_df.at[sample_id, key] = np_val.tolist()
+                    self._set_values(sample_id, {key: np_val.tolist()})
                 self._ex_columns_cache.add(key)
-                self._sync_row_to_ledger(sample_id)
                 continue
 
             # Fallback to truncated string
@@ -1327,15 +951,12 @@ class DataSampleTrackingWrapper(Dataset):
             if len(stringy) > 512:
                 stringy = stringy[:509] + "..."
             with self._df_lock:
-                if key not in self._stats_df.columns:
-                    self._stats_df[key] = None
-                self._stats_df.loc[sample_id, key] = stringy
+                self._set_values(sample_id, {key: stringy})
             self._ex_columns_cache.add(key)
-            self._sync_row_to_ledger(sample_id)
 
         # Ensure required columns
         with self._df_lock:
-            if sample_id not in self._stats_df.index or SampleStatsEx.DENY_LISTED not in self._stats_df.columns or pd.isna(self._stats_df.loc[sample_id, SampleStatsEx.DENY_LISTED]):
+            if not self._get_value(sample_id, SampleStatsEx.DENY_LISTED):
                 self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
 
     def update_sample_stats_ex_batch(
@@ -1375,18 +996,16 @@ class DataSampleTrackingWrapper(Dataset):
         self.dump_stats_to_h5()
 
     def get_dense_stat(self, sample_id: int, key: str) -> Optional[np.ndarray]:
-        d = self.dense_stats_store.get(key)
-        if d is None:
-            return None
-        return d.get(sample_id, None)
+        return self._get_dense(key, sample_id)
+
+    @property
+    def dense_stats_store(self) -> Dict[str, Dict[int, np.ndarray]]:
+        """Backward-compatible view of dense stats for this split."""
+        return LEDGER_MANAGER.get_dense_map(self._dataset_split)
 
     def _actually_deny_samples(self, sample_id):
         with self._df_lock:
-            if sample_id not in self._stats_df.index:
-                return True
-            if SampleStatsEx.DENY_LISTED not in self._stats_df.columns:
-                return True
-            val = self._stats_df.loc[sample_id, SampleStatsEx.DENY_LISTED]
+            val = self._get_value(sample_id, SampleStatsEx.DENY_LISTED)
             if pd.isna(val):
                 return True
             return not val
@@ -1395,9 +1014,10 @@ class DataSampleTrackingWrapper(Dataset):
         with self._df_lock:
             # Get previously denied samples
             prev_denied = set()
-            if SampleStatsEx.DENY_LISTED in self._stats_df.columns:
-                denied_mask = self._stats_df[SampleStatsEx.DENY_LISTED] == True
-                prev_denied = set(self._stats_df[denied_mask].index)
+            df_view = self._get_df_view()
+            if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
+                denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
+                prev_denied = set(df_view[denied_mask].index)
 
             if not denied_samples_ids:
                 # Clear all denials
@@ -1432,8 +1052,9 @@ class DataSampleTrackingWrapper(Dataset):
                     self.set(sample_id_int, SampleStatsEx.DENY_LISTED.value, False)
                 # Now count total denied
                 denied_cnt = 0
-                if SampleStatsEx.DENY_LISTED in self._stats_df.columns:
-                    denied_mask = self._stats_df[SampleStatsEx.DENY_LISTED] == True
+                df_view = self._get_df_view()
+                if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
+                    denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
                     denied_cnt = denied_mask.sum()
                 self.denied_sample_cnt = denied_cnt
 
@@ -1585,15 +1206,12 @@ class DataSampleTrackingWrapper(Dataset):
     def _get_stats_dataframe(self, limit: int = -1):
         """Return a copy of the stats dataframe (optionally limited)."""
         with self._df_lock:
-            if limit > 0:
-                return self._stats_df.head(limit).copy()
-            return self._stats_df.copy()
+            return self._get_df_view(limit=limit)
 
     def as_records(self, limit: int = -1):
         """Convert DataFrame to list of records."""
         with self._df_lock:
-            df = self._stats_df if limit < 0 else self._stats_df.head(limit)
-            df = df.copy()
+            df = self._get_df_view(limit=limit)
             # Ensure sample_id is a column (not just index)
             if 'sample_id' not in df.columns:
                 df = df.reset_index()  # Bring sample_id into columns
@@ -1647,11 +1265,8 @@ class DataSampleTrackingWrapper(Dataset):
         # Override target with tag-based label if use_tags is enabled
         if self._use_tags:
             with self._df_lock:
-                if int(id) in self._stats_df.index and SampleStatsEx.TAGS.value in self._stats_df.columns:
-                    tag_value = self._stats_df.loc[int(id), SampleStatsEx.TAGS.value]
-                    if pd.isna(tag_value):
-                        tag_value = ''
-                else:
+                tag_value = self._get_value(int(id), SampleStatsEx.TAGS.value) or ''
+                if pd.isna(tag_value):
                     tag_value = ''
 
             if self._is_binary_labels:
@@ -1854,8 +1469,9 @@ class DataSampleTrackingWrapper(Dataset):
         # Segmentation
         if task_name:
             key = f"pred/{task_name}"
-            if key in self.dense_stats_store:
-                return self.dense_stats_store[key].get(sample_id)
+            dense_val = self._get_dense(key, sample_id)
+            if dense_val is not None:
+                return dense_val
 
         # Detection: check if prediction_raw contains bboxes
         pred_raw = self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_RAW, raw=True)
@@ -1870,14 +1486,15 @@ class DataSampleTrackingWrapper(Dataset):
         self._save_pending_stats_to_h5()
 
     def _save_pending_stats_to_h5(self):
-        """Delegate pending rows to the global ledger manager for flushing."""
+        """Mark pending rows dirty and request async flush from background thread."""
         if not self._h5_pending_uids:
             return
         pending_uids = list(self._h5_pending_uids)
         self._h5_pending_uids.clear()
         for uid in pending_uids:
             LEDGER_MANAGER.mark_dirty(self._dataset_split, uid)
-        LEDGER_MANAGER.flush_if_needed(force=True)
+        # Request async flush to avoid blocking training loop
+        LEDGER_MANAGER.flush_async()
 
     def _load_stats_from_h5(self):
         """Load only SAMPLES_STATS_TO_SAVE_TO_H5 from H5 file if it exists, filtered to current UIDs."""
@@ -1892,36 +1509,35 @@ class DataSampleTrackingWrapper(Dataset):
                 return
 
             # Normalize index and filter to present UIDs only
-                df = df.set_index("sample_id") if "sample_id" in df.columns else df
-                df = df[df.index.isin(current_uids)]
+            df = df.set_index("sample_id") if "sample_id" in df.columns else df
+            df = df[df.index.isin(current_uids)]
 
-                logger.info(
-                    f"[DataSampleTrackingWrapper] Loading {len(df)} saved stats from {self._stats_store.path()}"
-                )
+            if df.empty:
+                return
 
-                # Merge loaded data into our DataFrame
-                with self._df_lock:
-                    for col in df.columns:
-                        if _matches_pattern(col, SAMPLES_STATS_TO_SAVE_TO_H5):
-                            self._stats_df.loc[df.index, col] = df[col]
+            cols_to_use = [c for c in df.columns if _matches_pattern(c, SAMPLES_STATS_TO_SAVE_TO_H5)]
+            df_use = df[cols_to_use]
 
-                    # Update denied count
-                    self.denied_sample_cnt = int(
-                        self._stats_df[SampleStatsEx.DENY_LISTED.value].sum()
-                    )
+            logger.info(
+                f"[DataSampleTrackingWrapper] Loading {len(df_use)} saved stats from {self._stats_store.path()}"
+            )
 
-                logger.info(
-                    f"[DataSampleTrackingWrapper] Loaded stats for {len(df)} samples. "
-                    f"{self.denied_sample_cnt} samples are deny-listed."
-                )
-            except Exception as e:
-                logger.error(f"[DataSampleTrackingWrapper] Failed to load stats from H5: {e}")
-                try:
-                    if self._h5_path and self._h5_path.exists():
-                        corrupt_path = str(self._h5_path) + f'.corrupt-{int(time.time())}'
-                        os.replace(str(self._h5_path), corrupt_path)
-                        logger.error(f"[DataSampleTrackingWrapper] Moved corrupted H5 to {corrupt_path}")
-                except Exception:
-                    pass
+            with self._df_lock:
+                LEDGER_MANAGER.upsert_df(self._dataset_split, df_use)
+                if SampleStatsEx.DENY_LISTED.value in df_use.columns:
+                    self.denied_sample_cnt = int(df_use[SampleStatsEx.DENY_LISTED.value].sum())
+            logger.info(
+                f"[DataSampleTrackingWrapper] Loaded stats for {len(df_use)} samples. "
+                f"{self.denied_sample_cnt} samples are deny-listed."
+            )
+        except Exception as e:
+            logger.error(f"[DataSampleTrackingWrapper] Failed to load stats from H5: {e}")
+            try:
+                if self._h5_path and self._h5_path.exists():
+                    corrupt_path = str(self._h5_path) + f'.corrupt-{int(time.time())}'
+                    os.replace(str(self._h5_path), corrupt_path)
+                    logger.error(f"[DataSampleTrackingWrapper] Moved corrupted H5 to {corrupt_path}")
+            except Exception:
+                pass
 
 
