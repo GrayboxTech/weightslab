@@ -267,6 +267,12 @@ message DataQueryRequest {
   bool is_natural_language = 3;
 }
 
+enum AgentIntentType {
+  INTENT_UNKNOWN = 0;
+  INTENT_FILTER = 1;
+  INTENT_ANALYSIS = 2;
+}
+
 message DataQueryResponse {
   bool success = 1;
   string message = 2;
@@ -274,6 +280,9 @@ message DataQueryResponse {
   int32 number_of_samples_in_the_loop = 4;
   int32 number_of_discarded_samples = 5;
   repeated string unique_tags = 6;
+  
+  AgentIntentType agent_intent_type = 7;
+  string analysis_result = 8;
 }
 
 message DataSamplesRequest {
