@@ -957,7 +957,8 @@ class DataService:
 
             # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
             with self._lock:
-                df = self._all_datasets_df  # authoritative DF
+                # Start with the current authoritative DF
+                df = self._all_datasets_df
                 messages = []
                 intent_type = pb2.INTENT_FILTER
                 analysis_result = ""
@@ -971,11 +972,12 @@ class DataService:
                         logger.debug("[ApplyDataQuery] Agent requested reset")
                         # Rebuild from loaders; this is the only place we replace the df object
                         self._all_datasets_df = self._pull_into_all_data_view_df()
-                        df = self._all_datasets_df
+                        df = self._all_datasets_df  # Reset df to full dataset
                         messages.append("Reset view")
                         continue
 
                     # 2b) All other agent operations mutate df in-place
+                    # df is now carried forward across iterations
                     msg = self._apply_agent_operation(df, func, params)
                     messages.append(msg)
 
@@ -989,7 +991,12 @@ class DataService:
 
                 final_message = " | ".join(messages) if messages else "No operation performed"
 
-                # 3) Return updated counts after mutation
+                # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
+                # Only update if it was a manipulation query, not analysis
+                if intent_type == pb2.INTENT_FILTER:
+                    self._all_datasets_df = df
+
+                # 5) Return updated counts after mutation
                 return self._build_success_response(
                     df=df, 
                     message=final_message,
