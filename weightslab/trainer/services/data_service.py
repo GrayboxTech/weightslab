@@ -644,20 +644,44 @@ class DataService:
                                 "[ApplyDataQuery] Column %r is object; attempting numeric conversion for sort",
                                 col,
                             )
-                            converted = pd.to_numeric(s, errors="ignore")
-                            if is_numeric_dtype(converted.dtype):
-                                logger.debug(
-                                    "[ApplyDataQuery] Column %r converted to numeric dtype %s",
-                                    col, converted.dtype,
-                                )
-                                df[col] = converted
+                            try:
+                                converted = pd.to_numeric(s)
+                                if is_numeric_dtype(converted.dtype):
+                                    logger.debug(
+                                        "[ApplyDataQuery] Column %r converted to numeric dtype %s",
+                                        col, converted.dtype,
+                                    )
+                                    df[col] = converted
+                            except (ValueError, TypeError):
+                                pass
 
+                    # Ensure all sort columns exist and are sortable (scalars only)
+                    valid_cols = []
+                    for c in by:
+                        if c not in df.columns:
+                            continue
+                        
+                        # Check for non-scalar types (like numpy arrays in 'prediction_loss')
+                        # We use a heuristic on the first non-null value
+                        non_null_s = df[c].dropna()
+                        if not non_null_s.empty:
+                            first_val = non_null_s.iloc[0]
+                            # If it's a collection but not a string/bytes, pandas can't sort it directly
+                            if hasattr(first_val, "__len__") and not isinstance(first_val, (str, bytes)):
+                                # Fallback: if user asked for 'prediction_loss', help them by using 'mean_loss'
+                                if c == "prediction_loss" and "mean_loss" in df.columns:
+                                    logger.info("[ApplyDataQuery] Column %r contains arrays; redirecting to 'mean_loss' for sorting", c)
+                                    valid_cols.append("mean_loss")
+                                    continue
+                                else:
+                                    logger.warning("[ApplyDataQuery] Skipping column %r for sorting: contains non-scalar values (e.g. arrays)", c)
+                                    continue
+                        
+                        valid_cols.append(c)
 
-                    # Ensure all sort columns exist
-                    valid_cols = [c for c in by if c in df.columns]
                     if not valid_cols:
-                        logger.warning("[ApplyDataQuery] No valid sort columns found in %s", by)
-                        return "Failed to sort: columns not found"
+                        logger.warning("[ApplyDataQuery] No valid or sortable columns found in %s", by)
+                        return "Failed to sort: columns either missing or contain non-sortable arrays"
                     
                     safe_params["by"] = valid_cols
                     

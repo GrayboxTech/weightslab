@@ -24,3 +24,5 @@ __pycache__/
 
 experiment_service_pb2.py
 experiment_service_pb2_grpc.py
+
+.env
