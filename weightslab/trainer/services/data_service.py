@@ -139,8 +139,8 @@ def _infer_task_type_from_label(label, default="classification"):
         return "classification"
 
     # 2D integer-ish → very likely segmentation mask or detection
-    if arr.shape[0] > 28 or arr.shape[1] > 28:
-        return 'detection'
+    if arr.shape[0] < 28 or arr.shape[1] < 28:
+        return 'segmentation'  # 'detection' interpreted as segmentation
     if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
         return "segmentation"
 
@@ -566,8 +566,8 @@ class DataService:
                                     type='array',
                                     shape=list(pred_arr.shape),
                                     value=pred_arr.astype(float).ravel().tolist(),
+                                )
                             )
-                        )
                         except Exception:
                             pass
                 else:

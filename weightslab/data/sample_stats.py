@@ -94,7 +94,7 @@ class SampleStats:
 
         Ex.TAGS.value,
         Ex.ORIGIN.value,
-        Ex.TASK_TYPE.value,
+        # Ex.TASK_TYPE.value,
     ]
 
 

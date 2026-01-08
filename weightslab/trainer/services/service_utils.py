@@ -5,18 +5,24 @@ from PIL import Image
 
 
 def _to_numpy_safe(x):
+    if isinstance(x, (int, float)):
+        return np.array([x])
+
     if isinstance(x, np.ndarray):
         return x
+
     if isinstance(x, (list, tuple)):
         try:
             return np.asarray(x)
         except Exception:
             return None
+
     try:
         if isinstance(x, th.Tensor):
             return x.detach().cpu().numpy()
     except Exception:
         pass
+
     return None
 
 

@@ -1,4 +1,4 @@
-device: cuda
+device: cpu
 root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/weightslab_mnist_tests"
 tqdm_display: true
 skip_loading: true
