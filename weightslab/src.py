@@ -273,13 +273,15 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                     logger = None
 
                             if logger is not None and hasattr(logger, 'add_scalars'):
-                                # attempt to get a sensible global_step
-                                step = 0
-                                try:
-                                    m = get_model()
-                                    step = int(m.get_age())
-                                except Exception:
-                                    step = 0
+                                # prioritize passed model_age, then model age, then 0
+                                step = model_age
+                                if step is None:
+                                    try:
+                                        m = get_model()
+                                        step = int(m.get_age())
+                                    except Exception:
+                                        step = 0
+                                
                                 logger.add_scalars(
                                     reg_name,
                                     {reg_name: scalar},

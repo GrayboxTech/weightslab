@@ -46,6 +46,9 @@ class AtomicIntent(BaseModel):
 
 class Intent(BaseModel):
     reasoning: str = Field(description="Step-by-step logic explaining the plan.")
+    primary_goal: Literal["ui_manipulation", "data_analysis"] = Field(
+        description="Whether the user wants to change the grid view (ui_manipulation) or get an answer/calculation (data_analysis)."
+    )
     steps: List[AtomicIntent] = Field(description="A sequence of atomic operations to execute in order.")
 
 
@@ -195,9 +198,10 @@ class DataManipulationAgent:
         try:
             host = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
             port = os.environ.get('OLLAMA_PORT', '11435')
-            llm = ChatOllama(base_url=f"http://{host}:{port}", model="llama3.2:1b", temperature=0, timeout=15)
+            model_ollama = "qwen2.5:3b-instruct" # "llama3.2:1b"
+            llm = ChatOllama(base_url=f"http://{host}:{port}", model=model_ollama, temperature=0, timeout=15)
             self.chain_ollama = llm.with_structured_output(Intent)
-            _LOGGER.info("Ollama active (llama3.2:1b)")
+            _LOGGER.info(f"Ollama active ({model_ollama})")
         except Exception as e: _LOGGER.error(f"Ollama error: {e}")
 
     def is_ollama_available(self) -> bool:
@@ -210,24 +214,12 @@ class DataManipulationAgent:
             instruction="{instruction}"
         )
         
-        # Build attempt order: Preferred -> Cloud Fallbacks -> Local Fallback
+        # Build attempt order: Preferred -> Local Fallback (no cloud fallbacks)
         order = [self.preferred_provider]
         
-        # Cloud candidates
-        cloud_candidates = ["openai", "openrouter", "google"]
-        for cand in cloud_candidates:
-            if cand not in order:
-                # Check if available
-                if cand == "google" and self.client_google: order.append(cand)
-                elif cand == "openai" and self.chain_openai: order.append(cand)
-                elif cand == "openrouter" and self.chain_openrouter: order.append(cand)
-        
-        # Finally local
-        if self.fallback_to_local and "ollama" not in order:
+        # Only add local Ollama as fallback if enabled
+        if self.fallback_to_local and self.preferred_provider != "ollama":
             order.append("ollama")
-        
-        # Deduplicate while preserving order
-        order = list(dict.fromkeys(order))
 
         for provider in order:
             try:

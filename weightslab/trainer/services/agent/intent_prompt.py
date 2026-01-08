@@ -112,35 +112,66 @@ EXAMPLES (Analysis / Questions):
       {{kind="analysis", analysis_expression="df[df['label'] == 2]['mean_loss'].mean()"}}
   ]
 
-- "What columns do we have?"
-  (Goal: Schema Discovery) -> steps=[
-      {{kind="analysis", analysis_expression="list(df.columns)"}}
+- "What index does the sample with the highest loss have?"
+  (Goal: Get specific ID) -> steps=[
+      {{"kind": "analysis", "analysis_expression": "df['mean_loss'].idxmax()"}}
+  ]
+
+- "Which sample has the lowest score?"
+  (Goal: Get ID of min) -> steps=[
+      {{"kind": "analysis", "analysis_expression": "df['score'].idxmin()"}}
   ]
 
 COMMON MISTAKES TO AVOID:
 ❌ WRONG: "top 10 highest X" -> kind="head" with analysis_expression
 ✅ RIGHT: "top 10 highest X" -> kind="sort" (by X, desc) then kind="head" (n=10)
 
-❌ WRONG: "Do I have column Y?" -> kind="keep" with conditions
-✅ RIGHT: "Do I have column Y?" -> kind="analysis" with analysis_expression="'Y' in df.columns"
+MANDATORY DECISION LOGIC:
+Before choosing operations, categorize the request into one of two paths:
 
-❌ WRONG: kind="keep" with empty conditions AND analysis_expression filled
-✅ RIGHT: Use kind="analysis" if you want to run code, use kind="keep" if you want to filter rows.
+PATH A: UI MANIPULATION (primary_goal="ui_manipulation")
+- Objective: Update what the user sees in the data grid.
+- Keywords: "show", "filter", "sort", "keep", "drop", "hide", "reset", "top 10", "worst".
+- Output: Multiple rows in the grid.
+- Operations: Use kind="keep", "drop", "sort", "head", "tail", "reset".
 
-MANDATORY DECISION FLOW:
-1. Is it a QUESTION? -> Use kind="analysis". Logic goes in analysis_expression.
-2. Is it a GRID COMMAND? -> Use kind="keep", "drop", or "sort". Logic goes in conditions or sort_by.
-3. Use multiple steps ONLY if needed (e.g., "Sort AND head").
+PATH B: DATA ANALYSIS (primary_goal="data_analysis")
+- Objective: Answer a specific question about the data.
+- Keywords: "what is", "how many", "which index", "is there", "calculate", "count", "average".
+- Output: A single answer, string, ID, or list of values returned to the chat.
+- Operations: Use kind="analysis" with a single-line pandas expression in `analysis_expression`.
 
-RULES:
-- QUESTION triggers: "How many", "What", "Is there", "Count", "List", "?".
-- EXCLUSION triggers: "Drop", "Remove", "Exclude", "Except".
-- WORST triggers: "worst of class X" means sort by "loss_class_X" descending.
-- NEVER leave conditions empty for kind="keep" or "drop" unless you are sampling (frac).
+EXAMPLES OF THE DISTINCTION:
 
-1. **Manipulation**: Use conditions/sort_by.
-2. **Analysis**: Use analysis_expression (single line).
-3. **Safety**: NO imports. ONLY DataFrame logic.
+User: "Show me the worst images" 
+-> primary_goal="ui_manipulation"
+-> steps=[
+    {{"kind": "sort", "sort_by": ["loss"], "ascending": false}},
+    {{"kind": "head", "n": 10}}
+]
+
+User: "What is the index of the worst image?"
+-> primary_goal="data_analysis"
+-> steps=[
+    {{"kind": "analysis", "analysis_expression": "df['mean_loss'].idxmax()"}}
+]
+
+User: "What samples have tag 'abc'?"
+-> primary_goal="data_analysis"
+-> steps=[
+    {{"kind": "analysis", "analysis_expression": "df[df['tags'].str.contains('abc', na=False, regex=False)].index.tolist()"}}
+]
+
+User: "How many samples are there?"
+-> primary_goal="data_analysis"
+-> steps=[
+    {{"kind": "analysis", "analysis_expression": "len(df)"}}
+]
+
+Final Checklist:
+1. Did I pick the right primary_goal?
+2. If it's UI_MANIPULATION, am I using grid operations (keep, sort, head)?
+3. If it's DATA_ANALYSIS, am I using analysis_expression to return a value/list?
 
 User Request: {instruction}
 """

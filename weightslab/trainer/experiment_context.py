@@ -167,9 +167,10 @@ class ExperimentContext:
 
         self.hyper_parameters = {
             ("Experiment Name", "experiment_name", "text", lambda: _hp_getter("experiment_name", "Anonymous")()),
+            ("Total Training Steps", "total_training_steps", "number", _hp_getter("total_training_steps", _hp_getter("training_steps_to_do", 999)())),
             ("Left Training Steps", "training_left", "number", _hp_getter("training_steps_to_do", 999)),
             ("Eval Frequency", "eval_frequency", "number", _hp_getter("eval_full_to_train_steps_ratio", 100)),
-            ("Checkpoint Frequency", "checkpooint_frequency", "number", _hp_getter("experiment_dump_to_train_steps_ratio", 100)),
+            ("Checkpoint Frequency", "checkpoint_frequency", "number", _hp_getter("experiment_dump_to_train_steps_ratio", 100)),
             ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
             ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 8)),
             ("Is Training", "is_training", "number", _hp_getter("is_training", 1)),
