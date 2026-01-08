@@ -22,6 +22,9 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# # Module-level lock for thread-safe hyperparams operations
+# _hyperparams_lock = threading.RLock()
+
 
 class Proxy:
     """A small forwarding proxy that holds a mutable reference to an object.
@@ -174,14 +177,17 @@ class Ledger:
         self._models: Dict[str, Any] = {}
         self._dataloaders: Dict[str, Any] = {}
         self._optimizers: Dict[str, Any] = {}
+        self._dataframes: Dict[str, Any] = {}
         # weak refs
         self._models_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
         self._dataloaders_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
         self._optimizers_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
+        self._dataframes_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
         # proxies mapping name -> Proxy for placeholders
         self._proxies_models: Dict[str, Proxy] = {}
         self._proxies_dataloaders: Dict[str, Proxy] = {}
         self._proxies_optimizers: Dict[str, Proxy] = {}
+        self._proxies_dataframes: Dict[str, Proxy] = {}
         # hyperparameters registry (name -> dict)
         self._hyperparams: Dict[str, Dict[str, Any]] = {}
         self._proxies_hyperparams: Dict[str, Proxy] = {}
@@ -446,6 +452,19 @@ class Ledger:
             self._signals.pop(name, None)
             self._proxies_signals.pop(name, None)
 
+    # DataFrames (e.g., shared sample stats managers)
+    def register_dataframe(self, name: str, dataframe: Any, weak: bool = False) -> None:
+        self._register(self._dataframes, self._dataframes_weak, self._proxies_dataframes, name, dataframe, weak=weak)
+
+    def get_dataframe(self, name: Optional[str] = None) -> Any:
+        return self._get(self._dataframes, self._dataframes_weak, self._proxies_dataframes, name)
+
+    def list_dataframes(self) -> List[str]:
+        return self._list(self._dataframes, self._dataframes_weak)
+
+    def unregister_dataframe(self, name: str) -> None:
+        self._unregister(self._dataframes, self._dataframes_weak, self._proxies_dataframes, name)
+
 
     # Models
     def register_model(self, name: str, model: Any, weak: bool = False) -> None:
@@ -493,12 +512,15 @@ class Ledger:
             self._models.clear()
             self._dataloaders.clear()
             self._optimizers.clear()
+            self._dataframes.clear()
             self._models_weak.clear()
             self._dataloaders_weak.clear()
             self._optimizers_weak.clear()
+            self._dataframes_weak.clear()
             self._proxies_models.clear()
             self._proxies_dataloaders.clear()
             self._proxies_optimizers.clear()
+            self._proxies_dataframes.clear()
 
     def snapshot(self) -> Dict[str, List[str]]:
         """Return the current keys for all registries (a lightweight snapshot)."""
@@ -507,6 +529,7 @@ class Ledger:
                 "models": list(self._models.keys()),
                 "dataloaders": list(self._dataloaders.keys()),
                 "optimizers": list(self._optimizers.keys()),
+                "dataframes": list(self._dataframes.keys()),
                 "hyperparams": list(self._hyperparams.keys()),
                 "loggers": list(self._loggers.keys()),
             }
@@ -563,6 +586,7 @@ def register_hyperparams(name: str, params: Dict[str, Any], weak: bool = False) 
     GLOBAL_LEDGER.register_hyperparams(name, params, weak=weak)
 
 def get_hyperparams(name: Optional[str] = None) -> Any:
+    # with _hyperparams_lock:
     return GLOBAL_LEDGER.get_hyperparams(name)
 
 def list_hyperparams() -> List[str]:
@@ -584,6 +608,7 @@ def resolve_hp_name() -> str | None:
     return names[-1]  # first is empty proxy parameters generated at init
 
 def set_hyperparam(name: str, key_path: str, value: Any) -> None:
+    # with _hyperparams_lock:
     try:
         return GLOBAL_LEDGER.set_hyperparam(name, key_path, value)
     except IndexError:
@@ -620,6 +645,26 @@ def list_signals() -> List[str]:
 
 def unregister_signal(name: str) -> None:
     return GLOBAL_LEDGER.unregister_signal(name)
+
+
+# DataFrames
+def register_dataframe(name: str, dataframe: Any, weak: bool = False) -> None:
+    GLOBAL_LEDGER.register_dataframe(name, dataframe, weak=weak)
+
+def get_dataframe(name: Optional[str] = None) -> Any:
+    """Return a dataframe handle; if none registered, return a Proxy placeholder.
+
+    When name is omitted, default to "sample_stats" so callers get a stable
+    proxy that will be updated in-place once the dataframe manager registers.
+    """
+    name = name or "sample_stats"
+    return GLOBAL_LEDGER.get_dataframe(name)
+
+def list_dataframes() -> List[str]:
+    return GLOBAL_LEDGER.list_dataframes()
+
+def unregister_dataframe(name: str) -> None:
+    return GLOBAL_LEDGER.unregister_dataframe(name)
 
 
 if __name__ == "__main__":

@@ -64,7 +64,7 @@ class ModelService:
             getattr(components.get("model"), "task_type", "classification"),
         )
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with concurrent.futures.ThreadPoolExecutor(thread_name_prefix="get_samples_worker") as executor:
             fut_map = {
                 executor.submit(
                     process_sample,

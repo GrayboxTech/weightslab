@@ -177,7 +177,7 @@ class DataSampleTrackingWrapperTest(unittest.TestCase):
         eval_sid = eval_wrapper.get_sample_id_at_index(0)
 
         train_wrapper.set(train_sid, SampleStatsEx.TAGS.value, "hot")
-        eval_wrapper.set(eval_sid, SampleStatsEx.DENY_LISTED.value, True)
+        eval_wrapper.set(eval_sid, SampleStatsEx.DENIED_FLAG.value, True)
 
         # Immediate-saving stats should flush to the shared store
         train_wrapper._save_pending_stats_to_h5()
@@ -311,41 +311,41 @@ class DataSampleTrackingWrapperTestMnist(unittest.TestCase):
             sample_predicate_fn1, weight=1.0,
             accumulate=False, verbose=True)
 
-        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2501)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENIED_FLAG.value].sum()), 2501)
 
     def test_predicate_with_weight(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=0.5,
             accumulate=False, verbose=True)
 
-        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 1250)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENIED_FLAG.value].sum()), 1250)
 
     def test_predicate_with_weight_over_one(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=2000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2000)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENIED_FLAG.value].sum()), 2000)
 
     def test_predicate_with_weight_over_one_not_enough_samples(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=20000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2501)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENIED_FLAG.value].sum()), 2501)
 
     def test_predicate_with_accumulation(self):
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn1, weight=20000,
             accumulate=False, verbose=True)
 
-        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 2501)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENIED_FLAG.value].sum()), 2501)
 
         self.wrapped_dataset.apply_weighted_predicate(
             sample_predicate_fn2, weight=20000,
             accumulate=True, verbose=True)
 
-        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENY_LISTED.value].sum()), 4001)
+        self.assertEqual(int(self.wrapped_dataset._stats_df[SampleStatsEx.DENIED_FLAG.value].sum()), 4001)
 
 
 class DataSampleTrackingWrapperExtendedStatsTest(unittest.TestCase):
@@ -767,7 +767,7 @@ class TestH5Persistence(unittest.TestCase):
 
         # # These operation will enforce saving everything to H5
         # Deny listed (already tested but include for completeness)
-        ds1.set(uids[2], SampleStatsEx.DENY_LISTED.value, True)
+        ds1.set(uids[2], SampleStatsEx.DENIED_FLAG.value, True)
         # Tags
         ds1.set(uids[0], SampleStatsEx.TAGS.value, "test_tag")
         # Check after these immediate saves, pending should still have the deferred ones
@@ -781,7 +781,7 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds1.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
         self.assertEqual(ds1.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
         self.assertEqual(ds1.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertTrue(ds1.get(uids[2], SampleStatsEx.DENY_LISTED.value))
+        self.assertTrue(ds1.get(uids[2], SampleStatsEx.DENIED_FLAG.value))
 
         # Manually trigger save
         ds1._save_pending_stats_to_h5()
@@ -795,13 +795,13 @@ class TestH5Persistence(unittest.TestCase):
         self.assertEqual(ds2.get(uids[1], SampleStatsEx.ENCOUNTERED.value), 5)
         self.assertEqual(ds2.get(uids[2], SampleStatsEx.PREDICTION_LOSS.value), 0.42)
         self.assertEqual(ds2.get(uids[0], SampleStatsEx.PREDICTION_AGE.value), 100)
-        self.assertTrue(ds2.get(uids[2], SampleStatsEx.DENY_LISTED.value))
+        self.assertTrue(ds2.get(uids[2], SampleStatsEx.DENIED_FLAG.value))
 
         # Verify unchanged UIDs have default values (not saved/loaded from H5)
         # These should be initialized with defaults, not loaded
         self.assertEqual(ds2.get(uids[3], SampleStatsEx.TAGS.value), '')
         self.assertEqual(ds2.get(uids[3], SampleStatsEx.PREDICTION_AGE.value), -1)
-        self.assertFalse(ds2.get(uids[3], SampleStatsEx.DENY_LISTED.value))
+        self.assertFalse(ds2.get(uids[3], SampleStatsEx.DENIED_FLAG.value))
 
     def test_h5_without_root_log_dir(self):
         """Test that wrapper works without H5 persistence."""
