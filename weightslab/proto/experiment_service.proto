@@ -186,7 +186,7 @@ message RecordMetadata {
   int32 sample_id = 1;
   repeated int32 sample_label = 2;
   repeated int32 sample_prediction = 3;
-  map<string, float> sample_last_loss = 4;
+  float sample_last_loss = 4;
   int32 sample_encounters = 5;
   bool sample_discarded = 6;
   repeated TaskField extra_fields = 7;

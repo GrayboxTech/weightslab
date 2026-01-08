@@ -231,18 +231,10 @@ class COCOBBoxSegmentationDataset(Dataset):
         else:
             # ToTensor would cast to float; keep long for class ids
             transformed_gt = mask
-
-        # Scale boxes to match the transformed mask/image size
-        out_h, out_w = transformed_gt.shape[-2:]
-        scale_x = out_w / float(w)
-        scale_y = out_h / float(h)
         boxes = torch.tensor([
                 [ann["bbox"][0], ann["bbox"][1], ann["bbox"][0] + ann["bbox"][2], ann["bbox"][1] + ann["bbox"][3]]
                 for ann in anns
         ], dtype=torch.float32) if anns else torch.zeros((0, 4), dtype=torch.float32)
-        if boxes.numel():
-            scales = torch.tensor([scale_x, scale_y, scale_x, scale_y], dtype=boxes.dtype)
-            boxes = boxes * scales
         labels = torch.tensor([
                 self.class_map.get(ann["category_id"], ann["category_id"])
                 for ann in anns

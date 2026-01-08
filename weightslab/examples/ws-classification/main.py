@@ -31,56 +31,38 @@ logging.basicConfig(level=logging.ERROR)
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_bin, criterion_mlt, device):
+def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
 
-        # Infer
         optimizer.zero_grad()
-        preds_raw = model(inputs)
+        outputs = model(inputs)
 
-        # Preds
-        if preds_raw.ndim == 1:
-            preds = (preds_raw > 0.0).long()
+        if outputs.ndim == 1:
+            preds = (outputs > 0.0).long()
         else:
-            preds = preds_raw.argmax(dim=1, keepdim=True)
+            preds = outputs.argmax(dim=1, keepdim=True)
 
         # Loss is a watched object => pass metadata for logging/stats
-        loss_batch_mlt = criterion_mlt(
-            preds_raw.float(),
+        loss_batch = criterion_mlt(
+            outputs.float(),
             labels.long(),
             model_age=model.get_age(),
             batch_ids=ids,
-            preds=preds
+            preds=preds,
         )
-        loss_batch_bin = criterion_bin(
-            preds_raw[:, 7] if preds_raw.ndim > 1 else preds_raw,
-            (labels == 7).float(),
-            model_age=model.get_age(),
-            batch_ids=ids,
-            preds=preds
-        )
-        total_loss = (loss_batch_mlt + loss_batch_bin)/2.0
-        wl.save_signals(
-            preds_raw=preds_raw,
-            model_age=model.get_age(),
-            batch_ids=ids,
-            signals={'combined_loss': total_loss},
-            preds=preds
-        )  # Save per-sample losses as signals manually
-        total_loss = total_loss.mean()  # Final scalar loss
+        loss = loss_batch.mean()
 
-        # Model
-        total_loss.backward()
+        loss.backward()
         optimizer.step()
 
-    return total_loss.detach().cpu().item()
+    return loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_loader_len):
+def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
@@ -89,24 +71,13 @@ def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_l
             inputs = inputs.to(device)
             labels = labels.to(device)
 
-            # Infer
             outputs = model(inputs)
 
-            # Preds
             if outputs.ndim == 1:
                 preds = (outputs > 0.0).long()
             else:
                 preds = outputs.argmax(dim=1, keepdim=True)
 
-            # Compute signals
-            loss_bin_batch = criterion_bin(
-                outputs[:, 7] if outputs.ndim > 1 else outputs,
-                (labels == 7).float(),
-                model_age=model.get_age(),
-                batch_ids=ids,
-                preds=preds,
-            )
-            losses += torch.mean(loss_bin_batch)
             loss_batch = criterion_mlt(
                 outputs,
                 labels,
@@ -116,19 +87,6 @@ def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_l
             )
             losses += torch.mean(loss_batch)
             metric_mlt.update(outputs, labels)
-
-            # Per-sample accuracy: 1.0 if correct, else 0.0
-            preds_flat = preds.view(-1)
-            acc_per_sample = (preds_flat == labels.view(-1)).float()
-
-            # Log per-sample metric alongside signals; persists via the storer
-            wl.save_signals(
-                preds_raw=outputs,
-                model_age=model.get_age(),
-                batch_ids=ids,
-                signals={"accuracy_per_sample": acc_per_sample},
-                preds=preds,
-            )
 
     loss = losses / test_loader_len
     metric = metric_mlt.compute() * 100
@@ -142,14 +100,14 @@ def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_l
 if __name__ == "__main__":
     start_time = time.time()
 
-    # Load hyperparameters (from YAML if present)
+    # 2) Load hyperparameters (from YAML if present)
     parameters = {}
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
-    parameters = parameters or {}
 
+    parameters = parameters or {}
     # ---- sensible defaults / normalization ----
     parameters.setdefault("experiment_name", "mnist_cnn")
     parameters.setdefault("device", "auto")
@@ -174,7 +132,6 @@ if __name__ == "__main__":
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
     eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
-    enable_h5_persistence = parameters.get("enable_h5_persistence", True)
 
     # Register components in the GLOBAL_LEDGER via watch_or_edit
     # Logger
@@ -253,8 +210,7 @@ if __name__ == "__main__":
         batch_size=train_bs,
         shuffle=train_shuffle,
         is_training=True,
-        compute_hash=False,
-        enable_h5_persistence=enable_h5_persistence
+        compute_hash=False
     )
     val_loader = wl.watch_or_edit(
         _val_dataset,
@@ -263,8 +219,7 @@ if __name__ == "__main__":
         batch_size=val_bs,
         shuffle=val_shuffle,
         is_training=False,
-        compute_hash=False,
-        enable_h5_persistence=enable_h5_persistence
+        compute_hash=False
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -273,8 +228,7 @@ if __name__ == "__main__":
         batch_size=test_bs,
         shuffle=test_shuffle,
         is_training=False,
-        compute_hash=False,
-        enable_h5_persistence=enable_h5_persistence
+        compute_hash=False
     )
 
     # Losses & metrics (watched objects – they log themselves)
@@ -284,34 +238,16 @@ if __name__ == "__main__":
         name="train_loss/mlt_loss",
         log=True,
     )
-    train_criterion_bin = wl.watch_or_edit(
-        nn.BCELoss(reduction="none"),
-        flag="loss",
-        name="train_loss/bin_loss",
-        log=True,
-    )
     val_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="val_loss/mlt_loss",
         log=True,
     )
-    val_criterion_bin = wl.watch_or_edit(
-        nn.BCELoss(reduction="none"),
-        flag="loss",
-        name="val_loss/bin_loss",
-        log=True,
-    )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="test_loss/mlt_loss",
-        log=True,
-    )
-    test_criterion_bin = wl.watch_or_edit(
-        nn.BCELoss(reduction="none"),
-        flag="loss",
-        name="test_loss/bin_loss",
         log=True,
     )
 
@@ -356,36 +292,33 @@ if __name__ == "__main__":
     val_loader_iter = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
     test_loader_iter = tqdm.tqdm(test_loader, desc="Testing") if tqdm_display else test_loader
 
-    train_loss = None
     val_loss, val_metric = None, None
     test_loss, test_metric = None, None
     for train_step in train_range:
         # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion_bin, train_criterion_mlt, device)
+        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
-        # Periodic validation and test evaluation
-        if train_step % eval_every == 0:
-            # Validate
-            val_loss, val_metric = test(
-                val_loader_iter,
-                model,
-                val_criterion_bin,
-                val_criterion_mlt,
-                val_metric_mlt,
-                device,
-                val_loader_len
-            )
+        # # Periodic validation and test evaluation
+        # if train_step % eval_every == 0:
+        #     # Validate
+        #     val_loss, val_metric = test(
+        #         val_loader_iter,
+        #         model,
+        #         val_criterion_mlt,
+        #         val_metric_mlt,
+        #         device,
+        #         val_loader_len
+        #     )
 
-            # Test (less frequent or same as val)
-            test_loss, test_metric = test(
-                test_loader_iter,
-                model,
-                test_criterion_bin,
-                test_criterion_mlt,
-                test_metric_mlt,
-                device,
-                test_loader_len
-            )
+        #     # Test (less frequent or same as val)
+        #     test_loss, test_metric = test(
+        #         test_loader_iter,
+        #         model,
+        #         test_criterion_mlt,
+        #         test_metric_mlt,
+        #         device,
+        #         test_loader_len
+        #     )
 
         # Verbose
         if verbose and not tqdm_display:

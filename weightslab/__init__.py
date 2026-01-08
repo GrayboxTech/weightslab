@@ -7,12 +7,12 @@ Expose commonly used helpers at package level so users can do::
 
 This file re-exports selected symbols from `weightslab.src`.
 """
-from .src import watch_or_edit, serve, keep_serving, save_signals
+from .src import watch_or_edit, serve, keep_serving
 from .art import _BANNER
 from .utils.logs import setup_logging
 
-import os
 
+import os
 
 # Auto-initialize logging if not already configured
 # Check for environment variable to control log level
@@ -41,7 +41,6 @@ __all__ = [
     "watch_or_edit",
     "serve",
     "keep_serving",
-    "save_signals",
 
     "_BANNER",
 

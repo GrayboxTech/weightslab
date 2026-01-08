@@ -54,7 +54,7 @@ class FashionCNN(nn.Module):
         x = self.m1(self.r1(self.b1(self.c1(x))))
         x = self.m2(self.r2(self.b2(self.c2(x))))
         x = self.fc4(self.fc3(self.f3(x)))
-        return self.s4(x)
+        return x
 
 
 class FashionCNNSequential(nn.Module):

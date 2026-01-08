@@ -32,10 +32,14 @@ class PauseController:
     def pause(self):
         print('\nTraining paused.')
         self._event.clear()
+        name = resolve_hp_name()
+        set_hyperparam(name, 'is_training', False)
 
     def resume(self):
         print('\nTraining resumed.')
         self._event.set()
+        name = resolve_hp_name()
+        set_hyperparam(name, 'is_training', True)
 
     def is_paused(self):
         return not self._event.is_set()
@@ -149,10 +153,12 @@ class GuardContext:
                         # try ledger API first
                         try:
                             set_hyperparam(name, 'training_steps_to_do', new)
+                            set_hyperparam(name, 'is_training', new > 0)
                         except Exception:
                             # best-effort fallback: update dict directly
                             try:
                                 hp['training_steps_to_do'] = new
+                                hp['is_training'] = new > 0
                             except Exception:
                                 pass
                     except Exception:

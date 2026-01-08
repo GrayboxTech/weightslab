@@ -249,7 +249,7 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
         task_type = str(task_type)
 
     sample_stats.task_type = task_type
-
+    
     ignore_index = getattr(dataset, "ignore_index", 255)
     num_classes  = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))
 
