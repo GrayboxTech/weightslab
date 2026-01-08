@@ -1,16 +1,21 @@
-device: cuda
-root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/weightslab_mnist"
+device: cpu
+root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/weightslab_mnist_tests"
 tqdm_display: true
 skip_loading: true
 
 experiment_name: Exp_CNN_Test
 
-eval_full_to_train_steps_ratio: 100
+eval_full_to_train_steps_ratio: 1000
 experiment_dump_to_train_steps_ratio: 200
 skip_checkpoint_load: true
 
 # start training immediately or not
-is_training: true
+is_training: false
+
+# Configure global dataframe storage
+enable_h5_persistence: true
+ledger_flush_max_rows: 250
+ledger_flush_interval: 10.0
 
 data:
   train_loader:

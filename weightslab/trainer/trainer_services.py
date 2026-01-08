@@ -111,7 +111,12 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
     grpc_port = int(os.getenv("GRPC_BACKEND_PORT", grpc_port))
 
     def serving_thread_callback():
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=n_workers_grpc))
+        server = grpc.server(
+            futures.ThreadPoolExecutor(
+                thread_name_prefix="grpc_server_worker",
+                max_workers=n_workers_grpc
+            )
+        )
         servicer = trainer.ExperimentServiceServicer()
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
         server.add_insecure_port(f'{grpc_host}:'+ str(grpc_port))  # guarantees IPv4 connectivity from containers.

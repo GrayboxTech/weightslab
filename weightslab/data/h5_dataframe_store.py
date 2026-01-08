@@ -124,12 +124,16 @@ class H5DataFrameStore:
             df_out.index = df_out.index.astype(int)
         except Exception:
             pass
+        # Sanitize column names: HDF5 doesn't allow '/' in object names
+        df_out.columns = [str(col).replace('/', '__SLASH__') for col in df_out.columns]
         return df_out
 
     def _normalize_for_read(self, df: pd.DataFrame, origin: str) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
         df_out = df.copy()
+        # Restore original column names by replacing __SLASH__ token back to '/'
+        df_out.columns = [str(col).replace('__SLASH__', '/') for col in df_out.columns]
         if df_out.index.name in (None, "uid"):
             df_out.index.name = "sample_id"
         if not isinstance(df_out, pd.Series) and "sample_id" not in df_out.columns:
@@ -201,6 +205,7 @@ class H5DataFrameStore:
         if not self._path.exists():
             return pd.DataFrame()
 
+        lock_timeout = 0.5 if non_blocking else self._lock_timeout
         if origins is None or origins == 'all' or (isinstance(origins, set) and 'all' in origins):
             origins = set()
             with self._local_lock:
@@ -227,7 +232,6 @@ class H5DataFrameStore:
             return pd.DataFrame()
 
         # Batch load under single lock/transaction with timeout support
-        lock_timeout = 0.5 if non_blocking else self._lock_timeout
         with self._local_lock:
             try:
                 with _InterProcessFileLock(self._lock_path, timeout=lock_timeout, poll_interval=self._poll_interval):
@@ -284,11 +288,13 @@ class H5DataFrameStore:
                     with pd.HDFStore(str(self._path), mode="a") as store:
                         existing = pd.DataFrame()
                         if key in store:
-                            existing = store.select(key)
-                            # retained = existing[~existing.index.isin(df_norm.index)] if not existing.empty else pd.DataFrame()
-                            store.remove(key)
-                            store.flush()
-                        # Update retained in place with df_norm, then add new rows
+                            try:
+                                existing = store.select(key)
+                                store.remove(key)
+                                store.flush()
+                            except (TypeError, KeyError) as exc:
+                                logger.warning(f"[H5DataFrameStore] Detected corrupted key {key} during upsert: {exc}")
+                        # Merge existing and new data
                         if not existing.empty:
                             if 'tags' in existing.columns and 'tags' in df_norm.columns and len(df_norm.columns) == 1:  # Only for tags update
                                 idx = df_norm.index.intersection(existing.index)
@@ -299,10 +305,10 @@ class H5DataFrameStore:
                                     combined = curr + sep + new
                                     existing.loc[idx, 'tags'] = combined
                             else:
-                                existing.update(df_norm)
+                                # Concatenate existing and new data, keeping newer values for duplicate indices
+                                existing = pd.concat([existing, df_norm])
                         else:
                             existing = df_norm.copy()
-                        # Remove any duplicate indices (keep last, i.e., new rows)
                         existing = existing[~existing.index.duplicated(keep='last')]
                         store.append(key, existing, format="table", data_columns=True, min_itemsize={"tags": 256})
                         store.flush()

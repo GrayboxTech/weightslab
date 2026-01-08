@@ -6,7 +6,12 @@ num_classes: 6
 image_size: 128
 
 # start training immediately or not
-is_training: true
+is_training: false
+
+# Configure global dataframe storage
+enable_h5_persistence: true
+ledger_flush_max_rows: 250
+ledger_flush_interval: 10.0
 
 data:
   train_loader:
