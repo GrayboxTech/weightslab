@@ -37,6 +37,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -98,7 +99,6 @@ class SmallUNet(nn.Module):
 
         logits = self.head(d1)  # [B, C, H, W]
         return logits
-
 
 
 # =============================================================================

@@ -652,6 +652,12 @@ def register_dataframe(name: str, dataframe: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_dataframe(name, dataframe, weak=weak)
 
 def get_dataframe(name: Optional[str] = None) -> Any:
+    """Return a dataframe handle; if none registered, return a Proxy placeholder.
+
+    When name is omitted, default to "sample_stats" so callers get a stable
+    proxy that will be updated in-place once the dataframe manager registers.
+    """
+    name = name or "sample_stats"
     return GLOBAL_LEDGER.get_dataframe(name)
 
 def list_dataframes() -> List[str]:

@@ -239,7 +239,7 @@ class DataLoaderInterface:
             # Wrap base sampler with MaskedSampler to skip deny-listed samples
             masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
 
-            # Inner class: mutable batch sampler
+            # Inner class: mutable batch sampler for batch size changes
             class MutableBatchSampler:
                 """A simple mutable batch sampler that yields lists of indices.
 
@@ -264,7 +264,7 @@ class DataLoaderInterface:
 
                 def __len__(self):
                     try:
-                        total = len(self.base_sampler)
+                        total = len(self.base_sampler.tracked_dataset)  # type: ignore
                         b = max(1, int(self.batch_size))
                         return (total + b - 1) // b
                     except Exception:
@@ -277,6 +277,7 @@ class DataLoaderInterface:
 
             # Construct dataloader using our batch_sampler
             self.is_training = kwargs.pop("is_training", False)
+            self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
             self.dataloader = DataLoader(
                 self.tracked_dataset,
                 batch_sampler=mbs,
@@ -287,7 +288,6 @@ class DataLoaderInterface:
             )
 
         self.init_attributes(self.dataloader)
-
 
         # Internal iterator used by `_next_batch` / `next_batch`
         self._iterator: Iterator = iter(self.dataloader)

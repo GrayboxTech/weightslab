@@ -288,10 +288,12 @@ class H5DataFrameStore:
                     with pd.HDFStore(str(self._path), mode="a") as store:
                         existing = pd.DataFrame()
                         if key in store:
-                            existing = store.select(key)
-                            # retained = existing[~existing.index.isin(df_norm.index)] if not existing.empty else pd.DataFrame()
-                            store.remove(key)
-                            store.flush()
+                            try:
+                                existing = store.select(key)
+                                store.remove(key)
+                                store.flush()
+                            except (TypeError, KeyError) as exc:
+                                logger.warning(f"[H5DataFrameStore] Detected corrupted key {key} during upsert: {exc}")
                         # Merge existing and new data
                         if not existing.empty:
                             if 'tags' in existing.columns and 'tags' in df_norm.columns and len(df_norm.columns) == 1:  # Only for tags update
@@ -307,7 +309,6 @@ class H5DataFrameStore:
                                 existing = pd.concat([existing, df_norm])
                         else:
                             existing = df_norm.copy()
-                        # Remove any duplicate indices (keep last, i.e., new rows)
                         existing = existing[~existing.index.duplicated(keep='last')]
                         store.append(key, existing, format="table", data_columns=True, min_itemsize={"tags": 256})
                         store.flush()
