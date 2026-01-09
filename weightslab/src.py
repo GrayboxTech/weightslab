@@ -55,8 +55,9 @@ def save_signals(
     model_age = int(model_age) // len(batch_ids_np)  # How old was the model when processing this batch, i.e., how many batches seen before me ?
     # # Process signals
     if isinstance(signals, dict):
-        losses_data = {
-            'signals//' + k: (v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v))
+        losses_data = {\
+            # Convert losses map of shape (B, ...) to (B,) by averaging spatial dimensions if needed
+            'signals//' + k: (v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v)).mean((1, 2)) if v.ndim > 2 else (v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v))
             for k, v in signals.items()
         }
     elif signals is not None:

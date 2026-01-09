@@ -456,11 +456,6 @@ class DataService:
                         or (getattr(dataset, "num_classes", None) if dataset else None)
                         or getattr(self._ctx.components.get("model"), "num_classes", None)
                     )
-                    if num_classes is not None:
-                        for i in range(int(num_classes)):
-                            col_name = f"loss_class_{i}"
-                            if col_name not in stats_to_retrieve:
-                                stats_to_retrieve.append(col_name)
 
             for stat_name in stats_to_retrieve:
                 # Get value
