@@ -141,13 +141,39 @@ PATH B: DATA ANALYSIS (primary_goal="data_analysis")
 - Output: A single answer, string, ID, or list of values returned to the chat.
 - Operations: Use kind="analysis" with a single-line pandas expression in `analysis_expression`.
 
+STRICT SCHEMA RULES:
+- "kind": "sort" -> ONLY use "sort_by" and "ascending". NEVER use "conditions".
+- "kind": "keep"/"drop" -> ONLY use "conditions". NEVER use "sort_by".
+- If you need to filter AND sort, use TWO SEPARATE steps.
+
 EXAMPLES OF THE DISTINCTION:
+
+User: "Show me the worst 10 images of class 5"
+-> primary_goal="ui_manipulation"
+-> steps=[
+    {{"kind": "keep", "conditions": [{{"column": "label", "op": "==", "value": 5}}]}},
+    {{"kind": "sort", "sort_by": ["loss_class_5"], "ascending": false}},
+    {{"kind": "head", "n": 10}}
+]
 
 User: "Show me the worst images" 
 -> primary_goal="ui_manipulation"
 -> steps=[
     {{"kind": "sort", "sort_by": ["loss"], "ascending": false}},
     {{"kind": "head", "n": 10}}
+]
+
+User: "Keep samples with loss above the average"
+-> primary_goal="ui_manipulation"
+-> steps=[
+    {{"kind": "keep", "conditions": [{{"column": "mean_loss", "op": ">", "value": "df['mean_loss'].mean()"}}]}}
+]
+
+User: "Keep only the sample with the lowest max_loss"
+-> primary_goal="ui_manipulation"
+-> steps=[
+    {{"kind": "sort", "sort_by": ["max_loss"], "ascending": true}},
+    {{"kind": "head", "n": 1}}
 ]
 
 User: "What is the index of the worst image?"

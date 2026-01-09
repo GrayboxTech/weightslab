@@ -72,11 +72,20 @@ class DataManipulationAgent:
         df = self.ctx._all_datasets_df
         all_columns = df.columns.tolist()
         
-        # Add index names to columns list
+        # Add index names to columns list (though we now keep them as columns)
         if isinstance(df.index, pd.MultiIndex):
             all_columns.extend([name for name in df.index.names if name is not None])
         elif df.index.name is not None:
             all_columns.append(df.index.name)
+
+        # Unique values for origin to help the agent know the vocabulary
+        origin_values = []
+        if 'origin' in df.columns:
+            origin_values = df['origin'].unique().tolist()
+        elif 'origin' in all_columns: # Might be in index
+            try:
+                origin_values = df.index.get_level_values('origin').unique().tolist()
+            except: pass
 
         # Add common prediction stats if missing
         expected_stats = [
@@ -93,7 +102,8 @@ class DataManipulationAgent:
 
         self.df_schema = {
             'columns': all_columns,
-            'dtypes': {str(k): str(v) for k, v in df.dtypes.to_dict().items()}
+            'dtypes': {str(k): str(v) for k, v in df.dtypes.to_dict().items()},
+            'origin_values': origin_values
         }
 
     def _load_config(self):
@@ -209,8 +219,14 @@ class DataManipulationAgent:
 
     def query(self, instruction: str) -> dict:
         """Main entry point for natural language instructions."""
+        self._setup_schema() # Refresh schema information
+        
+        cols_desc = ", ".join(self.df_schema['columns'])
+        if self.df_schema['origin_values']:
+            cols_desc += f" (Note: 'origin' has values: {self.df_schema['origin_values']})"
+
         system_prompt = INTENT_PROMPT.format(
-            columns=self.df_schema['columns'],
+            columns=cols_desc,
             instruction="{instruction}"
         )
         
@@ -349,29 +365,34 @@ class DataManipulationAgent:
         return best_col
 
     def _build_condition_string(self, conditions: List[Condition]) -> Optional[str]:
-        """Converts structured conditions into a pandas query string."""
+        """Converts structured conditions into a pandas mask expression."""
         if not conditions: return None
         parts = []
         for cond in conditions:
             col = self._resolve_column(cond.column)
             if not col: continue
             
-            ref = col if re.match(r'^[\w]+$', col) else f"`{col}`"
+            # Use df['col'] syntax to allow raw eval() in backend
+            ref = f"df['{col}']"
             op = cond.op.lower().strip()
             # Normalize operators
             if op in ("===", "==", "is", "equals"): op = "=="
             elif op in ("!==", "!="): op = "!="
             
             if op in ("==", "!=", ">", "<", ">=", "<="):
-                val = f"'{cond.value}'" if isinstance(cond.value, str) else str(cond.value)
+                # If the value looks like code (e.g. df['loss'].mean()), don't wrap in quotes 
+                if isinstance(cond.value, str) and (cond.value.startswith("df[") or cond.value.startswith("df.")):
+                    val = cond.value
+                else:
+                    val = f"'{cond.value}'" if isinstance(cond.value, str) else str(cond.value)
                 parts.append(f"({ref} {op} {val})")
             elif op == "between" and cond.value is not None and cond.value2 is not None:
                 parts.append(f"({ref}.between({cond.value}, {cond.value2}))")
             elif op == "contains" and cond.value is not None:
-                # df.query supports calling methods on columns
                 parts.append(f"({ref}.str.contains('{cond.value}', na=False, regex=False))")
                 
-        return " and ".join(parts) if parts else None
+        # Use '&' for bitwise/series comparison instead of 'and'
+        return " & ".join(parts) if parts else None
 
     def _intent_to_pandas_op(self, intent: Intent) -> List[dict]:
         """Converts an Intent object (with steps) into a list of dictionaries describing pandas operations."""
@@ -387,12 +408,27 @@ class DataManipulationAgent:
                 op["function"] = f"df.{kind}"
                 op["params"] = {"n": int(step.n) if step.n else 5}
                 
-            elif kind == "sort" and step.sort_by:
-                cols = [self._resolve_column(c) for c in step.sort_by]
-                cols = [c for c in cols if c]
-                if cols:
+            elif kind == "sort":
+                sort_cols = []
+                ascending = bool(step.ascending) if step.ascending is not None else True
+                
+                # HEALING: If model put sort info in conditions because it's silly
+                if not step.sort_by and step.conditions:
+                    for cond in step.conditions:
+                        col = self._resolve_column(cond.column)
+                        if col:
+                            sort_cols.append(col)
+                            # If value looks like 'desc' or 'false', set ascending=False
+                            if isinstance(cond.value, str) and any(x in cond.value.lower() for x in ['desc', 'false']):
+                                ascending = False
+
+                if step.sort_by:
+                    resolved = [self._resolve_column(c) for c in step.sort_by]
+                    sort_cols.extend([c for c in resolved if c])
+
+                if sort_cols:
                     op["function"] = "df.sort_values"
-                    op["params"] = {"by": cols, "ascending": bool(step.ascending) if step.ascending is not None else True}
+                    op["params"] = {"by": sort_cols, "ascending": ascending}
                     
             elif kind in ("keep", "drop") and step.conditions:
                 expr = self._build_condition_string(step.conditions)

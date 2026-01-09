@@ -260,12 +260,14 @@ class DataService:
 
         # Build dataframe once to avoid concat overhead
         df = pd.DataFrame.from_records(records)
-
+        
         try:
-            df.set_index(["origin", "sample_id"], inplace=True)
+            # We set the index for fast lookups (loc), but keep them as columns (drop=False)
+            # so the Agent can still see and filter them via df['origin'].
+            df.set_index(["origin", "sample_id"], inplace=True, drop=False)
         except KeyError as e:
             logger.warning(f"Failed to set index on dataframe: {e}")
-
+            
         return df
 
     def _load_existing_tags(self):
@@ -588,13 +590,19 @@ class DataService:
         # A) Agent-driven df.query → keep/filter rows via in-place drop
         if func == "df.query":
             expr = params.get("expr", "")
-            print(f"[DEBUG] ENTERED df.query branch with expr={expr}")
             before = len(df)
-            kept = df.query(expr)
-            print(f"[DEBUG] df.query kept {len(kept)} rows out of {before}")
-            df.drop(index=df.index.difference(kept.index), inplace=True)
-            print(f"[DEBUG] AFTER DROP df_len={len(df)}")
-            return f"Applied query: {expr}"
+            
+            try:
+                # We use raw eval() on a mask expression for maximum flexibility.
+                # This allows the expression to contain complex df[...] logic.
+                mask = eval(expr, {"df": df, "np": np, "pd": pd})
+                kept = df[mask]
+                
+                df.drop(index=df.index.difference(kept.index), inplace=True)
+                return f"Applied query: {expr}"
+            except Exception as e:
+                logger.error(f"Query failed: {e}")
+                return f"Failed to apply query: {e}"
 
         # B) Other supported Pandas operations (drop, sort, head, tail, sample)
         if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
@@ -1035,7 +1043,7 @@ class DataService:
             with self._lock:
                 self._slowUpdateInternals()
                 end_index = request.start_index + request.records_cnt
-                df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index()
+                df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index(drop=True)
 
             # Load tags only for the displayed slice (stream-friendly)
             df_slice = self._hydrate_tags_for_slice(df_slice)
