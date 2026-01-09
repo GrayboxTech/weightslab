@@ -30,11 +30,11 @@ class PauseController:
         self._event.wait()   # releases GIL while waiting
 
     def pause(self):
-        print('\nTraining paused.')
+        logger.info('\nTraining paused.')
         self._event.clear()
 
     def resume(self):
-        print('\nTraining resumed.')
+        logger.info('\nTraining resumed.')
         self._event.set()
 
     def is_paused(self):

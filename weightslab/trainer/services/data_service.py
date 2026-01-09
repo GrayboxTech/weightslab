@@ -1,4 +1,5 @@
 import io
+from typing import List
 import time
 import json
 import torch
@@ -153,6 +154,37 @@ def _infer_task_type_from_label(label, default="classification"):
     # Anything else: keep the caller's default guess
     return default
 
+
+def _infer_task_type_from_label(label, default="classification"):
+    """
+    Heuristic: guess task type based on label shape / dtype.
+
+    - 0D or size==1 → classification-like
+    - 2D integer mask → segmentation-like
+    - 3D 1-channel integer tensor → segmentation-like
+    - otherwise → fall back to default
+    """
+    try:
+        arr = label.cpu().numpy() if hasattr(label, "cpu") else np.asarray(label)
+    except Exception:
+        return default
+
+    # Scalar / single element → treat as classification
+    if arr.ndim == 0 or arr.size == 1:
+        return "classification"
+
+    # 2D integer-ish → very likely segmentation mask
+    if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
+        return "segmentation"
+
+    # 3D with a single channel can also be a mask (1, H, W) or (H, W, 1)
+    if arr.ndim == 3:
+        if arr.shape[0] == 1 or arr.shape[-1] == 1:
+            if np.issubdtype(arr.dtype, np.integer):
+                return "segmentation"
+
+    # Anything else: keep the caller's default guess
+    return default
 
 
 class DataService:
@@ -645,13 +677,12 @@ class DataService:
                     for tag_val in tag_values:
                         if tag_val:
                             # Tags are stored as comma-separated strings
-                            for t in str(tag_val).split(','):
+                            for t in str(tag_val).split(';'):
                                 clean_t = t.strip()
                                 if clean_t:
                                     tags.add(clean_t)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
-
         return sorted(list(tags))
 
     def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
@@ -669,13 +700,15 @@ class DataService:
             else 0
         )
         in_loop_count = total_count - discarded_count
+        unique_tags = self._get_unique_tags()
 
         return pb2.DataQueryResponse(
             success=True,
             message=message,
             number_of_all_samples=total_count,
             number_of_samples_in_the_loop=in_loop_count,
-            number_of_discarded_samples=discarded_count
+            number_of_discarded_samples=discarded_count,
+            unique_tags=unique_tags
         )
 
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
@@ -876,7 +909,43 @@ class DataService:
         if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 5:
             return
 
-        self._all_datasets_df = self._pull_into_all_data_view_df()  # new snapshot from data
+        updated_df = self._pull_into_all_data_view_df()
+
+        if hasattr(self, "_all_datasets_df") and self._all_datasets_df is not None and not self._all_datasets_df.empty:
+            # If the current DF is sorted differently than the default 'sample_id' order,
+            # we should try to maintain that sort order with the new data.
+            # Simple heuristic: if the index has changed (reordered), re-apply it.
+
+            # 1. Update the new DF with the new data
+            # 2. Reindex the new DF to match the old DF's index order (intersection)
+            # This keeps the user's sort valid for existing items.
+            pass
+
+            # Check if we have a custom sort (index is not strictly increasing monotonic)
+            # AND if the index types are compatible (both numeric)
+            if not self._all_datasets_df.index.is_monotonic_increasing:
+                 # We have a custom sort.
+                 old_index = self._all_datasets_df.index
+                 new_index = updated_df.index
+
+                 # 1. Identify rows that are in BOTH (intersection) -> keep old order
+                 # use .intersection to preserve order of left argument (old_index)
+                 kept_indices = [x for x in old_index if x in new_index]
+
+                 # 2. Identify rows that are NEW (difference) -> append to end
+                 # Use set difference for speed, then sort or just append
+                 old_index_set = set(old_index)
+                 newly_added_indices = [x for x in new_index if x not in old_index_set]
+
+                 # 3. Construct the full requested order
+                 full_order = kept_indices + newly_added_indices
+
+                 # 4. Reindex using this full order.
+                 # The 'updated_df' contains ALL the data (old items updated + new items).
+                 # This safely reorders it.
+                 updated_df = updated_df.reindex(full_order)
+
+        self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
 
     def ApplyDataQuery(self, request, context):
@@ -1025,7 +1094,7 @@ class DataService:
 
         self._ctx.ensure_components()
 
-        if request.stat_name not in [SampleStatsEx.TAGS.value, "deny_listed"]:
+        if request.stat_name not in [SampleStatsEx.TAGS.value, SampleStatsEx.DENY_LISTED.value]:
             return pb2.DataEditsResponse(
                 success=False,
                 message="Only 'tags' and 'deny_listed' stat editing is supported for now.",
@@ -1037,7 +1106,7 @@ class DataService:
         # No dataset lookups needed; all edits apply directly to the global dataframe.
 
         # ---------------------------------------------------------------------
-        # 2) Mirror edits into the in-memory DataFrame
+        # 1) Mirror edits into the in-memory DataFrame
         # ---------------------------------------------------------------------
         with self._lock:
             if self._all_datasets_df is not None:
@@ -1067,7 +1136,7 @@ class DataService:
                                 if new_val in current_tags:
                                     current_tags.remove(new_val)
 
-                            target_val = ", ".join(current_tags)
+                            target_val = ";".join(current_tags)
                         else:
                             target_val = new_val or ""
                     else:

@@ -64,11 +64,13 @@ def train(loader, model, optimizer, criterion_bin, criterion_mlt, device):
             preds=preds
         )
         total_loss = (loss_batch_mlt + loss_batch_bin)/2.0
+
+        # Save the global signals for this batch as it is computed manually
         wl.save_signals(
             preds_raw=preds_raw,
             model_age=model.get_age(),
             batch_ids=ids,
-            signals={'combined_loss': total_loss},
+            signals={'train/combined_loss': total_loss},
             preds=preds
         )  # Save per-sample losses as signals manually
         total_loss = total_loss.mean()  # Final scalar loss
@@ -126,7 +128,7 @@ def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_l
                 preds_raw=outputs,
                 model_age=model.get_age(),
                 batch_ids=ids,
-                signals={"accuracy_per_sample": acc_per_sample},
+                signals={"valOrtest/accuracy_per_sample": acc_per_sample},
                 preds=preds,
             )
 

@@ -250,6 +250,18 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
 
     sample_stats.task_type = task_type
 
+    raw_ds_task_type = getattr(dataset, "task_type", None)
+    raw_exp_task_type = getattr(experiment, "task_type", None)
+
+    task_type = raw_ds_task_type or raw_exp_task_type or "classification"
+    # ensure it's a plain string for protobuf
+    if isinstance(task_type, bytes):
+        task_type = task_type.decode("utf-8", "ignore")
+    else:
+        task_type = str(task_type)
+
+    sample_stats.task_type = task_type
+
     ignore_index = getattr(dataset, "ignore_index", 255)
     num_classes  = getattr(dataset, "num_classes", getattr(experiment, "num_classes", None))
 

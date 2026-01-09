@@ -274,6 +274,7 @@ message DataQueryResponse {
   int32 number_of_all_samples = 3;
   int32 number_of_samples_in_the_loop = 4;
   int32 number_of_discarded_samples = 5;
+  repeated string unique_tags = 6;
 }
 
 message DataSamplesRequest {

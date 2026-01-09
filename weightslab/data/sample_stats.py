@@ -23,7 +23,7 @@ class SampleStats:
         PREDICTION_SIGNALS_VALUES = "prediction_signals_values"
 
         TARGET = "target"
-        DENIED_FLAG = "deny_listed"
+        DENY_LISTED = "deny_listed"
         ENCOUNTERED = "encountered"
 
         TAGS = "tags"
@@ -43,7 +43,7 @@ class SampleStats:
         Ex.PREDICTION_SIGNALS_VALUES.value: dict,
 
         Ex.TARGET.value: int | list,
-        Ex.DENIED_FLAG.value: bool,
+        Ex.DENY_LISTED.value: bool,
         Ex.ENCOUNTERED.value: int,
 
         Ex.TAGS.value: list | str,
@@ -60,7 +60,7 @@ class SampleStats:
         Ex.PREDICTION_SIGNALS_VALUES.value: {},
 
         Ex.TARGET.value: None,
-        Ex.DENIED_FLAG.value: False,
+        Ex.DENY_LISTED.value: False,
         Ex.ENCOUNTERED.value: 0,
 
         Ex.TAGS.value: "",
@@ -89,7 +89,7 @@ class SampleStats:
 
         # Targets saved only if not array-like (see dataframe_manager._coerce_scalar_cell)
         # Ex.TARGET.value,
-        Ex.DENIED_FLAG.value,
+        Ex.DENY_LISTED.value,
         Ex.ENCOUNTERED.value,
 
         Ex.TAGS.value,
