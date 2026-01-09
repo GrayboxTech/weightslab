@@ -25,6 +25,9 @@ onnx==1.20.0
 onnxruntime==1.23.2
 xxhash==3.6.0
 tables==3.10.2
+httpx
+pydantic
+dotenv
 
 # UI - List the packages and their exact versions
 dash==2.17.1
@@ -38,3 +41,4 @@ langchain-ollama
 langchain-openai
 langchain-google-genai
 langchain-community
+langchain_core
