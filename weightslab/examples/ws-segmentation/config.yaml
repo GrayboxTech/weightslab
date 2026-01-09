@@ -1,3 +1,4 @@
+device: cuda
 experiment_name: bdd_segmentation
 data_root: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/BDD100k_reduced
 training_steps_to_do: 2000
@@ -22,5 +23,3 @@ data:
     batch_size: 8
     shuffle: false
     num_workers: 2
-
-device: cuda

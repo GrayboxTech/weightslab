@@ -66,19 +66,6 @@ class LedgeredDataFrameManager:
             return
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
         if not loaded_df.empty:
-            # Deserialize JSON strings back to dicts for loss values
-            loss_col = SampleStats.Ex.PREDICTION_SIGNALS_VALUES.value
-            if loss_col in loaded_df.columns:
-                import json
-                def _parse_json_cell(v):
-                    if isinstance(v, str):
-                        try:
-                            return json.loads(v)
-                        except Exception:
-                            return v
-                    return v
-                loaded_df[loss_col] = loaded_df[loss_col].apply(_parse_json_cell)
-
             # Ensure single-level index on sample_id
             if "sample_id" in loaded_df.columns:
                 try:
@@ -247,7 +234,7 @@ class LedgeredDataFrameManager:
 
                 loss_dict = self._safe_loss_dict(losses, i)
                 if loss_dict is not None:
-                    rec[SampleStats.Ex.PREDICTION_SIGNALS_VALUES.value] = loss_dict
+                    rec.update(loss_dict)
 
                 # Add to buffer data
                 self._buffer.append(rec)
@@ -386,7 +373,6 @@ class LedgeredDataFrameManager:
         with self._lock:
             # Extract sample IDs and separate loss dicts from regular updates
             sample_ids = [int(rec["sample_id"]) for rec in records]
-            loss_col = SampleStats.Ex.PREDICTION_SIGNALS_VALUES.value
 
             # Separate records into regular updates and loss dict updates
             regular_records = []
@@ -399,8 +385,6 @@ class LedgeredDataFrameManager:
                 for k, v in rec.items():
                     if k == "sample_id":
                         continue
-                    elif k == loss_col and isinstance(v, dict):
-                        loss_updates[sid] = v
                     else:
                         regular_rec[k] = v
 
@@ -416,22 +400,12 @@ class LedgeredDataFrameManager:
                     if col not in self._df.columns:
                         self._df[col] = np.nan
 
-                # Vectorized update
+                # Vectorized update - use update() to preserve non-NaN values
                 for col in df_updates.columns:
-                    self._df.loc[df_updates.index, col] = df_updates[col].values
-
-            # Handle loss dict merging separately
-            if loss_updates:
-                if loss_col not in self._df.columns:
-                    self._df[loss_col] = np.nan
-
-                for sid, new_losses in loss_updates.items():
-                    if sid in self._df.index:
-                        existing = self._df.at[sid, loss_col]
-                        if not isinstance(existing, dict):
-                            existing = {}
-                        existing.update(new_losses)
-                        self._df.at[sid, loss_col] = existing
+                    # Only update non-NaN values to avoid overwriting valid data with NaN
+                    non_nan_mask = df_updates[col].notna()
+                    if non_nan_mask.any():
+                        self._df.loc[df_updates.index[non_nan_mask], col] = df_updates.loc[non_nan_mask, col].values
 
             # Mark all as pending
             self._pending.update(sample_ids)
@@ -522,7 +496,8 @@ class LedgeredDataFrameManager:
             work = list(self._pending)
             self._pending.clear()
 
-            cols_to_save = SAMPLES_STATS_TO_SAVE_TO_H5
+            # Filter actual df columns that match patterns in SAMPLES_STATS_TO_SAVE_TO_H5
+            cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
             if not cols_to_save:
                 return
 

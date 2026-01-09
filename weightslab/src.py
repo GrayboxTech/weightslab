@@ -29,7 +29,7 @@ DATAFRAME_M = None
 def save_signals(
     model_age: int,
     batch_ids: th.Tensor,
-    signals: th.Tensor | dict,
+    signals: dict,
     preds_raw: th.Tensor,
     preds: th.Tensor = None,
     target: th.Tensor = None
@@ -58,11 +58,11 @@ def save_signals(
     # # Process signals
     if isinstance(signals, dict):
         losses_data = {
-            k: (v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v))
+            'signals//' + k: (v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v))
             for k, v in signals.items()
         }
     elif signals is not None:
-        losses_data = {"loss/default": signals.detach().cpu().numpy() if hasattr(signals, 'detach') else np.asarray(signals)}
+        losses_data = {"signals//default": signals.detach().cpu().numpy() if hasattr(signals, 'detach') else np.asarray(signals)}
     else:
         losses_data = None
 

@@ -13,7 +13,6 @@ from enum import Enum
 from typing import Callable, Any, Set, Dict, Sequence, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
-<<<<<<< HEAD
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
 from weightslab.data.dataframe_manager import LEDGER_MANAGER
@@ -26,6 +25,7 @@ from weightslab.data.data_utils import (
     _matches_pattern,
     _filter_columns_by_patterns,
 )
+import re
 from weightslab.data.sample_stats import (
     SampleStats,
     SampleStatsEx,
@@ -34,9 +34,6 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_DEFAULTS_TYPES,
     SAMPLE_STATS_ALL,
 )
-=======
-from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
->>>>>>> 90077a9b07d958aa38bdd3564301ab2005b21605
 
 
 # Global logger
@@ -45,119 +42,35 @@ SamplePredicateFn = Callable[[], bool]
 global _UID_CNT
 _UID_CNT = 0
 
-<<<<<<< HEAD
-=======
-# Global UID registry to detect train/test overlaps within a process
-GLOBAL_UID_REGISTRY: Dict[str, Set[int]] = {
-    'train': set(),
-    'test': set(),
-    'other': set(),
-}
 
-def _detect_dataset_split(ds) -> str:
-    """Best-effort split detection for common datasets."""
-    train_attr = getattr(ds, 'train', None)
-    if train_attr is True:
-        return 'train'
-    if train_attr is False:
-        return 'test'
-    split = getattr(ds, 'split', None)
-    if isinstance(split, str) and split.lower() in ('train', 'test'):
-        return split.lower()
-    return 'other'
+def _has_regex_symbols(pattern: str) -> bool:
+    """Check if a pattern string contains regex special characters."""
+    return any(c in pattern for c in r'.*+?[]{}()^$|\\')
 
 
-def _is_scalarish(x) -> bool:
-    if isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_)):
-        return True
-    if isinstance(x, str):
-        return len(x) <= 256
-    if isinstance(x, np.ndarray) and x.ndim == 0:
-        return True
+def _match_column_patterns(col: str, patterns: list) -> bool:
+    """Match column against patterns, using regex only if pattern has regex symbols."""
+    for pattern in patterns:
+        # Exact match first (fastest)
+        if col == pattern:
+            return True
+        # Use regex only if pattern contains regex symbols
+        if _has_regex_symbols(pattern):
+            try:
+                if re.search(pattern, col):
+                    return True
+            except re.error:
+                pass  # Invalid regex, skip
     return False
 
 
-def _is_dense_array(x) -> bool:
-    return isinstance(x, np.ndarray) and x.ndim >= 2
-
-
-def _to_numpy_safe(x):
-    if isinstance(x, np.ndarray):
-        return x
-    if isinstance(x, (list, tuple)):
-        try:
-            return np.asarray(x)
-        except Exception:
-            return None
-    try:
-        if isinstance(x, th.Tensor):
-            return x.detach().cpu().numpy()
-    except Exception:
-        pass
-    return None
-
-
-def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
-    """
-    Downsample 2D/3D arrays using simple striding (nearest-neighbor-like).
-    Keeps channels if present. Avoids heavy deps.
-    """
-    if arr.ndim == 2:
-        H, W = arr.shape
-        scale = max(1, int(np.ceil(max(H, W) / max_hw)))
-        return arr[::scale, ::scale]
-    if arr.ndim == 3:
-        # detect channels-first
-        if arr.shape[0] < arr.shape[1]:
-            C, H, W = arr.shape
-            scale = max(1, int(np.ceil(max(H, W) / max_hw)))
-            return arr[:, ::scale, ::scale]
-        else:
-            H, W, C = arr.shape
-            scale = max(1, int(np.ceil(max(H, W) / max_hw)))
-            return arr[::scale, ::scale, :]
-    return arr
-
-
-class SampleStatsEx(str, Enum):
-    PREDICTION_AGE = "prediction_age"
-    PREDICTION_LOSS = "prediction_loss"
-    PREDICTION_RAW = "prediction_raw"
-    TARGET = "target"
-    SAMPLE_ID = "sample_id"
-    INDEX = "index"
-    DENY_LISTED = "deny_listed"
-    ENCOUNTERED = "encountered"
-    TAGS = "tags"
-
-    @classmethod
-    def ALL(cls):
-        return list(map(lambda c: c.value, cls))
-
-
-# Which sample stats to auto-save to H5 upon update
-SAMPLES_STATS_TO_SAVE_TO_H5 = [
-    SampleStatsEx.DENY_LISTED.value,
-    SampleStatsEx.TAGS.value,
-    SampleStatsEx.ENCOUNTERED.value,
-    SampleStatsEx.PREDICTION_LOSS.value,
-    SampleStatsEx.PREDICTION_AGE.value
-]
-SAMPLES_STATS_IMMEDIATE_SAVING_TO_H5 = [
-    SampleStatsEx.DENY_LISTED.value,
-    SampleStatsEx.TAGS.value,
-]
-
-# Default values for each stat when not present
-SAMPLES_STATS_DEFAULTS = {
-    SampleStatsEx.DENY_LISTED.value: False,
-    SampleStatsEx.TAGS.value: '',
-    SampleStatsEx.ENCOUNTERED.value: 0,
-    SampleStatsEx.PREDICTION_LOSS.value: -1.0,
-    SampleStatsEx.PREDICTION_AGE.value: -1,
-    SampleStatsEx.PREDICTION_RAW.value: -1e9,
-}
->>>>>>> 90077a9b07d958aa38bdd3564301ab2005b21605
+def _filter_columns_with_patterns(columns: list, patterns: list) -> list:
+    """Filter columns by patterns, using regex only when patterns contain regex symbols."""
+    matched = []
+    for col in columns:
+        if _match_column_patterns(col, patterns):
+            matched.append(col)
+    return matched
 
 
 # I just like it when the enum values have the same name leghts.
@@ -318,7 +231,7 @@ class DataSampleTrackingWrapper(Dataset):
             )
             default_data.append(row)
 
-        # Register this split with the global ledger manager (shared across loaders)
+        # Register this split with the global ledger manager (shared across loaders) and load existing data
         LEDGER_MANAGER.register_split(self._dataset_split, default_data, self._stats_store)
 
         # Log tag-based labeling configuration if enabled
@@ -1228,7 +1141,7 @@ class DataSampleTrackingWrapper(Dataset):
                 self._ex_columns_cache.add(col)
 
             # Check if this column needs H5 persistence (only once, not per key)
-            if not needs_h5_flush and _matches_pattern(col, SAMPLES_STATS_TO_SAVE_TO_H5):
+            if not needs_h5_flush and _match_column_patterns(col, SAMPLES_STATS_TO_SAVE_TO_H5):
                 needs_h5_flush = True
 
         # Mark dirty for H5 persistence if any update column matches
@@ -1279,7 +1192,7 @@ class DataSampleTrackingWrapper(Dataset):
             if df.empty:
                 return
 
-            cols_to_use = [c for c in df.columns if _matches_pattern(c, SAMPLES_STATS_TO_SAVE_TO_H5)]
+            cols_to_use = _filter_columns_with_patterns(df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
             df_use = df[cols_to_use]
 
             logger.info(
@@ -1310,14 +1223,14 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Extract core stats (from SAMPLES_STATS_TO_SAVE_TO_H5)
         core = {}
-        matched_cols = _filter_columns_by_patterns(df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
+        matched_cols = _filter_columns_with_patterns(df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
         for stat_name in matched_cols:
             core[stat_name] = df[stat_name].dropna().to_dict()
 
         # Extract ex stats (columns not in core)
         ex = {}
         for col in self._ex_columns_cache:
-            if col in df.columns and not _matches_pattern(col, SAMPLES_STATS_TO_SAVE_TO_H5):
+            if col in df.columns and not _match_column_patterns(col, SAMPLES_STATS_TO_SAVE_TO_H5):
                 ex[col] = df[col].dropna().to_dict()
 
         dense = LEDGER_MANAGER.get_dense_map(self._dataset_split)

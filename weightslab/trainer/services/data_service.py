@@ -16,9 +16,8 @@ import weightslab.proto.experiment_service_pb2 as pb2
 from typing import List
 from pathlib import Path
 from concurrent import futures
-from torchvision import transforms
 
-from weightslab.data.sample_stats import SampleStats, SampleStatsEx
+from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image, load_label, get_mask
@@ -471,10 +470,6 @@ class DataService:
                                 stats_to_retrieve.append(col_name)
 
             for stat_name in stats_to_retrieve:
-                # Basically, skip stats that are not saved in the h5
-                if stat_name not in SampleStats.TO_SAVE_TO_H5:
-                    continue
-
                 # Get value
                 stat = _get_stat_from_row(row, stat_name)
                 if stat is None:

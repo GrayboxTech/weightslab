@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import Dict, Any, List
 import numpy as np
+import os
 
 
 __all__ = [
@@ -20,7 +21,7 @@ class SampleStats:
         PREDICTION_AGE = "prediction_age"
         PREDICTION = "prediction"
         PREDICTION_RAW = "prediction_raw"
-        PREDICTION_SIGNALS_VALUES = "prediction_signals_values"
+        # PREDICTION_SIGNALS_VALUES = "prediction_signals_values"  # Old name - replace now by dynamic signals name
 
         TARGET = "target"
         DENY_LISTED = "deny_listed"
@@ -40,7 +41,7 @@ class SampleStats:
         Ex.PREDICTION_AGE.value: int,
         Ex.PREDICTION.value: int | list,
         Ex.PREDICTION_RAW.value: float | list,
-        Ex.PREDICTION_SIGNALS_VALUES.value: dict,
+        # Ex.PREDICTION_SIGNALS_VALUES.value: dict,
 
         Ex.TARGET.value: int | list,
         Ex.DENY_LISTED.value: bool,
@@ -57,7 +58,7 @@ class SampleStats:
         Ex.PREDICTION_AGE.value: 0,
         Ex.PREDICTION.value: [],
         Ex.PREDICTION_RAW.value: [],
-        Ex.PREDICTION_SIGNALS_VALUES.value: {},
+        # Ex.PREDICTION_SIGNALS_VALUES.value: {},
 
         Ex.TARGET.value: None,
         Ex.DENY_LISTED.value: False,
@@ -78,29 +79,34 @@ class SampleStats:
         """Return a shallow copy of DEFAULTS_TYPES as a plain dict."""
         return dict(cls.DEFAULTS_TYPES)
 
-    TO_SAVE_TO_H5: List[str] = [
-        # Ex.SAMPLE_ID.value,
+    @classmethod
+    def get_to_save_to_h5_list(cls) -> List[str]:
+        """Return list of stats to save to H5, conditionally including predictions and targets."""
+        base_list = [
+            cls.Ex.PREDICTION_AGE.value,
+            # cls.Ex.PREDICTION_SIGNALS_VALUES.value,
+            "signals.*",  # Prefix for dynamic signals
+            cls.Ex.DENIED_FLAG.value,
+            cls.Ex.ENCOUNTERED.value,
+            cls.Ex.TAGS.value,
+            cls.Ex.ORIGIN.value,
+        ]
 
-        Ex.PREDICTION_AGE.value,
-        # Predictions saved only if not array-like (see dataframe_manager._coerce_scalar_cell)
-        # Ex.PREDICTION.value,
-        # Ex.PREDICTION_RAW.value,
-        Ex.PREDICTION_SIGNALS_VALUES.value,
+        # Check environment variable to include predictions and targets
+        if os.getenv('WEIGHTSLAB_SAVE_PREDICTIONS_TO_H5', '').lower() in ('true', '1', 'yes'):
+            # Include prediction arrays and targets
+            base_list.extend([
+                cls.Ex.PREDICTION.value,
+                cls.Ex.PREDICTION_RAW.value,
+                cls.Ex.TARGET.value,
+            ])
 
-        # Targets saved only if not array-like (see dataframe_manager._coerce_scalar_cell)
-        # Ex.TARGET.value,
-        Ex.DENY_LISTED.value,
-        Ex.ENCOUNTERED.value,
-
-        Ex.TAGS.value,
-        Ex.ORIGIN.value,
-        # Ex.TASK_TYPE.value,
-    ]
+        return base_list
 
 
 # Define global objects for easier access
 SampleStatsEx = SampleStats.Ex
-SAMPLES_STATS_TO_SAVE_TO_H5 = SampleStats.TO_SAVE_TO_H5
+SAMPLES_STATS_TO_SAVE_TO_H5 = SampleStats.get_to_save_to_h5_list()
 SAMPLES_STATS_DEFAULTS = SampleStats.DEFAULTS
 SAMPLES_STATS_DEFAULTS_TYPES = SampleStats.DEFAULTS_TYPES
 SAMPLE_STATS_ALL = set(SampleStatsEx.ALL())
