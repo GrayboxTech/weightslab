@@ -5,7 +5,7 @@
     height="250"
   />
 </div>
-                                                     
+
 </pred>
 </pred style="font-style: italic;">
 WeightsLab — Inspect, Edit and Evolve Neural Networks
@@ -73,9 +73,9 @@ pip install -r ./requirements.txt
 Check out our materials, with examples from toy to more complex models.
 
 Quickstart examples:
-- [Weights Lab - Toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/toy-pytorch_example)
-- [Weights Lab - Advanced (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/advanced-pytorch_example)
-- [Weights Studio - Toy(PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/advanced-pytorch_example)
+- [Weights Lab - Cls toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/ws-classification)
+- [Weights Lab - Cls toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/ws-segmentation)
+- [Weights Lab - Cls toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/ws-detection)
 
 <!-- ### Documentation -->
 

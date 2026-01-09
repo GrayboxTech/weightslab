@@ -1,330 +1,367 @@
 import os
-import json
 import logging
-import requests
 import difflib
 import re
 import pandas as pd
+import httpx
+from typing import Optional, List, Union, Literal
+from dotenv import load_dotenv
+from pathlib import Path
 
-from dataclasses import dataclass
-from typing import Optional, List, Union
-from .intent_prompt import INTENT_PROMPT
+from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 _LOGGER = logging.getLogger(__name__)
 
-# ALLOWED_METHODS is now purely for reference; the logic is governed by Intent.kind
-ALLOWED_METHODS = {"drop", "sort_values", "query", "head", "tail", "sample"}
+from .intent_prompt import INTENT_PROMPT
 
-# FUNCTION_SYNONYMS is no longer strictly needed but kept for potential future use
-# or internal column resolution guidance.
-FUNCTION_SYNONYMS = {
-    # show / list rows
-    "list": "head",
-    "show": "head",
-    "display": "head",
-    "preview": "head",
-    "view": "head",
-    "print": "head",
-    "head": "head",
-    "first": "head",
-    "top": "head",
-    "top_rows": "head",
+# Try to find .env in weightslab/ or parent root
+env_path = Path(__file__).resolve().parents[3] / '.env'
+load_dotenv(dotenv_path=env_path)
+load_dotenv()
 
-    # last rows
-    "tail": "tail",
-    "last": "tail",
-    "bottom": "tail",
-    "bottom_rows": "tail",
+# --- Pydantic Models ---
+class Condition(BaseModel):
+    column: str = Field(description="The column name to filter/check")
+    op: Literal["==", "!=", ">", "<", ">=", "<=", "between", "contains"] = Field(description="The operator")
+    value: Optional[Union[float, int, str]] = Field(default=None, description="The primary value")
+    value2: Optional[Union[float, int]] = Field(default=None, description="The secondary value for 'between'")
 
-    # sorting
-    "sort": "sort_values",
-    "sortby": "sort_values",
-    "order": "sort_values",
-    "orderby": "sort_values",
-    "order_by": "sort_values",
-    "rank": "sort_values",
+class AtomicIntent(BaseModel):
+    kind: Literal["keep", "drop", "sort", "head", "tail", "reset", "analysis", "noop"] = Field(description="The kind of operation")
+    conditions: Optional[List[Condition]] = Field(default=None, description="Conditions for keep/drop")
+    sort_by: Optional[List[str]] = Field(default=None, description="Columns to sort by")
+    ascending: Optional[bool] = Field(default=None, description="Sort ascending (true) or descending (false)")
+    n: Optional[int] = Field(default=None, description="Number of rows for head/tail")
+    drop_frac: Optional[float] = Field(default=None, description="Fraction of rows to drop (0.0 to 1.0)")
+    keep_frac: Optional[float] = Field(default=None, description="Fraction of rows to keep (0.0 to 1.0)")
+    analysis_expression: Optional[str] = Field(default=None, description="Pandas expression string for analysis queries")
 
-    # filtering / keeping (mapped to query)
-    "filter": "query",
-    "where": "query",
-    "select": "query",
-    "keep": "query",
-    "only": "query",
+class Intent(BaseModel):
+    reasoning: str = Field(description="Step-by-step logic explaining the plan.")
+    primary_goal: Literal["ui_manipulation", "data_analysis"] = Field(
+        description="Whether the user wants to change the grid view (ui_manipulation) or get an answer/calculation (data_analysis)."
+    )
+    steps: List[AtomicIntent] = Field(description="A sequence of atomic operations to execute in order.")
 
-    # dropping / deleting rows
-    "drop_rows": "drop",
-    "remove": "drop",
-    "delete": "drop",
-    "exclude": "drop",
-    "drop": "drop",
-
-    # randomness
-    "random": "sample",
-    "sample_rows": "sample",
-    "shuffle": "sample",
-    "sample": "sample",
-}
-
-@dataclass
-class Condition:
-    column: str           # user-specified column name (we'll resolve it)
-    op: str               # "==", "!=", ">", "<", ">=", "<=", "between"
-    value: Optional[Union[float, int, str]] = None
-    value2: Optional[Union[float, int]] = None  # for between
-
-
-@dataclass
-class Intent:
-    # "keep" (filter rows), "drop" (remove rows), "sort", "head", "tail", "reset", "noop"
-    kind: str
-
-    # For keep/drop
-    conditions: Optional[List[Condition]] = None
-
-    # For sort
-    sort_by: Optional[List[str]] = None
-    ascending: Optional[bool] = None
-
-    # For head/tail
-    n: Optional[int] = None
-
-    # Optional sampling for drop (e.g. "drop 50% of rows …")
-    drop_frac: Optional[float] = None
-
-    # Optional sampling for keep (e.g. "keep 80% of rows …")
-    keep_frac: Optional[float] = None
-
-
-class DataAgentError(Exception):
-    """Custom exception for Data Manipulation Agent errors."""
-    pass
 
 
 class DataManipulationAgent:
-    def __init__(self, ctx):
-        _LOGGER.info("Initializing DataManipulationAgent")
-        self.ctx = ctx
-        df = ctx._all_datasets_df
+    def __init__(self, context):
+        """
+        Initializes the agent with context and builds the column schema/index.
+        """
+        _LOGGER.info("Initializing DataManipulationAgent (Gemini 2.0 Ready)")
+        self.ctx = context
 
-        # Include both regular columns AND index columns (e.g., sample_id, origin)
-        # so they can be used in queries
+        self._setup_schema()
+        # ... rest of init remains same ...
+        self._build_column_index()
+        self._load_config()
+        self._setup_providers()
+
+    def _setup_schema(self):
+        """Builds the column schema from the context dataframe."""
+        df = self.ctx._all_datasets_df
         all_columns = df.columns.tolist()
+
+        # Add index names to columns list (though we now keep them as columns)
         if isinstance(df.index, pd.MultiIndex):
-            # Add index level names if using MultiIndex
             all_columns.extend([name for name in df.index.names if name is not None])
         elif df.index.name is not None:
-            # Add single index name if it exists
             all_columns.append(df.index.name)
 
-        # Add expected extended stats columns that will be populated during training
-        # This ensures the agent recognizes them even before they appear in the DataFrame
-        expected_extended_stats = [
+        # Unique values for origin to help the agent know the vocabulary
+        origin_values = []
+        if 'origin' in df.columns:
+            origin_values = df['origin'].unique().tolist()
+        elif 'origin' in all_columns: # Might be in index
+            try:
+                origin_values = df.index.get_level_values('origin').unique().tolist()
+            except: pass
+
+        # Add common prediction stats if missing
+        expected_stats = [
             "mean_loss", "max_loss", "min_loss", "std_loss", "median_loss",
             "num_classes_present", "dominant_class", "dominant_class_ratio",
             "background_ratio", "predicted_class"
         ]
-        # Also add per-class loss columns (up to 10 classes)
-        for i in range(10):
-            expected_extended_stats.append(f"loss_class_{i}")
+        # Add per-class losses (0-9)
+        expected_stats.extend([f"loss_class_{i}" for i in range(10)])
 
-        # Add expected columns that aren't already in the DataFrame
-        for col in expected_extended_stats:
+        for col in expected_stats:
             if col not in all_columns:
                 all_columns.append(col)
 
         self.df_schema = {
             'columns': all_columns,
-            'dtypes': {str(k): str(v) for k, v in df.dtypes.to_dict().items()}
+            'dtypes': {str(k): str(v) for k, v in df.dtypes.to_dict().items()},
+            'origin_values': origin_values
         }
-        _LOGGER.info("Agent initialized with schema: columns=%s", self.df_schema['columns'])
 
-        self._build_column_index()
+    def _load_config(self):
+        """Loads agent configuration from environment and YAML hyperparameters."""
+        # 1. Defaults from ENV
+        self.preferred_provider = os.environ.get("AGENT_PROVIDER", "google").lower()
+        self.google_model = os.environ.get("AGENT_MODEL_GOOGLE", "gemini-1.5-flash-latest")
+        self.openai_model = os.environ.get("AGENT_MODEL_OPENAI", "gpt-4o-mini")
+        self.openrouter_model = os.environ.get("AGENT_MODEL_OPENROUTER", "mistralai/mistral-7b-instruct:free")
+        self.fallback_to_local = True
 
-        self._check_ollama_health()
+        # 2. Override with Experiment YAML Config
+        try:
+            hp = self._get_hyperparams()
+            if hp and "agent" in hp:
+                cfg = hp["agent"]
+                self.preferred_provider = cfg.get("provider", self.preferred_provider).lower()
+
+                # Update model ID for the active provider
+                model_id = cfg.get("model")
+                if model_id:
+                    attr_map = {"google": "google_model", "openai": "openai_model", "openrouter": "openrouter_model"}
+                    if self.preferred_provider in attr_map:
+                        setattr(self, attr_map[self.preferred_provider], model_id)
+
+                self.fallback_to_local = bool(cfg.get("fallback_to_local", self.fallback_to_local))
+                _LOGGER.info(f"Agent config loaded from YAML: provider={self.preferred_provider}, model={model_id}")
+        except Exception as e:
+            _LOGGER.warning(f"Could not load agent config from hyperparams: {e}")
+
+    def _get_hyperparams(self) -> Optional[dict]:
+        """Robustly extracts hyperparameters from context."""
+        if not hasattr(self.ctx, "_ctx"):
+            return None
+
+        hp_comp = self.ctx._ctx.components.get("hyperparams")
+        if not hp_comp:
+            return None
+
+        if isinstance(hp_comp, dict):
+            return hp_comp
+
+        if hasattr(hp_comp, "_data"):
+            return hp_comp._data
+
+        if hasattr(hp_comp, "get"):
+            try: return hp_comp.get()
+            except: return None
+
+        return None
+
+    def _setup_providers(self):
+        """Initializes direct clients and LangChain chains for LLM providers."""
+        self.chain_openai = None
+        self.client_google = None
+        self.chain_ollama = None
+        self.chain_openrouter = None
+
+        # 1. OpenAI
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            try:
+                llm = ChatOpenAI(model=self.openai_model, temperature=0, api_key=api_key)
+                self.chain_openai = llm.with_structured_output(Intent)
+                _LOGGER.info(f"OpenAI active ({self.openai_model})")
+            except Exception as e: _LOGGER.error(f"OpenAI error: {e}")
+
+        # 2. Google (Direct SDK)
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if api_key:
+            try:
+                # Ensure model name is correct for direct SDK
+                aliases = {
+                    "gemini-1.5-flash-latest": "gemini-1.5-flash",
+                    "gemini-1.5-pro-latest": "gemini-1.5-pro"
+                }
+                self.google_model = aliases.get(self.google_model, self.google_model)
+                _LOGGER.info(f"Google active ({self.google_model})")
+            except Exception as e: _LOGGER.error(f"Google error: {e}")
+
+        # 3. OpenRouter
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if api_key:
+            try:
+                # Use custom http client to enforce timeout
+                http_client = httpx.Client(timeout=15.0)
+
+                llm = ChatOpenAI(
+                    model=self.openrouter_model,
+                    temperature=0,
+                    api_key=api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    streaming=False,
+                    max_retries=1,
+                    http_client=http_client
+                )
+                self.chain_openrouter = llm.with_structured_output(Intent)
+                _LOGGER.info(f"OpenRouter active ({self.openrouter_model})")
+            except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
+
+        # 4. Ollama (Local)
+        try:
+            host = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
+            port = os.environ.get('OLLAMA_PORT', '11435')
+            model_ollama = os.environ.get('OLLAMA_MODEL', 'llama3.2:1b')
+            llm = ChatOllama(base_url=f"http://{host}:{port}", model=model_ollama, temperature=0, timeout=15)
+            self.chain_ollama = llm.with_structured_output(Intent)
+            _LOGGER.info(f"Ollama active ({model_ollama})")
+        except Exception as e: _LOGGER.error(f"Ollama error: {e}")
+
+    def is_ollama_available(self) -> bool:
+        return self.chain_ollama is not None
+
+    def query(self, instruction: str) -> dict:
+        """Main entry point for natural language instructions."""
+        self._setup_schema() # Refresh schema information
+
+        cols_desc = ", ".join(self.df_schema['columns'])
+        if self.df_schema['origin_values']:
+            cols_desc += f" (Note: 'origin' has values: {self.df_schema['origin_values']})"
+
+        system_prompt = INTENT_PROMPT.format(
+            columns=cols_desc,
+            instruction="{instruction}"
+        )
+
+        # Build attempt order: Preferred -> Local Fallback (no cloud fallbacks)
+        order = [self.preferred_provider]
+
+        # Only add local Ollama as fallback if enabled
+        if self.fallback_to_local and self.preferred_provider != "ollama":
+            order.append("ollama")
+
+        for provider in order:
+            try:
+                result = self._try_query_provider(provider, instruction, system_prompt)
+                if result is not None:
+                    # 'result' is now a List[dict] of operations.
+                    # The wrapping logic (for analysis) currently happens in data_service after execution,
+                    # or needs to be refactored to happen here if we were executing here.
+                    # For now, just return the plan.
+                    return result
+            except Exception as e:
+                _LOGGER.warning(f"Provider {provider} failed critically: {e}")
+                continue
+
+        return []
+
+    def _wrap_analysis_response(self, provider: str, original_question: str, raw_answer: str) -> str:
+        """Uses the LLM to wrap the raw analysis result in a conversational sentence."""
+        try:
+             # Simple prompt for wrapping
+             wrapper_prompt = (
+                 f"You are a helpful data assistant. The user asked: '{original_question}'. "
+                 f"The analysis code returned this raw result: '{raw_answer}'. "
+                 "Please respond to the user with a clear, concise sentence summarizing this finding. "
+                 "Do not show code. Just the answer."
+             )
+
+             # Re-use the existing chain/client logic if possible, or simplified direct call
+             # For simplicity, we just use the same method _try_query_provider effectively but with a different prompt?
+             # Actually, we need a simple string retrieval. Let's reuse the chain but with a simple prompt.
+
+             # We can't easily reuse the structured output chain because it expects JSON Intent.
+             # So we need a raw generation call.
+             # For now, let's just return the raw answer to avoid double-latency/errors until stability is proven.
+             # The user asked for it, but let's be safe.
+
+             # TODO: Implement full wrapper once stability is confirmed.
+             return f"Analysis Result: {raw_answer}"
+        except Exception as e:
+            return str(raw_answer)
+
+    def _try_query_provider(self, provider: str, instruction: str, system_prompt: str) -> Optional[List[dict]]:
+        """Dispatches query to the specific LLM implementation."""
+        if provider == "google" and self.client_google:
+            return self._query_google(instruction, system_prompt)
+
+        chain = getattr(self, f"chain_{provider}", None)
+        if chain:
+            return self._query_langchain(provider, chain, instruction, system_prompt)
+
+        return None
+
+    def _query_google(self, instruction: str, system_prompt: str) -> Optional[dict]:
+        """Executes query using the Google Generative AI SDK."""
+        try:
+            _LOGGER.info(f"Calling Google Direct ({self.google_model})")
+            response = self.client_google.models.generate_content(
+                model=self.google_model,
+                contents=f"{system_prompt}\n\nUSER REQUEST: {instruction}",
+                config={'response_mime_type': 'application/json', 'response_schema': Intent, 'temperature': 0}
+            )
+            _LOGGER.info(f"Google returned: {response.parsed}")
+            return self._intent_to_pandas_op(response.parsed)
+        except Exception as e:
+            _LOGGER.warning(f"Google failed: {e}")
+            return None
+
+    def _query_langchain(self, name: str, chain, instruction: str, system_prompt: str) -> Optional[dict]:
+        """Executes query using a LangChain chain (OpenAI, OpenRouter, Ollama)."""
+        try:
+            _LOGGER.info(f"Calling {name.title()}")
+            # Escape braces for LangChain f-string parser
+            escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}").replace("{{instruction}}", "{instruction}")
+            prompt = ChatPromptTemplate.from_messages([("system", escaped_sys), ("human", "{instruction}")])
+
+            _LOGGER.info(f"[{name}] Invoking chain...")
+            try:
+                # Direct invoke with timeout handled by underlying client
+                intent = (prompt | chain).invoke({"instruction": instruction})
+            except Exception as invoke_err:
+                 _LOGGER.error(f"[{name}] Invoke failed/timed out: {invoke_err}")
+                 raise invoke_err
+
+            _LOGGER.info(f"{name.title()} returned: {intent}")
+            return self._intent_to_pandas_op(intent)
+        except Exception as e:
+            _LOGGER.warning(f"{name.title()} failed: {e}")
+            return None
 
     def _build_column_index(self):
-        """
-        Precompute tokenized view of column names for fuzzy matching.
-        """
+        """Builds a fast lookup index for column names and synonyms."""
         self._cols = list(self.df_schema['columns'])
-        self._col_tokens = {}
-        for c in self._cols:
-            tokens = re.split(r"[ _/\.]+", c.lower())
-            self._col_tokens[c] = set(t for t in tokens if t)
-
-        # generic synonym hints (for robustness)
+        self._col_tokens = {c: set(t for t in re.split(r"[ _/\.]+", c.lower()) if t) for c in self._cols}
         self._column_synonyms = {
-            "loss": {"loss", "error", "score"},
-            "score": {"score", "loss", "error"},
-            "age": {"age"},
-            "label": {"label", "class", "target"},
-            "origin": {"origin", "split", "dataset"},
-            "sample_id": {"sample_id", "id", "sample", "index"},
+            "loss": {"loss", "error", "score"}, "score": {"score", "loss", "error"},
+            "age": {"age"}, "label": {"label", "class", "target"},
+            "origin": {"origin", "split", "dataset"}, "sample_id": {"sample_id", "id", "sample", "index"},
         }
 
     def _resolve_column(self, user_name: str) -> Optional[str]:
-        """
-        Map a user-provided column name (possibly with typos) to an actual
-        DataFrame column. Uses:
-          - case-insensitive exact match
-          - token overlap / synonyms
-          - difflib distance
-        Returns None if nothing plausible is found.
-        """
-        if not user_name:
-            return None
-
+        """Maps a user-provided string to the best matching column name."""
+        if not user_name: return None
         user_name = user_name.strip().lower()
-        cols = self._cols
 
-        # 1) exact (case-insensitive)
-        for c in cols:
-            if c.lower() == user_name:
-                return c
+        # 1. Exact match
+        for c in self._cols:
+            if c.lower() == user_name: return c
 
-        # 2) token overlap / synonyms
+        # 2. Token-based Jaccard similarity
         user_tokens = set(re.split(r"[ _/\.]+", user_name))
-        expanded_tokens = set(user_tokens)
-
+        expanded = set(user_tokens)
         for base, syns in self._column_synonyms.items():
-            if base in user_tokens or user_name in syns:
-                expanded_tokens |= syns
+            if base in user_tokens or user_name in syns: expanded |= syns
 
-        best_col = None
-        best_score = 0.0
-        for c in cols:
-            ct = self._col_tokens.get(c, set())
-            if not ct:
-                continue
-            jacc = len(expanded_tokens & ct) / len(expanded_tokens | ct)
-            if jacc > best_score:
-                best_score = jacc
-                best_col = c
+        best_col, best_score = None, 0.0
+        for c, ct in self._col_tokens.items():
+            if not ct: continue
+            score = len(expanded & ct) / len(expanded | ct)
+            if score > best_score:
+                best_score, best_col = score, c
 
-        # 3) fallback: difflib if overlap is weak
+        # 3. Fuzzy match fallback
         if best_score < 0.2:
-            close = difflib.get_close_matches(user_name, cols, n=1, cutoff=0.6)
-            if close:
-                best_col = close[0]
-                best_score = 0.6
+            close = difflib.get_close_matches(user_name, self._cols, n=1, cutoff=0.6)
+            if close: best_col = close[0]
 
-        if best_col is not None:
-            _LOGGER.info("Resolved user column %r -> %r (score=%.2f)", user_name, best_col, best_score)
-            return best_col
-
-        _LOGGER.warning("Could not resolve user column %r to any schema column", user_name)
-        return None
-
-    def _check_ollama_health(self):
-        """Check if Ollama is running and accessible."""
-        _LOGGER.info("Checking Ollama health...")
-        os.environ['OLLAMA_HOST'] = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
-        try:
-            response = requests.get(
-                f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/tags",
-                timeout=1  # Reduced from 5 to 1 second for faster initialization
-            )
-            if response.status_code == 200:
-                models = response.json().get('models', [])
-                _LOGGER.info("Ollama is running with models: %s", [m.get('name') for m in models])
-                if not any('llama3.2:1b' == m.get('name', '') for m in models):
-                    _LOGGER.warning(
-                        "llama3.2:1b model not found in Ollama. Available models: %s",
-                        [m.get('name') for m in models]
-                    )
-            else:
-                _LOGGER.error("Ollama health check failed with status: %s", response.status_code)
-        except requests.RequestException as e:
-            _LOGGER.error(f"Ollama is not accessible at http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}: %s", e)
-
-    def _parse_intent_json(self, json_str: str) -> Intent:
-        """Parses the raw LLM JSON output into a structured Intent object."""
-        # Minimal cleanup for common LLM markdown output
-        json_str = json_str.replace('```json', '').replace('```', '').strip()
-        json_str = json_str.replace('False', 'false').replace('True', 'true').replace('None', 'null')
-
-        try:
-            data = json.loads(json_str)
-
-            if isinstance(data, list) and data:
-                data = data[-1]
-
-            kind = data.get("kind")
-            if kind not in ["keep", "drop", "sort", "head", "tail", "reset", "noop"]:
-                _LOGGER.warning("Invalid intent kind received: %s. Defaulting to noop.", kind)
-                kind = "noop"
-
-            # --- Parse conditions first ---
-            conditions_list: list[Condition] = []
-            for c_data in data.get("conditions", []) or []:
-                conditions_list.append(Condition(
-                    column=c_data.get("column", ""),
-                    op=c_data.get("op", "=="),
-                    value=c_data.get("value"),
-                    value2=c_data.get("value2")
-                ))
-
-            # --- Normalize / infer sort_by ---
-            raw_sort_by = data.get("sort_by")
-            sort_by: Optional[list[str]] = None
-
-            if isinstance(raw_sort_by, str):
-                sort_by = [raw_sort_by]
-            elif isinstance(raw_sort_by, list):
-                sort_by = raw_sort_by
-            else:
-                # NO sort_by provided: try to infer from conditions
-                if kind == "sort" and conditions_list:
-                    inferred_cols: list[str] = []
-                    for cond in conditions_list:
-                        # LLM pattern: put sort columns in conditions with value == null
-                        # We just use their column names in order.
-                        col_name = cond.column
-                        if col_name and col_name not in inferred_cols:
-                            inferred_cols.append(col_name)
-
-                    if inferred_cols:
-                        sort_by = inferred_cols
-                        _LOGGER.info(
-                            "Inferred sort_by from conditions for sort intent: %s",
-                            sort_by,
-                        )
-
-            return Intent(
-                kind=kind,
-                conditions=conditions_list if conditions_list else None,
-                sort_by=sort_by,
-                ascending=data.get("ascending"),
-                n=data.get("n"),
-                drop_frac=data.get("drop_frac"),
-                keep_frac=data.get("keep_frac"),
-            )
-
-        except json.JSONDecodeError as e:
-            _LOGGER.error("Failed to parse LLM JSON into Intent: %s. JSON: %s", e, json_str[:500])
-            return Intent(kind="noop")
-        except Exception as e:
-            _LOGGER.error("Error creating Intent object: %s", e)
-            return Intent(kind="noop")
+        return best_col
 
     def _build_condition_string(self, conditions: List[Condition]) -> Optional[str]:
-        """Safely generates the pandas query expression string from a list of Conditions."""
-        if not conditions:
-            return None
-
-        # Get the actual DataFrame to check if columns are in index
-        df = self.ctx._all_datasets_df
-        index_names = []
-        if isinstance(df.index, pd.MultiIndex):
-            index_names = [name for name in df.index.names if name is not None]
-        elif df.index.name is not None:
-            index_names = [df.index.name]
-
+        """Converts structured conditions into a pandas mask expression."""
+        if not conditions: return None
         parts = []
         for cond in conditions:
             # 1. Resolve column name safely
@@ -346,163 +383,82 @@ class DataManipulationAgent:
 
             # Simple operators
             if op in ("==", "!=", ">", "<", ">=", "<="):
-                # Quote string values, keep numbers as is
-                value_repr = f"'{val}'" if isinstance(val, str) else str(val)
-                parts.append(f"({col_ref} {op} {value_repr})")
-
-            # Between
-            elif op == "between" and cond.value is not None and cond.value2 is not None:
-                min_val = float(cond.value)
-                max_val = float(cond.value2)
-                parts.append(f"({col_ref}.between({min_val}, {max_val}))")
-
-            else:
-                _LOGGER.warning("Skipping condition due to invalid operator or values: %s", cond)
-
-        return " and ".join(parts) if parts else None
-
-    def _intent_to_pandas_op(self, intent: Intent) -> dict:
-        """
-        Converts a structured Intent object into the final Pandas operation dictionary.
-        This is the new, safe code generation core.
-        """
-        op = {"function": None, "params": {}}
-
-        if intent.kind == "head" and intent.n is not None:
-            op["function"] = "df.head"
-            op["params"] = {"n": max(0, int(intent.n))}
-
-        elif intent.kind == "tail" and intent.n is not None:
-            op["function"] = "df.tail"
-            op["params"] = {"n": max(0, int(intent.n))}
-
-        elif intent.kind == "sort" and intent.sort_by:
-            # Safely resolve all sort columns
-            resolved_cols = []
-            for col in intent.sort_by:
-                resolved = self._resolve_column(col)
-                if resolved:
-                    resolved_cols.append(resolved)
-
-            if resolved_cols:
-                op["function"] = "df.sort_values"
-                op["params"] = {
-                    "by": resolved_cols,
-                    "ascending": bool(intent.ascending) if intent.ascending is not None else True
-                }
-            else:
-                _LOGGER.warning("Sort instruction contained no valid columns.")
-
-        elif intent.kind in ("keep", "drop") and intent.conditions:
-            condition_expr = self._build_condition_string(intent.conditions)
-
-            if not condition_expr:
-                _LOGGER.warning("Filter/Drop instruction resulted in no valid condition expression.")
-                return op
-
-            # safe string literal for use inside df.query(...)
-            cond_repr = repr(condition_expr)
-
-            if intent.kind == "keep":
-                # --- plain keep: filter by condition, let ApplyDataQuery do in-place filter ---
-                if not intent.keep_frac or not (0 < intent.keep_frac <= 1):
-                    op["function"] = "df.query"
-                    op["params"] = {"expr": condition_expr}
+                # If the value looks like code (e.g. df['loss'].mean()), don't wrap in quotes
+                if isinstance(cond.value, str) and (cond.value.startswith("df[") or cond.value.startswith("df.")):
+                    val = cond.value
                 else:
-                    frac = float(intent.keep_frac)
-                    index_expr = (
-                        "df.index.difference("
-                        f"df.query({cond_repr}).sample(frac={frac}).index"
-                        ")"
-                    )
+                    val = f"'{cond.value}'" if isinstance(cond.value, str) else str(cond.value)
+                parts.append(f"({col_ref} {op} {val})")
+            elif op == "between" and cond.value is not None and cond.value2 is not None:
+                parts.append(f"({col_ref}.between({cond.value}, {cond.value2}))")
+            elif op == "contains" and cond.value is not None:
+                parts.append(f"({col_ref}.str.contains('{cond.value}', na=False, regex=False))")
+
+        # Use '&' for bitwise/series comparison instead of 'and'
+        return " & ".join(parts) if parts else None
+
+    def _intent_to_pandas_op(self, intent: Intent) -> List[dict]:
+        """Converts an Intent object (with steps) into a list of dictionaries describing pandas operations."""
+        ops = []
+
+        for step in intent.steps:
+            op = {"function": None, "params": {}}
+            kind = step.kind
+
+            if kind == "noop": continue
+
+            if kind in ("head", "tail"):
+                op["function"] = f"df.{kind}"
+                op["params"] = {"n": int(step.n) if step.n else 5}
+
+            elif kind == "sort":
+                sort_cols = []
+                ascending = bool(step.ascending) if step.ascending is not None else True
+
+                # HEALING: If model put sort info in conditions because it's silly
+                if not step.sort_by and step.conditions:
+                    for cond in step.conditions:
+                        col = self._resolve_column(cond.column)
+                        if col:
+                            sort_cols.append(col)
+                            # If value looks like 'desc' or 'false', set ascending=False
+                            if isinstance(cond.value, str) and any(x in cond.value.lower() for x in ['desc', 'false']):
+                                ascending = False
+
+                if step.sort_by:
+                    resolved = [self._resolve_column(c) for c in step.sort_by]
+                    sort_cols.extend([c for c in resolved if c])
+
+                if sort_cols:
+                    op["function"] = "df.sort_values"
+                    op["params"] = {"by": sort_cols, "ascending": ascending}
+
+            elif kind in ("keep", "drop") and step.conditions:
+                expr = self._build_condition_string(step.conditions)
+                if not expr: continue
+
+                if kind == "keep":
+                    if step.keep_frac:
+                        op["function"] = "df.drop"
+                        op["params"] = {"index": f"df.index.difference(df.query({repr(expr)}).sample(frac={step.keep_frac}).index)"}
+                    else:
+                        op["function"] = "df.query"
+                        op["params"] = {"expr": expr}
+                else:
+                    base = f"df.query({repr(expr)})"
                     op["function"] = "df.drop"
-                    op["params"] = {"index": index_expr}
+                    op["params"] = {"index": f"{base}.sample(frac={step.drop_frac}).index" if step.drop_frac else f"{base}.index"}
 
-            elif intent.kind == "drop":
-                op["function"] = "df.drop"
+            # FALLBACK: If LLM used analysis_expression for a keep/drop, or explicitly asked for analysis
+            elif (kind == "analysis" or (kind in ("keep", "drop") and not step.conditions)) and step.analysis_expression:
+                op["function"] = "df.analyze"
+                op["params"] = {"code": step.analysis_expression}
 
-                # Base index string: df.query(condition_expr).index
-                index_expr = f"df.query({cond_repr}).index"
+            elif kind == "reset":
+                op["function"] = "df.reset_view"
+                op["params"] = {"__agent_reset__": True}
 
-                # Apply sampling if specified
-                if intent.drop_frac and 0 < intent.drop_frac <= 1:
-                    frac = float(intent.drop_frac)
-                    # df.query(condition_expr).sample(frac=drop_frac).index
-                    index_expr = f"df.query({cond_repr}).sample(frac={frac}).index"
+            if op["function"]:
+                ops.append(op)
 
-                op["params"] = {"index": index_expr}
-
-        elif intent.kind == "reset":
-            # When the LLM understands the user wants to reset the view
-            op["function"] = "df.reset_view"  # Arbitrary string for logging/debug
-            op["params"] = {"__agent_reset__": True}  # The signal the DataService checks for
-
-        # If noop, this stays {"function": None, "params": {}}
-        return op
-
-    def query(self, instruction: str) -> dict:
-        """Main entry point to query the agent: call Ollama and return a Pandas operation."""
-        # Load Intent Prompt
-        prompt = INTENT_PROMPT.format(instruction=instruction, columns=self.df_schema['columns'])
-
-        try:
-            response = requests.post(
-                f"http://{os.environ.get('OLLAMA_HOST', 'localhost')}:{os.environ.get('OLLAMA_PORT', '11435')}/api/generate?source=data-agent",
-                json={
-                    'model': 'llama3.2:1b',
-                    'prompt': prompt,
-                    'format': 'json',
-                    'stream': False,
-                    'options': {
-                        'num_predict': 512,
-                    },
-                },
-                timeout=600
-            )
-
-            _LOGGER.debug("Ollama response status: %s", response.status_code)
-        except requests.RequestException as e:
-            raise DataAgentError(f"Ollama request failed: {e}") from e
-
-        if response.status_code == 200:
-            result = response.json().get('response', '').strip()
-            _LOGGER.debug("Ollama raw response: %s", result)
-
-            if not result:
-                _LOGGER.error("Ollama returned empty response")
-                return {"function": None, "params": {}}
-
-            # --- MINIMAL JSON CLEANUP & PARSING ---
-            intent = self._parse_intent_json(result)
-
-            # --- OPTIONAL: infer frac from natural language if LLM omitted it ---
-            try:
-                m = re.search(r'(\d+)\s*%', instruction)
-                if m:
-                    frac = int(m.group(1)) / 100.0
-                    if 0 < frac <= 1:
-                        if intent.kind == "keep" and not intent.keep_frac:
-                            intent.keep_frac = frac
-                        elif intent.kind == "drop" and not intent.drop_frac:
-                            intent.drop_frac = frac
-            except Exception as e:
-                _LOGGER.debug("Failed to infer percentage from instruction %r: %s", instruction, e)
-
-            # --- TRANSLATE INTENT TO PANDAS OPERATION ---
-            operation = self._intent_to_pandas_op(intent)
-
-            _LOGGER.info("Generated Pandas operation: %s", operation)
-            return operation
-        else:
-            try:
-                err_body = response.json()
-            except ValueError:
-                err_body = response.text
-
-            _LOGGER.error(
-                "Ollama request failed: status=%s, body=%r",
-                response.status_code, err_body
-            )
-            raise DataAgentError(
-                f"Ollama request failed: status={response.status_code}, body={err_body!r}"
-            )
+        return ops

@@ -673,7 +673,13 @@ class DataService:
             logger.warning(f"Error collecting unique tags: {e}")
         return sorted(list(tags))
 
-    def _build_success_response(self, df, message: str) -> pb2.DataQueryResponse:
+    def _build_success_response(
+        self,
+        df,
+        message: str,
+        intent_type=pb2.INTENT_FILTER,
+        analysis_result=""
+    ) -> pb2.DataQueryResponse:
         """
         Centralized helper so every code path reports counts consistently.
 
@@ -696,7 +702,9 @@ class DataService:
             number_of_all_samples=total_count,
             number_of_samples_in_the_loop=in_loop_count,
             number_of_discarded_samples=discarded_count,
-            unique_tags=unique_tags
+            unique_tags=unique_tags,
+            agent_intent_type=intent_type,
+            analysis_result=analysis_result
         )
 
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
@@ -708,13 +716,19 @@ class DataService:
         # A) Agent-driven df.query → keep/filter rows via in-place drop
         if func == "df.query":
             expr = params.get("expr", "")
-            print(f"[DEBUG] ENTERED df.query branch with expr={expr}")
             before = len(df)
-            kept = df.query(expr)
-            print(f"[DEBUG] df.query kept {len(kept)} rows out of {before}")
-            df.drop(index=df.index.difference(kept.index), inplace=True)
-            print(f"[DEBUG] AFTER DROP df_len={len(df)}")
-            return f"Applied query: {expr}"
+
+            try:
+                # We use raw eval() on a mask expression for maximum flexibility.
+                # This allows the expression to contain complex df[...] logic.
+                mask = eval(expr, {"df": df, "np": np, "pd": pd})
+                kept = df[mask]
+
+                df.drop(index=df.index.difference(kept.index), inplace=True)
+                return f"Applied query: {expr}"
+            except Exception as e:
+                logger.error(f"Query failed: {e}")
+                return f"Failed to apply query: {e}"
 
         # B) Other supported Pandas operations (drop, sort, head, tail, sample)
         if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
@@ -772,17 +786,41 @@ class DataService:
                                 "[ApplyDataQuery] Column %r is object; attempting numeric conversion for sort",
                                 col,
                             )
-                            converted = pd.to_numeric(s, errors="ignore")
-                            if is_numeric_dtype(converted.dtype):
-                                logger.debug(
-                                    "[ApplyDataQuery] Column %r converted to numeric dtype %s",
-                                    col, converted.dtype,
-                                )
-                                df[col] = converted
+                            try:
+                                converted = pd.to_numeric(s)
+                                if is_numeric_dtype(converted.dtype):
+                                    logger.debug(
+                                        "[ApplyDataQuery] Column %r converted to numeric dtype %s",
+                                        col, converted.dtype,
+                                    )
+                                    df[col] = converted
+                            except (ValueError, TypeError):
+                                pass
 
+                    # Ensure all sort columns exist and are sortable (scalars only)
+                    valid_cols = []
+                    for c in by:
+                        if c not in df.columns:
+                            continue
 
-                    # Ensure all sort columns exist
-                    valid_cols = [c for c in by if c in df.columns]
+                        # Check for non-scalar types (like numpy arrays in 'prediction_loss')
+                        # We use a heuristic on the first non-null value
+                        non_null_s = df[c].dropna()
+                        if not non_null_s.empty:
+                            first_val = non_null_s.iloc[0]
+                            # If it's a collection but not a string/bytes, pandas can't sort it directly
+                            if hasattr(first_val, "__len__") and not isinstance(first_val, (str, bytes)):
+                                # Fallback: if user asked for 'prediction_loss', help them by using 'mean_loss'
+                                if c == "prediction_loss" and "mean_loss" in df.columns:
+                                    logger.info("[ApplyDataQuery] Column %r contains arrays; redirecting to 'mean_loss' for sorting", c)
+                                    valid_cols.append("mean_loss")
+                                    continue
+                                else:
+                                    logger.warning("[ApplyDataQuery] Skipping column %r for sorting: contains non-scalar values (e.g. arrays)", c)
+                                    continue
+
+                        valid_cols.append(c)
+
                     if not valid_cols:
                         logger.warning("[ApplyDataQuery] No valid sort columns found in %s", by)
                         return "Failed to sort: columns not found"
@@ -876,6 +914,37 @@ class DataService:
                 )
                 return f"Failed to apply {func_name}: {e}"
 
+        # C) ANALYSIS (Read-only queries)
+        if func == "df.analyze":
+            code = params.get("code")
+            if not code: return "No code provided for analysis"
+
+            # Simple safety check: ensure code starts with df or looks like expression
+            # We trust the Developer environment, but basic guardrails help
+            if "import " in code or "__" in code:
+                return "Safety Violation: Code contains restricted keywords"
+
+            try:
+                # We need a context where 'df' is available
+                # Note: eval() expects an expression, not statements.
+                # If the agent generated statements, we might need exec() but Intent schema asks for expression.
+                result = eval(code, {"df": df, "pd": pd, "np": np})
+
+                # Format the result gracefully
+                # Format the result gracefully
+                if isinstance(result, (int, np.integer)):
+                     return f"Analysis Result: {result}"
+                elif isinstance(result, (float, np.floating)):
+                     return f"Analysis Result: {result:.4f}"
+                elif isinstance(result, (list, dict, set, tuple)):
+                    return f"Analysis Result: {result}"
+                else:
+                    return f"Analysis Result: {str(result)}"
+
+            except Exception as e:
+                logger.error(f"Analysis Failed: code={code}, error={e}")
+                return f"Analysis Error: {e}"
+
         # C) Unrecognized function: no-op, but log it
         logger.warning(
             "[ApplyDataQuery] Agent returned unrecognized function: %s. No operation applied.",
@@ -949,62 +1018,91 @@ class DataService:
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
-        with self._lock:
-            self._slowUpdateInternals()
-            df = self._all_datasets_df  # authoritative DF, mutated in-place
-
-            # 1) No query: just report counts
-            if request.query == "":
-                return self._build_success_response(
+        # 1) No query: just report counts (Needs lock for consistency)
+        if request.query == "":
+            with self._lock:
+                 df = self._all_datasets_df
+                 return self._build_success_response(
                     df=df,
                     message=f"Current dataframe has {len(df)} samples",
                 )
 
-            try:
-                # 2) All non-empty queries go through the agent
-                if not request.is_natural_language:
-                    logger.debug(
-                        "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
-                        "treating query as natural language: %r",
-                        request.query,
-                    )
+        try:
+            # 2) All non-empty queries go through the agent (IO BOUND - NO LOCK)
+            if not request.is_natural_language:
+                logger.debug(
+                    "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
+                    "treating query as natural language: %r",
+                    request.query,
+                )
 
-                if self._agent is None:
-                    return pb2.DataQueryResponse(
-                        success=False,
-                        message="Natural language queries require agent (not available)",
-                    )
-
-                # Agent translates query text → operation spec
-                operation = self._agent.query(request.query) or {}
-                func = operation.get("function")  # e.g., 'df.query', 'df.sort_values', 'df.drop', ...
-                params = operation.get("params", {}) or {}
-
-                # 2a) Agent-driven RESET has highest priority
-                if params.get("__agent_reset__"):
-                    logger.debug("[ApplyDataQuery] Agent requested reset")
-
-                    # Rebuild from loaders; this is the only place we replace the df object
-                    self._all_datasets_df = self._pull_into_all_data_view_df()
-                    df = self._all_datasets_df
-
-                    return self._build_success_response(
-                        df=df,
-                        message="Reset view to base dataset",
-                    )
-
-                # 2b) All other agent operations mutate df in-place
-                message = self._apply_agent_operation(df, func, params)
-
-                # 3) Return updated counts after mutation
-                return self._build_success_response(df=df, message=message)
-
-            except Exception as e:
-                logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
+            if self._agent is None:
                 return pb2.DataQueryResponse(
                     success=False,
-                    message=f"Failed to apply query: {str(e)}",
+                    message="Natural language queries require agent (not available)",
                 )
+
+            # Agent translates query text → operations spec (List[dict])
+            # Executed outside the lock to keep grid responsive during LLM waiting time
+            operations = self._agent.query(request.query)
+            if isinstance(operations, dict): operations = [operations] # Backwards compat
+            if not operations: operations = []
+
+            # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
+            with self._lock:
+                # Start with the current authoritative DF
+                df = self._all_datasets_df
+                messages = []
+                intent_type = pb2.INTENT_FILTER
+                analysis_result = ""
+
+                for i, op in enumerate(operations):
+                    func = op.get("function")
+                    params = op.get("params", {}) or {}
+
+                    # 2a) Agent-driven RESET has highest priority
+                    if params.get("__agent_reset__"):
+                        logger.debug("[ApplyDataQuery] Agent requested reset")
+                        # Rebuild from loaders; this is the only place we replace the df object
+                        self._all_datasets_df = self._pull_into_all_data_view_df()
+                        df = self._all_datasets_df  # Reset df to full dataset
+                        messages.append("Reset view")
+                        continue
+
+                    # 2b) All other agent operations mutate df in-place
+                    # df is now carried forward across iterations
+                    msg = self._apply_agent_operation(df, func, params)
+                    messages.append(msg)
+
+                    # Determine Intent Type based on message prefix (Last analysis wins or combined?)
+                    if msg.startswith("Analysis Result:"):
+                        intent_type = pb2.INTENT_ANALYSIS
+                        analysis_result = msg.replace("Analysis Result:", "").strip()
+                    elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
+                        intent_type = pb2.INTENT_ANALYSIS
+                        analysis_result = msg
+
+                final_message = " | ".join(messages) if messages else "No operation performed"
+
+                # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
+                # Only update if it was a manipulation query, not analysis
+                if intent_type == pb2.INTENT_FILTER:
+                    self._all_datasets_df = df
+
+                # 5) Return updated counts after mutation
+                return self._build_success_response(
+                    df=df,
+                    message=final_message,
+                    intent_type=intent_type,
+                    analysis_result=analysis_result
+                )
+
+        except Exception as e:
+            logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
+            return pb2.DataQueryResponse(
+                success=False,
+                message=f"Failed to apply query: {str(e)}",
+            )
 
     def GetDataSamples(self, request, context):
         """
