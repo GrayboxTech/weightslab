@@ -78,7 +78,7 @@ jobs:
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501
+            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 --fix
           fi
 
       - name: Pylint (errors only)

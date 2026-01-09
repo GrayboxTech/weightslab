@@ -3,7 +3,7 @@ import enum
 import logging
 
 import torch.nn as nn
-from typing import List, Set
+from typing import List
 
 logger = logging.getLogger(__name__)
 

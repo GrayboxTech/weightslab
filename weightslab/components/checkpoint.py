@@ -7,7 +7,7 @@ import torch as th
 import dill
 import pickle
 from pathlib import Path
-from typing import Set, Optional
+from typing import Optional
 
 from weightslab.backend.ledgers import (
     get_model,
