@@ -336,21 +336,6 @@ class DataService:
                 logger.debug("[DataService] Falling back to cached snapshot of dataframe")
                 return self._all_datasets_df if self._all_datasets_df is not None else pd.DataFrame()
 
-<<<<<<< HEAD
-        if not records:
-            return pd.DataFrame()
-
-        # Build dataframe once to avoid concat overhead
-        df = pd.DataFrame.from_records(records)
-        
-        try:
-            # We set the index for fast lookups (loc), but keep them as columns (drop=False)
-            # so the Agent can still see and filter them via df['origin'].
-            df.set_index(["origin", "sample_id"], inplace=True, drop=False)
-        except KeyError as e:
-            logger.warning(f"Failed to set index on dataframe: {e}")
-            
-=======
     def _get_origin_filter(self, request):
         """Extract requested origins if present on request (backward compatible)."""
         origins = None
@@ -380,7 +365,6 @@ class DataService:
                 return df[df["origin"].isin(origins)]
         except Exception as e:
             logger.debug(f"[_filter_df_by_origin] failed to filter by origins {origins}: {e}")
->>>>>>> d371443830ee426f092a30cde4362fde94767767
         return df
 
     def _load_existing_tags(self):
@@ -690,10 +674,10 @@ class DataService:
         return sorted(list(tags))
 
     def _build_success_response(
-        self, 
-        df, 
-        message: str, 
-        intent_type=pb2.INTENT_FILTER, 
+        self,
+        df,
+        message: str,
+        intent_type=pb2.INTENT_FILTER,
         analysis_result=""
     ) -> pb2.DataQueryResponse:
         """
@@ -733,13 +717,13 @@ class DataService:
         if func == "df.query":
             expr = params.get("expr", "")
             before = len(df)
-            
+
             try:
                 # We use raw eval() on a mask expression for maximum flexibility.
                 # This allows the expression to contain complex df[...] logic.
                 mask = eval(expr, {"df": df, "np": np, "pd": pd})
                 kept = df[mask]
-                
+
                 df.drop(index=df.index.difference(kept.index), inplace=True)
                 return f"Applied query: {expr}"
             except Exception as e:
@@ -818,7 +802,7 @@ class DataService:
                     for c in by:
                         if c not in df.columns:
                             continue
-                        
+
                         # Check for non-scalar types (like numpy arrays in 'prediction_loss')
                         # We use a heuristic on the first non-null value
                         non_null_s = df[c].dropna()
@@ -834,19 +818,13 @@ class DataService:
                                 else:
                                     logger.warning("[ApplyDataQuery] Skipping column %r for sorting: contains non-scalar values (e.g. arrays)", c)
                                     continue
-                        
+
                         valid_cols.append(c)
 
                     if not valid_cols:
-<<<<<<< HEAD
-                        logger.warning("[ApplyDataQuery] No valid or sortable columns found in %s", by)
-                        return "Failed to sort: columns either missing or contain non-sortable arrays"
-                    
-=======
                         logger.warning("[ApplyDataQuery] No valid sort columns found in %s", by)
                         return "Failed to sort: columns not found"
 
->>>>>>> d371443830ee426f092a30cde4362fde94767767
                     safe_params["by"] = valid_cols
 
                     # Fill NaN values in sort columns to avoid sort failures or inconsistent behaviors
@@ -940,7 +918,7 @@ class DataService:
         if func == "df.analyze":
             code = params.get("code")
             if not code: return "No code provided for analysis"
-            
+
             # Simple safety check: ensure code starts with df or looks like expression
             # We trust the Developer environment, but basic guardrails help
             if "import " in code or "__" in code:
@@ -951,7 +929,7 @@ class DataService:
                 # Note: eval() expects an expression, not statements.
                 # If the agent generated statements, we might need exec() but Intent schema asks for expression.
                 result = eval(code, {"df": df, "pd": pd, "np": np})
-                
+
                 # Format the result gracefully
                 # Format the result gracefully
                 if isinstance(result, (int, np.integer)):
@@ -962,7 +940,7 @@ class DataService:
                     return f"Analysis Result: {result}"
                 else:
                     return f"Analysis Result: {str(result)}"
-                    
+
             except Exception as e:
                 logger.error(f"Analysis Failed: code={code}, error={e}")
                 return f"Analysis Error: {e}"
@@ -1040,21 +1018,11 @@ class DataService:
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
-<<<<<<< HEAD
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
             with self._lock:
                  df = self._all_datasets_df
                  return self._build_success_response(
-=======
-        with self._lock:
-            self._slowUpdateInternals()
-            df = self._all_datasets_df  # authoritative DF, mutated in-place
-
-            # 1) No query: just report counts
-            if request.query == "":
-                return self._build_success_response(
->>>>>>> d371443830ee426f092a30cde4362fde94767767
                     df=df,
                     message=f"Current dataframe has {len(df)} samples",
                 )
@@ -1123,7 +1091,7 @@ class DataService:
 
                 # 5) Return updated counts after mutation
                 return self._build_success_response(
-                    df=df, 
+                    df=df,
                     message=final_message,
                     intent_type=intent_type,
                     analysis_result=analysis_result
@@ -1162,11 +1130,7 @@ class DataService:
                 self._slowUpdateInternals()
                 df_view = self._filter_df_by_origin(self._all_datasets_df, origin_filter)
                 end_index = request.start_index + request.records_cnt
-<<<<<<< HEAD
-                df_slice = self._all_datasets_df.iloc[request.start_index:end_index].reset_index(drop=True)
-=======
                 df_slice = df_view.iloc[request.start_index:end_index].reset_index()
->>>>>>> d371443830ee426f092a30cde4362fde94767767
 
             # Load tags only for the displayed slice (stream-friendly)
             df_slice = self._hydrate_tags_for_slice(df_slice)

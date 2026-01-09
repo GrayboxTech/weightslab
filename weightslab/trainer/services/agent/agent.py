@@ -1,7 +1,5 @@
 import os
-import json
 import logging
-import requests
 import difflib
 import re
 import pandas as pd
@@ -9,9 +7,6 @@ import httpx
 from typing import Optional, List, Union, Literal
 from dotenv import load_dotenv
 from pathlib import Path
-
-# New Google GenAI SDK
-from google import genai
 
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
@@ -393,11 +388,11 @@ class DataManipulationAgent:
                     val = cond.value
                 else:
                     val = f"'{cond.value}'" if isinstance(cond.value, str) else str(cond.value)
-                parts.append(f"({ref} {op} {val})")
+                parts.append(f"({col_ref} {op} {val})")
             elif op == "between" and cond.value is not None and cond.value2 is not None:
-                parts.append(f"({ref}.between({cond.value}, {cond.value2}))")
+                parts.append(f"({col_ref}.between({cond.value}, {cond.value2}))")
             elif op == "contains" and cond.value is not None:
-                parts.append(f"({ref}.str.contains('{cond.value}', na=False, regex=False))")
+                parts.append(f"({col_ref}.str.contains('{cond.value}', na=False, regex=False))")
 
         # Use '&' for bitwise/series comparison instead of 'and'
         return " & ".join(parts) if parts else None

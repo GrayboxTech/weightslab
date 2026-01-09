@@ -23,10 +23,10 @@ from weightslab.components.global_monitoring import (
     guard_testing_context,
 )
 
+
+# Setup loggers
 logging.basicConfig(level=logging.ERROR)
 os.environ["GRPC_VERBOSITY"] = "debug"
-
-# Suppress PIL warnings and set to INFO level
 logging.getLogger("PIL").setLevel(logging.INFO)
 
 
