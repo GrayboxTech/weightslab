@@ -300,14 +300,13 @@ class DataSampleTrackingWrapper(Dataset):
 
                 prediction_class = self.get(
                     sample_id=sample_id,
-                    stat_name=SampleStatsEx.PREDICTION_RAW.value,
-                    raw=True
+                    stat_name=SampleStatsEx.PREDICTION_RAW.value
                 )
             except (KeyError, IndexError) as e:
                 logger.error(f"Sample {sample_id}: Failed to get prediction - {type(e).__name__} {e}")
 
             try:
-                label = self.get(sample_id=sample_id, stat_name=SampleStatsEx.TARGET, raw=True)
+                label = self.get(sample_id=sample_id, stat_name=SampleStatsEx.TARGET)
             except (KeyError, IndexError) as e:
                 logger.error(f"Sample {sample_id}: Failed to get label - {type(e).__name__} {e}")
 
@@ -794,155 +793,6 @@ class DataSampleTrackingWrapper(Dataset):
             self._save_pending_stats_to_h5()
         self.iteration_counter += 1
 
-    def update_sample_stats(self,
-                            sample_id: int,
-                            sample_stats: Dict[str, None],
-                            raw: bool = True):
-        # Remap sample_id if raw=False and the key exists in the remap
-        # If key doesn't exist, sample_id is already the original ID
-        actual_sample_id = sample_id
-        if not raw and self.idx_to_idx_remapp and sample_id in self.idx_to_idx_remapp:
-            actual_sample_id = self.idx_to_idx_remapp[sample_id]
-
-        # Manually set each stat by row
-        self._sanity_check_columns(sample_stats_dict=sample_stats)
-        for stat_name, stat_value in sample_stats.items():
-            if stat_value is not None:
-                self.set(actual_sample_id, stat_name, stat_value)
-
-        # Update encounter count
-        with self._df_lock:
-            current = self._get_value(actual_sample_id, SampleStatsEx.ENCOUNTERED)
-            exposure_amount = 1 if current is None or pd.isna(current) else (int(current) + 1)
-            self.set(sample_id, SampleStatsEx.ENCOUNTERED.value, exposure_amount)
-
-        # Ensure deny_listed exists
-        with self._df_lock:
-            if self._get_value(sample_id, SampleStatsEx.DENY_LISTED) is None:
-                self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
-
-    def update_batch_sample_stats(self, model_age, ids_batch, signals_batch, preds_batch=None):
-        # Sanity check on ids
-        if set(ids_batch) - set(self.unique_id_to_index.keys()):
-            logger.debug("Some sample IDs in ids_batch are not recognized.")
-            return False
-        if preds_batch is None:
-            preds_batch = [None] * len(ids_batch)
-        if not isinstance(signals_batch, dict):
-            signals_batch = {"default": signals_batch}
-
-        signals_batch = [dict(zip(signals_batch.keys(), values)) for values in zip(*signals_batch.values())]
-        for sample_identifier, sample_signal, sample_pred in zip(ids_batch, signals_batch, preds_batch):
-            # patch for segmentation
-            if isinstance(sample_pred, np.ndarray):
-                if sample_pred.ndim == 1:
-                    sz = int(np.sqrt(sample_pred.size))
-                    if sz * sz == sample_pred.size:
-                        sample_pred = sample_pred.reshape((sz, sz))
-
-            # Core stats (keep original behavior)
-            self.update_sample_stats(
-                sample_identifier,
-                {
-                    SampleStatsEx.PREDICTION_AGE.value: model_age,
-                    SampleStatsEx.PREDICTION_RAW.value: sample_pred,
-                    SampleStatsEx.PREDICTION_LOSS_VALUES.value: sample_signal.values(),
-                }
-            )
-
-    def update_sample_stats_ex(
-        self,
-        sample_id: int,
-        sample_stats_ex: Dict[str, Any]
-    ):
-        """
-        Extended per-sample stats.
-        - Scalar-ish values -> added as DataFrame columns
-                - Dense arrays (ndim>=2) -> stored in global dense store
-          (downsampled)
-        """
-        for key, val in (sample_stats_ex or {}).items():
-            if val is None:
-                continue
-            if isinstance(val, dict):
-                # Flatten dict entries with key_prefix_
-                for sub_key, sub_val in val.items():
-                    full_key = f"{key}_{sub_key}"
-                    self.update_sample_stats_ex(sample_id, {full_key: sub_val})
-                continue
-            np_val = _to_numpy_safe(val)
-
-            # Dense arrays (e.g., segmentation mask / reconstruction)
-            if _is_dense_array(np_val):
-                self._set_dense(key, sample_id, _downsample_nn(np_val, max_hw=96))
-                continue
-
-            # Scalar-ish -> add to DataFrame
-            if _is_scalarish(val):
-                if isinstance(val, np.ndarray) and val.ndim == 0:
-                    val = val.item()
-                with self._df_lock:
-                    self._set_values(sample_id, {key: val})
-                self._ex_columns_cache.add(key)
-                continue
-
-            # Small vectors -> list, store in DataFrame
-            if (isinstance(np_val, np.ndarray) and
-                    np_val.ndim == 1 and np_val.size <= 64):
-                with self._df_lock:
-                    self._set_values(sample_id, {key: np_val.tolist()})
-                self._ex_columns_cache.add(key)
-                continue
-
-            # Fallback to truncated string
-            stringy = str(val)
-            if len(stringy) > 512:
-                stringy = stringy[:509] + "..."
-            with self._df_lock:
-                self._set_values(sample_id, {key: stringy})
-            self._ex_columns_cache.add(key)
-
-        # Ensure required columns
-        with self._df_lock:
-            if not self._get_value(sample_id, SampleStatsEx.DENY_LISTED):
-                self.set(sample_id, SampleStatsEx.DENY_LISTED, False)
-
-    def update_sample_stats_ex_batch(
-        self,
-        sample_ids: Sequence[int],
-        stats_map: Dict[str, Any]
-    ):
-        """
-        Convenience for batch updates.
-        stats_map values can be:
-            - scalar -> broadcast
-            - np.ndarray / tensor with shape [N, ...] matching len(sample_ids)
-        """
-        N = len(sample_ids)
-
-        for key, val in (stats_map or {}).items():
-            arr = _to_numpy_safe(val)
-            if arr is None:
-                # non-array scalar: broadcast
-                for sid in sample_ids:
-                    self.update_sample_stats_ex(sid, {key: val})
-                continue
-
-            if arr.ndim == 0:
-                v = arr.item()
-                for sid in sample_ids:
-                    self.update_sample_stats_ex(sid, {key: v})
-                continue
-
-            if arr.shape[0] != N:
-                raise ValueError(f"[update_sample_stats_ex_batch] '{key}' first dim {arr.shape[0]} != N={N}")
-
-            for i, sid in enumerate(sample_ids):
-                self.update_sample_stats_ex(sid, {key: arr[i]})
-
-        # # Dump to H5 if needed
-        # self.dump_stats_to_h5()
-
     def get_dense_stat(self, sample_id: int, key: str) -> Optional[np.ndarray]:
         return self._get_dense(key, sample_id)
 
@@ -1290,16 +1140,24 @@ class DataSampleTrackingWrapper(Dataset):
         return self.get_mask(sample_id, pred_raw)
 
     def flush_stats_to_h5(self):
-        """Explicitly flush pending stats to H5 (e.g., before training checkpoint).
-
-        Useful for ensuring critical updates are persisted without waiting for background flush.
+        """
+            Explicitly flush pending stats to H5 (e.g., before training checkpoint).
+            Useful for ensuring critical updates are persisted without waiting for background flush.
         """
         self._save_pending_stats_to_h5()
 
-    def get(self, sample_id: int, stat_name: str):
+    def get(self, sample_id: int, stat_name: str, raw: bool = False):
+        """
+            Get a specific stat value for a given sample ID.
+
+            TODO: Remove raw parameter in future versions and refactor calls accordingly.
+        """
         with self._df_lock:
             return self._get_value(sample_id=sample_id, key=stat_name)
 
     def set(self, sample_id: int, stat_name: str, value: Any):
+        """
+            Set a specific stat value for a given sample ID.
+        """
         with self._df_lock:
             self._set_values(sample_id=sample_id, updates={stat_name: value})

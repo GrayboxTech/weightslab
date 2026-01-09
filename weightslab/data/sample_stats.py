@@ -56,8 +56,8 @@ class SampleStats:
         Ex.SAMPLE_ID.value: -1,
 
         Ex.PREDICTION_AGE.value: 0,
-        Ex.PREDICTION.value: [],
-        Ex.PREDICTION_RAW.value: [],
+        Ex.PREDICTION.value: None,
+        Ex.PREDICTION_RAW.value: None,
         # Ex.PREDICTION_SIGNALS_VALUES.value: {},
 
         Ex.TARGET.value: None,
@@ -86,7 +86,7 @@ class SampleStats:
             cls.Ex.PREDICTION_AGE.value,
             # cls.Ex.PREDICTION_SIGNALS_VALUES.value,
             "signals.*",  # Prefix for dynamic signals
-            cls.Ex.DENIED_FLAG.value,
+            cls.Ex.DENY_LISTED.value,
             cls.Ex.ENCOUNTERED.value,
             cls.Ex.TAGS.value,
             cls.Ex.ORIGIN.value,

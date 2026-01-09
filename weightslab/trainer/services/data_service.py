@@ -1122,7 +1122,7 @@ class DataService:
                                 current_val = ""
 
                             if pd.isna(current_val): current_val = ""
-                            current_tags = [t.strip() for t in str(current_val).split(',') if t.strip()]
+                            current_tags = [t.strip() for t in str(current_val).split(';') if t.strip()]
 
                             if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
                                 if new_val not in current_tags:
@@ -1166,6 +1166,9 @@ class DataService:
 
                         # Aggregate old values
                         old_tags = self._df_manager.get_row(origin=origin, sample_id=int(sid))[SampleStatsEx.TAGS.value]
+                        if value in old_tags.split(';'):
+                            continue  # No change
+
                         new_tags = old_tags + "; " + value if old_tags and old_tags.replace(' ', '') != '' and value != '' else value
                         updates_by_origin.setdefault(origin, []).append({
                             "sample_id": int(sid),
@@ -1182,7 +1185,8 @@ class DataService:
 
                 for origin, rows in updates_by_origin.items():
                     df_update = pd.DataFrame(rows).set_index("sample_id")
-                    self._df_manager.upsert_df(df_update, origin=origin)
+                    self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+
         except Exception as e:
             logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
 

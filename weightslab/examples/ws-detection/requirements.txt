@@ -1,2 +1,0 @@
-pycocotools==1.26
-ultralytics==8.0.134
