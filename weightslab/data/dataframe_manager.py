@@ -29,6 +29,7 @@ class LedgeredDataFrameManager:
         self._df: pd.DataFrame = pd.DataFrame()
         self._store: H5DataFrameStore | None = None
         self._pending: set[int] = set()
+        self._force_flush = False
         self._lock = threading.RLock()
         self._queue_lock = threading.Lock()
         self._buffer_lock = threading.Lock()
@@ -88,7 +89,7 @@ class LedgeredDataFrameManager:
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
-    def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None):
+    def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
             return
 
@@ -111,7 +112,6 @@ class LedgeredDataFrameManager:
                 except Exception:
                     pass
 
-
         with self._lock:
             # Align columns
             all_cols = self._df.columns.union(df_norm.columns)
@@ -131,6 +131,14 @@ class LedgeredDataFrameManager:
             missing_idx = df_norm.index.difference(self._df.index)
             if len(missing_idx) > 0:
                 self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
+
+            self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
+
+    def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
+        with self._lock:
+            self._pending.update(set(sample_ids))
+            if force_flush:
+                self._force_flush = True
 
     def upsert_row(self, origin: str, sample_id: int, row: pd.Series):
         if row is None or row.empty:
@@ -167,8 +175,6 @@ class LedgeredDataFrameManager:
             arr = np.asanyarray(value)
         except Exception:
             return value
-        if arr.ndim > 2:
-            return None
         if arr.size == 0:
             return None
         if arr.ndim == 0:
@@ -470,7 +476,7 @@ class LedgeredDataFrameManager:
 
     def _should_flush(self) -> bool:
         with self._lock:
-            return len(self._pending) >= self._flush_max_rows
+            return len(self._pending) >= self._flush_max_rows or self._force_flush
 
     def flush_async(self):
         with self._queue_lock:
@@ -485,6 +491,7 @@ class LedgeredDataFrameManager:
         if not self._enable_h5_persistence:
             with self._lock:
                 self._pending.clear()
+                self._force_flush = False
             return
         if not force and not self._should_flush():
             return
@@ -495,6 +502,7 @@ class LedgeredDataFrameManager:
                 return
             work = list(self._pending)
             self._pending.clear()
+            self._force_flush = False
 
             # Filter actual df columns that match patterns in SAMPLES_STATS_TO_SAVE_TO_H5
             cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
