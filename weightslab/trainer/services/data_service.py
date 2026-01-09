@@ -201,12 +201,10 @@ class DataService:
 
         # init references to the context components
         self._ctx.ensure_components()
-        self.df_lock = threading.RLock()
 
         self._root_log_dir = self._resolve_root_log_dir()
         self._h5_path = self._resolve_h5_path()
         self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
-        self._stats_last_mtime = None
 
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
@@ -314,11 +312,6 @@ class DataService:
             return not pause_controller.is_paused()
         except Exception:
             return True
-
-    def _interaction_allowed(self):
-        if self._is_training_active():
-            return False, "Training is running; pause to browse or edit data."
-        return True, ""
 
     def _pull_into_all_data_view_df(self):
             """Stream stats from the global in-memory dataframe (ledger manager).

@@ -5,12 +5,11 @@ import tempfile
 import torch as th
 import numpy as np
 import pandas as pd
-import random as rnd
 import threading
 from pathlib import Path
 
 from enum import Enum
-from typing import Callable, Any, Set, Dict, Sequence, Optional
+from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
@@ -18,27 +17,19 @@ from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
 from weightslab.data.dataframe_manager import LEDGER_MANAGER
 from weightslab.data.data_utils import (
     _detect_dataset_split,
-    _is_scalarish,
-    _is_dense_array,
-    _to_numpy_safe,
-    _downsample_nn,
-    _matches_pattern,
-    _filter_columns_by_patterns,
+    _to_numpy_safe
 )
 import re
 from weightslab.data.sample_stats import (
     SampleStats,
     SampleStatsEx,
     SAMPLES_STATS_TO_SAVE_TO_H5,
-    SAMPLES_STATS_DEFAULTS,
-    SAMPLES_STATS_DEFAULTS_TYPES,
     SAMPLE_STATS_ALL,
 )
 
 
 # Global logger
 logger = logging.getLogger(__name__)
-SamplePredicateFn = Callable[[], bool]
 global _UID_CNT
 _UID_CNT = 0
 
@@ -75,7 +66,6 @@ def _filter_columns_with_patterns(columns: list, patterns: list) -> list:
 
 # I just like it when the enum values have the same name leghts.
 class _StateDictKeys(str, Enum):
-    IDX_TO_IDX_MAP = "idx_to_idx_map"
     BLOCKD_SAMPLES = "blockd_samples"
     SAMPLES_STATSS = "sample_statistics"
 
@@ -93,7 +83,6 @@ class DataSampleTrackingWrapper(Dataset):
         is_training: Whether this is a training dataset
         compute_hash: Whether to compute content-based UIDs (slower but more robust)
         use_tags: Enable tag-based labeling from H5-stored tags
-        load_every_data: Load all existing data from H5 on initialization
         name: Name of the dataset split (e.g., 'train', 'test', etc.)
         tags_mapping: Dict mapping tag strings to label integers
             - If only 1 tag specified: binary classification (tag → 1, others → 0)
@@ -125,7 +114,6 @@ class DataSampleTrackingWrapper(Dataset):
         use_tags: bool = False,
         tags_mapping: Optional[Dict[str, int]] = None,
         stats_store: Optional[H5DataFrameStore] = None,
-        load_every_data: bool = False,
         enable_h5_persistence: bool = True,
         name: Optional[str] = 'unknown',
         **_,
@@ -169,10 +157,6 @@ class DataSampleTrackingWrapper(Dataset):
                 "H5 persistence of sample statistics is disabled."
             )
 
-        # Experiment dump to train steps ratio from hyperparams
-        self.experiment_dump_to_train_steps_ratio = self._get_experiment_dump_to_train_steps_ratio()
-        self.iteration_counter = 0
-
         # First, generate UIDs and detect duplicates before wrapping
         logger.debug(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
 
@@ -208,7 +192,6 @@ class DataSampleTrackingWrapper(Dataset):
             "__name__"
         ) else "dataset"
         self.wrapped_dataset = wrapped_dataset
-        self._denied_samples_ids = set()
         self.denied_sample_cnt = 0
         self._ex_columns_cache: Set[str] = set()
         self._map_updates_hook_fns = []
@@ -258,71 +241,9 @@ class DataSampleTrackingWrapper(Dataset):
                 )
 
     @property
-    def dense_stats_store(self) -> Dict[str, Dict[int, np.ndarray]]:
-        """Backward-compatible view of dense stats for this split."""
-        return LEDGER_MANAGER.get_dense_map(self._dataset_split)
-
-    @property
     def num_classes(self) -> int:
         """Expose inferred number of classes as a property."""
         return self.infer_num_classes()
-
-    def _actually_deny_samples(self, sample_id):
-        with self._df_lock:
-            val = self._get_value(sample_id, SampleStatsEx.DENY_LISTED)
-            if pd.isna(val):
-                return True
-            return not val
-
-    def _get_denied_sample_ids(
-        self,
-        predicate: SamplePredicateFn | None,
-        verbose: bool = False
-    ) -> Set[int]:
-        denied_samples_ids = set()
-        if predicate is None:
-            return denied_samples_ids
-
-        for _, uid in enumerate(self.unique_ids):
-            sample_id = int(uid)
-            # These are hard-codes for classification tasks, so we treat them
-            # differently.
-            prediction_class, label = None, None
-            deny_listed = False
-            prediction_age = -1
-            prediction_loss = None
-            exposure_amount = 0
-            try:
-                deny_listed = self.is_deny_listed(sample_id)
-                prediction_age = self.get_prediction_age(sample_id)
-                prediction_loss = self.get_prediction_loss(sample_id)
-                exposure_amount = self.get_exposure_amount(sample_id)
-
-                prediction_class = self.get(
-                    sample_id=sample_id,
-                    stat_name=SampleStatsEx.PREDICTION_RAW.value
-                )
-            except (KeyError, IndexError) as e:
-                logger.error(f"Sample {sample_id}: Failed to get prediction - {type(e).__name__} {e}")
-
-            try:
-                label = self.get(sample_id=sample_id, stat_name=SampleStatsEx.TARGET)
-            except (KeyError, IndexError) as e:
-                logger.error(f"Sample {sample_id}: Failed to get label - {type(e).__name__} {e}")
-
-            if predicate(
-                    sample_id, prediction_age, prediction_loss,
-                    exposure_amount, deny_listed, prediction_class, label):
-                denied_samples_ids.add(sample_id)
-                if verbose:
-                    logger.info(f"Denied sample {sample_id} "
-                          f"with prediction age {prediction_age}, "
-                          f"prediction loss {prediction_loss}, "
-                          f"exposure amount {exposure_amount}, "
-                          f"deny listed {deny_listed}, "
-                          f"prediction class {prediction_class}, "
-                          f"label {label} -> predicate == True")
-        return denied_samples_ids
 
     def _get_stats_dataframe(self, limit: int = -1):
         """Return a copy of the stats dataframe (optionally limited)."""
@@ -523,62 +444,9 @@ class DataSampleTrackingWrapper(Dataset):
 
         return unique_ids, unique_id_to_index
 
-    def _raise_if_invalid_stat_name(self, stat_name: str):
-        if stat_name not in SampleStatsEx.ALL():
-            raise ValueError(f"Stat name: {stat_name}")
-
-    def _handle_deny_listed_updates(self, is_denied_listed: bool):
-        if is_denied_listed:
-            self.denied_sample_cnt += 1
-        else:
-            self.denied_sample_cnt -= 1
-
-    def _sanity_check_columns(self, sample_stats_dict: Dict[str, None]):
-        if set(sample_stats_dict.keys()) - set(SampleStatsEx.ALL()):
-            raise ValueError("Per sample stats keys are not recognized: "
-                             f"actual: {sample_stats_dict.keys()} "
-                             f"expected: {SampleStatsEx.ALL()}")
-
-    def _normalize_and_cast_for_df(self, value):
-        """
-        Normalize and cast arrays/tensors for DataFrame storage:
-        - If array/tensor is float and all values in [0, 1], scale to [0, 255] and cast to uint8.
-        - Convert arrays/tensors to list or scalar.
-        - Otherwise, cast to save type if possible.
-        """
-
-        arr = value
-        # Convert torch tensor to numpy
-        if th is not None and isinstance(arr, th.Tensor):
-            arr = arr.cpu().numpy()
-        if isinstance(arr, np.ndarray):
-            if arr.size == 1:
-                pass
-            elif arr.shape[0] == 0:
-                return None
-            elif np.issubdtype(arr.dtype, np.floating):
-                # Normalize float arrays in [0, 1] to [0, 255] uint8
-                if arr.min() >= 0.0 and arr.max() <= 1.0:
-                    arr = (arr * 255).round().astype(np.uint8)
-            elif np.issubdtype(arr.dtype, np.integer) and arr.dtype.itemsize == 2:
-                # Convert 16-bit integer arrays to 8-bit by scaling
-                arr_min, arr_max = arr.min(), arr.max()
-                if arr_max > 255 or arr_min < 0:
-                    # Scale to [0, 255] if out of 8-bit range
-                    arr = ((arr - arr_min) / (arr_max - arr_min) * 255).round().astype(np.uint8)
-                else:
-                    arr = arr.astype(np.uint8)
-
-            if arr.ndim == 2:
-                arr = arr[None]  # 1, H, W
-        return arr
-
     def _get_df_view(self, limit: int = -1) -> pd.DataFrame:
         """Convenience accessor for this split's ledger slice."""
         return LEDGER_MANAGER.get_df_view(self._dataset_split, limit=limit)
-
-    def _get_columns(self) -> Set[str]:
-        return set(LEDGER_MANAGER.get_columns(self._dataset_split))
 
     def _get_value(self, sample_id: int, key: str):
         return LEDGER_MANAGER.get_value(self._dataset_split, sample_id, key)
@@ -612,16 +480,6 @@ class DataSampleTrackingWrapper(Dataset):
     def _set_dense(self, key: str, sample_id: int, value: np.ndarray):
         LEDGER_MANAGER.set_dense(self._dataset_split, key, sample_id, value)
 
-    def _get_dense(self, key: str, sample_id: int) -> Optional[np.ndarray]:
-        return LEDGER_MANAGER.get_dense(self._dataset_split, key, sample_id)
-
-    def _sync_row_to_ledger(self, sample_id: int):
-        """Push the latest row for this sample into the global ledger."""
-        try:
-            LEDGER_MANAGER.mark_dirty(sample_id)
-        except Exception as e:
-            logger.debug(f"[DataSampleTrackingWrapper] Failed to mark row {sample_id} dirty: {e}")
-
     def _save_pending_stats_to_h5(self):
         """Mark pending rows dirty and request async flush from background thread."""
         if not self._h5_pending_uids:
@@ -632,50 +490,6 @@ class DataSampleTrackingWrapper(Dataset):
             LEDGER_MANAGER.mark_dirty(uid)
         # Request async flush to avoid blocking training loop
         LEDGER_MANAGER.flush_async()
-
-    def _load_stats_from_h5(self):
-        """Load only SAMPLES_STATS_TO_SAVE_TO_H5 from H5 file if it exists, filtered to current UIDs."""
-        if self._stats_store is None:
-            return
-
-        try:
-            current_uids = set(int(u) for u in self.unique_ids)
-            df = self._stats_store.load(self._dataset_split)
-            if df is None or df.empty:
-                logger.info(f"[DataSampleTrackingWrapper] No saved stats found for {self._dataset_split}")
-                return
-
-            # Normalize index and filter to present UIDs only
-            df = df.set_index("sample_id") if "sample_id" in df.columns else df
-            df = df[df.index.isin(current_uids)]
-
-            if df.empty:
-                return
-
-            cols_to_use = _filter_columns_with_patterns(df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
-            df_use = df[cols_to_use]
-
-            logger.info(
-                f"[DataSampleTrackingWrapper] Loading {len(df_use)} saved stats from {self._stats_store.path()}"
-            )
-
-            with self._df_lock:
-                LEDGER_MANAGER.upsert_df(df_use, self._dataset_split)
-                if SampleStatsEx.DENY_LISTED.value in df_use.columns:
-                    self.denied_sample_cnt = int(df_use[SampleStatsEx.DENY_LISTED.value].sum())
-            logger.info(
-                f"[DataSampleTrackingWrapper] Loaded stats for {len(df_use)} samples. "
-                f"{self.denied_sample_cnt} samples are deny-listed."
-            )
-        except Exception as e:
-            logger.error(f"[DataSampleTrackingWrapper] Failed to load stats from H5: {e}")
-            try:
-                if self._h5_path and self._h5_path.exists():
-                    corrupt_path = str(self._h5_path) + f'.corrupt-{int(time.time())}'
-                    os.replace(str(self._h5_path), corrupt_path)
-                    logger.error(f"[DataSampleTrackingWrapper] Moved corrupted H5 to {corrupt_path}")
-            except Exception:
-                pass
 
     def state_dict(self) -> Dict:
         with self._df_lock:
@@ -754,47 +568,14 @@ class DataSampleTrackingWrapper(Dataset):
         else:
             self.denied_sample_cnt = 0
 
-    def get_stat_value_at_percentile(self, stat_name: str, percentile: float):
-        with self._df_lock:
-            df = self._get_df_view()
-            if stat_name not in df.columns:
-                return 0
-            values = sorted(df[stat_name].dropna().tolist())
-        if not values:
-            return 0
-        percentile_index = int(percentile * len(values))
-        percentile_index = max(percentile_index, 0)
-        percentile_index = min(percentile_index, len(values) - 1)
-        return values[percentile_index]
-
     def get_prediction_age(self, sample_id: int) -> int:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_AGE, raw=True)
-
-    def get_prediction_loss(self, sample_id: int) -> float:
-        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_LOSS, raw=True)
 
     def get_exposure_amount(self, sample_id: int) -> int:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.ENCOUNTERED, raw=True)
 
     def is_deny_listed(self, sample_id: int) -> bool:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DENY_LISTED, raw=True)
-
-    def dump_stats_to_h5(self):
-        """
-            Force dump all sample stats to H5.
-            Dump is also triggered automatically based on iteration counter.
-            Every x iterations (experiment_dump_to_train_steps_ratio) or after infer on the whole eval set.
-        """
-        if self._h5_path is not None and self.iteration_counter > 0  and \
-                (
-                    (self.is_training and self.iteration_counter % (self.experiment_dump_to_train_steps_ratio or 100) == 0) or \
-                    (not self.is_training and self.iteration_counter % (self.wrapped_dataset.__len__() or 1) == 0)
-                ):
-            self._save_pending_stats_to_h5()
-        self.iteration_counter += 1
-
-    def get_dense_stat(self, sample_id: int, key: str) -> Optional[np.ndarray]:
-        return self._get_dense(key, sample_id)
 
     def denylist_samples(self, denied_samples_ids: Set[int] | None, accumulate: bool = False):
         with self._df_lock:
@@ -847,97 +628,6 @@ class DataSampleTrackingWrapper(Dataset):
         # Save pending changes to H5 after bulk allow operations
         self._save_pending_stats_to_h5()
 
-    def deny_samples_with_predicate(self, predicate: SamplePredicateFn):
-        denied_samples_ids = self._get_denied_sample_ids(predicate)
-        logger.info(f"denied samples with predicate {len(denied_samples_ids)}")
-        self.denylist_samples(denied_samples_ids)
-
-    def deny_samples_and_sample_allowed_with_predicate(
-        self,
-        predicate: SamplePredicateFn,
-        allow_to_denied_factor: float,
-        verbose: bool = False
-    ):
-        """
-            Apply denylisting predicate to samples, but keep a subset of
-            samples such that the number of allowed samples is equal to the
-            number of the denied samples multiplied by the
-            allow_to_denied_factor. This is to keep the dataset balanced with
-            both learned samples and misslabeled samples.
-        """
-        denied_samples_ids = self._get_denied_sample_ids(predicate)
-        total_samples_numb = len(self.wrapped_dataset)
-        denied_samples_cnt = len(denied_samples_ids)
-        allowed_samples_no = total_samples_numb - denied_samples_cnt
-        target_allowed_samples_no = int(
-            allowed_samples_no * allow_to_denied_factor)
-
-        if verbose:
-            logger.info(f'DataSampleTrackingWrapper.deny_samples_and_sample'
-                  f'_allowed_with_predicate denied {denied_samples_cnt} '
-                  f'samples, allowed {allowed_samples_no} samples, and will '
-                  f'toggle back to allowed {target_allowed_samples_no} samples'
-                  f' to keep the dataset balanced.')
-
-        if target_allowed_samples_no + allowed_samples_no \
-                >= len(self.wrapped_dataset):
-            target_allowed_samples_no = min(
-                target_allowed_samples_no,
-                total_samples_numb - allowed_samples_no)
-
-        if denied_samples_cnt > 0:
-            self.denylist_samples(denied_samples_ids)
-            if target_allowed_samples_no > 0:
-                override_allowed_sample_ids = rnd.sample(
-                    sorted(denied_samples_ids), target_allowed_samples_no)
-                self.allowlist_samples(override_allowed_sample_ids)
-
-    def apply_weighted_predicate(
-        self,
-        predicate: SamplePredicateFn,
-        weight: float | None,
-        accumulate: bool = True,
-        verbose: bool = False
-    ):
-        """
-            Apply denylisting predicate to samples, but control how many
-            positives and negatives are kept in the resulting set.
-        """
-
-        if weight is None:
-            weight = 1.0
-
-        denied_samples_ids = self._get_denied_sample_ids(
-            predicate, verbose=False)
-        denied_samples_cnt = len(denied_samples_ids)
-
-        denied_samples_cnt = int(denied_samples_cnt * weight) \
-            if weight <= 1.0 else int(weight)
-
-        if verbose:
-            logger.info(f'DataSampleTrackingWrapper'
-                  f'apply_weighted_predicate '
-                  f'denied {denied_samples_cnt} samples.')
-
-        override_denied_sample_ids = set()
-        if denied_samples_cnt > len(denied_samples_ids):
-            override_denied_sample_ids = set(denied_samples_ids)
-        elif denied_samples_cnt > 0:
-            override_denied_sample_ids = set(rnd.sample(
-                sorted(denied_samples_ids), denied_samples_cnt))
-
-        if accumulate:
-            override_denied_sample_ids |= self._denied_samples_ids
-
-        if verbose:
-            logger.info(f'DataSampleTrackingWrapper'
-                  f'apply_weighted_predicate '
-                  f'denied ids {list(override_denied_sample_ids)[:20]}')
-
-        self.denylist_samples(
-            override_denied_sample_ids)
-        logger.debug(f"DataSampleTrackingWrapper.apply_weighted_predicate #len {len(self)}")
-
     def as_records(self, limit: int = -1):
         """Convert DataFrame to list of records."""
         with self._df_lock:
@@ -947,11 +637,6 @@ class DataSampleTrackingWrapper(Dataset):
                 df = df.reset_index()  # Bring sample_id into columns
             # Convert NaN to None to match previous behavior
             return df.where(pd.notnull(df), None).to_dict(orient="records")
-
-    def get_actual_index(self, index: int) -> int:
-        if index not in self.idx_to_idx_remapp:
-            return index
-        return self.idx_to_idx_remapp[index]
 
     def get_dataframe(self, limit: int = -1) -> pd.DataFrame:
         return self._get_stats_dataframe(limit=limit)
@@ -1127,24 +812,10 @@ class DataSampleTrackingWrapper(Dataset):
         # Not bounding boxes, return as is
         return pred_raw
 
-    def get_target_mask(self, sample_id):
-        # Detection: check if target contains bboxes
-        target_raw = self.get(sample_id=sample_id, stat_name=SampleStatsEx.TARGET)
-        target = self.get_mask(sample_id, target_raw)
-        return target
-
     def get_prediction_mask(self, sample_id):
         # Detection: check if prediction_raw contains bboxes
         pred_raw = self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION)
-
         return self.get_mask(sample_id, pred_raw)
-
-    def flush_stats_to_h5(self):
-        """
-            Explicitly flush pending stats to H5 (e.g., before training checkpoint).
-            Useful for ensuring critical updates are persisted without waiting for background flush.
-        """
-        self._save_pending_stats_to_h5()
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False):
         """

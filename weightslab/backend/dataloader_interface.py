@@ -289,7 +289,7 @@ class DataLoaderInterface:
 
         self.init_attributes(self.dataloader)
 
-        # Internal iterator used by `_next_batch` / `next_batch`
+        # Internal iterator used by `_next_batch`
         self._iterator: Iterator = iter(self.dataloader)
 
         # Optionally register in the global ledger for cross-thread access.
@@ -488,15 +488,6 @@ class DataLoaderInterface:
         """Reset the internal iterator so `_next_batch()` starts from the beginning."""
         self._iterator = iter(self.dataloader)
 
-    # Backwards-compatible public names
-    def next_batch(self) -> Any:
-        """Backwards-compatible alias for `_next_batch()`."""
-        return self._next_batch()
-
-    def reset_iterator(self) -> None:
-        """Backwards-compatible alias for `_reset_iterator()`."""
-        return self._reset_iterator()
-
     # -------------------------------------------------------------------------
     # Batch-size management
     # -------------------------------------------------------------------------
@@ -627,20 +618,6 @@ class DataLoaderInterface:
         if hasattr(self.dataset, "as_records"):
             return self.dataset.as_records(limit)
         raise AttributeError("Wrapped dataset does not implement 'as_records()'")
-
-    def set_transform(self, transform: Any) -> None:
-        """Set a `transform` attribute on the wrapped dataset when supported.
-
-        Many torchvision datasets expose a `transform` attribute. This helper
-        allows swapping it at runtime.
-        """
-        if hasattr(self.dataset, "transform"):
-            setattr(self.dataset, "transform", transform)
-            self._reset_iterator()
-            return
-        raise AttributeError(
-            "Wrapped dataset does not support setting a 'transform' attribute"
-        )
 
     def get_dataloader(self) -> DataLoader:
         """Return the underlying `torch.utils.data.DataLoader`."""

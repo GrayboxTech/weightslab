@@ -1,7 +1,7 @@
+import os
+
 from enum import Enum
 from typing import Dict, Any, List
-import numpy as np
-import os
 
 
 __all__ = [
@@ -68,16 +68,6 @@ class SampleStats:
         Ex.ORIGIN.value: "",
         Ex.TASK_TYPE.value: "",
     }
-
-    @classmethod
-    def defaults_dict(cls, cols: list = None) -> Dict[str, Any]:
-        """Return a shallow copy of DEFAULTS as a plain dict."""
-        return dict(cls.DEFAULTS) if cols is None else {k: v for k, v in cls.DEFAULTS.items() if k in cols}
-
-    @classmethod
-    def defaults_types_dict(cls) -> Dict[str, Any]:
-        """Return a shallow copy of DEFAULTS_TYPES as a plain dict."""
-        return dict(cls.DEFAULTS_TYPES)
 
     @classmethod
     def get_to_save_to_h5_list(cls) -> List[str]:

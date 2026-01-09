@@ -11,9 +11,8 @@ import unittest
 import numpy as np
 import pandas as pd
 import torch
-from pathlib import Path
-from torch.utils.data import Dataset, Subset
-from unittest.mock import Mock, patch, MagicMock
+from torch.utils.data import Dataset
+from unittest.mock import Mock, patch
 
 from weightslab.data.data_samples_with_ops import (
     DataSampleTrackingWrapper,
@@ -22,7 +21,7 @@ from weightslab.data.data_samples_with_ops import (
     _filter_columns_with_patterns,
     _StateDictKeys,
 )
-from weightslab.data.sample_stats import SampleStats, SampleStatsEx
+from weightslab.data.sample_stats import SampleStatsEx
 
 
 class SimpleDataset(Dataset):
@@ -79,7 +78,7 @@ class TestHelperFunctions(unittest.TestCase):
     def test_filter_columns_with_patterns(self):
         """Test column filtering by patterns."""
         columns = ["loss", "loss_train", "accuracy", "test_accuracy", "feature_map"]
-        
+
         # Exact patterns
         result = _filter_columns_with_patterns(columns, ["loss"])
         self.assertEqual(result, ["loss"])
@@ -97,18 +96,6 @@ class TestHelperFunctions(unittest.TestCase):
         # Empty result
         result = _filter_columns_with_patterns(columns, ["nonexistent"])
         self.assertEqual(result, [])
-
-
-class TestStateDictKeys(unittest.TestCase):
-    """Test the _StateDictKeys enum."""
-
-    def test_all_method(self):
-        """Test that ALL method returns all enum values."""
-        all_keys = _StateDictKeys.ALL()
-        self.assertIn("idx_to_idx_map", all_keys)
-        self.assertIn("blockd_samples", all_keys)
-        self.assertIn("sample_statistics", all_keys)
-        self.assertEqual(len(all_keys), 3)
 
 
 class TestDataSampleTrackingWrapperInit(unittest.TestCase):
@@ -199,10 +186,10 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         # Should return tuple with (data, id, target, ...)
         self.assertIsInstance(result, tuple)
         self.assertGreaterEqual(len(result), 3)  # data, id, target at minimum
-        
+
         # First element should be numpy array or tensor
         self.assertTrue(isinstance(result[0], (np.ndarray, torch.Tensor)))
-        
+
         # Second element should be a numeric ID
         self.assertTrue(isinstance(result[1], (int, np.integer)))
 
@@ -223,7 +210,7 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         )
 
         result = wrapper[0]
-        
+
         # Should return (data, id)
         self.assertIsInstance(result, tuple)
         self.assertEqual(len(result), 2)
@@ -248,9 +235,8 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         """Test binary tag-based labeling."""
         mock_ledger.register_split = Mock()
         mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
-        
+
         # Create a shared dictionary to track get_value calls
-        call_count = [0]
         def mock_get_value(split, sample_id, key):
             # Mock tag values - the sample_id here is the actual unique_id, not the index
             if key == SampleStatsEx.TAGS.value:
@@ -274,7 +260,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         result = wrapper[0]
         target_label = result[2]
         sample_id = result[1]
-        
+
         # Check based on actual sample_id
         if sample_id % 2 == 0:
             self.assertEqual(target_label, 1)
@@ -295,7 +281,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         """Test multiclass tag-based labeling."""
         mock_ledger.register_split = Mock()
         mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
-        
+
         def mock_get_value(split, sample_id, key):
             if key == SampleStatsEx.TAGS.value:
                 mapping = {0: "small", 1: "medium", 2: "large"}
@@ -319,7 +305,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
             result = wrapper[idx]
             target_label = result[2]
             sample_id = result[1]
-            
+
             # Map based on the actual sample_id
             expected = {0: 0, 1: 1, 2: 2}.get(sample_id % 3, 0)
             self.assertEqual(target_label, expected)
@@ -384,7 +370,7 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
 
         # Then allow them back
         wrapper.allowlist_samples(denied_ids)
-        
+
         # If allow was successful, denied_sample_cnt should be updated
         # (depends on mock behavior of get_df_view)
 
@@ -452,41 +438,6 @@ class TestDataSampleTrackingWrapperStateDict(unittest.TestCase):
         self.assertIn("sample_statistics", state)
         self.assertIsInstance(state["blockd_samples"], int)
         self.assertIsInstance(state["sample_statistics"], dict)
-
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_load_state_dict(self, mock_ledger):
-        """Test loading state from a state dict."""
-        mock_ledger.register_split = Mock()
-        mock_df = pd.DataFrame({SampleStatsEx.DENY_LISTED.value: [False, False]})
-        mock_ledger.get_df_view = Mock(return_value=mock_df)
-        mock_ledger.update_values = Mock()
-        mock_ledger.mark_dirty = Mock()
-        mock_ledger.set_dense = Mock()
-
-        wrapper = DataSampleTrackingWrapper(
-            wrapped_dataset=self.dataset,
-            root_log_dir=self.temp_dir,
-            enable_h5_persistence=False,
-            compute_hash=False,
-        )
-
-        # Create a state dict with all required keys
-        state_dict = {
-            "idx_to_idx_map": {},
-            "blockd_samples": 2,
-            "sample_statistics": {
-                "core": {"prediction_loss": {100: 0.5}},
-                "ex": {},
-                "dense": {},
-            },
-        }
-
-        # Load the state
-        wrapper.load_state_dict(state_dict)
-        
-        # After loading, the denied_sample_cnt is recalculated from the dataframe
-        # Since mock_df has all False values, it should be 0
-        self.assertEqual(wrapper.denied_sample_cnt, 0)
 
 
 class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):

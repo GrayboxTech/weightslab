@@ -39,7 +39,6 @@ class _CheckpointDictKeys(str, enum.Enum):
     OPTIM = 'optimizer'
     LRATE = 'learning_rate'
     BSIZE = 'batch_size'
-    DATASETS = 'datasets'
     ENAME = 'experiment_name'
 
 
@@ -67,29 +66,8 @@ class CheckpointManager(object):
             f'id_to_path={self.id_to_path}\n' + \
             f'id_to_meta={self.id_to_meta}\n'
 
-    def get_ids(self) -> Set[int]:
-        return set(self.id_to_path.keys())
-
-    def get_path_for_id(self, id: int) -> Path:
-        return self.id_to_path[id]
-
     def _generate_checkpoint_id(self):
         self.next_id += 1
-        return self.next_id
-
-    def attach_metadata(self, checkpoint_id: int, metadata: dict):
-        if checkpoint_id in self.id_to_path:
-            raise ValueError(f"Checkpoint {checkpoint_id} does not exist.")
-
-        self.id_to_meta[checkpoint_id] = dict(metadata)
-
-    def get_metadata(self, checkpoint_id: int) -> dict:
-        if checkpoint_id in self.id_to_path:
-            raise ValueError(f"Checkpoint {checkpoint_id} does not exist.")
-
-        return self.id_to_meta[checkpoint_id]
-
-    def get_latest_experiment(self):
         return self.next_id
 
     def get_latest_checkpoint_path(self) -> Optional[Path]:

@@ -44,11 +44,6 @@ class NetworkWithOpsTest(unittest.TestCase):
             transform=transform,
             download=True
         )
-        self.dataset_eval = ds.MNIST(
-            os.path.join(self.test_dir, "data"),
-            train=False,
-            transform=transform
-        )
         self.train_sample1 = self.dataset_train[0]
         self.train_sample2 = self.dataset_train[1]
         self.tracked_input = th.stack(
@@ -56,9 +51,6 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         self.train_loader = th.utils.data.DataLoader(
             self.dataset_train, batch_size=8, shuffle=True)
-
-        self.eval_loader = th.utils.data.DataLoader(
-            self.dataset_eval, batch_size=8)
 
         self.optimizer = opt.SGD(
             self.dummy_network.parameters(), lr=1e-3)
@@ -92,17 +84,6 @@ class NetworkWithOpsTest(unittest.TestCase):
             loss = th.mean(losses_batch)
             loss.backward()
             self.optimizer.step()
-            corrects += prediction.eq(label.view_as(prediction)).sum().item()
-        return corrects
-
-    def _eval_one_epoch(self, cutoff: int | None = None):
-        corrects = 0
-        for idx, (image, label) in enumerate(self.eval_loader):
-            if cutoff and cutoff <= idx:
-                break
-            self.dummy_network.eval()
-            output = self.dummy_network(image)
-            prediction = output.argmax(dim=1, keepdim=True)
             corrects += prediction.eq(label.view_as(prediction)).sum().item()
         return corrects
 

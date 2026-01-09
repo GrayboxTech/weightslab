@@ -49,13 +49,6 @@ class NetworkWithOps(nn.Module):
     def __repr__(self):
         return super().__repr__() + f" age=({self.seen_samples})"
 
-    def _conv_neuron_to_linear_neurons_through_flatten(
-            self, conv_layer, linear_layer):
-        conv_neurons = conv_layer.weight.shape[0]
-        linear_neurons = linear_layer.weight.shape[1]
-        linear_neurons_per_conv_neuron = linear_neurons // conv_neurons
-        return linear_neurons_per_conv_neuron
-
     def _same_ancestors(self, node_id: int) -> Set[int]:
         visited = set()
         frontier = {node_id}
@@ -98,12 +91,6 @@ class NetworkWithOps(nn.Module):
 
     def get_layer_by_id(self, layer_id: int):
         return self._dep_manager.id_2_layer[layer_id]
-
-    def get_parameter_count(self):
-        count = 0
-        for layer in self.parameters():
-            count += np.prod(layer.shape)
-        return count
 
     def register_dependencies(
         self,
@@ -493,15 +480,6 @@ class NetworkWithOps(nn.Module):
         state[prefix + 'seen_samples'] = self.seen_samples
         state[prefix + 'tracking_mode'] = self.tracking_mode
         return state
-
-    def load_from_state_dict(
-            self, state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs):
-        self.seen_samples = state_dict[prefix + 'seen_samples']
-        self.tracking_mode = state_dict[prefix + 'tracking_mode']
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs)
 
     def load_state_dict(
             self, state_dict, strict, assign=True, **kwargs):

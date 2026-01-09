@@ -71,7 +71,7 @@ jobs:
         if: steps.changed-files.outputs.has_files == 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ruff pylint
+          python -m pip install ruff pylint vulture
 
       - name: Lint with Ruff (unused, style, bugs)
         if: steps.changed-files.outputs.has_files == 'true'
@@ -87,6 +87,14 @@ jobs:
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
             echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
+          fi
+
+      - name: Vulture (unused code)
+        if: steps.changed-files.outputs.has_files == 'true'
+        run: |
+          FILES="${{ steps.changed-files.outputs.changed_files }}"
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | xargs vulture --min-confidence 70 .
           fi
 
   install:

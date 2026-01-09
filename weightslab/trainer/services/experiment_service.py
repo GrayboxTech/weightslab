@@ -3,7 +3,7 @@ import logging
 import types
 
 import weightslab.proto.experiment_service_pb2 as pb2
-from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
+from weightslab.components.global_monitoring import weightslab_rlock
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService

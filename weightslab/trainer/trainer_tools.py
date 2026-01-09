@@ -133,20 +133,6 @@ def get_layer_representations(model):
         layer_representations.append(layer_representation)
     return layer_representations
 
-def make_task_field(name, value):
-    if isinstance(value, float):
-        return pb2.TaskField(name=name, float_value=value)
-    elif isinstance(value, bool):
-        return pb2.TaskField(name=name, bool_value=value)
-    elif isinstance(value, int):
-        return pb2.TaskField(name=name, int_value=value)
-    elif isinstance(value, str):
-        return pb2.TaskField(name=name, string_value=value)
-    elif isinstance(value, bytes):
-        return pb2.TaskField(name=name, bytes_value=value)
-    else:
-        raise ValueError(f"Unsupported value type for TaskField: {name}: {type(value)}")
-
 def mask_to_png_bytes(mask, num_classes=21):
     if isinstance(mask, torch.Tensor):
         mask = mask.detach().cpu().numpy()
@@ -235,9 +221,6 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
 
     sample_stats.sample_count = _safe_dataset_length(dataset)
 
-    tasks = getattr(experiment, "tasks", None)
-    is_multi_task = bool(tasks) and len(tasks) > 1
-
     raw_ds_task_type = getattr(dataset, "task_type", None)
     raw_exp_task_type = getattr(experiment, "task_type", None)
 
@@ -303,39 +286,8 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
         sample_stats.records.append(record)
     return sample_stats
 
-def _maybe_denorm(img_t, mean=None, std=None):
-    if mean is None or std is None:
-        return img_t
-    if img_t.ndim != 3 or img_t.shape[0] not in (1,3):
-        return img_t
-    m = torch.tensor(mean, dtype=img_t.dtype, device=img_t.device).view(-1,1,1)
-    s = torch.tensor(std,  dtype=img_t.dtype, device=img_t.device).view(-1,1,1)
-    return img_t * s + m
-
-def tensor_to_bytes(tensor, mean=None, std=None):
-    if isinstance(tensor, torch.Tensor):
-        tensor = tensor.detach().cpu()
-
-    if tensor.dtype.is_floating_point:
-        tensor = _maybe_denorm(tensor, mean, std)
-        tensor = torch.clamp(tensor, 0.0, 1.0)
-
-    if tensor.ndim == 3 and tensor.shape[0] > 1:
-        np_img = (tensor.numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-        mode = "RGB"
-    else:
-        np_img = tensor.squeeze(0).numpy()
-        np_img = (np_img * 255).astype(np.uint8)
-        mode = "L"
-
-    img = Image.fromarray(np_img, mode=mode)
-    buf = io.BytesIO()
-    # img.save(buf, format='png')
-    img.save(buf, format='jpeg', quality=85)
-    return buf.getvalue()
 
 def load_raw_image(dataset, index):
-
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
     if hasattr(wrapped, "images") and isinstance(wrapped.images, list):
         img_path = wrapped.images[index]

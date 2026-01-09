@@ -333,11 +333,6 @@ class DataManipulationAgent:
                 _LOGGER.warning("Skipping condition due to unresolvable column: %s", cond.column)
                 continue
 
-            # 2. Determine column reference
-            # For index columns and simple column names, use direct reference
-            # For columns with special chars, use backticks
-            is_index_col = resolved_col in index_names
-
             if re.match(r'^[\w]+$', resolved_col):
                 # Simple alphanumeric name - use as-is (works for both index and regular columns)
                 col_ref = resolved_col

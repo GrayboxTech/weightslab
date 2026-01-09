@@ -140,33 +140,6 @@ class LedgeredDataFrameManager:
             if force_flush:
                 self._force_flush = True
 
-    def upsert_row(self, origin: str, sample_id: int, row: pd.Series):
-        if row is None or row.empty:
-            return
-        row_data = dict(row)
-        row_data["sample_id"] = int(sample_id)
-        row_data["origin"] = origin
-        df_local = pd.DataFrame([row_data]).set_index("sample_id")
-        self.upsert_df(df_local, origin)
-
-    def ensure_columns(self, columns: Sequence[str]):
-        with self._lock:
-            for col in columns:
-                if col not in self._df.columns:
-                    self._df[col] = np.nan
-
-    def ensure_rows(self, origin: str, sample_ids: Sequence[int], defaults: Dict[str, Any]):
-        if not sample_ids:
-            return
-        data = []
-        for sid in sample_ids:
-            row = {**defaults}
-            row["sample_id"] = int(sid)
-            row["origin"] = origin
-            data.append(row)
-        df_local = pd.DataFrame(data).set_index("sample_id")
-        self.upsert_df(df_local, origin=origin)
-
     def _safe_array_value(self, value: Any) -> Any:
         """Convert arrays/tensors to lightweight Python objects and drop image-like data."""
         if value is None:
@@ -248,9 +221,6 @@ class LedgeredDataFrameManager:
             if len(self._buffer) >= self._flush_max_rows:
                 self.flush_async()
 
-    def update_df(self, df_updates: pd.DataFrame):
-        self._df.update(df_updates)
-
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
         if not updates:
             return
@@ -314,24 +284,6 @@ class LedgeredDataFrameManager:
             return None
         return row[column]
 
-    def get_columns(self, origin: str | None = None) -> list[str]:
-        with self._lock:
-            return list(self._df.columns)
-
-    def get_split_view(self, origin: str, limit: int = -1, copy: bool = False) -> pd.DataFrame:
-        with self._lock:
-            if self._df.empty:
-                return pd.DataFrame()
-            if "origin" in self._df.columns:
-                mask = self._df["origin"] == origin
-                # Return view of matching rows
-                subset = self._df.loc[mask]
-            else:
-                subset = self._df
-        if limit > 0:
-            subset = subset.head(limit)
-        return subset.copy() if copy else subset
-
     def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False) -> pd.DataFrame:
         with self._lock:
             if self._df.empty:
@@ -349,10 +301,6 @@ class LedgeredDataFrameManager:
     def set_dense(self, key: str, sample_id: int, value: np.ndarray):
         with self._lock:
             self._dense_store.setdefault(key, {})[int(sample_id)] = value
-
-    def get_dense(self, key: str, sample_id: int) -> np.ndarray | None:
-        with self._lock:
-            return self._dense_store.get(key, {}).get(int(sample_id))
 
     def get_dense_map(self, origin: str) -> Dict[str, Dict[int, np.ndarray]]:
         with self._lock:
@@ -382,7 +330,6 @@ class LedgeredDataFrameManager:
 
             # Separate records into regular updates and loss dict updates
             regular_records = []
-            loss_updates = {}
 
             for rec in records:
                 sid = int(rec["sample_id"])

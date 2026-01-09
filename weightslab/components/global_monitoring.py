@@ -85,8 +85,6 @@ class GuardContext:
         self.for_training = for_training
         self.architecture_guard = weightslab_rlock
         self.model = None
-        # pending updates collected while this guard is active
-        self._pending_updates = []
 
     def __enter__(self):
         """

@@ -143,20 +143,6 @@ class H5DataFrameStore:
         df_out["origin"] = origin
         return df_out
 
-    def _record_mtime(self):
-        try:
-            self._last_mtime = self._path.stat().st_mtime
-        except FileNotFoundError:
-            self._last_mtime = None
-
-    def has_changed_since(self, last_seen: Optional[float]) -> bool:
-        if not self._path.exists():
-            return False
-        try:
-            return self._path.stat().st_mtime > (last_seen or 0)
-        except FileNotFoundError:
-            return False
-
     @property
     def last_mtime(self) -> Optional[float]:
         return self._last_mtime
@@ -316,21 +302,6 @@ class H5DataFrameStore:
                 except Exception as exc:
                     logger.error(f"[H5DataFrameStore] Failed to upsert rows for {origin} into {self._path}: {exc}")
                     return 0
-
-    def truncate_origins(self, origins: Iterable[str]) -> None:
-        if not self._path.exists():
-            return
-        with self._local_lock:
-            with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
-                try:
-                    with pd.HDFStore(str(self._path), mode="a") as store:
-                        for origin in origins:
-                            key = self._key(origin)
-                            if key in store:
-                                store.remove(key)
-                    self._record_mtime()
-                except Exception as exc:
-                    logger.error(f"[H5DataFrameStore] Failed to truncate origins {list(origins)}: {exc}")
 
     def path(self) -> Path:
         return self._path
