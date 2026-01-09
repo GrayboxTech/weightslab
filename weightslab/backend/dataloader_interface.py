@@ -253,12 +253,19 @@ class DataLoaderInterface:
                     self.batch_size = int(batch_size)
                     self.drop_last = bool(drop_last)
 
+                def _wait_if_paused(self) -> None:
+                    """If the global pause controller is paused, wait until resumed."""
+                    try:
+                        pause_controller.wait_if_paused()
+                    except Exception:
+                        # Fail-open if pause controller is not available
+                        pass
+
                 def __iter__(self):
                     batch = []
                     for idx in self.base_sampler:
                         batch.append(idx)
                         if len(batch) >= int(self.batch_size):
-                            self._wait_if_paused()
                             yield list(batch)
                             batch = []
                     if batch and not self.drop_last:
