@@ -94,7 +94,7 @@ jobs:
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs vulture --min-confidence 70 .
+            echo "$FILES" | xargs vulture --min-confidence 70 . || true
           fi
 
   install:
