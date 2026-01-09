@@ -203,7 +203,7 @@ class DataManipulationAgent:
         try:
             host = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
             port = os.environ.get('OLLAMA_PORT', '11435')
-            model_ollama = "qwen2.5:3b-instruct" # "llama3.2:1b"
+            model_ollama = os.environ.get('OLLAMA_MODEL', 'llama3.2:1b')
             llm = ChatOllama(base_url=f"http://{host}:{port}", model=model_ollama, temperature=0, timeout=15)
             self.chain_ollama = llm.with_structured_output(Intent)
             _LOGGER.info(f"Ollama active ({model_ollama})")

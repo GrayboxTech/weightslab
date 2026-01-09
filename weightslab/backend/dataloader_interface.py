@@ -25,6 +25,7 @@ from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
+    resolve_hp_name
 )
 
 
@@ -257,6 +258,7 @@ class DataLoaderInterface:
                     for idx in self.base_sampler:
                         batch.append(idx)
                         if len(batch) >= int(self.batch_size):
+                            self._wait_if_paused()
                             yield list(batch)
                             batch = []
                     if batch and not self.drop_last:
