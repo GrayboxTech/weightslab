@@ -60,7 +60,7 @@ class DataManipulationAgent:
         """
         _LOGGER.info("Initializing DataManipulationAgent (Gemini 2.0 Ready)")
         self.ctx = context
-        
+
         self._setup_schema()
         # ... rest of init remains same ...
         self._build_column_index()
@@ -71,7 +71,7 @@ class DataManipulationAgent:
         """Builds the column schema from the context dataframe."""
         df = self.ctx._all_datasets_df
         all_columns = df.columns.tolist()
-        
+
         # Add index names to columns list (though we now keep them as columns)
         if isinstance(df.index, pd.MultiIndex):
             all_columns.extend([name for name in df.index.names if name is not None])
@@ -113,7 +113,7 @@ class DataManipulationAgent:
         self.google_model = os.environ.get("AGENT_MODEL_GOOGLE", "gemini-1.5-flash-latest")
         self.openai_model = os.environ.get("AGENT_MODEL_OPENAI", "gpt-4o-mini")
         self.openrouter_model = os.environ.get("AGENT_MODEL_OPENROUTER", "mistralai/mistral-7b-instruct:free")
-        self.fallback_to_local = True 
+        self.fallback_to_local = True
 
         # 2. Override with Experiment YAML Config
         try:
@@ -121,14 +121,14 @@ class DataManipulationAgent:
             if hp and "agent" in hp:
                 cfg = hp["agent"]
                 self.preferred_provider = cfg.get("provider", self.preferred_provider).lower()
-                
+
                 # Update model ID for the active provider
                 model_id = cfg.get("model")
                 if model_id:
                     attr_map = {"google": "google_model", "openai": "openai_model", "openrouter": "openrouter_model"}
                     if self.preferred_provider in attr_map:
                         setattr(self, attr_map[self.preferred_provider], model_id)
-                
+
                 self.fallback_to_local = bool(cfg.get("fallback_to_local", self.fallback_to_local))
                 _LOGGER.info(f"Agent config loaded from YAML: provider={self.preferred_provider}, model={model_id}")
         except Exception as e:
@@ -138,21 +138,21 @@ class DataManipulationAgent:
         """Robustly extracts hyperparameters from context."""
         if not hasattr(self.ctx, "_ctx"):
             return None
-            
+
         hp_comp = self.ctx._ctx.components.get("hyperparams")
         if not hp_comp:
             return None
-            
+
         if isinstance(hp_comp, dict):
             return hp_comp
-            
+
         if hasattr(hp_comp, "_data"):
             return hp_comp._data
-            
+
         if hasattr(hp_comp, "get"):
             try: return hp_comp.get()
             except: return None
-            
+
         return None
 
     def _setup_providers(self):
@@ -161,7 +161,7 @@ class DataManipulationAgent:
         self.client_google = None
         self.chain_ollama = None
         self.chain_openrouter = None
-        
+
         # 1. OpenAI
         api_key = os.environ.get("OPENAI_API_KEY")
         if api_key:
@@ -190,10 +190,10 @@ class DataManipulationAgent:
             try:
                 # Use custom http client to enforce timeout
                 http_client = httpx.Client(timeout=15.0)
-                
+
                 llm = ChatOpenAI(
-                    model=self.openrouter_model, 
-                    temperature=0, 
+                    model=self.openrouter_model,
+                    temperature=0,
                     api_key=api_key,
                     base_url="https://openrouter.ai/api/v1",
                     streaming=False,
@@ -220,7 +220,7 @@ class DataManipulationAgent:
     def query(self, instruction: str) -> dict:
         """Main entry point for natural language instructions."""
         self._setup_schema() # Refresh schema information
-        
+
         cols_desc = ", ".join(self.df_schema['columns'])
         if self.df_schema['origin_values']:
             cols_desc += f" (Note: 'origin' has values: {self.df_schema['origin_values']})"
@@ -229,10 +229,10 @@ class DataManipulationAgent:
             columns=cols_desc,
             instruction="{instruction}"
         )
-        
+
         # Build attempt order: Preferred -> Local Fallback (no cloud fallbacks)
         order = [self.preferred_provider]
-        
+
         # Only add local Ollama as fallback if enabled
         if self.fallback_to_local and self.preferred_provider != "ollama":
             order.append("ollama")
@@ -249,7 +249,7 @@ class DataManipulationAgent:
             except Exception as e:
                 _LOGGER.warning(f"Provider {provider} failed critically: {e}")
                 continue
-        
+
         return []
 
     def _wrap_analysis_response(self, provider: str, original_question: str, raw_answer: str) -> str:
@@ -262,18 +262,18 @@ class DataManipulationAgent:
                  "Please respond to the user with a clear, concise sentence summarizing this finding. "
                  "Do not show code. Just the answer."
              )
-             
+
              # Re-use the existing chain/client logic if possible, or simplified direct call
              # For simplicity, we just use the same method _try_query_provider effectively but with a different prompt?
              # Actually, we need a simple string retrieval. Let's reuse the chain but with a simple prompt.
-             
+
              # We can't easily reuse the structured output chain because it expects JSON Intent.
-             # So we need a raw generation call. 
+             # So we need a raw generation call.
              # For now, let's just return the raw answer to avoid double-latency/errors until stability is proven.
              # The user asked for it, but let's be safe.
-             
+
              # TODO: Implement full wrapper once stability is confirmed.
-             return f"Analysis Result: {raw_answer}" 
+             return f"Analysis Result: {raw_answer}"
         except Exception as e:
             return str(raw_answer)
 
@@ -281,11 +281,11 @@ class DataManipulationAgent:
         """Dispatches query to the specific LLM implementation."""
         if provider == "google" and self.client_google:
             return self._query_google(instruction, system_prompt)
-        
+
         chain = getattr(self, f"chain_{provider}", None)
         if chain:
             return self._query_langchain(provider, chain, instruction, system_prompt)
-            
+
         return None
 
     def _query_google(self, instruction: str, system_prompt: str) -> Optional[dict]:
@@ -310,7 +310,7 @@ class DataManipulationAgent:
             # Escape braces for LangChain f-string parser
             escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}").replace("{{instruction}}", "{instruction}")
             prompt = ChatPromptTemplate.from_messages([("system", escaped_sys), ("human", "{instruction}")])
-            
+
             _LOGGER.info(f"[{name}] Invoking chain...")
             try:
                 # Direct invoke with timeout handled by underlying client
@@ -339,29 +339,29 @@ class DataManipulationAgent:
         """Maps a user-provided string to the best matching column name."""
         if not user_name: return None
         user_name = user_name.strip().lower()
-        
+
         # 1. Exact match
         for c in self._cols:
             if c.lower() == user_name: return c
-            
+
         # 2. Token-based Jaccard similarity
         user_tokens = set(re.split(r"[ _/\.]+", user_name))
         expanded = set(user_tokens)
         for base, syns in self._column_synonyms.items():
             if base in user_tokens or user_name in syns: expanded |= syns
-            
+
         best_col, best_score = None, 0.0
         for c, ct in self._col_tokens.items():
             if not ct: continue
             score = len(expanded & ct) / len(expanded | ct)
             if score > best_score:
                 best_score, best_col = score, c
-                
+
         # 3. Fuzzy match fallback
         if best_score < 0.2:
             close = difflib.get_close_matches(user_name, self._cols, n=1, cutoff=0.6)
             if close: best_col = close[0]
-            
+
         return best_col
 
     def _build_condition_string(self, conditions: List[Condition]) -> Optional[str]:
@@ -369,18 +369,26 @@ class DataManipulationAgent:
         if not conditions: return None
         parts = []
         for cond in conditions:
-            col = self._resolve_column(cond.column)
-            if not col: continue
-            
-            # Use df['col'] syntax to allow raw eval() in backend
-            ref = f"df['{col}']"
-            op = cond.op.lower().strip()
-            # Normalize operators
-            if op in ("===", "==", "is", "equals"): op = "=="
-            elif op in ("!==", "!="): op = "!="
-            
+            # 1. Resolve column name safely
+            resolved_col = self._resolve_column(cond.column)
+            if not resolved_col:
+                _LOGGER.warning("Skipping condition due to unresolvable column: %s", cond.column)
+                continue
+
+            if re.match(r'^[\w]+$', resolved_col):
+                # Simple alphanumeric name - use as-is (works for both index and regular columns)
+                col_ref = resolved_col
+            else:
+                # Complex name with spaces/special chars - use backticks
+                col_ref = f"`{resolved_col}`"
+
+            # 3. Build expression based on operator
+            op = cond.op.lower()
+            val = cond.value
+
+            # Simple operators
             if op in ("==", "!=", ">", "<", ">=", "<="):
-                # If the value looks like code (e.g. df['loss'].mean()), don't wrap in quotes 
+                # If the value looks like code (e.g. df['loss'].mean()), don't wrap in quotes
                 if isinstance(cond.value, str) and (cond.value.startswith("df[") or cond.value.startswith("df.")):
                     val = cond.value
                 else:
@@ -390,28 +398,28 @@ class DataManipulationAgent:
                 parts.append(f"({ref}.between({cond.value}, {cond.value2}))")
             elif op == "contains" and cond.value is not None:
                 parts.append(f"({ref}.str.contains('{cond.value}', na=False, regex=False))")
-                
+
         # Use '&' for bitwise/series comparison instead of 'and'
         return " & ".join(parts) if parts else None
 
     def _intent_to_pandas_op(self, intent: Intent) -> List[dict]:
         """Converts an Intent object (with steps) into a list of dictionaries describing pandas operations."""
         ops = []
-        
+
         for step in intent.steps:
             op = {"function": None, "params": {}}
             kind = step.kind
-            
+
             if kind == "noop": continue
-            
+
             if kind in ("head", "tail"):
                 op["function"] = f"df.{kind}"
                 op["params"] = {"n": int(step.n) if step.n else 5}
-                
+
             elif kind == "sort":
                 sort_cols = []
                 ascending = bool(step.ascending) if step.ascending is not None else True
-                
+
                 # HEALING: If model put sort info in conditions because it's silly
                 if not step.sort_by and step.conditions:
                     for cond in step.conditions:
@@ -429,11 +437,11 @@ class DataManipulationAgent:
                 if sort_cols:
                     op["function"] = "df.sort_values"
                     op["params"] = {"by": sort_cols, "ascending": ascending}
-                    
+
             elif kind in ("keep", "drop") and step.conditions:
                 expr = self._build_condition_string(step.conditions)
                 if not expr: continue
-                
+
                 if kind == "keep":
                     if step.keep_frac:
                         op["function"] = "df.drop"
@@ -445,7 +453,7 @@ class DataManipulationAgent:
                     base = f"df.query({repr(expr)})"
                     op["function"] = "df.drop"
                     op["params"] = {"index": f"{base}.sample(frac={step.drop_frac}).index" if step.drop_frac else f"{base}.index"}
-            
+
             # FALLBACK: If LLM used analysis_expression for a keep/drop, or explicitly asked for analysis
             elif (kind == "analysis" or (kind in ("keep", "drop") and not step.conditions)) and step.analysis_expression:
                 op["function"] = "df.analyze"
@@ -454,8 +462,8 @@ class DataManipulationAgent:
             elif kind == "reset":
                 op["function"] = "df.reset_view"
                 op["params"] = {"__agent_reset__": True}
-            
+
             if op["function"]:
                 ops.append(op)
-            
+
         return ops

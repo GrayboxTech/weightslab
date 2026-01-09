@@ -1,27 +1,26 @@
 import os
 import time
+import logging
 import tempfile
 import itertools
-import logging
 
 import tqdm
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import yaml
+import torch
 import numpy as np
 
-import weightslab as wl
+from torch import nn, optim
 from torchvision import transforms
 from torchmetrics import JaccardIndex
 from torch.utils.data import Dataset
 from PIL import Image
 
+import weightslab as wl
+
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context,
-    pause_controller,
 )
 
 logging.basicConfig(level=logging.ERROR)
@@ -37,6 +36,7 @@ logging.getLogger("PIL").setLevel(logging.INFO)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch):
@@ -101,7 +101,6 @@ class SmallUNet(nn.Module):
         return logits
 
 
-
 # =============================================================================
 # BDD100k segmentation dataset
 # =============================================================================
@@ -135,7 +134,7 @@ class BDD100kSegDataset(Dataset):
         self.ignore_index = ignore_index
         self.task_type = "segmentation"
 
-        img_dir = os.path.join(root, "images_1280x720", split)
+        img_dir = os.path.join(root, "images", split)
         lbl_dir = os.path.join(root, "labels", split)
 
         image_files = [
@@ -269,7 +268,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
 # =============================================================================
 if __name__ == "__main__":
     # --- 1) Load hyperparameters from YAML (if present) ---
-    config_path = os.path.join(os.path.dirname(__file__), "bdd_seg_training_config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
@@ -281,8 +280,6 @@ if __name__ == "__main__":
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 500)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
-    parameters["is_training"] = lambda: not pause_controller.is_paused()
-
     parameters.setdefault("number_of_workers", 4)
     parameters.setdefault("num_classes", 6)      # adjust to your label set
     parameters.setdefault("ignore_index", 255)   # if you have void pixels
@@ -490,9 +487,6 @@ if __name__ == "__main__":
     print(f"📂 Data root: {data_root}")
     print("=" * 60 + "\n")
 
-    # --- 8) Training loop ---
-    pause_controller.resume()
-
     # ================
     # 7. Training Loop
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
@@ -511,14 +505,14 @@ if __name__ == "__main__":
         # Verbose
         if verbose and not tqdm_display:
             print(
-                f"Training.. " +
+                "Training.. " +
                 f"Step {train_step}: " +
                 f"| Train Loss: {train_loss:.4f} " +
                 (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
                 (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')
             )
         elif tqdm_display:
-            train_range.set_description(f"Step")
+            train_range.set_description("Step")
             train_range.set_postfix(
                 train_loss=f"{train_loss:.4f}",
                 test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",

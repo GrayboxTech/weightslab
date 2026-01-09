@@ -1,8 +1,6 @@
 import io
 import xxhash
-import yaml
 import types
-import inspect
 import logging
 import collections
 import torch as th
@@ -12,8 +10,7 @@ import random
 
 from typing import Union
 from copy import deepcopy
-from typing import Optional, List, Any, Type, Callable, Dict, Union
-from torch.fx import Node
+from typing import List, Union
 
 
 # Global logger
@@ -31,23 +28,6 @@ def seed_everything(seed):
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
-def is_learnable_module(module: nn.Module) -> bool:
-    """
-    Checks if a module is a learnable nn.Module with parameters that have grad.
-    """
-    # Check if it's a th.nn.Module instance
-    if not isinstance(module, nn.Module):
-        return
-
-    has_learnable_params = False
-    # Iterate over the parameters to check if any requires gradient
-    for _, param in module.named_parameters():
-        if param.requires_grad:
-            has_learnable_params = True
-            break
-    return has_learnable_params
-
-
 def extract_in_out_params(module: nn.Module) -> List[int | str]:
     """
     Detects and returns the primary input and output dimension parameters
@@ -170,19 +150,6 @@ def is_module_with_ops(module: nn.Module) -> bool:
     return "WithNeuronOps" in module._get_name()
 
 
-def get_all_classes_from_module(module):
-    """
-        Dynamically retrieves all class objects defined within a given module.
-    """
-    classes = []
-    # Use inspect.getmembers to look at all attributes of the module
-    for name, obj in inspect.getmembers(module):
-        # Check if the object is a class and not an internal/private object
-        if inspect.isclass(obj) and not name.startswith('_'):
-            classes.append(obj)
-    return tuple(classes)  # isinstance takes a tuple of classes
-
-
 # Helper to retrieve module instance by its submodule path
 def get_module_by_name(model: nn.Module, name: str) -> nn.Module | None:
     """
@@ -193,83 +160,6 @@ def get_module_by_name(model: nn.Module, name: str) -> nn.Module | None:
         return model.get_submodule(name)
     except AttributeError:
         return getattr(model, name, None)
-
-
-def is_module_learnable(module: Optional[Any]) -> bool:
-    """
-    Check if the module has learnable parameters.
-    """
-    return hasattr(module, 'weight') and module.weight is not None
-
-
-def is_feature_producer(module: Optional[Any]) -> bool:
-    """
-    Checks if a module is a primary feature producer by checking for
-    the presence of common input and output dimension attributes (in_*, out_*).
-    This generalizes the check beyond specific nn.Module classes.
-    """
-    if module is None:
-        return False
-
-    # Check for convolutional-style feature definition
-    # (e.g., in_channels, out_channels)
-    has_conv_features = hasattr(module, 'in_channels') and \
-        hasattr(module, 'out_channels')
-
-    # Check for linear-style feature definition
-    # (e.g., in_features, out_features)
-    has_linear_features = hasattr(module, 'in_features') and \
-        hasattr(module, 'out_features')
-
-    # Any module defining both an input and an output feature dimension is
-    # considered a "producer"
-    return has_conv_features or has_linear_features
-
-
-def get_feature_channel_size(node: Node) -> Optional[int]:
-    """
-        Retrieves the channel size (dimension 1) of the tensor output by the
-        node.
-    """
-    if 'tensor_meta' in node.meta and node.meta['tensor_meta'] is not None:
-        meta = node.meta['tensor_meta']
-        if isinstance(meta, th.Tensor) or \
-                isinstance(meta, th.fx.passes.shape_prop.TensorMetadata):
-            # Assumes N, C, H, W or N, C, L format (channel is dim 1)
-            if len(meta.shape) > 1:
-                return int(meta.shape[1])
-    return None
-
-
-def get_shape_attribute_from_module(
-        module: nn.Module,
-        _in=False,
-        _out=False,
-        with_name=False
-):
-    attrs = [
-        i for i in list(module.__dict__.keys())
-        if '_size' in i or '_shape' in i
-    ]
-    res = [None] if not with_name else (None, None)
-    if not len(attrs):
-        return [None] if not with_name else (None, None)
-    if _in:
-        _in_attrs = [i for i in attrs if '_in' in i or 'in_' in i]
-        if len(_in_attrs):
-            res = getattr(module, _in_attrs[0])
-            res = [res] if not with_name else (res, _in_attrs[0])
-    if _out:
-        _out_attrs = [i for i in attrs if '_out' in i or 'out_' in i]
-        if len(_out_attrs):
-            res = getattr(module, _out_attrs[0])
-            res = [res] if not with_name else (res, _out_attrs[0])
-
-    if _in == _out is False:
-        res = getattr(module, attrs[0])
-        res = [res] if not with_name else (res, attrs[0])
-
-    return res
 
 
 def what_layer_type(module: nn.Module):
@@ -292,20 +182,6 @@ def what_layer_type(module: nn.Module):
 
 def make_safelist(x):
     return [x] if not isinstance(x, list) else x
-
-
-def get_original_torch_class(
-        module_instance: nn.Module,
-        replacement_map: dict) -> Type[nn.Module] | None:
-    """
-    Maps an instance of a custom wrapper module back to its original
-    th.nn Class using the module's type.
-    """
-    # Get the class (type object) of the provided instance
-    custom_class = type(module_instance)
-
-    # Look up the original torch class in the replacement map
-    return replacement_map.get(custom_class)
 
 
 def model_op_neurons(model, layer_id=None, dummy_input=None, op=None, rand=False):
@@ -417,29 +293,6 @@ def get_layer_trainable_parameters_neuronwise(layer: th.nn.Module):
     return trainable_params
 
 
-def get_model_parameters_neuronwise(model: th.nn.Module, trainable_only=True):
-    """
-        Get the number of neurons with associated lr!= 0 in the model.
-    """
-    # Count only neurons with associated lr != 0
-    # Basically parameters not masked
-    params = sum(
-        p.numel() for p in model.parameters()
-    )
-    trainable_params = 0
-    for layer in model.layers:
-        trainable_params += get_layer_trainable_parameters_neuronwise(layer)
-
-    # Since all parameters in your model currently have requires_grad=True:
-    # trainable_params will also equal 8,367,235
-    logger.debug(
-        f"{params} paraeters with {trainable_params} trainable parameters."
-    )
-
-    return (params, trainable_params) if not trainable_only else \
-        trainable_params
-
-
 def normalize_dicts(a):
     offset_index = 0
     for deps_name_ in a:
@@ -501,52 +354,6 @@ def reversing_indices(n_neurons, indices_set):
             ) <= -1
         }
     )[::-1]
-
-
-def validate_kwargs(f: Callable, kwargs: Dict[str, Any]):
-    """
-    Validates a dictionary of keyword arguments (kwargs) against the signature
-    of a target function (f).
-
-    If the function f accepts a variadic keyword argument (**kwargs),
-    validation is skipped for extraneous parameters.
-
-    Args:
-        f: The function whose signature is used for validation.
-        kwargs: The dictionary of keyword arguments to check.
-
-    """
-    # 1. Get the signature of the target function
-    signature = inspect.signature(f)
-
-    # 2. Extract the names of all expected parameters
-    # This set contains argument names (e.g., 'a', 'b', 'debug').
-    expected_params = set(signature.parameters.keys())
-
-    # 3. Check for the presence of **kwargs (VAR_KEYWORD)
-    # If the function accepts **kwargs, we allow any extra arguments.
-    accepts_var_kwargs = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD
-        for p in signature.parameters.values()
-    )
-
-    return kwargs if accepts_var_kwargs else \
-        set(kwargs.keys()) - expected_params
-
-
-def load_config_from_yaml(filepath: str) -> Dict:
-    """Loads configuration data from a YAML file."""
-    try:
-        with open(filepath, 'r') as f:
-            config_data = yaml.safe_load(f)
-        logger.info(f"Successfully loaded configuration from {filepath}")
-        return config_data
-    except FileNotFoundError:
-        logger.error(f"Error: YAML file not found at {filepath}. Using default parameters.")
-        return {}
-    except yaml.YAMLError as e:
-        logger.error(f"Error loading YAML file: {e}. Using default parameters.")
-        return {}
 
 
 def _npy_bytes(arr: np.ndarray) -> bytes:

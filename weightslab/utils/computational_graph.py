@@ -11,6 +11,7 @@ from torch.fx import GraphModule
 from torch._C import _onnx as _C_onnx
 from typing import Iterable, List, Tuple, Dict, Optional
 from copy import deepcopy
+from typing import Any
 
 from weightslab.utils.tools import *
 from weightslab.utils.modules_dependencies import DepType
@@ -653,34 +654,6 @@ def generate_graph_dependencies_from_torchfx(
     """
     dependencies = []
 
-    def clean_dependencies(
-        dependencies: List[Tuple[nn.Module, nn.Module, DepType]]
-    ) -> List[Tuple[nn.Module, nn.Module, DepType]]:
-        """Remove self-loops and duplicate dependency edges.
-
-        - Self-loops (where src is dst) are removed.
-        - Duplicate edges (same src object, same dst object, same DepType)
-        are removed, preserving the first occurrence order.
-
-        Args:
-            dependencies: List of tuples (src_module, dst_module, DepType).
-
-        Returns:
-            Cleaned list of dependencies.
-        """
-        seen = set()
-        cleaned = []
-        for src, dst, dep in dependencies:
-            # Remove self-loops
-            if src is dst:
-                continue
-            key = (id(src), id(dst), dep)
-            if key in seen:
-                continue
-            seen.add(key)
-            cleaned.append((src, dst, dep))
-        return cleaned
-
     # Map to store the last *structural module* (instance) that produced the
     # output for a given node.
     # This map is crucial for implementing the "pass-through" logic for
@@ -729,8 +702,6 @@ def generate_graph_dependencies_from_torchfx(
                                 dep_type
                             )
                         )
-                        if hasattr(current_module, 'bypass'):
-                            source_module.src_bypass = 1
 
             # --- 2. Update Tracking Map ---
             # Track all modules (learnable, structural, and non-learnable) so they can be
@@ -1212,11 +1183,6 @@ def generate_layer_dependencies_from_onnx(
             # Set SAME Flag for modules if applicable
             if dep_type == DepType.SAME:
                 dst_mod.wl_same_flag = True
-
-            # Set src_bypass flag if destination has bypass attribute
-            if hasattr(dst_mod, 'bypass'):
-                src_mod.src_bypass = 1
-                logger.debug(f"  Setting src_bypass=1 for source module: {src_name}")
 
             logger.debug(f"  ✓ Adding dependency: {src_name} -> {dst_name} [{dep_type.name}]")
 

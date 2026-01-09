@@ -120,9 +120,6 @@ class OptimizerInterface:
         else:
             self.optimizer.param_groups[group_idx]['lr'] = lr
 
-    def get_param_groups(self):
-        return self.optimizer.param_groups
-
     def add_param_group(self, param_group):
         return self.optimizer.add_param_group(param_group)
 

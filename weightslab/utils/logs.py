@@ -48,7 +48,7 @@ def setup_logging(level, log_to_file=True):
     # File handler - write to temp directory
     if log_to_file:
         # Create temp directory for logs if it doesn't exist
-        temp_dir = tempfile.gettempdir()
+        temp_dir = tempfile.mkdtemp()
         log_dir = os.path.join(temp_dir, 'weightslab_logs')
         os.makedirs(log_dir, exist_ok=True)
 

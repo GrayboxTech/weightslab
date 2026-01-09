@@ -409,25 +409,6 @@ class DependencyPatternTest(unittest.TestCase):
         except Exception as e:
             self.skipTest(f"ONNX export failed: {e}")
 
-    def assert_dependency_exists(self, deps: List[Tuple[nn.Module, nn.Module, DepType]],
-                                src_name: str, dst_name: str, dep_type: DepType = None):
-        """Assert that a dependency exists between two modules"""
-        module_names = {id(m): n for n, m in self.model.named_modules()}
-        found = False
-
-        for src, dst, dtype in deps:
-            src_n = module_names.get(id(src))
-            dst_n = module_names.get(id(dst))
-
-            if src_n == src_name and dst_n == dst_name:
-                found = True
-                if dep_type is not None:
-                    self.assertEqual(dtype, dep_type,
-                        f"Expected {src_name} -> {dst_name} to have type {dep_type.name}, got {dtype.name}")
-                break
-
-        self.assertTrue(found, f"Dependency {src_name} -> {dst_name} not found")
-
     def assert_dependency_count_range(self, deps: List[Tuple[nn.Module, nn.Module, DepType]],
                                       min_count: int = None, max_count: int = None):
         """Assert that dependency count is within expected range"""

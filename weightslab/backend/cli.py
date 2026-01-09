@@ -25,8 +25,7 @@ import os
 import time
 from typing import Optional, Any
 
-from weightslab.backend.ledgers import GLOBAL_LEDGER
-from weightslab.backend.ledgers import Proxy
+from weightslab.backend.ledgers import GLOBAL_LEDGER, resolve_hp_name, Proxy, set_hyperparam, list_hyperparams
 from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
 
 
@@ -115,13 +114,15 @@ def _handle_command(cmd: str) -> Any:
                 }
             }
 
+        name = resolve_hp_name()
         if verb == 'pause' or verb == 'p':
             pause_controller.pause()
+            set_hyperparam(name, 'is_training', False)
             return {'ok': True, 'action': 'paused'}
-
 
         if verb == 'resume' or verb == 'r':
             pause_controller.resume()
+            set_hyperparam(name, 'is_training', True)
             return {'ok': True, 'action': 'resumed'}
 
         if verb == 'status':
@@ -335,7 +336,6 @@ def _handle_command(cmd: str) -> Any:
         if verb in ('set_hp', 'sethp', 'set-hp'):
             # syntax: set_hp [hp_name] <key.path> <value>
             try:
-                from weightslab.backend.ledgers import list_hyperparams, set_hyperparam
                 names = list_hyperparams()
                 # decide whether hp_name was supplied
                 if len(parts) < 3:
@@ -423,28 +423,6 @@ def _client_handler(conn: socket.socket, addr):
                 except Exception:
                     conn_file.write((json.dumps({'ok': False, 'error': 'unserializable_response'}) + "\n").encode('utf8'))
             conn_file.flush()
-
-
-def _server_loop(host: str, port: int):
-    """Legacy entry: bind and serve in this thread."""
-    global _server_sock, _server_port, _server_host
-    _server_host = host
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((host, port))
-        srv.listen(5)
-        _server_port = srv.getsockname()[1]
-        _server_sock = srv
-        while True:
-            conn, addr = srv.accept()
-            t = threading.Thread(target=_client_handler, args=(conn, addr), name='cli_serving_loop', daemon=True)
-            t.start()
-    finally:
-        try:
-            srv.close()
-        except Exception:
-            pass
 
 
 def _server_loop_sock(srv: socket.socket):

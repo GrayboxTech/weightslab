@@ -1,7 +1,7 @@
 """ Tests for modules with operations. """
+import os
 import time
 import warnings; warnings.filterwarnings("ignore")
-import tempfile
 import unittest
 import torch as th
 
@@ -22,7 +22,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
 
         # Init Variables
         self.stamp = time.time()
-        self.test_dir = tempfile.mkdtemp()
+        self.test_dir = '/tmp/utests/'; os.makedirs('/tmp/utests/', exist_ok=True)
         self.all_layers = {}
 
     def tearDown(self):

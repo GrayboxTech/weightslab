@@ -25,7 +25,6 @@ from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
-    list_hyperparams,
 )
 
 
@@ -55,11 +54,11 @@ class MaskedSampler(Sampler):
 
     def __iter__(self):
         """Iterate over non-deny-listed indices."""
-        # Build a set of deny-listed UIDs for fast lookup
-        deny_listed_uids = {
-            uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
-            if is_denied
-        }
+        # Build a set of deny-listed UIDs for fast lookup via DataFrame
+        df_view = self.tracked_dataset._get_df_view()
+        deny_listed_uids = set()
+        if not df_view.empty and 'deny_listed' in df_view.columns:
+            deny_listed_uids = set(df_view[df_view['deny_listed'] == True].index)
 
         # Iterate through base sampler, yielding only non-denied indices
         for idx in self.base_sampler:
@@ -69,11 +68,11 @@ class MaskedSampler(Sampler):
 
     def __len__(self):
         """Return the number of non-deny-listed samples."""
-        # Count non-denied samples
-        deny_listed_uids = {
-            uid for uid, is_denied in self.tracked_dataset.sample_statistics.get('deny_listed', {}).items()
-            if is_denied
-        }
+        # Count non-denied samples via DataFrame
+        df_view = self.tracked_dataset._get_df_view()
+        deny_listed_uids = set()
+        if not df_view.empty and 'deny_listed' in df_view.columns:
+            deny_listed_uids = set(df_view[df_view['deny_listed'] == True].index)
         total = len(self.base_sampler)
         denied_count = len(deny_listed_uids)
         return max(0, total - denied_count)
@@ -186,7 +185,7 @@ class DataLoaderInterface:
 
         if isinstance(data_loader_or_dataset, DataLoader):
             logger.warning(
-                "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !!"
+                "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !! "
                 "Otherwise, prefer passing a Dataset and let the interface build the DataLoader."
                 )
             # User-supplied dataloader
@@ -197,6 +196,7 @@ class DataLoaderInterface:
                 compute_hash=compute_hash,
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
+                name=name,
                 **kwargs
             )
             self.tracked_dataset._map_updates_hook_fns.append(
@@ -210,6 +210,7 @@ class DataLoaderInterface:
                 compute_hash=compute_hash,
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
+                name=name,
                 **kwargs
             )
 
@@ -238,7 +239,7 @@ class DataLoaderInterface:
             # Wrap base sampler with MaskedSampler to skip deny-listed samples
             masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
 
-            # Inner class: mutable batch sampler
+            # Inner class: mutable batch sampler for batch size changes
             class MutableBatchSampler:
                 """A simple mutable batch sampler that yields lists of indices.
 
@@ -263,7 +264,7 @@ class DataLoaderInterface:
 
                 def __len__(self):
                     try:
-                        total = len(self.base_sampler)
+                        total = len(self.base_sampler.tracked_dataset)  # type: ignore
                         b = max(1, int(self.batch_size))
                         return (total + b - 1) // b
                     except Exception:
@@ -276,6 +277,7 @@ class DataLoaderInterface:
 
             # Construct dataloader using our batch_sampler
             self.is_training = kwargs.pop("is_training", False)
+            self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
             self.dataloader = DataLoader(
                 self.tracked_dataset,
                 batch_sampler=mbs,
@@ -287,8 +289,7 @@ class DataLoaderInterface:
 
         self.init_attributes(self.dataloader)
 
-
-        # Internal iterator used by `_next_batch` / `next_batch`
+        # Internal iterator used by `_next_batch`
         self._iterator: Iterator = iter(self.dataloader)
 
         # Optionally register in the global ledger for cross-thread access.
@@ -407,14 +408,16 @@ class DataLoaderInterface:
     def __iter__(self) -> Iterator:
         """Return an iterator over batches (delegates to the wrapped dataloader)."""
         self._sync_batch_size_from_ledger()
+        res = iter(self.dataloader)
         self._wait_if_paused()
-        return iter(self.dataloader)
+        return res
 
     def __next__(self) -> Any:
         """Retrieve the next batch; used when iterating directly over the interface."""
         self._sync_batch_size_from_ledger()
+        res = self._next_batch()
         self._wait_if_paused()
-        return self._next_batch()
+        return res
 
     # -------------------------------------------------------------------------
     # Ledger / pause helpers
@@ -484,15 +487,6 @@ class DataLoaderInterface:
     def _reset_iterator(self) -> None:
         """Reset the internal iterator so `_next_batch()` starts from the beginning."""
         self._iterator = iter(self.dataloader)
-
-    # Backwards-compatible public names
-    def next_batch(self) -> Any:
-        """Backwards-compatible alias for `_next_batch()`."""
-        return self._next_batch()
-
-    def reset_iterator(self) -> None:
-        """Backwards-compatible alias for `_reset_iterator()`."""
-        return self._reset_iterator()
 
     # -------------------------------------------------------------------------
     # Batch-size management
@@ -624,20 +618,6 @@ class DataLoaderInterface:
         if hasattr(self.dataset, "as_records"):
             return self.dataset.as_records(limit)
         raise AttributeError("Wrapped dataset does not implement 'as_records()'")
-
-    def set_transform(self, transform: Any) -> None:
-        """Set a `transform` attribute on the wrapped dataset when supported.
-
-        Many torchvision datasets expose a `transform` attribute. This helper
-        allows swapping it at runtime.
-        """
-        if hasattr(self.dataset, "transform"):
-            setattr(self.dataset, "transform", transform)
-            self._reset_iterator()
-            return
-        raise AttributeError(
-            "Wrapped dataset does not support setting a 'transform' attribute"
-        )
 
     def get_dataloader(self) -> DataLoader:
         """Return the underlying `torch.utils.data.DataLoader`."""

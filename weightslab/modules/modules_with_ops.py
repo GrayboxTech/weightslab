@@ -87,10 +87,6 @@ class LayerWiseOperations(NeuronWiseOperations):
     # ===================
     # Getters and Setters
     # ===================
-    def set_name(self, n: str):
-        if isinstance(n, str):
-            self.module_name = n
-
     def get_name(self) -> str:
         return self.module_name
 
@@ -395,25 +391,6 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         return value
 
-    def _find_value_for_key_pattern(
-            self,
-            key_pattern: str,
-            state_dict: dict
-    ) -> object:
-        """
-            Find the value for a key pattern in the state_dict.
-
-            Args:
-                key_pattern (str): The pattern to search for in the keys.
-                state_dict (dict): The state dictionary.
-
-            Returns:
-                object: The value corresponding to the key pattern, or None
-                if not found.
-        """
-        for key, value in state_dict.items():
-            if key_pattern in key:
-                return value
 
     def _process_neurons_indices(
             self,
@@ -513,56 +490,6 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         return flat_indexs, original_indexs
 
-    # ---------------
-    # Torch Functions
-    def load_from_state_dict(
-            self,
-            state_dict: dict,
-            prefix: str,
-            local_metadata: dict,
-            strict: bool,
-            missing_keys: List[str],
-            unexpected_keys: List[str],
-            error_msgs: str
-    ):
-        """
-        Load the model from a state dictionary.
-
-        Args:
-            state_dict (dict): The state dictionary to load from.
-            prefix (str): The prefix to use when searching for keys in the state_dict.
-            local_metadata (dict): The local metadata to use when searching for keys in the state_dict.
-            strict (bool): Whether to strictly enforce that the keys in the state_dict match
-                the keys in this module.
-            missing_keys (List[str]): List of keys that are missing in the state_dict.
-            unexpected_keys (List[str]): List of keys that are present in the state_dict but not in this module.
-            error_msgs (str): Error messages to return.
-        """
-        tnsr = self._find_value_for_key_pattern('weight', state_dict)
-        if tnsr is not None:
-            in_size, out_size = tnsr.shape[1], tnsr.shape[0]
-            with th.no_grad():
-                wshape = (out_size, in_size)
-                self.weight.data = nn.Parameter(
-                    th.ones(wshape)).to(self.device)
-                if self.bias is not None:
-                    self.bias.data = nn.Parameter(
-                        th.ones(out_size)).to(self.device)
-
-            # Update neurons information
-            self.set_neurons(
-                attr_name='in_neurons',
-                new_value=self._update_attr(self.super_in_name, in_size)
-            )
-            self.set_neurons(
-                attr_name='out_neurons',
-                new_value=self._update_attr(self.super_out_name, out_size)
-            )
-        # Update state dict from torch.nn.Module class
-        self._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs)
-
     def to(self, *args, **kwargs):
         """
         Move all tensors and modules to a specified device.
@@ -594,11 +521,6 @@ class LayerWiseOperations(NeuronWiseOperations):
         processed_activation_map = th.sum(activation_map, dim=(-2, -1)) if len(activation_map.shape) > 2 else activation_map
         copy_forward_tracked_attrs(processed_activation_map, activation_map)
         tracker.update(processed_activation_map)
-
-    def has_constraints(self):
-        """ Check if the layer has any constraints on its neurons. """
-        if hasattr(self, 'wl_constraints'):
-            return len(self.wl_constraints) > 0
 
     def perform_layer_op(
         self,
@@ -1729,8 +1651,6 @@ if __name__ == "__main__":
     # Watcher
     model = ModelInterface(model, dummy_input=dummy_input, print_graph=False)
     model(dummy_input)
-    print(model)
-    nn_l = len(model.layers)-1
 
     # Neurons Operation
     # FREEZE

@@ -6,23 +6,20 @@ import logging
 
 import tqdm
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchvision.ops as ops
 import yaml
-import numpy as np
 
-import weightslab as wl
-from torchvision import transforms
-from torchmetrics import JaccardIndex
+from torch import nn
+from torchvision import ops, transforms
 from torch.utils.data import Dataset
 from PIL import Image
 from pathlib import Path
 
+import weightslab as wl
+
 from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
-    guard_testing_context,
-    pause_controller,
+    guard_training_context,
+    guard_testing_context
 )
 from weightslab.baseline_models.pytorch.models import Yolov11
 
@@ -132,8 +129,8 @@ class GIoULoss(nn.Module):
                 return batch_losses.mean()
             elif self.reduction == "sum":
                 return batch_losses.sum()
-            else:  # "none"
-                return batch_losses
+
+            return batch_losses
 
         # Handle single image inputs [M, 4] and [N, 4]
         elif pred_boxes.dim() == 2 and target_boxes.dim() == 2:
@@ -144,6 +141,10 @@ class GIoULoss(nn.Module):
                 f"pred_boxes and target_boxes must have dims 2 (single) or 3 (batched). "
                 f"Got pred_boxes.dim()={pred_boxes.dim()}, target_boxes.dim()={target_boxes.dim()}"
             )
+
+    def compute(self):
+        """Placeholder for compatibility."""
+        pass
 
 
 class COCOBBoxSegmentationDataset(Dataset):
@@ -222,35 +223,80 @@ class COCOBBoxSegmentationDataset(Dataset):
         anns = self.coco.loadAnns(ann_ids)
 
         # Build mask from bboxes
-        H, W = img_info["height"], img_info["width"]
-        mask = self._build_mask(anns, H, W)[None, ...]  # Add channel dim
+        h, w = img_info["height"], img_info["width"]
+        mask = self._build_mask(anns, h, w)[None, ...]  # Add channel dim
 
         if self.mask_transform:
-            mask = self.mask_transform(mask)
+            transformed_gt = self.mask_transform(mask)
         else:
             # ToTensor would cast to float; keep long for class ids
-            mask = mask
+            transformed_gt = mask
 
-        target = {
-            "boxes": torch.tensor([
+        # Scale boxes to match the transformed mask/image size
+        out_h, out_w = transformed_gt.shape[-2:]
+        scale_x = out_w / float(w)
+        scale_y = out_h / float(h)
+        boxes = torch.tensor([
                 [ann["bbox"][0], ann["bbox"][1], ann["bbox"][0] + ann["bbox"][2], ann["bbox"][1] + ann["bbox"][3]]
                 for ann in anns
-            ], dtype=torch.float32) if anns else torch.zeros((0, 4), dtype=torch.float32),
-            "labels": torch.tensor([
+        ], dtype=torch.float32) if anns else torch.zeros((0, 4), dtype=torch.float32)
+        if boxes.numel():
+            scales = torch.tensor([scale_x, scale_y, scale_x, scale_y], dtype=boxes.dtype)
+            boxes = boxes * scales
+        labels = torch.tensor([
                 self.class_map.get(ann["category_id"], ann["category_id"])
                 for ann in anns
-            ], dtype=torch.int64) if anns else torch.zeros((0,), dtype=torch.int64),
-            "image_id": torch.tensor([image_id], dtype=torch.int64),
-        }
+        ], dtype=torch.int64) if anns else torch.zeros((0,), dtype=torch.int64)
+        image_id = torch.tensor([image_id], dtype=torch.int64)
+        # Outputs is stackable tensors only
+        return image_t, transformed_gt, boxes, labels, image_id
 
-        return image_t, mask, target
 
-
+# Set up logging
 logging.basicConfig(level=logging.ERROR)
 os.environ["GRPC_VERBOSITY"] = "debug"
 
 # Suppress PIL warnings and set to INFO level
 logging.getLogger("PIL").setLevel(logging.INFO)
+
+
+def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_len=1, tqdm_display=False):
+    """Iterate over the train loader to compute a detection loss on trainset.
+
+    Note: This loop uses the model's high-level predict API (non-differentiable)
+    to obtain boxes and compute a GIoU-based loss for monitoring. It does not
+    perform optimization and serves primarily to iterate over the trainset.
+    """
+    losses = 0.0
+
+    it = tqdm.tqdm(loader, desc="Training (iter)") if tqdm_display else loader
+    with guard_training_context:
+        for data in it:
+            inputs = data[0].to(device)
+            ids = data[1].to(device)
+            tbbxs = data[3].to(device)  # No batches
+
+            outputs = model.predict(inputs)[0]
+            pbbxs = torch.cat(
+                [
+                    outputs.boxes.cls[..., None],
+                    outputs.boxes.xyxy
+                ],
+                dim=1
+            )[None]
+
+            if criterion_mlt is not None:
+                loss_batch = criterion_mlt(
+                    pbbxs[..., :-1],  # Remove class for loss
+                    tbbxs,
+                    model_age=model.get_age(),
+                    batch_ids=ids,
+                    preds=pbbxs,  # Full preds for data store logging, bboxs with cls
+                )
+                losses += torch.mean(loss_batch)
+
+    loss = float((losses / max(1, train_loader_len)).detach().cpu().item()) if criterion_mlt is not None else None
+    return loss
 
 
 def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_loader_len=1):
@@ -262,34 +308,49 @@ def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_
         for data in loader:
             inputs = data[0].to(device)
             ids = data[1].to(device)
-            seg = data[2].to(device)
-            boxs = data[3]['boxes'].to(device)  # No batches
+            tseg = data[2].to(device)
+            tbbxs = data[3].to(device)  # No batches
 
+            # Predict boxes
             outputs = model.predict(inputs)[0]
-            preds = outputs.boxes.xyxy[None]
-
-            # Create clean segmentation mask from detected boxes (no labels)
-            H, W = inputs.shape[2], inputs.shape[3]
-            segmentation = torch.zeros((1, H, W), dtype=torch.int64, device=device)
-
-            for box, cls in zip(outputs.boxes.xyxy, outputs.boxes.cls):
-                x1, y1, x2, y2 = box.int()
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(W, x2), min(H, y2)
-                if x2 > x1 and y2 > y1:
-                    segmentation[0, y1:y2, x1:x2] = int(cls) + 1  # +1 to avoid background class 0
-
+            pbbxs = torch.cat([outputs.boxes.cls[..., None], outputs.boxes.xyxy], dim=1)[None]
             if criterion_mlt is not None:
                 loss_batch = criterion_mlt(
-                    preds,
-                    boxs,
+                    pbbxs[..., :-1],  # Remove class for loss
+                    tbbxs,
                     model_age=model.get_age(),
                     batch_ids=ids,
-                    preds=segmentation,
+                    preds=pbbxs,  # Full preds for data store logging, bboxs with cls
                 )
                 losses += torch.mean(loss_batch)
 
-            metric_mlt.update(preds, seg) if metric_mlt is not None else None
+            # ========== Build segmentation from boxes ==========
+            # ===================================================
+            # Build a class map from detected boxes (0 = background)
+            H, W = tseg.shape[-2:]  # target mask spatial size
+            class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
+
+            # Unpack detections; outputs.boxes.xyxy is [N,4], outputs.boxes.cls is [N]
+            boxes_xyxy = outputs.boxes.xyxy
+            classes = outputs.boxes.cls.int()
+            conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
+
+            # Optional: filter by confidence
+            keep = (conf >= 0.25) if conf is not None else torch.ones_like(classes, dtype=torch.bool)
+            boxes_xyxy = boxes_xyxy[keep]
+            classes = classes[keep]
+
+            # Rasterize boxes into the class map
+            for box, cls in zip(boxes_xyxy, classes):
+                x1, y1, x2, y2 = box.round().int().tolist()
+                x1 = max(0, x1); y1 = max(0, y1)
+                x2 = min(W, x2); y2 = min(H, y2)
+                if x2 > x1 and y2 > y1:
+                    class_map[y1:y2, x1:x2] = cls + 1  # offset by 1 to keep 0 as background
+
+            # Now class_map is your predicted segmentation; compare/log against tseg
+            pseg = class_map[None, ...]  # add channel if your metric expects [1, H, W]
+            metric_mlt.update(pseg, tseg) if metric_mlt is not None else None
 
     loss = float((losses / test_loader_len).detach().cpu().item()) if criterion_mlt is not None else None
     metric = float(metric_mlt.compute().detach().cpu().item() * 100.0) if metric_mlt is not None else None
@@ -301,7 +362,7 @@ def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_
 # =============================================================================
 if __name__ == "__main__":
     # --- 1) Load hyperparameters from YAML (if present) ---
-    config_path = os.path.join(os.path.dirname(__file__), "inference_config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
@@ -332,7 +393,7 @@ if __name__ == "__main__":
 
     log_dir = parameters["root_log_dir"]
     verbose = parameters.get("verbose", True)
-    tqdm_display = parameters.get("tqdm_display", True)
+    tqdm_display = parameters.get("tqdm_display", False)
 
     # --- 4) Register logger + hyperparameters ---
     logger = Logger()
@@ -359,7 +420,8 @@ if __name__ == "__main__":
         transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.NEAREST),
     ])
 
-    test_cfg = parameters.get("data", {}).get("test_loader", {})
+    data_cfg = parameters.get("data", {})
+    test_cfg = data_cfg.get("test_loader", {})
     _test_dataset = COCOBBoxSegmentationDataset(
         test_cfg["images_dir"],
         test_cfg["annotations_file"],
@@ -403,22 +465,52 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("🚀 STARTING COCO SEGMENTATION TESTING")
+    print("🚀 STARTING COCO DETECTION TRAIN/TEST")
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    # --- 8) Training loop ---
-    pause_controller.resume()
-
     # ================
-    # 7. Testing Loop
+    # 7. Optional Trainset iteration
+    train_cfg = data_cfg.get("train_loader", {})
+    train_loss = None
+    if train_cfg:
+        _train_dataset = COCOBBoxSegmentationDataset(
+            train_cfg["images_dir"],
+            train_cfg["annotations_file"],
+            image_transform=image_transform,
+            mask_transform=mask_transform,
+            class_map=None,
+        )
+        train_loader = wl.watch_or_edit(
+            _train_dataset,
+            flag="data",
+            name="train_loader",
+            batch_size=train_cfg.get("batch_size", 2),
+            shuffle=train_cfg.get("shuffle", True),
+            compute_hash=False,
+            is_training=True,
+        )
+
+        train_loader_len = len(train_loader)
+        train_loss = pseudo_train(
+            train_loader,
+            model,
+            criterion_mlt=test_criterion,
+            device=device,
+            train_loader_len=train_loader_len,
+            tqdm_display=tqdm_display,
+        )
+        if train_loss is not None:
+            print(f"Train loss (GIoU-based, no backprop): {train_loss:.4f}")
+
+    # ===============
+    # 8. Testing Loop
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
     test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
     test_loss, test_metric = None, None
     start_time = time.time()
     test_loss, test_metric = test(test_loader, model, test_criterion, device=device, test_loader_len=test_loader_len)
-
     print("\n" + "=" * 60)
     print(f"✅ Testing completed in {time.time() - start_time:.2f} seconds")
     print(f"💾 Logs saved to: {log_dir}")

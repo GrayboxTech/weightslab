@@ -1153,7 +1153,7 @@ def get_layer_div(
     checklist_values = convert_checklist_to_df_head(checklist_values)
     try:
         neurons_view_df = format_values_df(layer_neurons_df[checklist_values])
-    except Exception as e:
+    except Exception:
         return no_update
 
     fetch_filters_toggle = html.Div(

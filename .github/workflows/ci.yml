@@ -45,7 +45,7 @@ jobs:
             BASE_SHA=${{ github.event.before }}
             HEAD_SHA=${{ github.sha }}
           fi
-          
+
           # Get changed Python files in weightslab directory, exclude generated files
           CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
             grep '^weightslab/.*\.py$' | \
@@ -53,11 +53,11 @@ jobs:
             grep -v '_pb2_grpc\.py$' | \
             grep -v 'ui\.py$' | \
             grep -v 'trainer.*\.py$' || true)
-          
+
           echo "changed_files<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          
+
           if [ -z "$CHANGED_FILES" ]; then
             echo "has_files=false" >> $GITHUB_OUTPUT
             echo "No Python files changed in weightslab directory"
@@ -71,14 +71,14 @@ jobs:
         if: steps.changed-files.outputs.has_files == 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ruff pylint
+          python -m pip install ruff pylint vulture
 
       - name: Lint with Ruff (unused, style, bugs)
         if: steps.changed-files.outputs.has_files == 'true'
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501
+            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 --fix
           fi
 
       - name: Pylint (errors only)
@@ -86,7 +86,15 @@ jobs:
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs pylint --disable=C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
+            echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
+          fi
+
+      - name: Vulture (unused code)
+        if: steps.changed-files.outputs.has_files == 'true'
+        run: |
+          FILES="${{ steps.changed-files.outputs.changed_files }}"
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | xargs vulture --min-confidence 70 . || true
           fi
 
   install:

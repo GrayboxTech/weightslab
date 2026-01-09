@@ -7,15 +7,15 @@ import torch as th
 import dill
 import pickle
 from pathlib import Path
-from typing import Set, Optional
+from typing import Optional
 
 from weightslab.backend.ledgers import (
     get_model,
     get_optimizer,
     get_dataloader,
+    get_dataloaders,
     register_model,
     list_models,
-    list_hyperparams,
     resolve_hp_name,
     set_hyperparam,
 )
@@ -39,8 +39,6 @@ class _CheckpointDictKeys(str, enum.Enum):
     OPTIM = 'optimizer'
     LRATE = 'learning_rate'
     BSIZE = 'batch_size'
-    TDATA = 'train_dataset'
-    EDATA = 'eval_dataset'
     ENAME = 'experiment_name'
 
 
@@ -68,29 +66,8 @@ class CheckpointManager(object):
             f'id_to_path={self.id_to_path}\n' + \
             f'id_to_meta={self.id_to_meta}\n'
 
-    def get_ids(self) -> Set[int]:
-        return set(self.id_to_path.keys())
-
-    def get_path_for_id(self, id: int) -> Path:
-        return self.id_to_path[id]
-
     def _generate_checkpoint_id(self):
         self.next_id += 1
-        return self.next_id
-
-    def attach_metadata(self, checkpoint_id: int, metadata: dict):
-        if checkpoint_id in self.id_to_path:
-            raise ValueError(f"Checkpoint {checkpoint_id} does not exist.")
-
-        self.id_to_meta[checkpoint_id] = dict(metadata)
-
-    def get_metadata(self, checkpoint_id: int) -> dict:
-        if checkpoint_id in self.id_to_path:
-            raise ValueError(f"Checkpoint {checkpoint_id} does not exist.")
-
-        return self.id_to_meta[checkpoint_id]
-
-    def get_latest_experiment(self):
         return self.next_id
 
     def get_latest_checkpoint_path(self) -> Optional[Path]:
@@ -144,8 +121,6 @@ class CheckpointManager(object):
     def dump(self,
              model_name: Optional[str] = None,
              optimizer_name: Optional[str] = None,
-             train_loader_name: Optional[str] = None,
-             eval_loader_name: Optional[str] = None,
              experiment_name: Optional[str] = None,
              override_filepath: Optional[str] = None,
              save_full_model: bool = False,
@@ -194,8 +169,7 @@ class CheckpointManager(object):
         # Gather states defensively from ledger
         model_state = None
         optimizer_state = None
-        train_data_state = None
-        eval_data_state = None
+        datasets_state = {}
         batch_size = None
         learning_rate = None
         full_model_bytes = None
@@ -206,9 +180,10 @@ class CheckpointManager(object):
             # If ledger returned a Proxy-like wrapper, try to get underlying object
             try:
                 underlying = getattr(model, 'get', None)
+                model_obj = None
                 if callable(underlying):
                     model_obj = model.get()
-                else:
+                if model_obj is None:
                     model_obj = model
             except Exception:
                 model_obj = model
@@ -267,47 +242,39 @@ class CheckpointManager(object):
         except Exception:
             optimizer_state = None
 
-        # Train / Eval dataloaders
+        # All dataloaders dynamically from ledger
         try:
-            tr = get_dataloader(train_loader_name)
-            try:
-                # unwrap proxy if present
+            loader_names = get_dataloaders()
+            for loader_name in loader_names:
                 try:
-                    tr_under = getattr(tr, 'get', None)
-                    if callable(tr_under):
-                        tr_obj = tr.get()
-                    else:
-                        tr_obj = tr
-                except Exception:
-                    tr_obj = tr
+                    loader = get_dataloader(loader_name)
+                    try:
+                        # unwrap proxy if present
+                        try:
+                            loader_under = getattr(loader, 'get', None)
+                            if callable(loader_under):
+                                loader_obj = loader.get()
+                            else:
+                                loader_obj = loader
+                        except Exception:
+                            loader_obj = loader
 
-                train_data_state = tr_obj.dataset.state_dict()
-                try:
-                    batch_size = getattr(tr_obj, 'batch_size', None)
+                        # Get dataset state
+                        if hasattr(loader_obj, 'dataset') and hasattr(loader_obj.dataset, 'state_dict'):
+                            datasets_state[loader_name] = loader_obj.dataset.state_dict()
+
+                        # Get batch size from first loader if not set
+                        if batch_size is None:
+                            try:
+                                batch_size = getattr(loader_obj, 'batch_size', None)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
-                    batch_size = None
-            except Exception:
-                train_data_state = None
+                    pass
         except Exception:
-            train_data_state = None
-
-        try:
-            ev = get_dataloader(eval_loader_name)
-            try:
-                try:
-                    ev_under = getattr(ev, 'get', None)
-                    if callable(ev_under):
-                        ev_obj = ev.get()
-                    else:
-                        ev_obj = ev
-                except Exception:
-                    ev_obj = ev
-
-                eval_data_state = ev_obj.dataset.state_dict()
-            except Exception:
-                eval_data_state = None
-        except Exception:
-            eval_data_state = None
+            pass
 
         payload = {
             _CheckpointDictKeys.ENAME: experiment_name,
@@ -316,8 +283,6 @@ class CheckpointManager(object):
             _CheckpointDictKeys.MODEL: model_state,
             _CheckpointDictKeys.MODEL_FULL: full_model_bytes,
             _CheckpointDictKeys.OPTIM: optimizer_state,
-            _CheckpointDictKeys.EDATA: eval_data_state,
-            _CheckpointDictKeys.TDATA: train_data_state,
         }
 
         try:
@@ -331,8 +296,6 @@ class CheckpointManager(object):
              checkpoint_id_or_path: int | str,
              model_name: Optional[str] = None,
              optimizer_name: Optional[str] = None,
-             train_loader_name: Optional[str] = None,
-             eval_loader_name: Optional[str] = None,
              hyperparams_name: Optional[str] = None,
              ) -> None:
         """
@@ -442,35 +405,7 @@ class CheckpointManager(object):
         except Exception:
             pass
 
-        # Restore dataset states
-        try:
-            tr = None
-            try:
-                tr = get_dataloader(train_loader_name)
-            except Exception:
-                tr = None
-            if tr is not None and ckpt_dict.get(_CheckpointDictKeys.TDATA) is not None:
-                try:
-                    tr.dataset.load_state_dict(ckpt_dict[_CheckpointDictKeys.TDATA])
-                except Exception:
-                    _logger.exception("Failed to load train dataset state from checkpoint")
-        except Exception:
-            pass
-
-        try:
-            ev = None
-            try:
-                ev = get_dataloader(eval_loader_name)
-            except Exception:
-                ev = None
-            if ev is not None and ckpt_dict.get(_CheckpointDictKeys.EDATA) is not None:
-                try:
-                    ev.dataset.load_state_dict(ckpt_dict[_CheckpointDictKeys.EDATA])
-                except Exception:
-                    _logger.exception("Failed to load eval dataset state from checkpoint")
-        except Exception:
-            pass
-
+        # Update hyperparameters in ledger if requested
         try:
             hp_name = hyperparams_name
             if hp_name is None:

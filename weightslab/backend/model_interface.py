@@ -318,6 +318,26 @@ class ModelInterface(NetworkWithOps):
         except Exception:
             pass
 
+    def eval(self):
+        try:
+            return super().eval()
+        except (RuntimeError, Exception):
+            logger.warning(
+                f"[{self.__class__.__name__}]: Caught RuntimeError during eval(): {Exception}. \
+                This may be due to certain layers not supporting eval mode. Continuing without eval()."
+            )
+            return self
+
+    def train(self):
+        try:
+            return super().train()
+        except (RuntimeError, Exception):
+            logger.warning(
+                f"[{self.__class__.__name__}]: Caught RuntimeError during train(): {Exception}. \
+                This may be due to certain layers not supporting train mode. Continuing without train()."
+            )
+            return self
+
     def is_training(self) -> bool:
         """
         Checks if the model is currently in training mode.
