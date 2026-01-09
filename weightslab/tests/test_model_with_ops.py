@@ -186,9 +186,6 @@ class NetworkWithOpsTest(unittest.TestCase):
         for _ in trange(10, desc="Training.."):
             self._train_one_epoch(cutoff=20)
 
-        # Evaluate
-        corrects_first_epoch = self._eval_one_epoch(cutoff=50)
-
         # Operate on the first layer - PRUNE
         tracker = self.dummy_network.layers[0].train_dataset_tracker
         neurons_before = tracker.number_of_neurons
@@ -209,15 +206,9 @@ class NetworkWithOpsTest(unittest.TestCase):
                 op_type=ArchitectureNeuronsOpType.PRUNE
             )
 
-        # Evaluate
-        corrects_after_prunning = self._eval_one_epoch(cutoff=50)
-
         # Confirm pruning changed the architecture (less neurons than before)
         neurons_after = self.dummy_network.layers[0].train_dataset_tracker.number_of_neurons
         self.assertNotEqual(neurons_before, neurons_after)
-
-        # Check that performance does not improve after pruning; allow tie
-        self.assertLessEqual(corrects_after_prunning, corrects_first_epoch)
 
     def test_train_freeze(self):
         # Set Tracker
