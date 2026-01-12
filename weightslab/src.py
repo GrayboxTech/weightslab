@@ -45,7 +45,7 @@ def save_signals(
         DATAFRAME_M = get_dataframe()
 
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(np.uint16)
+    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int)
     pred_np = preds.detach().cpu().numpy().astype(np.uint16) if preds is not None else None
     pred_raw_np = preds_raw.detach().cpu().numpy().astype(float) if preds_raw is not None else None
     target_np = target.detach().cpu().numpy().astype(np.uint16) if target is not None else None
