@@ -281,7 +281,7 @@ message DataQueryResponse {
   int32 number_of_samples_in_the_loop = 4;
   int32 number_of_discarded_samples = 5;
   repeated string unique_tags = 6;
-  
+
   AgentIntentType agent_intent_type = 7;
   string analysis_result = 8;
 }
@@ -302,6 +302,7 @@ message DataStat {
   repeated int32 shape = 3;
   repeated float value = 4;
   string value_string = 5;
+  bytes thumbnail = 6;  // Add thumbnail field for compressed JPEG thumbnails
 }
 
 message DataRecord {

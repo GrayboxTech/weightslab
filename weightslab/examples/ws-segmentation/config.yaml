@@ -6,6 +6,7 @@ training_steps_to_do: 2000
 eval_full_to_train_steps_ratio: 50
 num_classes: 6
 image_size: 128
+tqdm_display: true
 
 # start training immediately or not
 is_training: false
@@ -18,9 +19,7 @@ ledger_flush_interval: 10.0
 data:
   train_loader:
     batch_size: 8
-    shuffle: true
-    num_workers: 2
+    shuffle: false
   test_loader:
     batch_size: 8
     shuffle: false
-    num_workers: 2

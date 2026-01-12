@@ -322,9 +322,6 @@ if __name__ == "__main__":
     )
 
     # --- 5) Data (BDD100k reduced) ---
-    # Your layout from earlier:
-    #   .../development/merge-main-dev/weightslab  (this script)
-    #   .../development/data/BDD100k_reduced      (data)
     default_data_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "data", "BDD100k_reduced")
     )
@@ -387,16 +384,13 @@ if __name__ == "__main__":
         Compute class weights based on inverse pixel frequency.
         Rare classes get higher weights to balance the loss.
         """
-        import numpy as np
-        from tqdm import tqdm
-
         class_counts = np.zeros(num_classes, dtype=np.float64)
 
         # Sample up to max_samples images to compute statistics
         num_samples = min(len(dataset), max_samples)
         print(f"Analyzing {num_samples} samples from dataset...")
 
-        for idx in tqdm(range(num_samples), desc="Computing class weights"):
+        for idx in range(num_samples):
             try:
                 # The dataset returns (img_t, mask_t)
                 _, label = dataset[idx]
@@ -471,12 +465,8 @@ if __name__ == "__main__":
 
     # --- 7) Start WeightsLab services ---
     wl.serve(
-        serving_ui=False,
-        root_directory=log_dir,
-
         serving_grpc=True,
-
-        serving_cli=False,
+        serving_cli=True,
     )
 
     print("=" * 60)

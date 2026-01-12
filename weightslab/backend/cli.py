@@ -434,7 +434,7 @@ def _server_loop_sock(srv: socket.socket):
         _server_port = srv.getsockname()[1]
         while True:
             conn, addr = srv.accept()
-            t = threading.Thread(target=_client_handler, args=(conn, addr), name='cli_serving_loop', daemon=True)
+            t = threading.Thread(target=_client_handler, args=(conn, addr), name='WL-CLI_serving_loop', daemon=True)
             t.start()
     finally:
         try:
@@ -486,7 +486,7 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 60000, *, spawn_clien
         target=_server_loop_sock,
         args=(srv,),
         daemon=True,
-        name="WeightsLab CLI Server",
+        name='WL-CLI_serving_loop',
     )
     _server_thread.start()
     logger.info("cli_thread_started", extra={

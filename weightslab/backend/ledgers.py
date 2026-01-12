@@ -365,7 +365,7 @@ class Ledger:
                         # swallow errors to keep watcher alive; user can inspect file
                         time.sleep(poll_interval)
 
-            th = threading.Thread(target=_watcher, name=f"hp-watcher-{name}", daemon=True)
+            th = threading.Thread(target=_watcher, name=f"WL-HP_Watcher_{name}", daemon=True)
             self._hp_watchers[name] = {'path': path, 'thread': th, 'stop_event': stop_event}
             th.start()
 
