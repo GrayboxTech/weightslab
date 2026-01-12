@@ -711,19 +711,37 @@ class DataService:
         # A) Agent-driven df.query → keep/filter rows via in-place drop
         if func == "df.query":
             expr = params.get("expr", "")
-            before = len(df)
 
             try:
-                # We use raw eval() on a mask expression for maximum flexibility.
-                # This allows the expression to contain complex df[...] logic.
-                mask = eval(expr, {"df": df, "np": np, "pd": pd})
-                kept = df[mask]
-
+                # 1. Try pandas query() first: Handles 'col == val' and backticks natively.
+                # This is the cleanest syntax for the agent.
+                kept = df.query(expr)
                 df.drop(index=df.index.difference(kept.index), inplace=True)
                 return f"Applied query: {expr}"
-            except Exception as e:
-                logger.error(f"Query failed: {e}")
-                return f"Failed to apply query: {e}"
+            except Exception as query_error:
+                try:
+                    # 2. Try df.eval(): Handles column names AND explicit 'df' prefixes.
+                    # This covers cases like "mean_loss > df['mean_loss'].mean()"
+                    mask = df.eval(expr, local_dict={"df": df, "np": np, "pd": pd})
+                    if isinstance(mask, (pd.Series, np.ndarray)):
+                        kept = df[mask]
+                        df.drop(index=df.index.difference(kept.index), inplace=True)
+                        return f"Applied query (df.eval): {expr}"
+                    else:
+                        raise ValueError("eval did not return a boolean mask")
+                except Exception as eval_error:
+                    try:
+                        # 3. Final fallback to raw eval() for complex logic that pandas might block.
+                        mask = eval(expr, {"df": df, "np": np, "pd": pd})
+                        if isinstance(mask, (pd.Series, np.ndarray, list)):
+                            kept = df[mask]
+                            df.drop(index=df.index.difference(kept.index), inplace=True)
+                            return f"Applied query (raw eval): {expr}"
+                        else:
+                            raise ValueError("raw eval did not return a mask")
+                    except Exception as raw_eval_error:
+                        logger.error(f"Query failed. query() error: {query_error}, eval() error: {eval_error}, raw_eval() error: {raw_eval_error}")
+                        return f"Failed to apply query: {query_error}"
 
         # B) Other supported Pandas operations (drop, sort, head, tail, sample)
         if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
