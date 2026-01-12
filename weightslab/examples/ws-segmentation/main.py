@@ -443,7 +443,7 @@ if __name__ == "__main__":
             weight=class_weights  # ← Class weights applied!
         ),
         flag="loss",
-        name="train_loss/mlt_loss",
+        name="train_mlt_loss/CE",
         per_sample=True,
         log=True,
     )
@@ -454,7 +454,7 @@ if __name__ == "__main__":
             weight=class_weights  # ← Class weights applied!
         ),
         flag="loss",
-        name="test_loss/mlt_loss",
+        name="test_mlt_loss/CE",
         per_sample=True,
         log=True,
     )
@@ -465,7 +465,7 @@ if __name__ == "__main__":
             ignore_index=ignore_index,
         ).to(device),
         flag="metric",
-        name="test_metric/miou",
+        name="test_metric/JaccardIndex",
         log=True,
     )
 

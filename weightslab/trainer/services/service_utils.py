@@ -158,8 +158,8 @@ def load_raw_image(dataset, index) -> Image.Image:
         if np.issubdtype(np_img.dtype, np.floating):
             min_v = float(np.nanmin(np_img)) if np_img.size else 0.0
             max_v = float(np.nanmax(np_img)) if np_img.size else 1.0
-            if max_v <= 1.0 and min_v >= 0.0:
-                np_img = np_img * 255.0
+            if max_v <= 128.0:  # TODO fix convert image type
+                np_img = (np_img - min_v) / (max_v - min_v) * 255.0
         # Clip to valid byte range then cast
         np_img = np.clip(np_img, 0, 255)
         return np_img.astype(np.uint8)

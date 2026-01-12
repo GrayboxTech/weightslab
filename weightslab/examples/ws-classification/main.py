@@ -255,7 +255,7 @@ if __name__ == "__main__":
         batch_size=train_bs,
         shuffle=train_shuffle,
         is_training=True,
-        compute_hash=False,
+        compute_hash=True,
         enable_h5_persistence=enable_h5_persistence
     )
     val_loader = wl.watch_or_edit(
@@ -265,7 +265,7 @@ if __name__ == "__main__":
         batch_size=val_bs,
         shuffle=val_shuffle,
         is_training=False,
-        compute_hash=False,
+        compute_hash=True,
         enable_h5_persistence=enable_h5_persistence
     )
     test_loader = wl.watch_or_edit(
@@ -275,7 +275,7 @@ if __name__ == "__main__":
         batch_size=test_bs,
         shuffle=test_shuffle,
         is_training=False,
-        compute_hash=False,
+        compute_hash=True,
         enable_h5_persistence=enable_h5_persistence
     )
 
@@ -283,65 +283,57 @@ if __name__ == "__main__":
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="train_loss/mlt_loss",
+        name="train_mlt_loss/CE",
         log=True,
     )
     train_criterion_bin = wl.watch_or_edit(
         nn.BCELoss(reduction="none"),
         flag="loss",
-        name="train_loss/bin_loss",
+        name="train_bin_loss/BCE",
         log=True,
     )
     val_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="val_loss/mlt_loss",
+        name="val_mlt_loss/CE",
         log=True,
     )
     val_criterion_bin = wl.watch_or_edit(
         nn.BCELoss(reduction="none"),
         flag="loss",
-        name="val_loss/bin_loss",
+        name="val_bin_loss/BCE",
         log=True,
     )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="test_loss/mlt_loss",
+        name="test_mlt_loss/CE",
         log=True,
     )
     test_criterion_bin = wl.watch_or_edit(
         nn.BCELoss(reduction="none"),
         flag="loss",
-        name="test_loss/bin_loss",
+        name="test_bin_loss/BCE",
         log=True,
     )
 
     val_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="val_metric/mlt_metric",
+        name="val_metric/Accuracy",
         log=True,
     )
     test_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="test_metric/mlt_metric",
+        name="test_metric/Accuracy",
         log=True,
     )
 
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
-        # UI client settings
-        serving_ui=False,
-        root_directory=log_dir,
-
-        # gRPC server settings
         serving_grpc=True,
-        n_workers_grpc=None,
-
-        # CLI server settings
-        serving_cli=True
+        serving_cli=True,
     )
 
     print("=" * 60)

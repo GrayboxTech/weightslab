@@ -40,47 +40,43 @@ class ExperimentService:
         while True:
             signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
             if signal_logger is None or not hasattr(signal_logger, "queue"):
-                raise RuntimeError("No logger with a queue registered in GLOBAL_LEDGER")
+                logger.warning("No logger with a queue registered in GLOBAL_LEDGER")
 
-            signal_log = signal_logger.queue.get()
+            if signal_logger is not None:
+                signal_log = signal_logger.queue.get()
 
-            if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:
-                logger.debug(f"[signal_log] {signal_log['metric_name']} = {signal_log['metric_value']:.2f}")
+                if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:
+                    logger.debug(f"[signal_log] {signal_log['metric_name']} = {signal_log['metric_value']:.2f}")
 
-            if signal_log is None:
-                break
+                metrics_status, annotat_status = None, None
+                if "metric_name" in signal_log:
+                    metrics_status = pb2.MetricsStatus(
+                        name=signal_log["metric_name"],
+                        value=signal_log["metric_value"],
+                    )
+                elif "annotation" in signal_log:
+                    annotat_status = pb2.AnnotatStatus(name=signal_log["annotation"])
+                    for key, value in signal_log["metadata"].items():
+                        annotat_status.metadata[key] = value
 
-            metrics_status, annotat_status = None, None
-            if "metric_name" in signal_log:
-                metrics_status = pb2.MetricsStatus(
-                    name=signal_log["metric_name"],
-                    value=signal_log["metric_value"],
+                training_status = pb2.TrainingStatusEx(
+                    timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+                    experiment_name=signal_log["experiment_name"],
+                    model_age=signal_log["model_age"],
                 )
-            elif "annotation" in signal_log:
-                annotat_status = pb2.AnnotatStatus(name=signal_log["annotation"])
-                for key, value in signal_log["metadata"].items():
-                    annotat_status.metadata[key] = value
 
-            training_status = pb2.TrainingStatusEx(
-                timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
-                experiment_name=signal_log["experiment_name"],
-                model_age=signal_log["model_age"],
-            )
+                if metrics_status:
+                    training_status.metrics_status.CopyFrom(metrics_status)
+                if annotat_status:
+                    training_status.annotat_status.CopyFrom(annotat_status)
 
-            if metrics_status:
-                training_status.metrics_status.CopyFrom(metrics_status)
-            if annotat_status:
-                training_status.annotat_status.CopyFrom(annotat_status)
-
-            # mark task done on ledger logger queue
-            signal_logger = components.get("signal_logger")
-            if signal_logger is not None and hasattr(signal_logger, "queue"):
+                # mark task done on ledger logger queue
                 try:
                     signal_logger.queue.task_done()
                 except Exception:
                     pass
 
-            yield training_status
+                yield training_status
 
     # -------------------------------------------------------------------------
     # Training & hyperparameter commands

@@ -408,6 +408,16 @@ class DataService:
                         raw_img = load_raw_image(dataset, index)
                         original_size = raw_img.size
 
+                        # Convert PIL Image to NumPy array if needed
+                        raw_img_array = np.array(raw_img)
+
+                        # If values are in [0, 1], scale to [0, 255]. Otherwise, leave as-is.
+                        if raw_img_array.max() <= 1.0:
+                            raw_img_array = ((raw_img_array - raw_img_array.min())/(raw_img_array.max() - raw_img_array.min()) * 255)
+
+                        # Clip to [0, 255] and convert type
+                        raw_img_array = np.clip(raw_img_array, 0, 255).astype(np.uint8)
+
                         # Handle resize request
                         # Negative values indicate percentage mode (e.g., -50 means 50% of original)
                         # Positive values indicate absolute pixel dimensions
@@ -419,11 +429,14 @@ class DataService:
 
                             # Only resize if we're actually reducing size
                             if target_width < original_size[0] or target_height < original_size[1]:
-                                raw_img = raw_img.resize((target_width, target_height))
+                                raw_img = Image.fromarray(raw_img_array).resize((target_width, target_height))
 
                         elif request.resize_width > 0 and request.resize_height > 0:
                             if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
-                                raw_img = raw_img.resize((request.resize_width, request.resize_height))
+                                raw_img = Image.fromarray(raw_img_array).resize((request.resize_width, request.resize_height))
+
+                        else:
+                            raw_img = Image.fromarray(raw_img_array)
 
                         raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
                         raw_buf = io.BytesIO()
