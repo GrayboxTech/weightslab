@@ -88,8 +88,12 @@ class ModelInterface(NetworkWithOps):
         self.init_attributes(self.model)
 
         if not use_onnx:
-            # Propagate the shape over the graph
-            self.shape_propagation()
+            # Only propagate shapes if we need them for visualization
+            if self.print_graph:
+                self.shape_propagation()
+                # Clean up any leftover threads from shape propagation
+                # import gc
+                # gc.collect()
 
             # Generate the graph vizualisation
             self.generate_graph_vizu()

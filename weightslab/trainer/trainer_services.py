@@ -113,7 +113,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
     def serving_thread_callback():
         server = grpc.server(
             futures.ThreadPoolExecutor(
-                thread_name_prefix="grpc_server_worker",
+                thread_name_prefix="WL-gRPC-Worker",
                 max_workers=n_workers_grpc
             )
         )
@@ -129,7 +129,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
     training_thread = Thread(
         target=serving_thread_callback,
         daemon=True,
-        name="WeightsLab gRPC Server",
+        name="WL-gRPC_Server",
     )
     training_thread.start()
     logger.info("grpc_thread_started", extra={

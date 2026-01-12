@@ -251,7 +251,20 @@ class DataService:
         self._agent = DataManipulationAgent(self)
 
         self._last_internals_update_time = None
-        logger.info("DataService initialized.")
+
+        # Shared thread pool for data processing (avoid thread explosion)
+        # Size: min(CPU cores * 2, 16) to balance concurrency without excessive threading
+        cpu_count = os.cpu_count() or 4
+        max_data_workers = min(cpu_count * 2, 16)
+        self._data_executor = futures.ThreadPoolExecutor(
+            max_workers=max_data_workers,
+            thread_name_prefix="WL-DataProcessing"
+        )
+
+        logger.info("DataService initialized.", extra={
+            "data_workers": max_data_workers,
+            "cpu_count": cpu_count
+        })
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -1210,15 +1223,12 @@ class DataService:
             logger.info(
                 "Retrieving samples from %s to %s", request.start_index, end_index)
 
-            # Build the data records list in parallel with optimized worker count
+            # Build the data records list using shared executor
             data_records = []
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
-            # Use more workers for I/O-bound image processing (CPU count * 2)
-            max_workers = max(min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8), 1)
-            with futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="get_data_samples_worker") as executor:
-                results = executor.map(self._process_sample_row, tasks, timeout=30)
-                data_records = [res for res in results if res is not None]
+            results = self._data_executor.map(self._process_sample_row, tasks, timeout=30)
+            data_records = [res for res in results if res is not None]
 
             logger.info("Retrieved %s data records", len(data_records))
             return pb2.DataSamplesResponse(

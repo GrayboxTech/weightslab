@@ -384,7 +384,7 @@ class LedgeredDataFrameManager:
                 except Exception as e:
                     logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}")
 
-        self._flush_thread = threading.Thread(target=_worker, name="Ledger-Flush")
+        self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush")
         self._flush_thread.start()
 
     def stop(self):
