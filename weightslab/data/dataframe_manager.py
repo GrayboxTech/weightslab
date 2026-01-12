@@ -326,13 +326,13 @@ class LedgeredDataFrameManager:
             return
         with self._lock:
             # Extract sample IDs and separate loss dicts from regular updates
-            sample_ids = [int(rec["sample_id"]) for rec in records]
+            sample_ids = [rec["sample_id"] for rec in records]
 
             # Separate records into regular updates and loss dict updates
             regular_records = []
 
             for rec in records:
-                sid = int(rec["sample_id"])
+                sid = rec["sample_id"]
                 regular_rec = {"sample_id": sid}
 
                 for k, v in rec.items():
