@@ -201,9 +201,12 @@ class DataManipulationAgent:
 
         # 4. Ollama (Local)
         try:
+            # Get env. vars for Ollama connection
             host = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
             port = os.environ.get('OLLAMA_PORT', '11435')
             model_ollama = os.environ.get('OLLAMA_MODEL', 'qwen2.5:3b-instruct')
+
+            # Init the Ollama client
             llm = ChatOllama(base_url=f"http://{host}:{port}", model=model_ollama, temperature=0, timeout=15)
             self.chain_ollama = llm.with_structured_output(Intent)
             _LOGGER.info(f"Ollama active ({model_ollama})")

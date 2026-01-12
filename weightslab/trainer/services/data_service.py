@@ -13,6 +13,7 @@ import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
 
+from PIL import Image
 from typing import List
 from pathlib import Path
 from concurrent import futures
@@ -186,6 +187,45 @@ def _infer_task_type_from_label(label, default="classification"):
     return default
 
 
+def generate_thumbnail(pil_image, max_size=(128, 128), quality=85):
+    """Generate a JPEG thumbnail from a PIL image.
+
+    Args:
+        pil_image: PIL Image object
+        max_size: Max dimensions (width, height) for thumbnail
+        quality: JPEG quality (1-95)
+
+    Returns:
+        bytes: JPEG thumbnail as bytes
+    """
+    try:
+        # Create a copy to avoid modifying original
+        thumb = pil_image.copy()
+
+        # Use LANCZOS for high-quality downsampling
+        thumb.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+        # Convert to RGB if needed (JPEG doesn't support RGBA)
+        if thumb.mode in ('RGBA', 'LA', 'P'):
+            # Create white background
+            background = Image.new('RGB', thumb.size, (255, 255, 255))
+            if thumb.mode == 'P':
+                thumb = thumb.convert('RGBA')
+            if thumb.mode in ('RGBA', 'LA'):
+                background.paste(thumb, mask=thumb.split()[-1])  # Use alpha channel as mask
+                thumb = background
+        elif thumb.mode != 'RGB':
+            thumb = thumb.convert('RGB')
+
+        # Save as JPEG to buffer
+        buffer = io.BytesIO()
+        thumb.save(buffer, format='JPEG', quality=quality, optimize=True)
+        return buffer.getvalue()
+    except Exception as e:
+        logger.warning(f"Failed to generate thumbnail: {e}")
+        return b""
+
+
 class DataService:
 
     """
@@ -211,7 +251,20 @@ class DataService:
         self._agent = DataManipulationAgent(self)
 
         self._last_internals_update_time = None
-        logger.info("DataService initialized.")
+
+        # Shared thread pool for data processing (avoid thread explosion)
+        # Size: min(CPU cores * 2, 16) to balance concurrency without excessive threading
+        cpu_count = os.cpu_count() or 4
+        max_data_workers = min(cpu_count * 2, 16)
+        self._data_executor = futures.ThreadPoolExecutor(
+            max_workers=max_data_workers,
+            thread_name_prefix="WL-DataProcessing"
+        )
+
+        logger.info("DataService initialized.", extra={
+            "data_workers": max_data_workers,
+            "cpu_count": cpu_count
+        })
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -427,7 +480,7 @@ class DataService:
 
                         raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
                         raw_buf = io.BytesIO()
-                        raw_img.save(raw_buf, format='PNG')
+                        raw_img.save(raw_buf, format='JPEG')
                         raw_data_bytes = raw_buf.getvalue()
 
                 except Exception as e:
@@ -629,10 +682,21 @@ class DataService:
             # ====================================================================
             # ========================== Processing ==============================
             if raw_data_bytes:
+                # Generate thumbnail for grid display
+                try:
+                    raw_img_for_thumb = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
+                    thumbnail_bytes = generate_thumbnail(raw_img_for_thumb, max_size=(256, 256), quality=85)
+                except Exception as e:
+                    logger.debug(f"Could not generate thumbnail for sample {sample_id}: {e}")
+                    thumbnail_bytes = b""
+
                 data_stats.append(
                     pb2.DataStat(
-                        name='raw_data', type='bytes', shape=raw_shape,
-                        value=raw_data_bytes
+                        name='raw_data',
+                        type='bytes',
+                        shape=raw_shape,
+                        value=raw_data_bytes,
+                        thumbnail=thumbnail_bytes  # Add thumbnail
                     )
                 )
             if transformed_data_bytes:
@@ -1159,15 +1223,12 @@ class DataService:
             logger.info(
                 "Retrieving samples from %s to %s", request.start_index, end_index)
 
-            # Build the data records list in parallel with optimized worker count
+            # Build the data records list using shared executor
             data_records = []
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
-            # Use more workers for I/O-bound image processing (CPU count * 2)
-            max_workers = max(min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8), 1)
-            with futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="get_data_samples_worker") as executor:
-                results = executor.map(self._process_sample_row, tasks, timeout=30)
-                data_records = [res for res in results if res is not None]
+            results = self._data_executor.map(self._process_sample_row, tasks, timeout=30)
+            data_records = [res for res in results if res is not None]
 
             logger.info("Retrieved %s data records", len(data_records))
             return pb2.DataSamplesResponse(
