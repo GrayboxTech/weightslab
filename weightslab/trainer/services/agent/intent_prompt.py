@@ -104,12 +104,12 @@ EXAMPLES (Analysis / Questions):
 
 - "How many samples have tag 'sky'?"
   (Goal: Count specific rows) -> steps=[
-      {{kind="analysis", analysis_expression="len(df[df['tags'].str.contains('sky', regex=False, na=False)])"}}
+      {{kind="analysis", analysis_expression="len(df.query('tags.str.contains(\"sky\")'))"}}
   ]
 
 - "What is the average loss for class 2?"
   (Goal: Aggregation) -> steps=[
-      {{kind="analysis", analysis_expression="df[df['label'] == 2]['mean_loss'].mean()"}}
+      {{kind="analysis", analysis_expression="df.query('label == 2')['mean_loss'].mean()"}}
   ]
 
 - "What index does the sample with the highest loss have?"
@@ -123,8 +123,10 @@ EXAMPLES (Analysis / Questions):
   ]
 
 COMMON MISTAKES TO AVOID:
-❌ WRONG: "top 10 highest X" -> kind="head" with analysis_expression
-✅ RIGHT: "top 10 highest X" -> kind="sort" (by X, desc) then kind="head" (n=10)
+RIGHT: "top 10 highest X" -> kind="sort" (by X, desc) then kind="head" (n=10)
+
+WRONG: df[df['origin'] == 'train'] (fails because 'origin' is in the index)
+RIGHT: df.query('origin == "train"') (works for both index and columns)
 
 MANDATORY DECISION LOGIC:
 Before choosing operations, categorize the request into one of two paths:
@@ -140,6 +142,7 @@ PATH B: DATA ANALYSIS (primary_goal="data_analysis")
 - Keywords: "what is", "how many", "which index", "is there", "calculate", "count", "average".
 - Output: A single answer, string, ID, or list of values returned to the chat.
 - Operations: Use kind="analysis" with a single-line pandas expression in `analysis_expression`.
+- **CRITICAL RULE**: Always use `df.query('...')` for filtering, even inside analysis. Do NOT use `df[df['col'] == val]` as it fails for index fields like 'origin'.
 
 STRICT SCHEMA RULES:
 - "kind": "sort" -> ONLY use "sort_by" and "ascending". NEVER use "conditions".
@@ -185,7 +188,13 @@ User: "What is the index of the worst image?"
 User: "What samples have tag 'abc'?"
 -> primary_goal="data_analysis"
 -> steps=[
-    {{"kind": "analysis", "analysis_expression": "df[df['tags'].str.contains('abc', na=False, regex=False)].index.tolist()"}}
+    {{"kind": "analysis", "analysis_expression": "df.query('tags.str.contains(\"abc\")').index.tolist()"}}
+]
+
+User: "What is the average loss for origin train?"
+-> primary_goal="data_analysis"
+-> steps=[
+    {{"kind": "analysis", "analysis_expression": "df.query('origin == \"train\"')['mean_loss'].mean()"}}
 ]
 
 User: "How many samples are there?"
