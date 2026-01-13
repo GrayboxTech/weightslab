@@ -39,10 +39,8 @@ class ExperimentService:
 
         while True:
             signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
-            if signal_logger is None or not hasattr(signal_logger, "queue"):
-                logger.warning("No logger with a queue registered in GLOBAL_LEDGER")
 
-            if signal_logger is not None:
+            if signal_logger != None:
                 signal_log = signal_logger.queue.get()
 
                 if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:

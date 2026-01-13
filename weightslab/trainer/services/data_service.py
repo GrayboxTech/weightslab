@@ -459,17 +459,8 @@ class DataService:
                     if dataset:
                         index = dataset.get_index_from_sample_id(sample_id)
                         raw_img = load_raw_image(dataset, index)
-                        original_size = raw_img.size
-
-                        # Convert PIL Image to NumPy array if needed
                         raw_img_array = np.array(raw_img)
-
-                        # If values are in [0, 1], scale to [0, 255]. Otherwise, leave as-is.
-                        if raw_img_array.max() <= 1.0:
-                            raw_img_array = ((raw_img_array - raw_img_array.min())/(raw_img_array.max() - raw_img_array.min()) * 255)
-
-                        # Clip to [0, 255] and convert type
-                        raw_img_array = np.clip(raw_img_array, 0, 255).astype(np.uint8)
+                        original_size = raw_img.size
 
                         # Handle resize request
                         # Negative values indicate percentage mode (e.g., -50 means 50% of original)

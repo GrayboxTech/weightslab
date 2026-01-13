@@ -12,7 +12,7 @@ tqdm_display: true
 is_training: false
 
 # Configure global dataframe storage
-enable_h5_persistence: true
+ledger_enable_h5_persistence: false
 ledger_flush_max_rows: 250
 ledger_flush_interval: 10.0
 
