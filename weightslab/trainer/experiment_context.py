@@ -137,10 +137,34 @@ class ExperimentContext:
 
             return _g
 
+        def _get_total_steps():
+            # Try to infer Total = Current (Elapsed) + Remaining
+            try:
+                # Get current step from model
+                current = 0
+                model = self._components.get("model")
+                if model:
+                    if hasattr(model, 'current_step'):
+                        current = int(model.current_step)
+                    elif hasattr(model, 'get_age'):
+                        current = int(model.get_age())
+                
+                # Get remaining from hyperparams
+                remaining = _hp_getter("training_steps_to_do", 999)()
+                
+                # If explicit total is set, use it. Otherwise calculate.
+                explicit_total = _hp_getter("total_training_steps", None)()
+                if explicit_total is not None:
+                    return explicit_total
+                
+                return current + int(remaining)
+            except Exception:
+                return 1000
+
         # TODO (GP): expand hyper-parameters exposed here
         self.hyper_parameters = {
             ("Experiment Name", "experiment_name", "text", lambda: _hp_getter("experiment_name", "Anonymous")()),
-            ("Total Training Steps", "total_training_steps", "number", _hp_getter("total_training_steps", _hp_getter("training_steps_to_do", 999)())),
+            ("Total Training Steps", "total_training_steps", "number", _get_total_steps),
             ("Left Training Steps", "training_left", "number", _hp_getter("training_steps_to_do", 999)),
             ("Eval Frequency", "eval_frequency", "number", _hp_getter("eval_full_to_train_steps_ratio", 100)),
             ("Checkpoint Frequency", "checkpoint_frequency", "number", _hp_getter("experiment_dump_to_train_steps_ratio", 100)),

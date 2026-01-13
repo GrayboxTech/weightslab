@@ -159,6 +159,12 @@ class GuardContext:
             except Exception:
                 pass
 
+        # Auto-increment step count for UI progress
+        if self.for_training and self.model is not None:
+            if not hasattr(self.model, 'current_step'):
+                self.model.current_step = 0
+            self.model.current_step += 1
+
         return False
 
 
