@@ -181,7 +181,7 @@ class DataSampleTrackingWrapper(Dataset):
         if num_duplicates > 0:
             logger.warning(
                 f"[DataSampleTrackingWrapper] Found {num_duplicates} duplicate samples. "
-                f"Keeping {len(kept_indices)} unique samples. Duplicates physically removed from dataset."
+                f"Keeping {len(kept_indices)} unique samples. Duplicates removed from the dataset."
             )
             # Wrap the original dataset with Subset to only expose non-duplicate indices
             wrapped_dataset = Subset(wrapped_dataset, kept_indices)
@@ -645,7 +645,7 @@ class DataSampleTrackingWrapper(Dataset):
         return self.unique_id_to_index[sample_id]
 
     def get_sample_id_at_index(self, index: int) -> int:
-        return int(self.unique_ids[index])
+        return self.unique_ids[index]
 
     def infer_num_classes(self, sample_limit: int = 128) -> int:
         """Infer the number of classes for this dataset/wrapper.
