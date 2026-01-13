@@ -779,6 +779,78 @@ class DataService:
             analysis_result=analysis_result
         )
 
+    def _parse_direct_query(self, query: str) -> list:
+        """
+        Parse a simple direct query string into operations list.
+        Expected format: "col > val and col2 == val2 sortby col desc"
+        
+        This bypasses the LLM agent for deterministic filtering.
+        """
+        operations = []
+        query = query.strip()
+        
+        logger.debug(f"[_parse_direct_query] Parsing query: {repr(query)}")
+        
+        if query.lower().startswith("sortby "):
+            filter_part = None
+            sort_part = query[7:].strip()
+        elif " sortby " in query.lower():
+            parts = query.split(" sortby ", 1)
+            filter_part = parts[0].strip() if parts[0].strip() else None
+            sort_part = parts[1].strip() if len(parts) > 1 else None
+        else:
+            filter_part = query
+            sort_part = None
+        
+        logger.debug(f"[_parse_direct_query] filter_part: {repr(filter_part)}, sort_part: {repr(sort_part)}")
+        
+        # Parse filter part
+        if filter_part:
+            # For now, treat the entire filter as a pandas query expression
+            operations.append({
+                "function": "df.query",
+                "params": {"expr": filter_part}
+            })
+        
+        # Parse sort part
+        if sort_part:
+            # Robust parsing for columns with spaces
+            sort_part = sort_part.strip()
+            ascending = True
+            col_raw = sort_part
+            
+            # Check for direction suffix
+            lower_s = sort_part.lower()
+            if lower_s.endswith(" asc"):
+                ascending = True
+                col_raw = sort_part[:-4].strip()
+            elif lower_s.endswith(" desc"):
+                ascending = False
+                col_raw = sort_part[:-5].strip()
+            
+            # Clean up quotes from column name
+            col = col_raw.replace('`', '').strip()
+            
+            # Split if multiple columns? (Not supported by simple "sortby" textual interface easily yet, assumes single col)
+            # But the front-end sends single col.
+            
+            if col:
+                logger.debug(f"[_parse_direct_query] Sort: col={repr(col)}, ascending={ascending}")
+                
+                if col.lower() == 'index':
+                    operations.append({
+                        "function": "df.sort_index",
+                        "params": {"ascending": ascending}
+                    })
+                else:
+                    operations.append({
+                        "function": "df.sort_values",
+                        "params": {"by": col, "ascending": ascending}
+                    })
+        
+        logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
+        return operations
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -821,7 +893,7 @@ class DataService:
                         return f"Failed to apply query: {query_error}"
 
         # B) Other supported Pandas operations (drop, sort, head, tail, sample)
-        if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
+        if func in {"df.drop", "df.sort_values", "df.sort_index", "df.head", "df.tail", "df.sample"}:
             func_name = func.replace("df.", "")
 
             try:
@@ -848,6 +920,33 @@ class DataService:
                         by, safe_params
                     )
 
+                    # Case-insensitive and format-tolerant column matching
+                    corrected_by = []
+                    
+                    def normalize_name(n):
+                        return str(n).lower().replace(' ', '').replace('_', '')
+
+                    # Build map of normalized names to actual column/index names
+                    df_cols_map = {}
+                    # Priority to columns, then index
+                    candidates = list(df.columns) + list(df.index.names)
+                    for c in candidates:
+                        if c:
+                            df_cols_map[normalize_name(c)] = c
+
+                    for col in by:
+                        if col in df.columns or col in df.index.names:
+                            corrected_by.append(col)
+                        else:
+                            norm_col = normalize_name(col)
+                            if norm_col in df_cols_map:
+                                corrected_col = df_cols_map[norm_col]
+                                logger.debug(f"[ApplyDataQuery] Fuzzy matched sort column '{col}' to '{corrected_col}'")
+                                corrected_by.append(corrected_col)
+                            else:
+                                corrected_by.append(col)
+                    by = corrected_by
+
                     from pandas.api.types import (
                         is_categorical_dtype,
                         is_numeric_dtype,
@@ -856,6 +955,10 @@ class DataService:
 
                     # Sanitize sort columns so sort_values is less fragile
                     for col in by:
+                        # Skip index columns for sanitization
+                        if col in df.index.names and col not in df.columns:
+                             continue
+                             
                         if col not in df.columns:
                             continue
 
@@ -890,8 +993,14 @@ class DataService:
                     # Ensure all sort columns exist and are sortable (scalars only)
                     valid_cols = []
                     for c in by:
-                        if c not in df.columns:
+                        is_index = c in df.index.names
+                        if c not in df.columns and not is_index:
                             continue
+                            
+                        # Skip array check for index (assumed scalar/hashable)
+                        if is_index and c not in df.columns:
+                             valid_cols.append(c)
+                             continue
 
                         # Check for non-scalar types (like numpy arrays in 'prediction_loss')
                         # We use a heuristic on the first non-null value
@@ -900,10 +1009,33 @@ class DataService:
                             first_val = non_null_s.iloc[0]
                             # If it's a collection but not a string/bytes, pandas can't sort it directly
                             if hasattr(first_val, "__len__") and not isinstance(first_val, (str, bytes)):
+                                c_lower = c.lower()
                                 # Fallback: if user asked for 'prediction_loss', help them by using 'mean_loss'
-                                if c == "prediction_loss" and "mean_loss" in df.columns:
+                                if c_lower == "prediction_loss" and "mean_loss" in df.columns:
                                     logger.info("[ApplyDataQuery] Column %r contains arrays; redirecting to 'mean_loss' for sorting", c)
                                     valid_cols.append("mean_loss")
+                                    continue
+                                # Special handling for tags/categories: sort by string representation (grouping)
+                                elif c_lower in ["tags", "task_type"]:
+                                    logger.debug("[ApplyDataQuery] Column %r is list-like; casting to string for sorting", c)
+                                    df[c] = df[c].astype(str)
+                                    valid_cols.append(c)
+                                    continue
+                                # Robust handling for prediction/target: try to extract scalar (classification) or group as string
+                                elif c_lower in ["prediction", "target", "label", "pred"]:
+                                    logger.debug("[ApplyDataQuery] Column %r is list-like; attempting scalar extraction for sort", c)
+                                    try:
+                                        def try_scalar(x):
+                                            if hasattr(x, "__len__") and not isinstance(x, (str, bytes)):
+                                                if len(x) > 0: return x[0]
+                                                return None
+                                            return x
+                                        df[c] = df[c].apply(try_scalar)
+                                        df[c] = pd.to_numeric(df[c], errors='ignore')
+                                    except Exception as e:
+                                        logger.debug(f"[ApplyDataQuery] Scalar extraction failed for {c}: {e}")
+                                        df[c] = df[c].astype(str)
+                                    valid_cols.append(c)
                                     continue
                                 else:
                                     logger.warning("[ApplyDataQuery] Skipping column %r for sorting: contains non-scalar values (e.g. arrays)", c)
@@ -919,6 +1051,8 @@ class DataService:
 
                     # Fill NaN values in sort columns to avoid sort failures or inconsistent behaviors
                     for c in valid_cols:
+                         if c in df.index.names and c not in df.columns:
+                             continue
                          if df[c].isna().any():
                              # Use a type-appropriate fill value
                              if is_numeric_dtype(df[c].dtype):
@@ -950,6 +1084,19 @@ class DataService:
                             raise
 
                     return "Applied operation: sort_values"
+
+                # -------- SORT INDEX --------
+                if func_name == "sort_index":
+                    safe_params = {}
+                    if "ascending" in params:
+                        safe_params["ascending"] = params["ascending"]
+                    
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.sort_index(inplace=True) with params=%s",
+                        safe_params
+                    )
+                    df.sort_index(inplace=True, **safe_params)
+                    return "Applied operation: sort_index"
 
                 # -------- HEAD --------
                 if func_name == "head":
@@ -1118,13 +1265,42 @@ class DataService:
                 )
 
         try:
-            # 2) All non-empty queries go through the agent (IO BOUND - NO LOCK)
+            # 2) Check if we should bypass the agent (Quick Filters path)
             if not request.is_natural_language:
-                logger.debug(
-                    "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
-                    "treating query as natural language: %r",
+                logger.info(
+                    "[ApplyDataQuery] ⚡ BYPASSING AGENT - Direct query execution: %r",
                     request.query,
                 )
+                
+                # Parse the query directly without agent
+                # Expected format: "col > val and col2 == val2 sortby col desc"
+                operations = self._parse_direct_query(request.query)
+                
+                # Apply operations with lock
+                with self._lock:
+                    df = self._all_datasets_df
+                    messages = []
+                    
+                    for op in operations:
+                        func = op.get("function")
+                        params = op.get("params", {}) or {}
+                        msg = self._apply_agent_operation(df, func, params)
+                        messages.append(msg)
+                    
+                    final_message = " | ".join(messages) if messages else "No operation performed"
+                    self._all_datasets_df = df
+                    
+                    return self._build_success_response(
+                        df=df,
+                        message=final_message,
+                        intent_type=pb2.INTENT_FILTER
+                    )
+            
+            # 3) Natural language path - go through agent
+            logger.debug(
+                "[ApplyDataQuery] Using AGENT for natural language query: %r",
+                request.query,
+            )
 
             if self._agent is None:
                 return pb2.DataQueryResponse(
