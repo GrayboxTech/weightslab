@@ -1,9 +1,12 @@
 import threading
 import logging
-from typing import Dict, Sequence, Any, List
+
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
+
+from typing import Dict, Sequence, Any, List
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.data_utils import _filter_columns_by_patterns
@@ -13,8 +16,10 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_DEFAULTS_TYPES,
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
-from weightslab.backend import ledgers as backend_ledgers
+from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe
 
+
+# Set up logger
 logger = logging.getLogger(__name__)
 
 
@@ -133,6 +138,10 @@ class LedgeredDataFrameManager:
                 self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
 
             self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
+
+    def mark_dirty(self, sample_id: int):
+        with self._lock:
+            self._pending.add(int(sample_id))
 
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
@@ -316,10 +325,6 @@ class LedgeredDataFrameManager:
                 return {}
             return {k: dict(v) for k, v in origin_store.items()}
 
-    def mark_dirty(self, sample_id: int):
-        with self._lock:
-            self._pending.add(int(sample_id))
-
     def _drain_buffer(self) -> List[Dict[str, Any]]:
         with self._buffer_lock:
             if not self._buffer:
@@ -331,44 +336,32 @@ class LedgeredDataFrameManager:
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
         if not records:
             return
-        with self._lock:
-            # Extract sample IDs and separate loss dicts from regular updates
-            sample_ids = [rec["sample_id"] for rec in records]
 
-            # Separate records into regular updates and loss dict updates
-            regular_records = []
+        current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
+        logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applying {len(records)} buffered records to Global DataFrame.")
 
-            for rec in records:
-                sid = rec["sample_id"]
-                regular_rec = {"sample_id": sid}
+        # Extract sample IDs and separate loss dicts from regular updates
+        sample_ids = [rec["sample_id"] for rec in records]
 
-                for k, v in rec.items():
-                    if k == "sample_id":
-                        continue
-                    else:
-                        regular_rec[k] = v
+        # Batch update regular columns using DataFrame
+        if records:
+            df_updates = pd.DataFrame(records).set_index("sample_id")
 
-                if len(regular_rec) > 1:
-                    regular_records.append(regular_rec)
+            # Ensure columns exist (vectorized, no Python loop)
+            if not set(df_updates.columns).issubset(self._df.columns):
+                self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
 
-            # Batch update regular columns using DataFrame
-            if regular_records:
-                df_updates = pd.DataFrame(regular_records).set_index("sample_id")
+            # Vectorized masked update: only overwrite where df_updates has non-NaN
+            mask = df_updates.notna()
+            self._df.loc[df_updates.index, df_updates.columns] = (
+                self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
+            )
 
-                # Ensure columns exist
-                for col in df_updates.columns:
-                    if col not in self._df.columns:
-                        self._df[col] = np.nan
+        # Mark all as pending for h5 flush
+        self.mark_dirty_batch(sample_ids)
 
-                # Vectorized update - use update() to preserve non-NaN values
-                for col in df_updates.columns:
-                    # Only update non-NaN values to avoid overwriting valid data with NaN
-                    non_nan_mask = df_updates[col].notna()
-                    if non_nan_mask.any():
-                        self._df.loc[df_updates.index[non_nan_mask], col] = df_updates.loc[non_nan_mask, col].values
-
-            # Mark all as pending
-            self._pending.update(sample_ids)
+        current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
+        logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applied {len(records)} buffered records to Global DataFrame.")
 
     def _ensure_flush_thread(self):
         if self._flush_thread and self._flush_thread.is_alive():
@@ -450,94 +443,48 @@ class LedgeredDataFrameManager:
         if not force and not self._should_flush():
             return
 
-        # Extract only the data we need while holding the lock
-        with self._lock:
-            if self._store is None or self._df.empty or not self._pending:
-                return
-            work = list(self._pending)
-            self._pending.clear()
-            self._force_flush = False
+        # === PHASE 1: Extract data snapshot (FAST, lock held briefly) ===
+        work = None
+        data_snapshot = None
+        cols_to_save = None
 
-            # Filter actual df columns that match patterns in SAMPLES_STATS_TO_SAVE_TO_H5
-            cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
-            if not cols_to_save:
-                return
+        # Quick checks and data extraction
+        if self._store is None or self._df.empty or not self._pending:
+            return
 
-            # Group by origin and extract only needed rows/columns
-            by_origin: Dict[str, pd.DataFrame] = {}
-            for sid in work:
-                origin = "unknown"
-                try:
-                    if "origin" in self._df.columns and sid in self._df.index:
-                        row = self._df.loc[sid]
-                        if isinstance(row, pd.DataFrame):
-                            origin_val = row.iloc[0].get("origin", origin)
-                        else:
-                            origin_val = row.get("origin", origin)
-                        origin = origin_val if origin_val is not None else "unknown"
-                except Exception:
-                    origin = "unknown"
+        # Extract work set and clear pending
+        work = list(self._pending)
+        self._pending.clear()
+        self._force_flush = False
 
-                if origin not in by_origin:
-                    by_origin[origin] = []
-                by_origin[origin].append(sid)
+        # Filter columns while holding lock (fast operation)
+        cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
+        if not cols_to_save:
+            return
 
-            # Extract data for each origin
-            origin_data = {}
-            for origin, ids in by_origin.items():
-                ids_set = set(ids)
-                if "origin" in self._df.columns:
-                    mask = (self._df["origin"] == origin) & (self._df.index.isin(ids_set))
-                    df_update = self._df.loc[mask, cols_to_save].copy()
-                else:
-                    df_update = self._df.loc[self._df.index.isin(ids_set), cols_to_save].copy()
-                if not df_update.empty:
-                    origin_data[origin] = df_update
+        # Create a snapshot copy of the data we need (deep copy to isolate from training thread)
+        data_snapshot = self._df.loc[work, cols_to_save]
 
-        # Now process H5 writes without holding the lock
-        for origin, df_update in origin_data.items():
+        # === PHASE 2: Process and write H5 (NO LOCKS, training proceeds in parallel) ===
+        if data_snapshot is None or data_snapshot.empty:
+            return
+
+        # Determine origins from the snapshot copy
+        if "origin" in data_snapshot.columns:
+            origins = data_snapshot["origin"].unique()
+        else:
+            origins = ["unknown"]
+
+        # Write each origin's data independently (no locks held)
+        for origin in origins:
             try:
-                # Ensure index is sample_id for H5
-                df_update["sample_id"] = df_update.index
-
-                def _coerce_scalar_cell(col_name, v):
-                    try:
-                        # For prediction and target: exclude if array-like
-                        prediction_col = SampleStats.Ex.PREDICTION.value
-                        target_col = SampleStats.Ex.TARGET.value
-                        if col_name in (prediction_col, target_col):
-                            if isinstance(v, (np.ndarray, list, tuple)) or (hasattr(v, '__iter__') and not isinstance(v, str)):
-                                return None
-
-                        if isinstance(v, dict):
-                            # Convert dict to JSON string for H5 storage
-                            import json
-                            return json.dumps(v)
-                        if isinstance(v, np.ndarray):
-                            if v.ndim > 2:
-                                return None
-                            if v.size == 0:
-                                return None
-                            if v.size == 1:
-                                return v.item()
-                            return v.tolist()
-                        if isinstance(v, (list, tuple)):
-                            return list(v)
-                    except Exception:
-                        pass
-                    return v
-
-                # Apply coercion with column name context
-                for col in df_update.columns:
-                    if col != "sample_id":
-                        df_update[col] = df_update[col].apply(lambda v: _coerce_scalar_cell(col, v))
-                df_update = self._coerce_df_for_h5(df_update)
-                df_update.set_index("sample_id", inplace=True)
-                written = self._store.upsert(origin, df_update)
-                logger.debug(f"[LedgeredDataFrameManager] Flushed {written} rows (origin={origin})")
+                origin_data = data_snapshot[data_snapshot["origin"] == origin] if "origin" in data_snapshot.columns else data_snapshot
+                written = self._store.upsert(origin, origin_data)
+                current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Flushed {written} rows (origin={origin}) to H5 store.")
             except Exception as e:
-                logger.error(f"[LedgeredDataFrameManager] Failed flush for origin={origin}: {e}")
-
+                current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                logger.error(f"[{current_time}] [LedgeredDataFrameManager] Failed flush for origin={origin}: {e}")
 
 # Create global instance with config-driven parameters
 def _create_ledger_manager():
@@ -547,23 +494,30 @@ def _create_ledger_manager():
     enable_h5 = True
 
     try:
-        from weightslab.backend.ledgers import get_hyperparams
-        hp = get_hyperparams()
+        not_init = True
+        hp = get_hyperparams(resolve_hp_name())
         if isinstance(hp, dict):
             flush_interval = hp.get('ledger_flush_interval', flush_interval)
             flush_max_rows = hp.get('ledger_flush_max_rows', flush_max_rows)
             enable_h5 = hp.get('ledger_enable_h5_persistence', enable_h5)
+            not_init = False
+
     except Exception:
+        not_init = True
         pass  # Use defaults if hyperparams not available
 
-    return LedgeredDataFrameManager(
-        flush_interval=flush_interval,
-        flush_max_rows=flush_max_rows,
-        enable_h5_persistence=enable_h5
-    )
+    if not not_init:
+        return LedgeredDataFrameManager(
+            flush_interval=flush_interval,
+            flush_max_rows=flush_max_rows,
+            enable_h5_persistence=enable_h5
+        )
 
-LEDGER_MANAGER = _create_ledger_manager()
+
+# Global LedgeredDataFrameManager instance
+# TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
+LM = _create_ledger_manager()
 try:
-    backend_ledgers.register_dataframe("sample_stats", LEDGER_MANAGER)
+    register_dataframe("sample_stats", LM)
 except Exception as e:
     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

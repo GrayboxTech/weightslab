@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import tempfile
@@ -13,13 +14,12 @@ from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
-from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
-from weightslab.data.dataframe_manager import LEDGER_MANAGER
+from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
+from weightslab.data.dataframe_manager import _create_ledger_manager
 from weightslab.data.data_utils import (
     _detect_dataset_split,
     _to_numpy_safe
 )
-import re
 from weightslab.data.sample_stats import (
     SampleStats,
     SampleStatsEx,
@@ -121,6 +121,15 @@ class DataSampleTrackingWrapper(Dataset):
         # Set name
         self.name = name
 
+        # Init Global Ledger Manager
+        ledger_manager = get_dataframe()
+        if ledger_manager == None:
+            ledger_manager = _create_ledger_manager()
+            try:
+                register_dataframe("sample_stats", ledger_manager)
+            except Exception as e:
+                logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")
+
         # Setup H5 persistence path
         self._root_log_dir = Path(root_log_dir) if root_log_dir else self._resolve_root_log_dir()
         self._h5_path = None
@@ -215,12 +224,12 @@ class DataSampleTrackingWrapper(Dataset):
             default_data.append(row)
 
         # Register this split with the global ledger manager (shared across loaders) and load existing data
-        LEDGER_MANAGER.register_split(self._dataset_split, default_data, self._stats_store)
+        ledger_manager.register_split(self._dataset_split, default_data, self._stats_store)
 
         # Log tag-based labeling configuration if enabled
         if self._use_tags:
             with self._df_lock:
-                df_view = LEDGER_MANAGER.get_df_view(column=self._dataset_split)
+                df_view = ledger_manager.get_df_view(column=self._dataset_split)
                 tags_count = df_view.apply(lambda x: len(x) > 0).sum()
 
             if self._is_binary_labels:
@@ -446,10 +455,10 @@ class DataSampleTrackingWrapper(Dataset):
 
     def _get_df_view(self, limit: int = -1) -> pd.DataFrame:
         """Convenience accessor for this split's ledger slice."""
-        return LEDGER_MANAGER.get_df_view(self._dataset_split, limit=limit)
+        return get_dataframe().get_df_view(self._dataset_split, limit=limit)
 
     def _get_value(self, sample_id: int, key: str):
-        return LEDGER_MANAGER.get_value(self._dataset_split, sample_id, key)
+        return get_dataframe().get_value(self._dataset_split, sample_id, key)
 
     def _set_values(self, sample_id: int, updates: Dict[str, Any]):
         """Write scalar updates into the shared ledger and mark pending H5 rows (optimized)."""
@@ -457,7 +466,7 @@ class DataSampleTrackingWrapper(Dataset):
             return
 
         # Update data
-        LEDGER_MANAGER.update_values(self._dataset_split, sample_id, updates)
+        get_dataframe().update_values(self._dataset_split, sample_id, updates)
 
         if self._enable_h5_persistence is False:
             return
@@ -475,10 +484,10 @@ class DataSampleTrackingWrapper(Dataset):
         # Mark dirty for H5 persistence if any update column matches
         if needs_h5_flush:
             self._h5_pending_uids.add(sample_id)
-            LEDGER_MANAGER.mark_dirty(sample_id)
+            get_dataframe().mark_dirty(sample_id)
 
     def _set_dense(self, key: str, sample_id: int, value: np.ndarray):
-        LEDGER_MANAGER.set_dense(self._dataset_split, key, sample_id, value)
+        get_dataframe().set_dense(self._dataset_split, key, sample_id, value)
 
     def _save_pending_stats_to_h5(self):
         """Mark pending rows dirty and request async flush from background thread."""
@@ -487,9 +496,9 @@ class DataSampleTrackingWrapper(Dataset):
         pending_uids = list(self._h5_pending_uids)
         self._h5_pending_uids.clear()
         for uid in pending_uids:
-            LEDGER_MANAGER.mark_dirty(uid)
+            get_dataframe().mark_dirty(uid)
         # Request async flush to avoid blocking training loop
-        LEDGER_MANAGER.flush_async()
+        get_dataframe().flush_async()
 
     def state_dict(self) -> Dict:
         with self._df_lock:
@@ -507,7 +516,7 @@ class DataSampleTrackingWrapper(Dataset):
             if col in df.columns and not _match_column_patterns(col, SAMPLES_STATS_TO_SAVE_TO_H5):
                 ex[col] = df[col].dropna().to_dict()
 
-        dense = LEDGER_MANAGER.get_dense_map(self._dataset_split)
+        dense = get_dataframe().get_dense_map(self._dataset_split)
 
         return {
             _StateDictKeys.BLOCKD_SAMPLES.value: self.denied_sample_cnt,
