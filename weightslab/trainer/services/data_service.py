@@ -1210,25 +1210,28 @@ class DataService:
             # AND if the index types are compatible (both numeric)
             if not self._all_datasets_df.index.is_monotonic_increasing:
                  # We have a custom sort.
-                 old_index = self._all_datasets_df.index
-                 new_index = updated_df.index
+                 # 1. Check strict equality first (fastest)
+                 if self._all_datasets_df.index.equals(updated_df.index):
+                     pass  # Index match, just use updated_df as is
 
-                 # 1. Identify rows that are in BOTH (intersection) -> keep old order
-                 # use .intersection to preserve order of left argument (old_index)
-                 kept_indices = [x for x in old_index if x in new_index]
+                 else:
+                     # We have a custom sort or mismatch.
+                     old_index = self._all_datasets_df.index
+                     new_index = updated_df.index
 
-                 # 2. Identify rows that are NEW (difference) -> append to end
-                 # Use set difference for speed, then sort or just append
-                 old_index_set = set(old_index)
-                 newly_added_indices = [x for x in new_index if x not in old_index_set]
+                     # Optimize intersection using set for O(1) lookups
+                     new_index_set = set(new_index)
+                     kept_indices = [x for x in old_index if x in new_index_set]
 
-                 # 3. Construct the full requested order
-                 full_order = kept_indices + newly_added_indices
+                     # Identify rows that are NEW
+                     old_index_set = set(old_index)
+                     newly_added_indices = [x for x in new_index if x not in old_index_set]
 
-                 # 4. Reindex using this full order.
-                 # The 'updated_df' contains ALL the data (old items updated + new items).
-                 # This safely reorders it.
-                 updated_df = updated_df.reindex(full_order)
+                     # Construct full order
+                     full_order = kept_indices + newly_added_indices
+
+                     # Reindex using this full order.
+                     updated_df = updated_df.reindex(full_order)
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
@@ -1493,47 +1496,64 @@ class DataService:
                             )
                             self._all_datasets_df.loc[mask, request.stat_name] = target_val
 
+
                     except Exception as e:
                         logger.debug(
                             f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
                         )
 
-        # ------------------------------------------------------------------
-        # 3) Persist edits into the global dataframe manager (in-memory ledger)
-        # ------------------------------------------------------------------
-        try:
-            if request.samples_ids and self._df_manager is not None:
-                updates_by_origin = {}
-                for sid, origin in zip(request.samples_ids, request.sample_origins):
-                    # Tags
-                    if request.stat_name == SampleStatsEx.TAGS.value:
-                        value = request.string_value  #if request.stat_name == SampleStatsEx.TAGS.value else request.bool_value
+            # ------------------------------------------------------------------
+            # 3) Persist edits into the global dataframe manager (in-memory ledger)
+            # MOVED INSIDE LOCK to prevent race conditions with _slowUpdateInternals
+            # ------------------------------------------------------------------
+            try:
+                if request.samples_ids and self._df_manager is not None:
+                    updates_by_origin = {}
+                    for sid, origin in zip(request.samples_ids, request.sample_origins):
+                        # Tags
+                        if request.stat_name == SampleStatsEx.TAGS.value:
+                            value = request.string_value  #if request.stat_name == SampleStatsEx.TAGS.value else request.bool_value
 
-                        # Aggregate old values
-                        old_tags = self._df_manager.get_row(origin=origin, sample_id=int(sid))[SampleStatsEx.TAGS.value]
-                        if value in old_tags.split(';'):
-                            continue  # No change
+                            # Logic to calculate new tags based on edit type
+                            # use self._all_datasets_df (which was just updated above) as source of truth
+                            # instead of pulling from _df_manager again, to ensure consistency inside the lock.
+                            
+                            uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
+                            current_val = ""
+                            try:
+                                if uses_multiindex:
+                                    current_val = self._all_datasets_df.loc[(origin, sid), SampleStatsEx.TAGS.value]
+                                else:
+                                    # Fallback
+                                    mask = (self._all_datasets_df[SampleStatsEx.SAMPLE_ID.value] == sid) & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
+                                    if mask.any():
+                                        current_val = self._all_datasets_df.loc[mask, SampleStatsEx.TAGS.value].iloc[0]
+                            except Exception:
+                                pass
+                                
+                            target_val = current_val # Already updated above in step 1
 
-                        new_tags = old_tags + "; " + value if old_tags and old_tags.replace(' ', '') != '' and value != '' else value
-                        updates_by_origin.setdefault(origin, []).append({
-                            "sample_id": int(sid),
-                            SampleStatsEx.ORIGIN.value: origin,
-                            request.stat_name: new_tags,
-                        })
-                    else:
-                        # Deny_listed
-                        updates_by_origin.setdefault(origin, []).append({
-                            "sample_id": int(sid),
-                            SampleStatsEx.ORIGIN.value: origin,
-                            request.stat_name: request.bool_value,
-                        })
+                            updates_by_origin.setdefault(origin, []).append({
+                                "sample_id": int(sid),
+                                SampleStatsEx.ORIGIN.value: origin,
+                                request.stat_name: target_val,
+                            })
+                        else:
+                            # Deny_listed
+                            updates_by_origin.setdefault(origin, []).append({
+                                "sample_id": int(sid),
+                                SampleStatsEx.ORIGIN.value: origin,
+                                request.stat_name: request.bool_value,
+                            })
 
-                for origin, rows in updates_by_origin.items():
-                    df_update = pd.DataFrame(rows).set_index("sample_id")
-                    self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                    for origin, rows in updates_by_origin.items():
+                        df_update = pd.DataFrame(rows).set_index("sample_id")
+                        # upsert_df updates the ledger's dataframe immediately
+                        self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
 
-        except Exception as e:
-            logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
+            except Exception as e:
+                logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
+
 
         return pb2.DataEditsResponse(
             success=True,
