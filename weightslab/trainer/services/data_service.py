@@ -993,28 +993,68 @@ class DataService:
                              valid_cols.append(c)
                              continue
 
-                        # Check for non-scalar types (like numpy arrays in 'prediction_loss')
+                        # 1. Handle special string-based columns irrespective of content type
+                        c_lower = c.lower()
+
+                        if c_lower == "tags":
+                            logger.debug("[ApplyDataQuery] Column 'tags': normalizing for alphabetical sort (grouping)")
+                            # Normalize tags: split, sort items, join. This ensures ['b', 'a'] == ['a', 'b']
+                            def normalize_tags(x):
+                                if pd.isna(x): return ""
+                                if isinstance(x, str):
+                                    # robust split by ; or ,
+                                    import re
+                                    parts = re.split(r'[;,]', x)
+                                    items = [t.strip() for t in parts if t.strip()]
+                                elif isinstance(x, (list, tuple, np.ndarray)):
+                                    items = [str(i).strip() for i in x if str(i).strip()]
+                                else:
+                                    items = [str(x)]
+                                return ";".join(sorted(items))
+                            
+                            df[c] = df[c].apply(normalize_tags)
+                            valid_cols.append(c)
+                            continue
+
+                        if c_lower == "task_type":
+                             df[c] = df[c].astype(str)
+                             valid_cols.append(c)
+                             continue
+
+                        # 2. Check for non-scalar types (like numpy arrays in 'prediction_loss')
                         # We use a heuristic on the first non-null value
                         non_null_s = df[c].dropna()
                         if not non_null_s.empty:
                             first_val = non_null_s.iloc[0]
                             # If it's a collection but not a string/bytes, pandas can't sort it directly
                             if hasattr(first_val, "__len__") and not isinstance(first_val, (str, bytes)):
-                                c_lower = c.lower()
                                 # Fallback: if user asked for 'prediction_loss', help them by using 'mean_loss'
                                 if c_lower == "prediction_loss" and "mean_loss" in df.columns:
                                     logger.info("[ApplyDataQuery] Column %r contains arrays; redirecting to 'mean_loss' for sorting", c)
                                     valid_cols.append("mean_loss")
                                     continue
-                                # Special handling for tags/categories: sort by string representation (grouping)
-                                elif c_lower in ["tags", "task_type"]:
-                                    logger.debug("[ApplyDataQuery] Column %r is list-like; casting to string for sorting", c)
-                                    df[c] = df[c].astype(str)
-                                    valid_cols.append(c)
-                                    continue
-                                # Robust handling for prediction/target: try to extract scalar (classification) or group as string
-                                elif c_lower in ["prediction", "target", "label", "pred"]:
-                                    logger.debug("[ApplyDataQuery] Column %r is list-like; attempting scalar extraction for sort", c)
+
+                                # Robust handling for prediction/target: 
+                                # 1) If multi-element list -> REJECT sort (return error message)
+                                # 2) If single-element -> Extract scalar
+                                if c_lower in ["prediction", "target", "label", "pred", "prediction_raw"]:
+                                    # Peek at the column to check data shape
+                                    sub_non_null = df[c].dropna()
+                                    if not sub_non_null.empty:
+                                        # Check first few items to see if they are generic lists > 1
+                                        sample_vals = sub_non_null.head(5)
+                                        is_multi_dim = False
+                                        for v in sample_vals:
+                                            if hasattr(v, "__len__") and not isinstance(v, (str, bytes)):
+                                                if len(v) > 1:
+                                                    is_multi_dim = True
+                                                    break
+                                        
+                                        if is_multi_dim:
+                                            logger.info(f"[ApplyDataQuery] Cannot sort by '{c}': contains multi-dimensional data.")
+                                            return f"Cannot sort by '{c}': Data is multi-dimensional"
+
+                                    logger.debug("[ApplyDataQuery] Column %r is scalar-like; attempting scalar extraction for sort", c)
                                     try:
                                         def try_scalar(x):
                                             if hasattr(x, "__len__") and not isinstance(x, (str, bytes)):
@@ -1033,6 +1073,7 @@ class DataService:
                                     continue
 
                         valid_cols.append(c)
+
 
                     if not valid_cols:
                         logger.warning("[ApplyDataQuery] No valid sort columns found in %s", by)
