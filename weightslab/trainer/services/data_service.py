@@ -496,7 +496,10 @@ class DataService:
             # And get label from the dataset
             label = row.get(SampleStatsEx.TARGET.value)
             dataset = self._get_dataset(origin)
-            dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset else None
+            try:
+                dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset else None
+            except (KeyError, ValueError, IndexError):
+                dataset_index = None
             if label is None:
                 # Try loading label from dataset if available
                 if dataset:
@@ -805,38 +808,52 @@ class DataService:
         
         # Parse sort part
         if sort_part:
-            # Robust parsing for columns with spaces
-            sort_part = sort_part.strip()
-            ascending = True
-            col_raw = sort_part
+            sort_cols = []
+            sort_ascs = []
             
-            # Check for direction suffix
-            lower_s = sort_part.lower()
-            if lower_s.endswith(" asc"):
+            # Split by comma to support multiple columns: "tags asc, target desc"
+            # We need to respect quotes potentially, but for now assume simple CSV structure
+            parts = [p.strip() for p in sort_part.split(',')]
+            
+            for p in parts:
+                if not p:
+                    continue
+                    
                 ascending = True
-                col_raw = sort_part[:-4].strip()
-            elif lower_s.endswith(" desc"):
-                ascending = False
-                col_raw = sort_part[:-5].strip()
-            
-            # Clean up quotes from column name
-            col = col_raw.replace('`', '').strip()
-            
-            # Split if multiple columns? (Not supported by simple "sortby" textual interface easily yet, assumes single col)
-            # But the front-end sends single col.
-            
-            if col:
-                logger.debug(f"[_parse_direct_query] Sort: col={repr(col)}, ascending={ascending}")
+                col_raw = p
                 
-                if col.lower() == 'index':
+                # Check for direction suffix
+                lower_s = p.lower()
+                if lower_s.endswith(" asc"):
+                    ascending = True
+                    col_raw = p[:-4].strip()
+                elif lower_s.endswith(" desc"):
+                    ascending = False
+                    col_raw = p[:-5].strip()
+                
+                # Clean up quotes from column name
+                col = col_raw.replace('`', '').strip()
+                
+                if col:
+                    sort_cols.append(col)
+                    sort_ascs.append(ascending)
+            
+            if sort_cols:
+                logger.debug(f"[_parse_direct_query] Sort: cols={sort_cols}, asc={sort_ascs}")
+                
+                # Special optimization for single 'index' sort
+                if len(sort_cols) == 1 and sort_cols[0].lower() == 'index':
                     operations.append({
                         "function": "df.sort_index",
-                        "params": {"ascending": ascending}
+                        "params": {"ascending": sort_ascs[0]}
                     })
                 else:
+                    # Multi-column or single column sort
+                    # Note: 'index' mixed with columns in sort_values requires actual column named 'index' 
+                    # or index level support (which sort_values handles if named).
                     operations.append({
                         "function": "df.sort_values",
-                        "params": {"by": col, "ascending": ascending}
+                        "params": {"by": sort_cols, "ascending": sort_ascs}
                     })
         
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
@@ -985,6 +1002,26 @@ class DataService:
                     valid_cols = []
                     for c in by:
                         is_index = c in df.index.names
+                        
+                        # Handle nested signal columns (e.g., signals//train_loss/mlt_loss)
+                        if "//" in c and c not in df.columns:
+                            root_col, nested_path = c.split("//", 1)
+                            if root_col in df.columns:
+                                logger.debug(f"[ApplyDataQuery] Extracting nested column {c} from {root_col}")
+                                def extract_nested(val, path):
+                                    if not isinstance(val, dict): return None
+                                    keys = path.split('/')
+                                    curr = val
+                                    for k in keys:
+                                        if isinstance(curr, dict) and k in curr:
+                                            curr = curr[k]
+                                        else:
+                                            return None
+                                    return curr
+                                
+                                # Extract and assign to a temporary column so subsequent logic works
+                                df[c] = df[root_col].apply(lambda x: extract_nested(x, nested_path))
+                        
                         if c not in df.columns and not is_index:
                             continue
                             
