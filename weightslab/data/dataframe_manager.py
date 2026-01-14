@@ -9,6 +9,8 @@ import pandas as pd
 from typing import Dict, Sequence, Any, List
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
+from weightslab.data.h5_array_store import H5ArrayStore
+from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
 from weightslab.data.data_utils import _filter_columns_by_patterns
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -33,6 +35,7 @@ class LedgeredDataFrameManager:
     def __init__(self, flush_interval: float = 3.0, flush_max_rows: int = 100, enable_h5_persistence: bool = True):
         self._df: pd.DataFrame = pd.DataFrame()
         self._store: H5DataFrameStore | None = None
+        self._array_store: H5ArrayStore | None = None
         self._pending: set[int] = set()
         self._force_flush = False
         self._lock = threading.RLock()
@@ -46,11 +49,31 @@ class LedgeredDataFrameManager:
         self._dense_store: Dict[str, Dict[int, np.ndarray]] = {}
         self._buffer: List[Dict[str, Any]] = []
         self._enable_h5_persistence = enable_h5_persistence
+        # Columns that should store arrays in separate H5 file
+        self._array_columns = [
+            SampleStats.Ex.PREDICTION.value,
+            SampleStats.Ex.PREDICTION_RAW.value,
+            SampleStats.Ex.TARGET.value,
+        ]
 
     def set_store(self, store: H5DataFrameStore):
         with self._lock:
             if self._store is None and self._enable_h5_persistence:
                 self._store = store
+                # Auto-create array store in same directory
+                if self._array_store is None:
+                    array_path = store.get_path().parent / "arrays.h5"
+                    self._array_store = H5ArrayStore(array_path)
+
+    def set_array_store(self, array_store: H5ArrayStore):
+        """Explicitly set the array store."""
+        with self._lock:
+            if self._enable_h5_persistence:
+                self._array_store = array_store
+
+    def get_array_store(self) -> H5ArrayStore | None:
+        """Get the array store instance."""
+        return self._array_store
 
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None):
         with self._lock:
@@ -71,6 +94,7 @@ class LedgeredDataFrameManager:
         if not self._enable_h5_persistence:
             return
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
+
         if not loaded_df.empty:
             # Ensure single-level index on sample_id
             if "sample_id" in loaded_df.columns:
@@ -149,6 +173,47 @@ class LedgeredDataFrameManager:
             if force_flush:
                 self._force_flush = True
 
+    def _is_array_column(self, column_name: str) -> bool:
+        """Check if a column should store arrays in separate H5 file."""
+        return column_name in self._array_columns
+
+    def _should_array_be_stored(self, array_name) -> bool:
+        """Check if array storage is enabled."""
+        return array_name in SAMPLES_STATS_TO_SAVE_TO_H5  # Regexed signals are not considered here
+
+    def _should_store_array_separately(self, value: Any) -> bool:
+        """Determine if a value should be stored in array H5."""
+        if value is None:
+            return False
+        try:
+            arr = np.asanyarray(value)
+            # Store arrays with size > 1 separately
+            return arr.size > 1 and arr.ndim >= 1
+        except Exception:
+            return False
+
+    def _extract_arrays_for_storage(self, sample_id: int, data: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        """
+        Extract arrays that should be stored separately.
+
+        Returns:
+            Dict of {column_name: array} for arrays to store in array H5
+        """
+        arrays_to_store = {}
+
+        for col in self._array_columns:
+            if col not in data:
+                continue
+
+            value = data[col]
+            if self._should_array_be_stored(col) and self._should_store_array_separately(value):
+                try:
+                    arrays_to_store[col] = np.asanyarray(value)
+                except Exception as e:
+                    logger.warning(f"[LedgeredDataFrameManager] Failed to convert {col} to array for sample {sample_id}: {e}")
+
+        return arrays_to_store
+
     def _safe_array_value(self, value: Any) -> Any:
         """Convert arrays/tensors to lightweight Python objects and drop image-like data."""
         if value is None:
@@ -212,13 +277,24 @@ class LedgeredDataFrameManager:
                     SampleStats.Ex.PREDICTION_AGE.value: model_age,
                 }
 
+                # Store arrays as-is initially; they'll be moved to array H5 during flush
                 if targets is not None:
-                    rec[SampleStats.Ex.TARGET.value] = self._safe_array_value(targets[i])
+                    try:
+                        rec[SampleStats.Ex.TARGET.value] = targets[i]
+                    except Exception:
+                        pass
 
                 if preds_raw is not None:
-                    rec[SampleStats.Ex.PREDICTION_RAW.value] = self._safe_array_value(preds_raw[i])
+                    try:
+                        rec[SampleStats.Ex.PREDICTION_RAW.value] = preds_raw[i]
+                    except Exception:
+                        pass
+
                 if preds is not None:
-                    rec[SampleStats.Ex.PREDICTION.value] = self._safe_array_value(preds[i])
+                    try:
+                        rec[SampleStats.Ex.PREDICTION.value] = preds[i]
+                    except Exception:
+                        pass
 
                 loss_dict = self._safe_loss_dict(losses, i)
                 if loss_dict is not None:
@@ -227,8 +303,8 @@ class LedgeredDataFrameManager:
                 # Add to buffer data
                 self._buffer.append(rec)
 
-            if len(self._buffer) >= self._flush_max_rows:
-                self.flush_async()
+                if len(self._buffer) >= self._flush_max_rows:
+                    self.flush_async()
 
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
         if not updates:
@@ -333,16 +409,25 @@ class LedgeredDataFrameManager:
         current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
         logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applying {len(records)} buffered records to Global DataFrame.")
 
-        # Extract sample IDs and separate loss dicts from regular updates
+        # Extract sample IDs
         sample_ids = [rec["sample_id"] for rec in records]
 
-        # Batch update regular columns using DataFrame
+        # Step 1: Batch update regular columns using DataFrame
         if records:
             df_updates = pd.DataFrame(records).set_index("sample_id")
 
             # Ensure columns exist (vectorized, no Python loop)
             if not set(df_updates.columns).issubset(self._df.columns):
                 self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
+
+            # Ensure target rows exist before masked update
+            missing_idx = df_updates.index.difference(self._df.index)
+            if len(missing_idx) > 0:
+                # Precreate empty rows so loc assignment does not fail
+                self._df = pd.concat(
+                    [self._df, pd.DataFrame(index=missing_idx, columns=self._df.columns)],
+                    copy=False,
+                )
 
             # Vectorized masked update: only overwrite where df_updates has non-NaN
             mask = df_updates.notna()
@@ -385,9 +470,38 @@ class LedgeredDataFrameManager:
         if self._flush_thread:
             self._flush_thread.join(timeout=2.0)
 
-    def get_combined_df(self) -> pd.DataFrame:
-        with self._lock:
-            return self._df.copy()
+    def get_combined_df(
+        self,
+        autoload_arrays: bool | list | set = False,
+        return_proxies: bool = True,
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Get a copy of the combined dataframe with optional array materialization.
+
+        Args:
+            autoload_arrays: If True, load arrays from arrays.h5 eagerly; if a list/set,
+                only those column names are eagerly loaded; otherwise keep lazy proxies.
+            return_proxies: If True and autoload_arrays is False, return ArrayH5Proxy objects
+            use_cache: When autoloading, allow proxy cache to speed repeated access
+
+        Returns:
+            Copy of the dataframe with array cells resolved according to options
+        """
+        # Work on a copy to avoid mutating the live frame
+        df = self._df
+
+        if self._array_store is not None:
+            df = convert_dataframe_to_proxies(
+                df,
+                self._array_columns,
+                array_store=self._array_store,
+                autoload=autoload_arrays,
+                use_cache=use_cache,
+                return_proxies=return_proxies,
+            )
+
+        return df
 
     def _coerce_df_for_h5(self, df: pd.DataFrame) -> pd.DataFrame:
         df2 = df.copy()
@@ -457,6 +571,30 @@ class LedgeredDataFrameManager:
 
         # Create a snapshot copy of the data we need (deep copy to isolate from training thread)
         data_snapshot = self._df.loc[work, cols_to_save]
+
+        # === PHASE 1.5: Extract and store arrays to H5 (if enabled) ===
+        if self._array_store is not None and self._enable_h5_persistence:
+            arrays_to_store = {}  # {sample_id: {col_name: array}}
+
+            for sample_id in work:
+                if sample_id not in self._df.index:
+                    continue
+                row_data = self._df.loc[sample_id].to_dict() if isinstance(self._df.loc[sample_id], pd.Series) else self._df.loc[sample_id]
+                arrays = self._extract_arrays_for_storage(sample_id, row_data)
+                if arrays:
+                    arrays_to_store[sample_id] = arrays
+
+            # Batch save arrays and get path references
+            if arrays_to_store:
+                path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
+
+                # Replace array values with path references in DataFrame
+                for sample_id in path_refs:
+                    for col_name, path_ref in path_refs[sample_id].items():
+                        if col_name in self._df.columns and path_ref is not None:
+                            self._df.loc[sample_id, col_name] = path_ref
+                            if sample_id in data_snapshot.index and col_name in data_snapshot.columns:
+                                data_snapshot.loc[sample_id, col_name] = path_ref
 
         # === PHASE 2: Process and write H5 (NO LOCKS, training proceeds in parallel) ===
         if data_snapshot is None or data_snapshot.empty:

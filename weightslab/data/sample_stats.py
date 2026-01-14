@@ -83,7 +83,7 @@ class SampleStats:
         ]
 
         # Check environment variable to include predictions and targets
-        if os.getenv('WEIGHTSLAB_SAVE_PREDICTIONS_TO_H5', '').lower() in ('true', '1', 'yes'):
+        if os.getenv('WEIGHTSLAB_SAVE_PREDICTIONS_TO_H5', "1").lower() in ('true', '1', 'yes'):
             # Include prediction arrays and targets
             base_list.extend([
                 cls.Ex.PREDICTION.value,

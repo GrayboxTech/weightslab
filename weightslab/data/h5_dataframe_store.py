@@ -303,7 +303,7 @@ class H5DataFrameStore:
                     logger.error(f"[H5DataFrameStore] Failed to upsert rows for {origin} into {self._path}: {exc}")
                     return 0
 
-    def path(self) -> Path:
+    def get_path(self) -> Path:
         return self._path
 
     def exists(self) -> bool:

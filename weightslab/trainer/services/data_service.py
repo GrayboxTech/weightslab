@@ -16,9 +16,11 @@ import weightslab.proto.experiment_service_pb2 as pb2
 from PIL import Image
 from typing import List
 from pathlib import Path
+from datetime import datetime
 from concurrent import futures
 
 from weightslab.data.sample_stats import SampleStatsEx
+from weightslab.data.array_proxy import ArrayH5Proxy
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image, load_label, get_mask
@@ -28,12 +30,13 @@ from weightslab.backend.ledgers import get_dataloaders, get_dataframe
 
 # Get global logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
 
 
 def _get_stat_from_row(row, stat_name):
     """Extract stat from dataframe row and convert to DataStat message."""
     value = row.get(stat_name)
+
+    # Check if it's a stored array proxy
     if not isinstance(value, (list, np.ndarray, torch.Tensor)) and (value is None or pd.isna(value)):
         return None
 
@@ -142,38 +145,6 @@ def _infer_task_type_from_label(label, default="classification"):
     # 2D integer-ish → very likely segmentation mask or detection
     if arr.shape[0] < 28 or arr.shape[1] < 28:
         return 'segmentation'  # 'detection' interpreted as segmentation
-    if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
-        return "segmentation"
-
-    # 3D with a single channel can also be a mask (1, H, W) or (H, W, 1)
-    if arr.ndim == 3:
-        if arr.shape[0] == 1 or arr.shape[-1] == 1:
-            if np.issubdtype(arr.dtype, np.integer):
-                return "segmentation"
-
-    # Anything else: keep the caller's default guess
-    return default
-
-
-def _infer_task_type_from_label(label, default="classification"):
-    """
-    Heuristic: guess task type based on label shape / dtype.
-
-    - 0D or size==1 → classification-like
-    - 2D integer mask → segmentation-like
-    - 3D 1-channel integer tensor → segmentation-like
-    - otherwise → fall back to default
-    """
-    try:
-        arr = label.cpu().numpy() if hasattr(label, "cpu") else np.asarray(label)
-    except Exception:
-        return default
-
-    # Scalar / single element → treat as classification
-    if arr.ndim == 0 or arr.size == 1:
-        return "classification"
-
-    # 2D integer-ish → very likely segmentation mask
     if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
         return "segmentation"
 
@@ -373,7 +344,8 @@ class DataService:
             blocking on IO. Falls back to last snapshot if retrieval fails.
             """
             try:
-                df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
+                # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
+                df = self._df_manager.get_combined_df(autoload_arrays=False, return_proxies=True, use_cache=True) if self._df_manager is not None else pd.DataFrame()
                 if df.empty:
                     return df
 
@@ -492,11 +464,13 @@ class DataService:
                     raw_data_bytes = transformed_data_bytes
                     raw_shape = transformed_shape
 
+            # Get dataset
+            dataset = self._get_dataset(origin)
+            dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset else None
+
             # Determine task type early so we can conditionally send stats
             # And get label from the dataset
             label = row.get(SampleStatsEx.TARGET.value)
-            dataset = self._get_dataset(origin)
-            dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset else None
             if label is None:
                 # Try loading label from dataset if available
                 if dataset:
@@ -505,14 +479,15 @@ class DataService:
 
             stats_to_retrieve = list(request.stats_to_retrieve)
             if not stats_to_retrieve:
-                stats_to_retrieve = [col for col in df_columns if col not in [SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.ORIGIN.value]]
-                if task_type != "classification":
-                    # Also pre-emptively include per-class loss columns if we can find num_classes
-                    num_classes = (
-                        row.get('num_classes')
-                        or (getattr(dataset, "num_classes", None) if dataset else None)
-                        or getattr(self._ctx.components.get("model"), "num_classes", None)
-                    )
+                stats_to_retrieve = [
+                    col for col in df_columns if col not in [
+                        SampleStatsEx.SAMPLE_ID.value,
+                        SampleStatsEx.ORIGIN.value,
+                        SampleStatsEx.TARGET.value,
+                        SampleStatsEx.PREDICTION.value,
+                        SampleStatsEx.PREDICTION_RAW.value
+                    ]
+                ]
 
             for stat_name in stats_to_retrieve:
                 # Get value
@@ -545,8 +520,13 @@ class DataService:
             # ========================== Labels ==================================
             # Encode label safely depending on task_type  (GT mask / label)
             if task_type != "classification":
-                label_arr = row.get(SampleStatsEx.TARGET.value) or label
-                if label_arr is not None and not isinstance(label_arr, np.ndarray):
+                if label is None and row.get(SampleStatsEx.TARGET.value) is not None:
+                    label_arr = row.get(SampleStatsEx.TARGET.value)
+                else:
+                    label_arr = label
+
+                # Process label
+                if label_arr is not None and not isinstance(label_arr, (np.ndarray, ArrayH5Proxy)):
                     try:
                         label_arr = np.array(label_arr.detach().cpu() if hasattr(label_arr, 'detach') else label_arr)
                     except Exception:
@@ -622,26 +602,23 @@ class DataService:
             try:
                 pred = row.get(SampleStatsEx.PREDICTION.value)
                 if task_type != "classification":
-                    if pred is not None:
-                        try:
-                            pred_arr = np.asarray(
-                                pred.cpu() if hasattr(pred, "cpu") else pred
-                            )
+                    if pred is not None and not isinstance(pred, (np.ndarray, ArrayH5Proxy)):
+                        pred_arr = np.asarray(
+                            pred.cpu() if hasattr(pred, "cpu") else pred
+                        )
 
-                            # If pred_arr appears to be bounding boxes, convert to mask
-                            pred_arr = get_mask(pred_arr, dataset, dataset_index=dataset_index)
+                        # If pred_arr appears to be bounding boxes, convert to mask
+                        pred_arr = get_mask(pred_arr, dataset, dataset_index=dataset_index)
 
-                            # Add predicted mask stat
-                            data_stats.append(
-                                pb2.DataStat(
-                                    name='pred_mask',
-                                    type='array',
-                                    shape=list(pred_arr.shape),
-                                    value=pred_arr.astype(float).ravel().tolist(),
-                                )
+                        # Add predicted mask stat
+                        data_stats.append(
+                            pb2.DataStat(
+                                name='pred_mask',
+                                type='array',
+                                shape=list(pred_arr.shape),
+                                value=pred_arr.astype(float).ravel().tolist(),
                             )
-                        except Exception:
-                            pass
+                        )
                 else:
                     # Classification: get prediction from row or dataset
                     if pred is not None:
@@ -1231,7 +1208,10 @@ class DataService:
             data_records = []
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.debug("Processing %s samples at %s", len(tasks), current_time)
             results = self._data_executor.map(self._process_sample_row, tasks, timeout=30)
+            logger.debug("Completed processing samples at %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             data_records = [res for res in results if res is not None]
 
             logger.info("Retrieved %s data records", len(data_records))
