@@ -919,9 +919,48 @@ class DataService:
                 # ---- SORT_VALUES ----
                 if func_name == "sort_values":
                     safe_params = params.copy()
-                    by = safe_params.get("by", [])
-                    if isinstance(by, str):
-                        by = [by]
+                    raw_by = safe_params.get("by", [])
+                    if isinstance(raw_by, str):
+                        raw_by = [raw_by]
+                    
+                    # 1. Flatten comma-separated strings and extract direction (asc/desc)
+                    # Agent LLMs sometimes return ["col1, col2"] or ["col1 asc", "col2 desc"]
+                    final_by = []
+                    final_ascs = []
+                    
+                    # Initialize default ascending from params if present
+                    # params["ascending"] can be a bool or a list
+                    input_ascending = params.get("ascending", True)
+
+                    for b in raw_by:
+                        # Split by comma
+                        parts = [p.strip() for p in str(b).split(',')]
+                        for p in parts:
+                            if not p: continue
+                            
+                            # Default direction for this specific item
+                            item_asc = True
+                            if isinstance(input_ascending, list) and len(final_by) < len(input_ascending):
+                                item_asc = input_ascending[len(final_by)]
+                            elif isinstance(input_ascending, bool):
+                                item_asc = input_ascending
+
+                            col_name = p
+                            lower_p = p.lower()
+                            if lower_p.endswith(" asc"):
+                                item_asc = True
+                                col_name = p[:-4].strip()
+                            elif lower_p.endswith(" desc"):
+                                item_asc = False
+                                col_name = p[:-5].strip()
+                            
+                            final_by.append(col_name)
+                            final_ascs.append(item_asc)
+
+                    by = final_by
+                    # If we found explicit directions or have a list, use the list for ascending
+                    if len(final_ascs) > 1 or (len(final_ascs) == 1 and "desc" in str(raw_by).lower()):
+                         safe_params["ascending"] = final_ascs
 
                     logger.debug(
                         "[ApplyDataQuery] Preparing in-place sort_values on columns %s with params %s",
@@ -943,6 +982,9 @@ class DataService:
                             df_cols_map[normalize_name(c)] = c
 
                     for col in by:
+                        # Strip backticks if present (from agent or UI)
+                        col = col.replace('`', '').strip()
+                        
                         if col in df.columns or col in df.index.names:
                             corrected_by.append(col)
                         else:
