@@ -457,10 +457,15 @@ class DataService:
 
                     # Attempt to load raw image from dataset if available
                     if dataset:
-                        index = dataset.get_index_from_sample_id(sample_id)
-                        raw_img = load_raw_image(dataset, index)
-                        raw_img_array = np.array(raw_img)
-                        original_size = raw_img.size
+                        try:
+                            index = dataset.get_index_from_sample_id(sample_id)
+                        except (KeyError, ValueError, IndexError):
+                            index = None
+                        
+                        if index is not None:
+                            raw_img = load_raw_image(dataset, index)
+                            raw_img_array = np.array(raw_img)
+                            original_size = raw_img.size
 
                         # Handle resize request
                         # Negative values indicate percentage mode (e.g., -50 means 50% of original)
@@ -504,6 +509,12 @@ class DataService:
                 # Try loading label from dataset if available
                 if dataset:
                     label = load_label(dataset, sample_id)  # Load cls, seg, or det labels
+            
+            if label is None:
+                # If still None, it's a ghost record. Return a minimal response or skip.
+                logger.debug(f"Skipping ghost sample {sample_id} (not found in dataset)")
+                return None
+
             task_type = _infer_task_type_from_label(label, default='Segmentation')
 
             stats_to_retrieve = list(request.stats_to_retrieve)
@@ -1530,7 +1541,7 @@ class DataService:
             data_records = []
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
-            results = self._data_executor.map(self._process_sample_row, tasks, timeout=30)
+            results = self._data_executor.map(self._process_sample_row, tasks, timeout=120)
             data_records = [res for res in results if res is not None]
 
             logger.info("Retrieved %s data records", len(data_records))

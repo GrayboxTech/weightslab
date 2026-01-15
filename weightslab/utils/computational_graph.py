@@ -703,13 +703,32 @@ def generate_graph_dependencies_from_torchfx(
                             )
                         )
 
-            # --- 2. Update Tracking Map ---
             # Track all modules (learnable, structural, and non-learnable) so they can be
             # referenced as sources by subsequent nodes.
             # For non-learnable pass-through layers (ReLU, MaxPool, etc.), we track them
             # directly instead of passing through to an earlier source.
             if current_module is not None:
                 node_to_module[node] = make_safelist(current_module)
+                
+                # SEED NEURONS: Use FX metadata to seed neurons if possible
+                for mod in make_safelist(current_module):
+                    if 'tensor_meta' in node.meta:
+                        meta = node.meta['tensor_meta']
+                        if hasattr(meta, 'shape') and len(meta.shape) >= 2:
+                            out_ch = meta.shape[1]
+                            if out_ch is not None and out_ch > 0:
+                                mod.set_neurons('out_neurons', out_ch)
+                                if getattr(mod, 'wl_same_flag', False):
+                                    mod.set_neurons('in_neurons', out_ch)
+                    
+                    # Also check inputs to seed in_neurons
+                    for arg in node.args:
+                        if isinstance(arg, th.fx.Node) and 'tensor_meta' in arg.meta:
+                            meta_in = arg.meta['tensor_meta']
+                            if hasattr(meta_in, 'shape') and len(meta_in.shape) >= 2:
+                                in_ch = meta_in.shape[1]
+                                if in_ch is not None and in_ch > 0:
+                                    mod.set_neurons('in_neurons', in_ch)
 
         # --- Handle General Merge Operations (Any call_function with multiple
         # module inputs) ---
@@ -1173,6 +1192,17 @@ def generate_layer_dependencies_from_onnx(
             # Get current channel counts
             src_channels = get_channel_count(src_tensor)
             dst_channels = get_channel_count(dst_tensor) if dst_tensor else None
+
+            # SEED NEURONS: Use ONNX metadata to seed neurons if possible
+            if src_channels is not None and src_channels > 0:
+                src_mod.set_neurons('out_neurons', src_channels)
+                if getattr(src_mod, 'wl_same_flag', False):
+                    src_mod.set_neurons('in_neurons', src_channels)
+            
+            if dst_channels is not None and dst_channels > 0:
+                dst_mod.set_neurons('in_neurons', dst_channels)
+                if getattr(dst_mod, 'wl_same_flag', False):
+                    dst_mod.set_neurons('out_neurons', dst_channels)
 
             logger.debug(f"Analyzing dependency {src_name} -> {dst_name}")
             logger.debug(f"  Source channels: {src_channels}, Destination channels: {dst_channels}")

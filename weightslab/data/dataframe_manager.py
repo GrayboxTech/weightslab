@@ -87,10 +87,10 @@ class LedgeredDataFrameManager:
                     loaded_df = loaded_df.reindex(columns=all_cols)
                     # Override existing rows
                     self._df.update(loaded_df)
-                    # Append any new rows present only in loaded_df
-                    missing_idx = loaded_df.index.difference(self._df.index)
-                    if len(missing_idx) > 0:
-                        self._df = pd.concat([self._df, loaded_df.loc[missing_idx]])
+                    # Note: We NO LONGER concat missing_idx here. 
+                    # If a sample_id is in H5 but not in our current self._df (which was just seeded 
+                    # with the current dataset's IDs), it means it's a stale/ghost record.
+                    # We skip it to keep the session clean.
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
