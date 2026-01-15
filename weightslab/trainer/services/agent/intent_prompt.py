@@ -209,4 +209,10 @@ Final Checklist:
 3. If it's DATA_ANALYSIS, am I using analysis_expression to return a value/list?
 
 User Request: {instruction}
+
+IMPORTANT: You MUST respond with ONLY valid JSON matching the Intent schema. Do not include any explanatory text before or after the JSON.
+The JSON must have these fields:
+- "reasoning": string explaining your logic
+- "primary_goal": either "ui_manipulation" or "data_analysis"
+- "steps": array of operation objects with "kind" and relevant parameters
 """

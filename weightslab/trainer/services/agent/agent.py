@@ -3,7 +3,6 @@ import logging
 import difflib
 import re
 import pandas as pd
-import httpx
 from typing import Optional, List, Union, Literal
 from dotenv import load_dotenv
 from pathlib import Path
@@ -102,32 +101,62 @@ class DataManipulationAgent:
         }
 
     def _load_config(self):
-        """Loads agent configuration from environment and YAML hyperparameters."""
-        # 1. Defaults from ENV
-        self.preferred_provider = os.environ.get("AGENT_PROVIDER", "google").lower()
-        self.google_model = os.environ.get("AGENT_MODEL_GOOGLE", "gemini-1.5-flash-latest")
-        self.openai_model = os.environ.get("AGENT_MODEL_OPENAI", "gpt-4o-mini")
-        self.openrouter_model = os.environ.get("AGENT_MODEL_OPENROUTER", "mistralai/mistral-7b-instruct:free")
+        """Loads agent configuration:
+        1. Defaults (Hardcoded)
+        2. Environment Variables (.env strictly for API Keys)
+        3. Repository Config File (agent_config.yaml strictly for Behavior)
+        """
+        # --- Level 1: Hardcoded Defaults ---
+        self.preferred_provider = "ollama"
+        self.google_model = "gemini-1.5-flash-latest"
+        self.openai_model = "gpt-4o-mini"
+        self.openrouter_model = "mistralai/mistral-7b-instruct:free"
         self.fallback_to_local = True
+        self.ollama_host = "localhost"
+        self.ollama_port = "11435"
+        self.ollama_model = "qwen2.5:3b-instruct"
 
-        # 2. Override with Experiment YAML Config
-        try:
-            hp = self._get_hyperparams()
-            if hp and "agent" in hp:
-                cfg = hp["agent"]
-                self.preferred_provider = cfg.get("provider", self.preferred_provider).lower()
+        # --- Base Path Selection ---
+        repo_root = Path(__file__).resolve().parents[4]
+        inner_pkg = Path(__file__).resolve().parents[3]
 
-                # Update model ID for the active provider
-                model_id = cfg.get("model")
-                if model_id:
-                    attr_map = {"google": "google_model", "openai": "openai_model", "openrouter": "openrouter_model"}
-                    if self.preferred_provider in attr_map:
-                        setattr(self, attr_map[self.preferred_provider], model_id)
+        # --- Level 2: Environment Variables (API Keys ONLY) ---
+        env_paths = [repo_root / ".env", inner_pkg / ".env"]
+        for ep in env_paths:
+            if ep.exists():
+                load_dotenv(dotenv_path=ep)
+                _LOGGER.info(f"Loaded credentials from {ep}")
+                break
 
-                self.fallback_to_local = bool(cfg.get("fallback_to_local", self.fallback_to_local))
-                _LOGGER.info(f"Agent config loaded from YAML: provider={self.preferred_provider}, model={model_id}")
-        except Exception as e:
-            _LOGGER.warning(f"Could not load agent config from hyperparams: {e}")
+        # --- Level 3: Repository Configuration File (agent_config.yaml ONLY) ---
+        # This is the EXCLUSIVE source for Provider and Model selection.
+        # It cannot be overridden by .env or experiment YAML.
+        config_paths = [
+            repo_root / "agent_config.yaml",
+            inner_pkg / "agent_config.yaml",
+            Path.cwd() / "agent_config.yaml"
+        ]
+        
+        for path in config_paths:
+            if path.exists():
+                try:
+                    import yaml
+                    with open(path, 'r') as f:
+                        cfg = yaml.safe_load(f)
+                        if cfg and "agent" in cfg:
+                            a_cfg = cfg["agent"]
+                            self.preferred_provider = a_cfg.get("provider", self.preferred_provider).lower()
+                            self.google_model = a_cfg.get("google_model", self.google_model)
+                            self.openai_model = a_cfg.get("openai_model", self.openai_model)
+                            self.openrouter_model = a_cfg.get("openrouter_model", self.openrouter_model)
+                            self.fallback_to_local = a_cfg.get("fallback_to_local", self.fallback_to_local)
+                            self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
+                            self.ollama_port = a_cfg.get("ollama_port", self.ollama_port)
+                            self.ollama_model = a_cfg.get("ollama_model", self.ollama_model)
+                            _LOGGER.info(f"Applied agent configuration from {path}")
+                            break
+                except Exception as e:
+                    _LOGGER.warning(f"Error loading config from {path}: {e}")
 
     def _get_hyperparams(self) -> Optional[dict]:
         """Robustly extracts hyperparameters from context."""
@@ -183,9 +212,8 @@ class DataManipulationAgent:
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if api_key:
             try:
-                # Use custom http client to enforce timeout
-                http_client = httpx.Client(timeout=15.0)
-
+                # Don't use custom http_client - it can cause hanging issues
+                # LangChain will handle connection pooling properly
                 llm = ChatOpenAI(
                     model=self.openrouter_model,
                     temperature=0,
@@ -193,23 +221,26 @@ class DataManipulationAgent:
                     base_url="https://openrouter.ai/api/v1",
                     streaming=False,
                     max_retries=1,
-                    http_client=http_client
+                    request_timeout=15.0,  # Use request_timeout instead of http_client timeout
                 )
-                self.chain_openrouter = llm.with_structured_output(Intent)
-                _LOGGER.info(f"OpenRouter active ({self.openrouter_model})")
-            except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
+                # DON'T use structured output for OpenRouter - it causes hanging
+                # We'll parse JSON manually in _query_langchain
+                self.chain_openrouter = llm
+                _LOGGER.info(f"OpenRouter active with manual JSON parsing ({self.openrouter_model})")
+            except Exception as e: 
+                _LOGGER.error(f"OpenRouter error: {e}")
 
         # 4. Ollama (Local)
         try:
-            # Get env. vars for Ollama connection
-            host = os.environ.get('OLLAMA_HOST', 'localhost').split(':')[0]
-            port = os.environ.get('OLLAMA_PORT', '11435')
-            model_ollama = os.environ.get('OLLAMA_MODEL', 'qwen2.5:3b-instruct')
+            # Init the Ollama client using loaded config
+            host = self.ollama_host.split(':')[0]
+            port = self.ollama_port
+            model_ollama = self.ollama_model
 
-            # Init the Ollama client
             llm = ChatOllama(base_url=f"http://{host}:{port}", model=model_ollama, temperature=0, timeout=15)
-            self.chain_ollama = llm.with_structured_output(Intent)
-            _LOGGER.info(f"Ollama active ({model_ollama})")
+            # Use manual JSON parsing like OpenRouter for consistency
+            self.chain_ollama = llm
+            _LOGGER.info(f"Ollama active with manual JSON parsing ({model_ollama})")
         except Exception as e: _LOGGER.error(f"Ollama error: {e}")
 
     def is_ollama_available(self) -> bool:
@@ -217,6 +248,7 @@ class DataManipulationAgent:
 
     def query(self, instruction: str) -> dict:
         """Main entry point for natural language instructions."""
+        _LOGGER.info(f"[Agent] Query started: '{instruction}'")
         self._setup_schema() # Refresh schema information
 
         cols_desc = ", ".join(self.df_schema['columns'])
@@ -227,6 +259,8 @@ class DataManipulationAgent:
             columns=cols_desc,
             instruction="{instruction}"
         )
+        
+        _LOGGER.info(f"[Agent] System prompt size: {len(system_prompt)} chars, Columns: {len(self.df_schema['columns'])}")
 
         # Build attempt order: Preferred -> Local Fallback (no cloud fallbacks)
         order = [self.preferred_provider]
@@ -235,19 +269,26 @@ class DataManipulationAgent:
         if self.fallback_to_local and self.preferred_provider != "ollama":
             order.append("ollama")
 
+        _LOGGER.info(f"[Agent] Provider order: {order}")
+
         for provider in order:
             try:
+                _LOGGER.info(f"[Agent] Trying provider: {provider}")
                 result = self._try_query_provider(provider, instruction, system_prompt)
                 if result is not None:
+                    _LOGGER.info(f"[Agent] ✓ Provider {provider} succeeded with {len(result)} operations")
                     # 'result' is now a List[dict] of operations.
                     # The wrapping logic (for analysis) currently happens in data_service after execution,
                     # or needs to be refactored to happen here if we were executing here.
                     # For now, just return the plan.
                     return result
+                else:
+                    _LOGGER.warning(f"[Agent] ✗ Provider {provider} returned None (likely parsing failure)")
             except Exception as e:
-                _LOGGER.warning(f"Provider {provider} failed critically: {e}")
+                _LOGGER.warning(f"[Agent] ✗ Provider {provider} failed critically: {e}")
                 continue
 
+        _LOGGER.error(f"[Agent] All providers failed for query: '{instruction}' - returning empty list")
         return []
 
     def _wrap_analysis_response(self, provider: str, original_question: str, raw_answer: str) -> str:
@@ -304,23 +345,91 @@ class DataManipulationAgent:
     def _query_langchain(self, name: str, chain, instruction: str, system_prompt: str) -> Optional[dict]:
         """Executes query using a LangChain chain (OpenAI, OpenRouter, Ollama)."""
         try:
-            _LOGGER.info(f"Calling {name.title()}")
+            _LOGGER.info(f"[{name}] Starting LangChain query")
             # Escape braces for LangChain f-string parser
             escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}").replace("{{instruction}}", "{instruction}")
             prompt = ChatPromptTemplate.from_messages([("system", escaped_sys), ("human", "{instruction}")])
 
-            _LOGGER.info(f"[{name}] Invoking chain...")
+            _LOGGER.info(f"[{name}] Invoking chain with instruction: '{instruction[:100]}...'")
             try:
                 # Direct invoke with timeout handled by underlying client
+                _LOGGER.debug(f"[{name}] About to call chain.invoke()...")
                 intent = (prompt | chain).invoke({"instruction": instruction})
+                _LOGGER.info(f"[{name}] ✓ Chain.invoke() returned successfully")
+                _LOGGER.info(f"[{name}] Chain invocation successful, parsing response...")
+                _LOGGER.debug(f"[{name}] Raw intent object type: {type(intent)}")
+                _LOGGER.debug(f"[{name}] Raw intent object: {intent}")
             except Exception as invoke_err:
                  _LOGGER.error(f"[{name}] Invoke failed/timed out: {invoke_err}")
                  raise invoke_err
 
-            _LOGGER.info(f"{name.title()} returned: {intent}")
-            return self._intent_to_pandas_op(intent)
+
+            # Check if we got a proper Intent object or just a string/dict/AIMessage
+            if not isinstance(intent, Intent):
+                _LOGGER.info(f"[{name}] Response is not an Intent object (type: {type(intent).__name__}), attempting to parse...")
+                
+                # Try to extract JSON from the response
+                import json
+                
+                response_text = ""
+                
+                # Handle different response types
+                if hasattr(intent, 'content'):
+                    # AIMessage object from plain LLM
+                    response_text = intent.content
+                    _LOGGER.debug(f"[{name}] Extracted content from AIMessage")
+                elif isinstance(intent, str):
+                    response_text = intent
+                elif isinstance(intent, dict):
+                    # Already a dict, try to use it directly
+                    try:
+                        intent = Intent(**intent)
+                        _LOGGER.info(f"[{name}] Successfully created Intent from dict response")
+                        # Skip to the conversion step
+                        operations = self._intent_to_pandas_op(intent)
+                        _LOGGER.info(f"[{name}] Converted to {len(operations)} pandas operations")
+                        return operations
+                    except Exception as dict_err:
+                        _LOGGER.warning(f"[{name}] Failed to create Intent from dict: {dict_err}")
+                        response_text = str(intent)
+                else:
+                    response_text = str(intent)
+                
+                _LOGGER.info(f"[{name}] Response text length: {len(response_text)} chars")
+                _LOGGER.debug(f"[{name}] Response text preview: {response_text[:500]}...")
+                
+                # Try to find JSON in the response (greedy match for nested objects)
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    try:
+                        json_str = json_match.group(0)
+                        _LOGGER.debug(f"[{name}] Extracted JSON string length: {len(json_str)} chars")
+                        parsed_dict = json.loads(json_str)
+                        _LOGGER.debug(f"[{name}] Parsed dict keys: {list(parsed_dict.keys())}")
+                        intent = Intent(**parsed_dict)
+                        _LOGGER.info(f"[{name}] ✓ Successfully parsed JSON from text response")
+                    except json.JSONDecodeError as json_err:
+                        _LOGGER.error(f"[{name}] JSON decode error: {json_err}")
+                        _LOGGER.debug(f"[{name}] Failed JSON string: {json_str[:200]}...")
+                        return None
+                    except Exception as parse_err:
+                        _LOGGER.error(f"[{name}] Failed to create Intent from parsed JSON: {parse_err}")
+                        _LOGGER.debug(f"[{name}] Parsed dict: {parsed_dict}")
+                        return None
+                else:
+                    _LOGGER.error(f"[{name}] No JSON found in response")
+                    _LOGGER.debug(f"[{name}] Full response text: {response_text}")
+                    return None
+
+
+            _LOGGER.info(f"[{name}] Returned intent: {intent}")
+            
+            # Convert to pandas operations
+            operations = self._intent_to_pandas_op(intent)
+            _LOGGER.info(f"[{name}] Converted to {len(operations)} pandas operations")
+            return operations
         except Exception as e:
-            _LOGGER.warning(f"{name.title()} failed: {e}")
+            _LOGGER.warning(f"[{name}] Failed with exception: {e}", exc_info=True)
             return None
 
     def _build_column_index(self):
