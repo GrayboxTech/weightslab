@@ -1632,6 +1632,9 @@ class DataService:
             except Exception as e:
                 logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
 
+            # Prevent _slowUpdateInternals from overwriting our in-memory edits with stale data
+            # from the disk/db for a few seconds.
+            self._last_internals_update_time = time.time()
 
         return pb2.DataEditsResponse(
             success=True,
