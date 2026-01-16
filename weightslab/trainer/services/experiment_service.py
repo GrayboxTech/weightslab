@@ -38,14 +38,13 @@ class ExperimentService:
 
         self._ctx.ensure_components()
         components = self._ctx.components
+        signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
 
         while True:
             try:
-                signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
-
                 if signal_logger == None:
                     # No signal logger available, wait briefly and continue
-                    time.sleep(0.1)
+                    time.sleep(0.01)
                     continue
 
                 # Use timeout to avoid blocking indefinitely

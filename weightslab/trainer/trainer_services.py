@@ -37,7 +37,18 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # -------------------------------------------------------------------------
     def StreamStatus(self, request_iterator, context):
         logger.debug(f"ExperimentServiceServicer.StreamStatus({request_iterator})")
+
+        # Get context components to fetch signal logger
+        self._ctx.ensure_components()
+        components = self._ctx.components
+        is_model_interfaced = components.get("model") is not None
+
         # delegate to domain ExperimentService
+        if not is_model_interfaced:
+            logger.warning("No signal_logger found in context components for StreamStatus")
+            return None
+
+        # stream status updates to client
         for status in self._exp_service.stream_status(request_iterator):
             yield status
 
