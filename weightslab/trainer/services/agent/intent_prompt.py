@@ -13,6 +13,9 @@ MODE SELECTION HEURISTIC:
 ALLOWED OPERATIONS (inside 'steps'):
 - "kind": "keep" | "drop" | "sort" | "head" | "tail" | "reset" | "analysis" | "noop"
 - "conditions": List of {{column, op, value}} (for keep/drop)
+  - Available operators: "==", "!=", ">", "<", ">=", "<=", "between", "contains", "in"
+  - Use "in" for checking if a value exists in list-like columns (e.g., tags)
+  - Use "contains" for substring matching in string columns
 - "sort_by": List of columns (for sort)
 - "ascending": Boolean (for sort)
 - "n": Integer (for head/tail)
@@ -92,7 +95,7 @@ EXAMPLES (Manipulation / Grid View):
 
 - "Keep samples with tag 'sky'"
   (Goal: Tag Filter) -> steps=[
-      {{kind="keep", conditions=[{{"column": "tags", "op": "contains", "value": "sky"}}]}}
+      {{kind="keep", conditions=[{{"column": "tags", "op": "in", "value": "sky"}}]}}
   ]
 
 EXAMPLES (Analysis / Questions):
