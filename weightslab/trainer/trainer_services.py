@@ -66,18 +66,23 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # Data service helpers + RPCs (for weights_studio UI)
     # -------------------------------------------------------------------------
     def ApplyDataQuery(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.ApplyDataQuery({request})")
         return self._exp_service.data_service.ApplyDataQuery(request, context)
 
     def GetDataSamples(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.GetDataSamples({request})")
         return self._exp_service.data_service.GetDataSamples(request, context)
 
     def EditDataSample(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.EditDataSample({request})")
         return self._exp_service.data_service.EditDataSample(request, context)
 
     def GetDataSplits(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.GetDataSplits({request})")
         return self._exp_service.data_service.GetDataSplits(request, context)
 
     def CheckAgentHealth(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.CheckAgentHealth({request})")
         return self._exp_service.data_service.CheckAgentHealth(request, context)
 
     # -------------------------------------------------------------------------

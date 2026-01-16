@@ -2,11 +2,13 @@ import io
 from typing import List
 import time
 import json
+from matplotlib.pyplot import step
 import torch
 import logging
 import os
 import traceback
 import threading
+from hashlib import md5
 
 import numpy as np
 import pandas as pd
@@ -20,10 +22,9 @@ from datetime import datetime
 from concurrent import futures
 
 from weightslab.data.sample_stats import SampleStatsEx
-from weightslab.data.array_proxy import ArrayH5Proxy
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
-from weightslab.trainer.services.service_utils import load_raw_image, load_label, get_mask
+from weightslab.trainer.services.service_utils import load_raw_image, load_label
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe
 
@@ -32,169 +33,28 @@ from weightslab.backend.ledgers import get_dataloaders, get_dataframe
 logger = logging.getLogger(__name__)
 
 
-def _get_stat_from_row(row, stat_name):
-    """Extract stat from dataframe row and convert to DataStat message."""
-    value = row.get(stat_name)
-
-    # Check if it's a stored array proxy
-    if not isinstance(value, (list, np.ndarray, torch.Tensor)) and (value is None or pd.isna(value)):
-        return None
-
-    # Helper for creating DataStat messages
-    def make_stat(type_, shape, **kwargs):
-        name = kwargs.pop("name", stat_name)
-        return pb2.DataStat(name=name, type=type_, shape=shape, **kwargs)
-
-    # 0) Specific case: string from signals
-    if stat_name == "prediction_signals_values" and (isinstance(value, dict) or isinstance(value, str)):
-        if isinstance(value, dict):
-            value_string = str(value)
-        else:
-            value_string = value
-
-        # Replace to json like standard format, i.e., '""'
-        value = json.loads(value_string.replace('\'', '@').replace('\"', '\'').replace('@', '\"'))
-        data_list = []
-        for k, v in value.items():
-            data_list.append(
-                make_stat("scalar", [], value=[float(v)], name=str(k))
-            )
-        return data_list
-
-    # 1) Fast-path: None
-    if value is None:
-        return None
-
-    # Detect array-like first
-    is_array_like = isinstance(value, (np.ndarray, list, tuple)) or isinstance(value, torch.Tensor)
-
-    # 2) NaN handling ONLY for non-array-like values
-    if not is_array_like:
-        try:
-            if pd.isna(value):
-                return None
-        except TypeError:
-            # Some objects don't like pd.isna, just ignore
-            pass
-
-    # 3) torch.Tensor -> numpy
-    if isinstance(value, torch.Tensor):
-        try:
-            value = value.detach().cpu().numpy()
-        except Exception:
-            return None
-
-    # 4) numpy arrays -> array stat
-    if isinstance(value, np.ndarray):
-        # 0-dim array -> scalar
-        if value.ndim == 0:
-            v = float(value.item())
-            return make_stat("scalar", [], value=[v])
-
-        a = value
-        # NOTE: if you ever need to cap size, you could do it here:
-        # if a.size > MAX_ALLOWED:
-        #     a = a.reshape(-1)[:MAX_ALLOWED]
-        return make_stat(
-            "array",
-            list(a.shape),
-            value=a.ravel().astype(float).tolist(),
-        )
-
-    # 5) list/tuple -> treat as 1D array
-    if isinstance(value, (list, tuple)):
-        a = np.asarray(value)
-        if a.ndim == 0:
-            v = float(a.item())
-            return make_stat("scalar", [], value=[v])
-        return make_stat(
-            "array",
-            list(a.shape),
-            value=a.ravel().astype(float).tolist(),
-        )
-
-    # 6) scalars
-    if isinstance(value, (int, float, bool, np.integer, np.floating, np.bool_)):
-        return make_stat("scalar", [], value=[float(value)])
-
-    # 7) strings
-    if isinstance(value, str):
-        return make_stat("string", [1], value_string=value)
-
-    # 8) Fallback: stringify
-    return make_stat("string", [1], value_string=str(value)[:512])
-
-def _infer_task_type_from_label(label, default="classification"):
-    """
-    Heuristic: guess task type based on label shape / dtype.
-
-    - 0D or size==1 → classification-like
-    - 2D integer mask → segmentation-like
-    - 3D 1-channel integer tensor → segmentation-like
-    - otherwise → fall back to default
-    """
-    try:
-        arr = label.cpu().numpy() if hasattr(label, "cpu") else np.asarray(label)
-    except Exception:
-        return default
-
-    # Scalar / single element → treat as classification
-    if arr.ndim == 0 or arr.size == 1:
-        return "classification"
-
-    # 2D integer-ish → very likely segmentation mask or detection
-    if arr.shape[0] < 28 or arr.shape[1] < 28:
-        return 'segmentation'  # 'detection' interpreted as segmentation
-    if arr.ndim == 2 and np.issubdtype(arr.dtype, np.integer):
-        return "segmentation"
-
-    # 3D with a single channel can also be a mask (1, H, W) or (H, W, 1)
-    if arr.ndim == 3:
-        if arr.shape[0] == 1 or arr.shape[-1] == 1:
-            if np.issubdtype(arr.dtype, np.integer):
-                return "segmentation"
-
-    # Anything else: keep the caller's default guess
-    return default
-
-
-def generate_thumbnail(pil_image, max_size=(128, 128), quality=85):
-    """Generate a JPEG thumbnail from a PIL image.
+def create_data_stat(name, stat_type, shape=None, value=None, value_string="", thumbnail=b""):
+    """Helper to create DataStat with all fields properly initialized.
 
     Args:
-        pil_image: PIL Image object
-        max_size: Max dimensions (width, height) for thumbnail
-        quality: JPEG quality (1-95)
+        name: Stat name
+        stat_type: Type string (scalar, array, string, etc)
+        shape: List of shape dimensions
+        value: List of float values
+        value_string: String value
+        thumbnail: Bytes object for thumbnail (default empty bytes)
 
     Returns:
-        bytes: JPEG thumbnail as bytes
+        pb2.DataStat: Properly initialized DataStat
     """
-    try:
-        # Create a copy to avoid modifying original
-        thumb = pil_image.copy()
-
-        # Use LANCZOS for high-quality downsampling
-        thumb.thumbnail(max_size, Image.Resampling.LANCZOS)
-
-        # Convert to RGB if needed (JPEG doesn't support RGBA)
-        if thumb.mode in ('RGBA', 'LA', 'P'):
-            # Create white background
-            background = Image.new('RGB', thumb.size, (255, 255, 255))
-            if thumb.mode == 'P':
-                thumb = thumb.convert('RGBA')
-            if thumb.mode in ('RGBA', 'LA'):
-                background.paste(thumb, mask=thumb.split()[-1])  # Use alpha channel as mask
-                thumb = background
-        elif thumb.mode != 'RGB':
-            thumb = thumb.convert('RGB')
-
-        # Save as JPEG to buffer
-        buffer = io.BytesIO()
-        thumb.save(buffer, format='JPEG', quality=quality, optimize=True)
-        return buffer.getvalue()
-    except Exception as e:
-        logger.warning(f"Failed to generate thumbnail: {e}")
-        return b""
+    return pb2.DataStat(
+        name=name,
+        type=stat_type,
+        shape=shape or [],
+        value=value or [],
+        value_string=value_string,
+        thumbnail=thumbnail
+    )
 
 
 class DataService:
@@ -221,21 +81,34 @@ class DataService:
         self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
 
-        self._last_internals_update_time = None
+        self._last_internals_update_time = 0.0
+
+        # Request deduplication for concurrent GetDataSamples requests
+        self._pending_requests = {}  # Maps request hash to Future
+        self._request_lock = threading.Lock()
 
         # Shared thread pool for data processing (avoid thread explosion)
         # Size: min(CPU cores * 2, 16) to balance concurrency without excessive threading
-        cpu_count = os.cpu_count() or 4
-        max_data_workers = min(cpu_count * 2, 16)
         self._data_executor = futures.ThreadPoolExecutor(
-            max_workers=max_data_workers,
-            thread_name_prefix="WL-DataProcessing"
+            thread_name_prefix="WL-DataProcessing",
+            max_workers=2
         )
 
-        logger.info("DataService initialized.", extra={
-            "data_workers": max_data_workers,
-            "cpu_count": cpu_count
-        })
+        logger.info("DataService initialized.")
+
+    def _get_request_hash(self, request) -> str:
+        """Create a unique hash for a GetDataSamples request to detect duplicates."""
+        key_parts = [
+            str(request.start_index),
+            str(request.records_cnt),
+            str(request.include_transformed_data),
+            str(request.include_raw_data),
+            str(sorted(request.stats_to_retrieve)) if hasattr(request, 'stats_to_retrieve') else 'all',
+            str(request.resizeWidth) if hasattr(request, 'resizeWidth') else '0',
+            str(request.resizeHeight) if hasattr(request, 'resizeHeight') else '0',
+        ]
+        key = "|".join(key_parts)
+        return md5(key.encode()).hexdigest()
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -296,14 +169,6 @@ class DataService:
             pass
         return data_dir / "data_with_ops.h5"
 
-    def get_root_log_dir(self) -> str:
-        """Get the root log directory as a string.
-
-        Returns:
-            Absolute path to root_log_dir
-        """
-        return str(self._root_log_dir.absolute())
-
     def is_agent_available(self) -> bool:
         """
         Check if the agent (Ollama) is available for natural language queries.
@@ -345,16 +210,12 @@ class DataService:
             """
             try:
                 # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
-                df = self._df_manager.get_combined_df(autoload_arrays=False, return_proxies=True, use_cache=True) if self._df_manager is not None else pd.DataFrame()
+                df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
                 if df.empty:
                     return df
 
-                # Ensure MultiIndex for stable slicing and agent operations
-                if "origin" in df.columns and not isinstance(df.index, pd.MultiIndex):
-                    try:
-                        df = df.reset_index().set_index(["origin", "sample_id"])
-                    except Exception as e:
-                        logger.warning(f"Failed to set index on streamed dataframe: {e}")
+                # Ensure sample_id is in index for consistency
+                df = df.reset_index().set_index(["sample_id"])
 
                 return df
             except Exception:
@@ -412,286 +273,252 @@ class DataService:
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
         row, request, df_columns = args
-
+        start_total = time.time()
         try:
             origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
             sample_id = int(row.get(SampleStatsEx.SAMPLE_ID.value, 0))
 
-            num_classes = None
-            data_stats = []
-            raw_data_bytes, transformed_data_bytes = b"", b""
-            raw_shape, transformed_shape = [], []
+            # ===== Step 0: Initialize Variables======
+            raw_shape, data_stats = [], []
+            raw_data_bytes = b""
 
-            if request.include_raw_data:
-                try:
-                    # Get Dataset
-                    dataset = self._get_dataset(origin)
-
-                    # Attempt to load raw image from dataset if available
-                    if dataset:
-                        index = dataset.get_index_from_sample_id(sample_id)
-                        raw_img = load_raw_image(dataset, index)
-                        raw_img_array = np.array(raw_img)
-                        original_size = raw_img.size
-
-                        # Handle resize request
-                        # Negative values indicate percentage mode (e.g., -50 means 50% of original)
-                        # Positive values indicate absolute pixel dimensions
-                        # Zero means no resize
-                        if request.resize_width < 0 and request.resize_height < 0:
-                            percent = abs(request.resize_width) / 100.0
-                            target_width = int(original_size[0] * percent)
-                            target_height = int(original_size[1] * percent)
-
-                            # Only resize if we're actually reducing size
-                            if target_width < original_size[0] or target_height < original_size[1]:
-                                raw_img = Image.fromarray(raw_img_array).resize((target_width, target_height))
-
-                        elif request.resize_width > 0 and request.resize_height > 0:
-                            if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
-                                raw_img = Image.fromarray(raw_img_array).resize((request.resize_width, request.resize_height))
-
-                        else:
-                            raw_img = Image.fromarray(raw_img_array)
-
-                        raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
-                        raw_buf = io.BytesIO()
-                        raw_img.save(raw_buf, format='JPEG')
-                        raw_data_bytes = raw_buf.getvalue()
-
-                except Exception as e:
-                    logger.debug(f"Could not load raw image for sample {sample_id}: {e}")
-                    raw_data_bytes = transformed_data_bytes
-                    raw_shape = transformed_shape
-
-            # Get dataset
+            # ====== Step 1: Load dataset ======
             dataset = self._get_dataset(origin)
-            dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset else None
 
-            # Determine task type early so we can conditionally send stats
-            # And get label from the dataset
+            # ====== Step 3: Get dataset and label ======
+            dataset = self._get_dataset(origin)
+
+            # ====== Step 4: Determine task type ======
             label = row.get(SampleStatsEx.TARGET.value)
-            if label is None:
-                # Try loading label from dataset if available
-                if dataset:
-                    label = load_label(dataset, sample_id)  # Load cls, seg, or det labels
-            task_type = _infer_task_type_from_label(label, default='Segmentation')
+            if label is None and dataset:
+                label = load_label(dataset, sample_id)
 
+            # Scalar / single element -> treat as classification
+            label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
+            label_size = label.size if hasattr(label, 'size') else (1 if label_ndim == 0 else None)
+
+            # Enccode task type based on label shape heuristics
+            # TODO (GP): more robust task type inference
+            task_type = 'segmentation'  # _infer_task_type_from_label(label, default='Segmentation')
+            if label_ndim == 0 or label_size == 1:
+                task_type = "classification"
+            elif label_ndim >= 2:
+                # Cache shape to avoid multiple H5 accesses
+                shape = label.shape
+                if shape[-2] > 28 or shape[-1] > 28:
+                    task_type = 'segmentation'
+                else:
+                    task_type = "unknown"
+
+            # ====== Step 5a: Process stats ======
             stats_to_retrieve = list(request.stats_to_retrieve)
             if not stats_to_retrieve:
-                stats_to_retrieve = [
-                    col for col in df_columns if col not in [
-                        SampleStatsEx.SAMPLE_ID.value,
-                        SampleStatsEx.ORIGIN.value,
-                        SampleStatsEx.TARGET.value,
-                        SampleStatsEx.PREDICTION.value,
-                        SampleStatsEx.PREDICTION_RAW.value
-                    ]
-                ]
+                # Use set for O(1) lookup instead of O(n) list lookup
+                exclude_cols = {
+                    SampleStatsEx.SAMPLE_ID.value,
+                    SampleStatsEx.ORIGIN.value,
+                    SampleStatsEx.TARGET.value,
+                    SampleStatsEx.PREDICTION.value,
+                    SampleStatsEx.PREDICTION_RAW.value,
+                    SampleStatsEx.TASK_TYPE.value,
+                }
+                stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
 
+            # Optimized bulk processing of stats
             for stat_name in stats_to_retrieve:
-                # Get value
-                stat = _get_stat_from_row(row, stat_name)
-                if stat is None:
-                    continue
+                value = row.get(stat_name)
 
-                # Sanity check: wrap single stat into list
-                if not isinstance(stat, list):
-                    stat = [stat]
+                data_stats.append(
+                    create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
+                )
 
-                # Save every stats
-                if stat is not None:
-                    data_stats.extend(stat)
-
-            # ====================================
-            # Expose origin and task_type as stats
+            # ====== Step 6: Add origin and task_type stats ======
             data_stats.append(
-                pb2.DataStat(
-                    name="origin", type='string', shape=[1], value_string=origin
+                create_data_stat(
+                    "origin", 'string', shape=[1], value_string=origin, thumbnail=b""
                 )
             )
             data_stats.append(
-                pb2.DataStat(
-                    name="task_type", type='string', shape=[1], value_string=str(task_type)
+                create_data_stat(
+                    "task_type", 'string', shape=[1], value_string=str(task_type), thumbnail=b""
                 )
             )
 
-            # ====================================================================
-            # ========================== Labels ==================================
-            # Encode label safely depending on task_type  (GT mask / label)
+            # ====== Step 7: Process labels ======
             if task_type != "classification":
-                if label is None and row.get(SampleStatsEx.TARGET.value) is not None:
-                    label_arr = row.get(SampleStatsEx.TARGET.value)
+                if label is None:
+                    label_arr = np.asarray(row.get(SampleStatsEx.TARGET.value))
                 else:
                     label_arr = label
 
-                # Process label
-                if label_arr is not None and not isinstance(label_arr, (np.ndarray, ArrayH5Proxy)):
-                    try:
-                        label_arr = np.array(label_arr.detach().cpu() if hasattr(label_arr, 'detach') else label_arr)
-                    except Exception:
-                        label_arr = np.array(label_arr)
-
-                # If pred_arr appears to be bounding boxes, convert to mask
-                label_arr = get_mask(label_arr, dataset, dataset_index=dataset_index)
-
-                # Treat label as segmentation mask → array stat
+                # Treat label as segmentation mask -> array stat
                 data_stats.append(
-                    pb2.DataStat(
+                    create_data_stat(
                         name='label',
-                        type='array',
+                        stat_type='array',
                         shape=list(label_arr.shape),
                         value=label_arr.astype(float).ravel().tolist(),
+                        thumbnail=b""
                     )
                 )
 
-                try:
-                    # Prefer row attribute if available, fallback to dataset, then model
-                    num_classes = (
-                        row.get('num_classes')
-                        or (getattr(dataset, "num_classes", None) if dataset else None)
-                        or getattr(self._ctx.components.get("model"), "num_classes", None)
-                    )
-                    if num_classes is None:
-                        # Fallback: infer from this label
-                        if label_arr.size > 0:
-                            max_id = int(label_arr.max())
-                            num_classes = max(1, max_id + 1)
-                        else:
-                            num_classes = 1
+                # Prefer row attribute if available, fallback to dataset, then model
+                num_classes = (
+                    row.get('num_classes')
+                    or (getattr(dataset, "num_classes", None) if dataset else None)
+                    or getattr(self._ctx.components.get("model"), "num_classes", None)
+                )
+                if num_classes is None:
+                    # Fallback: infer from this label
+                    if label_arr.size > 0:
+                        max_id = int(label_arr.max())
+                        num_classes = max(1, max_id + 1)
+                    else:
+                        num_classes = 1
 
-                    data_stats.append(
-                        pb2.DataStat(
-                            name="num_classes",
-                            type="scalar",
-                            shape=[1],
-                            value=[float(num_classes)],
-                        )
+                data_stats.append(
+                    create_data_stat(
+                        name="num_classes",
+                        stat_type="scalar",
+                        shape=[1],
+                        value=[float(num_classes)],
+                        thumbnail=b""
                     )
-
-                except Exception as e:
-                    logger.warning(f"Could not infer num_classes for sample {sample_id}: {e}")
+                )
 
             else:
                 # Classification / other scalar-like labels
-                label_arr = np.array(label.cpu() if hasattr(label, 'cpu') else label)
-                if label_arr.size == 1:
-                    label_val = float(label_arr.reshape(-1)[0])
+                if label.size == 1:
+                    label = float(label.reshape(-1)[0])
                     data_stats.append(
-                        pb2.DataStat(
+                        create_data_stat(
                             name='label',
-                            type='scalar',
+                            stat_type='scalar',
                             shape=[1],
-                            value=[label_val],
+                            value=[label],
+                            thumbnail=b""
                         )
                     )
                 else:
                     # Fallback for non-scalar labels in non-segmentation tasks
                     data_stats.append(
-                        pb2.DataStat(
+                        create_data_stat(
                             name='label',
-                            type='array',
-                            shape=list(label_arr.shape),
-                            value=label_arr.astype(float).ravel().tolist(),
+                            stat_type='array',
+                            shape=list(label.shape),
+                            value=label.astype(float).ravel().tolist(),
+                            thumbnail=b""
                         )
                     )
 
-            # ====================================================================
-            # ======================== Segmentations =============================
-            # Predicted mask for segmentation (if available) from row or dataset
-            try:
-                pred = row.get(SampleStatsEx.PREDICTION.value)
-                if task_type != "classification":
-                    if pred is not None and not isinstance(pred, (np.ndarray, ArrayH5Proxy)):
-                        pred_arr = np.asarray(
-                            pred.cpu() if hasattr(pred, "cpu") else pred
+            # ====== Step 8: Process predictions ======
+            pred = row.get(SampleStatsEx.PREDICTION.value)
+            if task_type != "classification":
+                if pred is not None:
+                    pred_arr = np.asarray(pred)
+
+                    # Add predicted mask stat
+                    data_stats.append(
+                        create_data_stat(
+                            name='pred_mask',
+                            stat_type='array',
+                            shape=list(pred_arr.shape),
+                            value=pred_arr.astype(float).ravel().tolist(),
+                            thumbnail=b""
                         )
-
-                        # If pred_arr appears to be bounding boxes, convert to mask
-                        pred_arr = get_mask(pred_arr, dataset, dataset_index=dataset_index)
-
-                        # Add predicted mask stat
+                    )
+            else:
+                # Classification: get prediction from row or dataset
+                if pred is not None:
+                    if isinstance(pred, (int, float)):
+                        pred_val = pred
                         data_stats.append(
-                            pb2.DataStat(
-                                name='pred_mask',
-                                type='array',
-                                shape=list(pred_arr.shape),
-                                value=pred_arr.astype(float).ravel().tolist(),
+                            create_data_stat(
+                                name='pred',
+                                stat_type='scalar',
+                                shape=[1],
+                                value=[pred_val],
+                                thumbnail=b""
                             )
                         )
+
+                    elif isinstance(pred, np.ndarray) and pred.size == 1:
+                        pred_val = int(pred.reshape(-1)[0])
+                        data_stats.append(
+                            create_data_stat(
+                                name='pred',
+                                stat_type='scalar',
+                                shape=[1],
+                                value=[pred_val],
+                                thumbnail=b""
+                            )
+                        )
+                    else:
+                        # Fallback for non-scalar labels in non-segmentation tasks
+                        pred_ = np.array(pred)
+                        data_stats.append(
+                            create_data_stat(
+                                name='pred',
+                                stat_type='array',
+                                shape=list(pred_.shape),
+                                value=pred_.astype(float).ravel().tolist(),
+                                thumbnail=b""
+                            )
+                        )
+
+            # ====== Step 9: Generate raw data bytes and thumbnail ======
+            if request.include_raw_data:
+                raw_img = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
+                original_size = raw_img.size
+
+                # Handle resize request
+                target_width = original_size[0]
+                target_height = original_size[1]
+                aspect_ratio = original_size[0] / original_size[1]
+                if request.resize_width < 0 and request.resize_height < 0:
+                    percent = abs(request.resize_width) / 100.0
+                    target_width = int(original_size[0] * percent * aspect_ratio)
+                    target_height = int(original_size[1] * percent)
+
+                elif request.resize_width > 0 and request.resize_height > 0:
+                    if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
+                        target_width = int(request.resize_width * aspect_ratio)
+                        target_height = int(request.resize_height)
+
                 else:
-                    # Classification: get prediction from row or dataset
-                    if pred is not None:
-                        if isinstance(pred, (int, float)):
-                            pred_val = pred
-                            data_stats.append(
-                                pb2.DataStat(
-                                    name='pred',
-                                    type='scalar',
-                                    shape=[1],
-                                    value=[pred_val],
-                                )
-                            )
+                    # Default to 360p (height=360) maintaining aspect ratio if no resize requested
+                    if request.resize_width == 0 and request.resize_height == 0:
+                        target_height = 360
+                        target_width = int(target_height * aspect_ratio)
 
-                        elif isinstance(pred, np.ndarray) and pred.size == 1:
-                            pred_val = int(pred.reshape(-1)[0])
-                            data_stats.append(
-                                pb2.DataStat(
-                                    name='pred',
-                                    type='scalar',
-                                    shape=[1],
-                                    value=[pred_val],
-                                )
-                            )
-                        else:
-                            # Fallback for non-scalar labels in non-segmentation tasks
-                            pred_ = np.array(pred)
-                            data_stats.append(
-                                pb2.DataStat(
-                                    name='pred',
-                                    type='array',
-                                    shape=list(pred_.shape),
-                                    value=pred_.astype(float).ravel().tolist(),
-                                )
-                            )
+                # Resize image if needed
+                if target_width != original_size[0] or target_height != original_size[1]:
+                    raw_img = raw_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
-            except Exception as e:
-                logger.warning(
-                    f"Could not get prediction for sample {sample_id}: {e}"
-                )
-
-            # ====================================================================
-            # ========================== Processing ==============================
-            if raw_data_bytes:
-                # Generate thumbnail for grid display
-                try:
-                    raw_img_for_thumb = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
-                    thumbnail_bytes = generate_thumbnail(raw_img_for_thumb, max_size=(256, 256), quality=85)
-                except Exception as e:
-                    logger.debug(f"Could not generate thumbnail for sample {sample_id}: {e}")
-                    thumbnail_bytes = b""
+                # Generate raw data bytes
+                step_start = time.time()
+                raw_buf = io.BytesIO()
+                raw_img.save(raw_buf, format='JPEG')
+                raw_data_bytes = raw_buf.getvalue()
+                raw_shape = [target_height, target_width, len(raw_img.getbands())]
 
                 data_stats.append(
-                    pb2.DataStat(
+                    create_data_stat(
                         name='raw_data',
-                        type='bytes',
-                        shape=raw_shape,
+                        stat_type='bytes',
                         value=raw_data_bytes,
-                        thumbnail=thumbnail_bytes  # Add thumbnail
-                    )
-                )
-            if transformed_data_bytes:
-                data_stats.append(
-                    pb2.DataStat(
-                        name='transformed_data', type='bytes',
-                        shape=transformed_shape, value=transformed_data_bytes
+                        shape=raw_shape,
                     )
                 )
 
-            return pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
+            # ====== Step 10: Create DataRecord ======
+            record = pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
+
+            return record
 
         except Exception as e:
-            logger.error(f"Error processing row for sample_id {row.get(SampleStatsEx.SAMPLE_ID.value, -1)}: {e}", exc_info=True)
+            total_time = time.time() - start_total
+            logger.error(f"[Sample {row.get(SampleStatsEx.SAMPLE_ID.value, -1)}] X Error after {total_time:.3f}s: {e}", exc_info=True)
             return None
 
     def _get_unique_tags(self) -> List[str]:
@@ -753,7 +580,7 @@ class DataService:
 
         Returns a short human-readable message describing what was applied.
         """
-        # A) Agent-driven df.query → keep/filter rows via in-place drop
+        # A) Agent-driven df.query -> keep/filter rows via in-place drop
         if func == "df.query":
             expr = params.get("expr", "")
 
@@ -829,7 +656,7 @@ class DataService:
 
                         s = df[col]
 
-                        # 1) Categorical → cast to str to avoid "categories must be unique"
+                        # 1) Categorical -> cast to str to avoid "categories must be unique"
                         if is_categorical_dtype(s.dtype):
                             logger.debug(
                                 "[ApplyDataQuery] Column %r is categorical; casting to str before sorting",
@@ -838,7 +665,7 @@ class DataService:
                             df[col] = s.astype(str)
                             continue
 
-                        # 2) Object/string → try to interpret as numeric for better sorting
+                        # 2) Object/string -> try to interpret as numeric for better sorting
                         if is_object_dtype(s.dtype) and not is_numeric_dtype(s.dtype):
                             logger.debug(
                                 "[ApplyDataQuery] Column %r is object; attempting numeric conversion for sort",
@@ -1010,18 +837,9 @@ class DataService:
         )
         return "No operation applied"
 
-    def _hydrate_tags_for_slice(self, df_slice: pd.DataFrame) -> pd.DataFrame:
-        """Ensure tags column exists on the slice (values already streamed from H5)."""
-        if df_slice is None or df_slice.empty:
-            return df_slice
-
-        if SampleStatsEx.TAGS.value not in df_slice.columns:
-            df_slice[SampleStatsEx.TAGS.value] = ""
-        return df_slice
-
     def _slowUpdateInternals(self):
         current_time = time.time()
-        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 5:
+        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
 
         updated_df = self._pull_into_all_data_view_df()
@@ -1063,19 +881,84 @@ class DataService:
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
 
+    def _process_get_data_samples(self, request, context):
+        """
+        Actual implementation of GetDataSamples.
+        Process the request and retrieve data samples from the dataframe.
+        """
+        try:
+            start_time = time.time()
+            logger.debug(
+                "GetDataSamples processing: start_index=%s, records_cnt=%s, peer=%s, thread=%s, timestart=%s",
+                request.start_index,
+                request.records_cnt,
+                context.peer(),
+                threading.current_thread().name,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
+
+            # Validate request parameters
+            if request.start_index < 0 or request.records_cnt <= 0:
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message="Invalid start_index or records_cnt",
+                    data_records=[]
+                )
+
+            with self._lock:
+                self._slowUpdateInternals()
+                df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()  # Reset index for proper row access with sample_id column
+
+            if df_slice.empty:
+                logger.warning(f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}")
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message=f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}",
+                    data_records=[]
+                )
+
+            logger.debug(
+                "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)
+
+            # Build the data records list using shared executor
+            data_records = []
+            tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
+
+            logger.debug("Processing %s samples at %s", len(tasks), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            data_records = self._data_executor.map(self._process_sample_row, tasks, timeout=120)
+            data_records = list(data_records)
+            logger.debug("Completed processing at %s in %.2f seconds\n", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time)
+
+            return pb2.DataSamplesResponse(
+                success=True,
+                message=f"Retrieved {len(data_records)} data records",
+                data_records=data_records
+            )
+
+        except Exception as e:
+            logger.error("Failed to retrieve samples: %s", str(e), exc_info=True)
+            return pb2.DataSamplesResponse(
+                success=False,
+                message=f"Failed to retrieve samples: {str(e)}\n{traceback.format_exc()}",
+                data_records=[]
+            )
+
+    # RPC Implementations
+    # ===================
     def ApplyDataQuery(self, request, context):
         """
         Apply a query on the in-memory dataframe.
 
         Modes:
-          - request.query == ""  → just return counts, do not modify df
-          - request.query != ""  → always handled by the agent (natural language path)
+          - request.query == ""  -> just return counts, do not modify df
+          - request.query != ""  -> always handled by the agent (natural language path)
 
         Counts returned:
           - number_of_all_samples: all rows currently in the dataframe
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
+
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
             with self._lock:
@@ -1100,7 +983,7 @@ class DataService:
                     message="Natural language queries require agent (not available)",
                 )
 
-            # Agent translates query text → operations spec (List[dict])
+            # Agent translates query text -> operations spec (List[dict])
             # Executed outside the lock to keep grid responsive during LLM waiting time
             operations = self._agent.query(request.query)
             if isinstance(operations, dict): operations = [operations] # Backwards compat
@@ -1165,74 +1048,71 @@ class DataService:
     def GetDataSamples(self, request, context):
         """
         Retrieve samples from the dataframe with their data statistics.
-        Only allowed when training is paused.
+        Implements request deduplication to prevent duplicate concurrent requests.
         """
+
+        request_hash = self._get_request_hash(request)
+        is_first_request = False
+
+        # Check if this exact request is already being processed
+        with self._request_lock:
+            if request_hash in self._pending_requests:
+                logger.debug(f"Duplicate GetDataSamples request detected (hash={request_hash[:8]}...), waiting for existing request")
+                pending_future = self._pending_requests[request_hash]
+            else:
+                # Mark this request as being processed
+                pending_future = futures.Future()
+                self._pending_requests[request_hash] = pending_future
+                is_first_request = True
+
         try:
-            logger.info(
-                "GetSamples called with start_index=%s, records_cnt=%s",
-                request.start_index, request.records_cnt
-            )
+            # If this is not the first request with this hash, wait for the result
+            if not is_first_request:
+                result = pending_future.result(timeout=300)
+                logger.debug(f"Duplicate request returned cached result (hash={request_hash[:8]}...)")
+                return result
 
-            # Validate request parameters
-            if request.start_index < 0 or request.records_cnt <= 0:
-                return pb2.DataSamplesResponse(
-                    success=False,
-                    message="Invalid start_index or records_cnt",
-                    data_records=[]
-                )
+            # Otherwise, process the request normally
+            result = self._process_get_data_samples(request, context)
 
-            # Get the requested slice of the dataframe (optionally filtered by origin)
-            origin_filter = self._get_origin_filter(request)
+            # Store result for any duplicate requests waiting
+            with self._request_lock:
+                if request_hash in self._pending_requests:
+                    self._pending_requests[request_hash].set_result(result)
 
-            with self._lock:
-                self._slowUpdateInternals()
-                df_view = self._filter_df_by_origin(self._all_datasets_df, origin_filter)
-                end_index = request.start_index + request.records_cnt
-                df_slice = df_view.iloc[request.start_index:end_index].reset_index()
-
-            # Load tags only for the displayed slice (stream-friendly)
-            df_slice = self._hydrate_tags_for_slice(df_slice)
-
-            if df_slice.empty:
-                logger.warning(f"No samples found at index {request.start_index}:{end_index}")
-                return pb2.DataSamplesResponse(
-                    success=False,
-                    message=f"No samples found at index {request.start_index}:{end_index}",
-                    data_records=[]
-                )
-
-            logger.info(
-                "Retrieving samples from %s to %s", request.start_index, end_index)
-
-            # Build the data records list using shared executor
-            data_records = []
-            tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
-
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            logger.debug("Processing %s samples at %s", len(tasks), current_time)
-            results = self._data_executor.map(self._process_sample_row, tasks, timeout=30)
-            logger.debug("Completed processing samples at %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            data_records = [res for res in results if res is not None]
-
-            logger.info("Retrieved %s data records", len(data_records))
-            return pb2.DataSamplesResponse(
-                success=True,
-                message=f"Retrieved {len(data_records)} data records",
-                data_records=data_records
-            )
+            return result
 
         except Exception as e:
-            logger.error("Failed to retrieve samples: %s", str(e), exc_info=True)
-            return pb2.DataSamplesResponse(
+            logger.error("Error in GetDataSamples: %s", str(e), exc_info=True)
+            error_response = pb2.DataSamplesResponse(
                 success=False,
-                message=f"Failed to retrieve samples: {str(e)}\n{traceback.format_exc()}",
+                message=f"Failed to retrieve samples: {str(e)}",
                 data_records=[]
             )
+
+            with self._request_lock:
+                if request_hash in self._pending_requests and not self._pending_requests[request_hash].done():
+                    try:
+                        self._pending_requests[request_hash].set_exception(e)
+                    except Exception:
+                        pass
+
+            return error_response
+
+        finally:
+            # Clean up the pending request entry
+            with self._request_lock:
+                if request_hash in self._pending_requests:
+                    try:
+                        del self._pending_requests[request_hash]
+                    except KeyError:
+                        pass
 
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and deny_listed).
         """
+
         if self._all_datasets_df is None:
             self._initialize_data_service()
 
@@ -1349,6 +1229,7 @@ class DataService:
         Return the list of available dataset splits (train, test, val, etc.)
         Extracted from the global dataframe's origin column.
         """
+
         try:
             split_names = []
             with self._lock:
@@ -1379,6 +1260,7 @@ class DataService:
         Returns:
             AgentHealthResponse { available: bool, message: str }
         """
+
         try:
             available = self.is_agent_available()
             msg = "Agent is available" if available else "Agent is not available"

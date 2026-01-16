@@ -112,21 +112,21 @@ class Proxy:
         return target(*args, **kwargs)
 
     def __repr__(self):
-        with self._lock:
-            return f"Proxy({repr(self._obj)})"
+        # with self._lock:
+        return f"Proxy({repr(self._obj)})"
 
     def __eq__(self, other):
         """Enable equality comparison with the wrapped object.
 
         This allows `Proxy(None) == None` to return True.
         """
-        with self._lock:
-            return self._obj == other
+        # with self._lock:
+        return self._obj == other
 
     def __ne__(self, other):
         """Enable inequality comparison with the wrapped object."""
-        with self._lock:
-            return self._obj != other
+        # with self._lock:
+        return self._obj != other
 
     def __bool__(self):
         """Enable boolean evaluation of the proxy based on the wrapped object.
@@ -134,10 +134,10 @@ class Proxy:
         This allows `bool(Proxy(None))` to return False and
         `if not proxy:` to work correctly when proxy wraps None.
         """
-        with self._lock:
-            if self._obj is None:
-                return False
-            return bool(self._obj)
+        # with self._lock:
+        if self._obj is None:
+            return False
+        return bool(self._obj)
 
     def __next__(self):
         """Allow the Proxy itself to act as an iterator when `next(proxy)` is

@@ -116,6 +116,9 @@ class DataSampleTrackingWrapper(Dataset):
         stats_store: Optional[H5DataFrameStore] = None,
         enable_h5_persistence: bool = True,
         name: Optional[str] = 'unknown',
+        array_autoload_arrays: bool = False,
+        array_return_proxies: bool = True,
+        array_use_cache: bool = True,
         **_,
     ):
         # Set name
@@ -136,6 +139,11 @@ class DataSampleTrackingWrapper(Dataset):
         self._h5_pending_uids = set()  # Track UIDs with pending H5 saves
         self._stats_store = stats_store
         self._enable_h5_persistence = enable_h5_persistence
+
+        # Arrays autoloading configuration
+        self.array_autoload_arrays = array_autoload_arrays
+        self.array_return_proxies = array_return_proxies
+        self.array_use_cache = array_use_cache
 
         # Tag-based labeling configuration
         self._use_tags = use_tags
@@ -224,7 +232,14 @@ class DataSampleTrackingWrapper(Dataset):
             default_data.append(row)
 
         # Register this split with the global ledger manager (shared across loaders) and load existing data
-        ledger_manager.register_split(self._dataset_split, default_data, self._stats_store)
+        ledger_manager.register_split(
+            self._dataset_split,
+            default_data,
+            self._stats_store,
+            autoload_arrays=self.array_autoload_arrays,
+            return_proxies=self.array_return_proxies,
+            use_cache=self.array_use_cache
+        )
 
         # Log tag-based labeling configuration if enabled
         if self._use_tags:

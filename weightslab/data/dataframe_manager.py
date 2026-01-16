@@ -12,6 +12,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
 from weightslab.data.data_utils import _filter_columns_by_patterns
+from weightslab.backend.ledgers import get_dataloaders, get_dataloader
 from weightslab.data.sample_stats import (
     SampleStats,
     SAMPLES_STATS_DEFAULTS,
@@ -19,6 +20,7 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe
+from weightslab.trainer.services.service_utils import get_mask
 
 
 # Set up logger
@@ -45,6 +47,7 @@ class LedgeredDataFrameManager:
         self._flush_max_rows = flush_max_rows
         self._flush_thread: threading.Thread | None = None
         self._flush_stop = threading.Event()
+        self._flush_event = threading.Event()  # Event to wake thread for force flush
         self._flush_queue_count = 0
         self._dense_store: Dict[str, Dict[int, np.ndarray]] = {}
         self._buffer: List[Dict[str, Any]] = []
@@ -75,7 +78,7 @@ class LedgeredDataFrameManager:
         """Get the array store instance."""
         return self._array_store
 
-    def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None):
+    def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
         with self._lock:
             if store is not None:
                 self.set_store(store)
@@ -85,12 +88,12 @@ class LedgeredDataFrameManager:
 
         # Load existing persisted data if needed
         if self._store is not None and self._df is not None:
-            self._load_existing_data(origin)
+            self._load_existing_data(origin, autoload_arrays=autoload_arrays, return_proxies=return_proxies, use_cache=use_cache)
 
         # Start flush thread if not already running
         self._ensure_flush_thread()
 
-    def _load_existing_data(self, origin: str = None):
+    def _load_existing_data(self, origin: str = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
         if not self._enable_h5_persistence:
             return
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
@@ -102,6 +105,18 @@ class LedgeredDataFrameManager:
                     loaded_df = loaded_df.set_index("sample_id")
                 except Exception:
                     pass
+
+                # Convert array columns to proxies
+                if self._array_store is not None:
+                    loaded_df = convert_dataframe_to_proxies(
+                        loaded_df,
+                        self._array_columns,
+                        array_store=self._array_store,
+                        autoload=autoload_arrays,
+                        use_cache=use_cache,
+                        return_proxies=return_proxies,
+                    )
+
                 # Merge with right override: loaded_df wins on overlapping sample_ids
                 all_cols = self._df.columns.union(loaded_df.columns)
                 if self._df.empty:
@@ -117,6 +132,7 @@ class LedgeredDataFrameManager:
                         self._df = pd.concat([self._df, loaded_df.loc[missing_idx]])
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
+
 
     def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
@@ -173,9 +189,9 @@ class LedgeredDataFrameManager:
             if force_flush:
                 self._force_flush = True
 
-    def _is_array_column(self, column_name: str) -> bool:
+    def _is_array_column_to_norm(self, column_name: str, value: Any) -> bool:
         """Check if a column should store arrays in separate H5 file."""
-        return column_name in self._array_columns
+        return column_name in self._array_columns and isinstance(value, (np.ndarray, ArrayH5Proxy))
 
     def _should_array_be_stored(self, array_name) -> bool:
         """Check if array storage is enabled."""
@@ -402,6 +418,36 @@ class LedgeredDataFrameManager:
             self._buffer = []
             return drained
 
+    def _get_loader_by_origin(self, origin: str):
+        """Dynamically retrieve loader for a specific origin (on-demand).
+        Avoids maintaining persistent _loaders state; fetches only when needed.
+        """
+        try:
+            loader_names = get_dataloaders()
+            for loader_name in loader_names:
+                loader = get_dataloader(loader_name)
+                if loader is None:
+                    continue
+                tracked_ds = getattr(loader, "tracked_dataset", None)
+                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
+                    if tracked_ds._dataset_split == origin:
+                        return loader
+                # Fallback: match by loader name
+                elif origin in loader_name:
+                    return loader
+
+        except Exception as e:
+            logger.debug(f"[_get_loader_by_origin] Failed to retrieve loader for origin={origin}: {e}")
+
+        return None
+
+    def _normalize_arrays_for_storage(self, row: pd.Series) -> Any:
+        for col in row.index:
+            value = row[col]
+            if self._is_array_column_to_norm(col, value):
+                row[col] = get_mask(value, dataset=self._get_loader_by_origin(row.get("origin")), dataset_index=row.name)
+        return row
+
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
         if not records:
             return
@@ -415,6 +461,9 @@ class LedgeredDataFrameManager:
         # Step 1: Batch update regular columns using DataFrame
         if records:
             df_updates = pd.DataFrame(records).set_index("sample_id")
+
+            # Normalize array columns to safe values
+            df_updates = df_updates.apply(self._normalize_arrays_for_storage, axis=1)
 
             # Ensure columns exist (vectorized, no Python loop)
             if not set(df_updates.columns).issubset(self._df.columns):
@@ -455,12 +504,19 @@ class LedgeredDataFrameManager:
                             force_requested = True
 
                     if force_requested:
+                        self._flush_event.clear()  # Clear before flush
                         self.flush_if_needed(force=True)
 
-                    self._flush_stop.wait(timeout=self._flush_interval)
-                    self.flush_if_needed()
+                    # Wait for flush event (force) or timeout (periodic)
+                    self._flush_event.wait(timeout=self._flush_interval)
+                    self._flush_event.clear()
+
+                    if not self._flush_stop.is_set():
+                        self.flush_if_needed()
+                        self._flush_queue_count = 0  # Reset queue count after periodic flush
                 except Exception as e:
-                    logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}")
+                    traceback_str = logging.Formatter().formatException(e.__traceback__)
+                    logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}: {traceback_str}")
 
         self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush")
         self._flush_thread.start()
@@ -535,6 +591,7 @@ class LedgeredDataFrameManager:
     def flush_async(self):
         with self._queue_lock:
             self._flush_queue_count += 1
+        self._flush_event.set()  # Wake thread immediately
         self._ensure_flush_thread()
 
     def flush_if_needed(self, force: bool = False):
@@ -589,13 +646,15 @@ class LedgeredDataFrameManager:
                 path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
 
                 # Replace array values with path references in DataFrame
-                for sample_id in path_refs:
-                    for col_name, path_ref in path_refs[sample_id].items():
-                        if col_name in self._df.columns and path_ref is not None:
-                            self._df.loc[sample_id, col_name] = path_ref
-                            if sample_id in data_snapshot.index and col_name in data_snapshot.columns:
-                                data_snapshot.loc[sample_id, col_name] = path_ref
-
+                try:
+                    for sample_id in path_refs:
+                        for col_name, path_ref in path_refs[sample_id].items():
+                            if col_name in self._df.columns and path_ref is not None:
+                                self._df.loc[sample_id, col_name] = path_ref
+                                if sample_id in data_snapshot.index and col_name in data_snapshot.columns:
+                                    data_snapshot.loc[sample_id, col_name] = path_ref
+                except Exception as e:
+                    print()
         # === PHASE 2: Process and write H5 (NO LOCKS, training proceeds in parallel) ===
         if data_snapshot is None or data_snapshot.empty:
             return

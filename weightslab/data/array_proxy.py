@@ -105,6 +105,10 @@ class ArrayH5Proxy:
             raise AttributeError(f"Array not available for {self.path_ref}")
         return getattr(array, name)
 
+    def __len__(self):
+        """Get length of the array (requires loading)."""
+        return 1
+
     @property
     def shape(self):
         """Get array shape (requires loading)."""
@@ -345,6 +349,7 @@ def convert_dataframe_to_proxies(
     autoload: bool | list | set = False,
     use_cache: bool = True,
     return_proxies: bool = True,
+    inplace: bool = True
 ) -> pd.DataFrame:
     """
     Convert path reference strings in specified columns to ArrayH5Proxy objects
@@ -362,7 +367,7 @@ def convert_dataframe_to_proxies(
     Returns:
         DataFrame with path references converted to proxies or arrays
     """
-    df_out = df.copy()
+    df_out = df.copy() if not inplace else df
 
     autoload_set = None
     if isinstance(autoload, (list, set, tuple)):

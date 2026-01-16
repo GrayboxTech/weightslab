@@ -429,3 +429,90 @@ def array_id_2bytes(
             return int.from_bytes(digest8, byteorder="big", signed=False) % (10**8)
         else:
             return int.from_bytes(digest8, byteorder="big", signed=False)
+
+
+def filter_kwargs_for_callable(func, kwargs):
+    """Filter kwargs to only include parameters accepted by the callable.
+
+    This utility inspects the signature of a function/method and returns
+    a filtered dictionary containing only the keyword arguments that the
+    function accepts. This is useful when you have a large kwargs dict
+    and want to pass only relevant parameters to a specific function.
+
+    Args:
+        func: A callable (function, method, class, etc.)
+        kwargs: Dictionary of keyword arguments to filter
+
+    Returns:
+        dict: Filtered kwargs containing only parameters accepted by func
+
+    Examples:
+        >>> def my_func(a, b, c=10):
+        ...     return a + b + c
+        >>> all_kwargs = {'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5}
+        >>> filtered = filter_kwargs_for_callable(my_func, all_kwargs)
+        >>> filtered
+        {'a': 1, 'b': 2, 'c': 3}
+        >>> my_func(**filtered)
+        6
+    """
+    import inspect
+
+    if not callable(func):
+        raise TypeError(f"Expected callable, got {type(func)}")
+
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError) as e:
+        # Some built-in functions don't have inspectable signatures
+        logger.debug(f"Cannot inspect signature of {func}: {e}. Returning all kwargs.")
+        return kwargs
+
+    # Get parameter names from the signature
+    param_names = set(sig.parameters.keys())
+
+    # Check if function accepts **kwargs (VAR_KEYWORD)
+    has_var_keyword = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in sig.parameters.values()
+    )
+
+    # If function has **kwargs, return all kwargs unchanged
+    if has_var_keyword:
+        return kwargs
+
+    # Otherwise, filter to only include accepted parameters
+    filtered = {k: v for k, v in kwargs.items() if k in param_names}
+
+    # Log warning if parameters were filtered out
+    removed = set(kwargs.keys()) - set(filtered.keys())
+    if removed:
+        logger.debug(
+            f"Filtered out kwargs {removed} for {func.__name__ if hasattr(func, '__name__') else func}"
+        )
+
+    return filtered
+
+
+def safe_call_with_kwargs(func, *args, **kwargs):
+    """Safely call a function with filtered kwargs.
+
+    This is a convenience wrapper around filter_kwargs_for_callable that
+    filters the kwargs and immediately calls the function.
+
+    Args:
+        func: A callable (function, method, class, etc.)
+        *args: Positional arguments to pass to func
+        **kwargs: Keyword arguments (will be filtered before passing)
+
+    Returns:
+        The return value of func(*args, **filtered_kwargs)
+
+    Examples:
+        >>> def my_func(a, b, c=10):
+        ...     return a + b + c
+        >>> safe_call_with_kwargs(my_func, 1, 2, c=3, d=4, e=5)
+        6
+    """
+    filtered_kwargs = filter_kwargs_for_callable(func, kwargs)
+    return func(*args, **filtered_kwargs)

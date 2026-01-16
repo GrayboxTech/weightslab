@@ -26,12 +26,14 @@ def _to_numpy_safe(x):
     return None
 
 
-def get_mask(raw, dataset, dataset_index):
+def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
     # Check if prediction_raw is a numpy array (could be bboxes)
     if isinstance(raw, np.ndarray) and (raw.ndim == 2 or raw.ndim == 3) and raw.shape[-1] >= 4:
         # raw appears to be bboxes (N, 4+) format
         # Get the item (image) to determine mask dimensions
-        raw_data = dataset[dataset_index]
+        raw_data = dataset[dataset_index] if dataset is not None and dataset_index is not None else raw_data
+        if raw_data is None:
+            return raw
 
         # Extract the item (first element of the tuple)
         if isinstance(raw_data, tuple):

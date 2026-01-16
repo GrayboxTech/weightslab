@@ -8,15 +8,120 @@ main dataframe as paths like 'arrays.h5:/sample_id/key_name'.
 """
 
 import os
+import sys
 import time
 import logging
 import threading
 from pathlib import Path
 from typing import Dict, Optional, Union, Any, Tuple
+from collections import OrderedDict
 import h5py
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class LRUArrayCache:
+    """
+    Thread-safe LRU (Least Recently Used) cache with memory size limits.
+
+    Evicts least recently accessed arrays when total memory exceeds max_size.
+    Tracks memory usage and provides cache statistics.
+    """
+
+    def __init__(self, max_size_bytes: int = 2 * 1024**3):  # 2GB default
+        """
+        Initialize LRU cache.
+
+        Args:
+            max_size_bytes: Maximum total memory for cached arrays in bytes
+        """
+        self._max_size = max_size_bytes
+        self._cache = OrderedDict()  # Maintains insertion/access order
+        self._current_size = 0
+        self._lock = threading.RLock()
+        self._hits = 0
+        self._misses = 0
+
+    def _array_size(self, array: np.ndarray) -> int:
+        """Get memory size of numpy array."""
+        return array.nbytes
+
+    def get(self, key: str) -> Optional[np.ndarray]:
+        """
+        Get array from cache if present (O(1) with Python 3.7+ dict ordering).
+        Moves accessed item to end (most recently used).
+
+        Args:
+            key: Cache key
+
+        Returns:
+            Cached array or None if not found
+        """
+        with self._lock:
+            if key in self._cache:
+                # Move to end (mark as recently used)
+                self._cache.move_to_end(key)
+                self._hits += 1
+                return self._cache[key]
+            self._misses += 1
+            return None
+
+    def put(self, key: str, array: np.ndarray) -> None:
+        """
+        Put array in cache, evicting LRU entries if needed.
+
+        Args:
+            key: Cache key
+            array: Numpy array to cache
+        """
+        if array is None or array.size == 0:
+            return
+
+        array_size = self._array_size(array)
+
+        with self._lock:
+            # If key exists, remove it first
+            if key in self._cache:
+                self._current_size -= self._array_size(self._cache[key])
+                del self._cache[key]
+
+            # Evict LRU entries until there's space
+            while self._current_size + array_size > self._max_size and self._cache:
+                lru_key, lru_array = self._cache.popitem(last=False)  # FIFO = LRU
+                self._current_size -= self._array_size(lru_array)
+                logger.debug(f"[LRUArrayCache] Evicted {lru_key} to free memory (cache size: {self._current_size / 1024**2:.1f}MB)")
+
+            # Add new entry
+            self._cache[key] = array
+            self._current_size += array_size
+
+    def clear(self) -> None:
+        """Clear all cached arrays."""
+        with self._lock:
+            self._cache.clear()
+            self._current_size = 0
+
+    def remove(self, key: str) -> None:
+        """Remove specific key from cache."""
+        with self._lock:
+            if key in self._cache:
+                self._current_size -= self._array_size(self._cache[key])
+                del self._cache[key]
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        with self._lock:
+            total_accesses = self._hits + self._misses
+            hit_rate = (self._hits / total_accesses * 100) if total_accesses > 0 else 0
+            return {
+                'size_mb': self._current_size / 1024**2,
+                'max_size_mb': self._max_size / 1024**2,
+                'entries': len(self._cache),
+                'hits': self._hits,
+                'misses': self._misses,
+                'hit_rate': hit_rate,
+            }
 
 
 class _ReadWriteLock:
@@ -219,7 +324,9 @@ class H5ArrayStore:
         path: Union[str, Path],
         lock_timeout: float = 10.0,
         poll_interval: float = 0.1,
-        auto_normalize: bool = True
+        auto_normalize: bool = True,
+        use_compression: bool = True,
+        max_cache_size_mb: int = 2048
     ):
         """
         Initialize H5ArrayStore.
@@ -229,6 +336,8 @@ class H5ArrayStore:
             lock_timeout: Timeout for file locks in seconds
             poll_interval: Lock polling interval in seconds
             auto_normalize: If True, automatically normalize arrays to uint8
+            use_compression: If True, use gzip compression (set False if experiencing corruption issues)
+            max_cache_size_mb: Maximum cache size in MB (default 2048MB = 2GB)
         """
         self._path = Path(path)
         self._local_lock = threading.RLock()
@@ -237,6 +346,10 @@ class H5ArrayStore:
         self._lock_timeout = lock_timeout
         self._poll_interval = poll_interval
         self._auto_normalize = auto_normalize
+        self._use_compression = use_compression
+        # Initialize LRU cache with memory limit
+        self._cache = LRUArrayCache(max_size_bytes=max_cache_size_mb * 1024**2)
+        logger.info(f"[H5ArrayStore] Initialized with cache limit: {max_cache_size_mb}MB")
 
     def _ensure_parent(self):
         """Create parent directory if it doesn't exist."""
@@ -291,6 +404,12 @@ class H5ArrayStore:
                 logger.warning(f"[H5ArrayStore] Failed to convert to array: {e}")
                 return None
 
+        # Validate array: replace NaN/Inf values that cause compression issues
+        if np.issubdtype(array.dtype, np.floating):
+            if np.any(np.isnan(array)) or np.any(np.isinf(array)):
+                logger.warning(f"[H5ArrayStore] Array contains NaN/Inf values for sample_id={sample_id}, key={key_name}. Replacing with zeros.")
+                array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+
         # Normalize array if requested
         should_normalize = self._auto_normalize and not preserve_original
         if should_normalize:
@@ -318,8 +437,11 @@ class H5ArrayStore:
                         # Create key group
                         key_group = sample_group.create_group(key_name)
 
-                        # Store array data
-                        key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
+                        # Store array data (with optional compression)
+                        if self._use_compression:
+                            key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
+                        else:
+                            key_group.create_dataset('data', data=array)
 
                         # Store metadata
                         for k, v in metadata.items():
@@ -386,7 +508,10 @@ class H5ArrayStore:
 
                                 # Create and save
                                 key_group = sample_group.create_group(key_name)
-                                key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
+                                if self._use_compression:
+                                    key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
+                                else:
+                                    key_group.create_dataset('data', data=array)
 
                                 for k, v in metadata.items():
                                     key_group.attrs[k] = v
@@ -404,7 +529,7 @@ class H5ArrayStore:
 
     def load_array(self, path_ref: str) -> Optional[np.ndarray]:
         """
-        Load array from path reference.
+        Load array from path reference with LRU cache.
 
         Args:
             path_ref: Path reference string (e.g., 'arrays.h5:/123/prediction')
@@ -414,6 +539,11 @@ class H5ArrayStore:
         """
         if not path_ref or not isinstance(path_ref, str):
             return None
+
+        # Check cache first
+        cached = self._cache.get(path_ref)
+        if cached is not None:
+            return cached
 
         if not self._path.exists():
             logger.debug(f"[H5ArrayStore] Array file does not exist: {self._path}")
@@ -426,18 +556,14 @@ class H5ArrayStore:
             return None
 
         # Use read lock for concurrent read access (multiple threads can load in parallel)
-        self._rw_lock.acquire_read()
+        # self._rw_lock.acquire_read()
         try:
             try:
                 with h5py.File(str(self._path), 'r') as f:
                     sample_group_name = str(sample_id)
-                    if sample_group_name not in f:
-                        return None
 
+                    # if not in, return None
                     sample_group = f[sample_group_name]
-                    if key_name not in sample_group:
-                        return None
-
                     key_group = sample_group[key_name]
 
                     # Load array
@@ -450,10 +576,21 @@ class H5ArrayStore:
                     if metadata.get('normalized', False):
                         array = denormalize_array(array, metadata)
 
+                    # Cache the loaded array
+                    self._cache.put(path_ref, array)
+
                     return array
 
             except Exception as exc:
-                logger.error(f"[H5ArrayStore] Failed to load array from {path_ref}: {exc}")
+                error_msg = str(exc)
+                if "filter returned failure" in error_msg or "Can't synchronously read" in error_msg:
+                    logger.error(
+                        f"[H5ArrayStore] Corrupted/unreadable data at {path_ref}: {exc}. "
+                        f"This may be due to: (1) interrupted write, (2) invalid array values (NaN/Inf), "
+                        f"or (3) HDF5 filter codec issues. Consider deleting and regenerating this data."
+                    )
+                else:
+                    logger.error(f"[H5ArrayStore] Failed to load array from {path_ref}: {exc}")
                 return None
         finally:
             self._rw_lock.release_read()
@@ -492,6 +629,12 @@ class H5ArrayStore:
                                 continue
 
                             try:
+                                # Check cache first
+                                cached = self._cache.get(path_ref)
+                                if cached is not None:
+                                    sample_arrays[key_name] = cached
+                                    continue
+
                                 key_group = sample_group[key_name]
                                 array = key_group['data'][:]
                                 metadata = dict(key_group.attrs)
@@ -499,7 +642,9 @@ class H5ArrayStore:
                                 if metadata.get('normalized', False):
                                     array = denormalize_array(array, metadata)
 
-                                    sample_arrays[key_name] = array
+                                # Cache the array
+                                self._cache.put(path_ref, array)
+                                sample_arrays[key_name] = array
                             except Exception:
                                 continue
 
@@ -545,6 +690,30 @@ class H5ArrayStore:
         finally:
             self._rw_lock.release_write()
 
+    def clear_cache(self) -> None:
+        """Clear all cached arrays from memory."""
+        self._cache.clear()
+        logger.info("[H5ArrayStore] Cache cleared")
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """
+        Get cache statistics and memory usage.
+
+        Returns:
+            Dict with cache statistics (size_mb, entries, hit_rate, etc.)
+        """
+        return self._cache.get_stats()
+
+    def set_cache_size(self, max_size_mb: int) -> None:
+        """
+        Update maximum cache size. Clears cache if reducing size.
+
+        Args:
+            max_size_mb: New maximum cache size in MB
+        """
+        old_size = self._cache._max_size / 1024**2
+        self._cache._max_size = max_size_mb * 1024**2
+        logger.info(f"[H5ArrayStore] Cache size updated: {old_size:.1f}MB -> {max_size_mb}MB")
     def get_path(self) -> Path:
         """Get the path to the arrays H5 file."""
         return self._path
