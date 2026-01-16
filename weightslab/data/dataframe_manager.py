@@ -213,12 +213,19 @@ class LedgeredDataFrameManager:
                 }
 
                 if targets is not None:
-                    rec[SampleStats.Ex.TARGET.value] = self._safe_array_value(targets[i])
+                    val = self._safe_array_value(targets[i])
+                    if isinstance(val, list) and len(val) == 1:
+                        val = val[0]
+                    rec[SampleStats.Ex.TARGET.value] = val
 
                 if preds_raw is not None:
                     rec[SampleStats.Ex.PREDICTION_RAW.value] = self._safe_array_value(preds_raw[i])
+
                 if preds is not None:
-                    rec[SampleStats.Ex.PREDICTION.value] = self._safe_array_value(preds[i])
+                    val = self._safe_array_value(preds[i])
+                    if isinstance(val, list) and len(val) == 1:
+                        val = val[0]
+                    rec[SampleStats.Ex.PREDICTION.value] = val
 
                 loss_dict = self._safe_loss_dict(losses, i)
                 if loss_dict is not None:
