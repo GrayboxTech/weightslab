@@ -3,7 +3,7 @@ agent:
   # Select the model provider. 
   # Local: 'ollama'
   # Remote: 'openrouter', 'google', 'openai' (requires API tokens in .env)
-  provider: openrouter
+  provider: ollama
   
   # Local Settings
   ollama_model: qwen2.5:3b-instruct
