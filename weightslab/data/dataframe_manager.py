@@ -55,9 +55,9 @@ class LedgeredDataFrameManager:
         # TODO (GP): Remove multi-threads lock madness, let s see if it brokes anywhere
         # TODO (GP): Review locking strategy to minimize contention and opt. perfs.
         # Locks
-        self._lock = _NoOpLock()  # threading.RLock()
-        self._queue_lock = _NoOpLock()  # threading.Lock()
-        self._buffer_lock = _NoOpLock()  # threading.Lock()
+        self._lock = threading.RLock()
+        self._queue_lock = threading.Lock()
+        self._buffer_lock = threading.Lock()
 
         # Columns that should store arrays in separate H5 file
         self._array_columns = [
@@ -133,8 +133,8 @@ class LedgeredDataFrameManager:
                     loaded_df = loaded_df.reindex(columns=all_cols)
                     # Override existing rows
                     self._df.update(loaded_df)
-                    # Note: We NO LONGER concat missing_idx here. 
-                    # If a sample_id is in H5 but not in our current self._df (which was just seeded 
+                    # Note: We NO LONGER concat missing_idx here.
+                    # If a sample_id is in H5 but not in our current self._df (which was just seeded
                     # with the current dataset's IDs), it means it's a stale/ghost record.
                     # We skip it to keep the session clean.
             else:
@@ -857,98 +857,6 @@ class LedgeredDataFrameManager:
 
         # Flush to H5 if needed
         self._flush_to_h5_if_needed(force=force)
-
-    def flush_if_needed(self, force: bool = False):
-        buffered = self._drain_buffer()
-        if buffered:
-            self._apply_buffer_records(buffered)
-
-        if not self._enable_h5_persistence:
-            with self._lock:
-                self._pending.clear()
-                self._force_flush = False
-            return
-        if not force and not self._should_flush():
-            return
-
-        # === PHASE 1: Extract data snapshot (FAST, lock held briefly) ===
-        with self._lock:
-            work = None
-            data_snapshot = None
-            cols_to_save = None
-
-            # Quick checks and data extraction
-            if self._store is None or self._df.empty or not self._pending:
-                return
-
-            # Extract work set and clear pending
-            work = list(self._pending)
-            self._pending.clear()
-            self._force_flush = False
-
-            # Filter columns while holding lock (fast operation)
-            cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
-            if not cols_to_save:
-                return
-
-            # Create a snapshot copy of the data we need
-            data_snapshot = self._df.loc[work, cols_to_save]
-
-        # === PHASE 1.5: Extract and store arrays to H5 (if enabled) ===
-        # Extract array data from snapshot (already copied, no lock needed)
-        if self._array_store is not None and self._enable_h5_persistence and data_snapshot is not None:
-            arrays_to_store = {}  # {sample_id: {col_name: array}}
-
-            for sample_id in work:
-                if sample_id not in data_snapshot.index:
-                    continue
-                row_data = data_snapshot.loc[sample_id].to_dict() if isinstance(data_snapshot.loc[sample_id], pd.Series) else data_snapshot.loc[sample_id]
-                arrays = self._extract_arrays_for_storage(sample_id, row_data)
-                if arrays:
-                    arrays_to_store[sample_id] = arrays
-
-            # Batch save arrays and get path references (no lock needed)
-            if arrays_to_store:
-                path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
-
-                # Replace array values with path references in both DataFrame and snapshot
-                if path_refs:
-                    with self._lock:
-                        try:
-                            for sample_id in path_refs:
-                                for col_name, path_ref in path_refs[sample_id].items():
-                                    if col_name in self._df.columns and path_ref is not None:
-                                        self._df.loc[sample_id, col_name] = path_ref
-                        except Exception as e:
-                            logger.warning(f"[LedgeredDataFrameManager] Error updating array refs: {e}")
-
-                    # Update snapshot too (no lock needed, it's a copy)
-                    try:
-                        for sample_id in path_refs:
-                            for col_name, path_ref in path_refs[sample_id].items():
-                                if sample_id in data_snapshot.index and col_name in data_snapshot.columns and path_ref is not None:
-                                    data_snapshot.loc[sample_id, col_name] = path_ref
-                    except Exception as e:
-                        logger.warning(f"[LedgeredDataFrameManager] Error updating snapshot array refs: {e}")
-        # === PHASE 2: Process and write H5 (NO LOCKS, training proceeds in parallel) ===
-        if data_snapshot is None or data_snapshot.empty:
-            return
-
-        # Determine origins from the snapshot copy
-        if "origin" in data_snapshot.columns:
-            origins = data_snapshot["origin"].unique()
-        else:
-            origins = ["unknown"]
-
-        # Write each origin's data independently (no locks held)
-        logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] flushing to H5 store.')
-        for origin in origins:
-            try:
-                origin_data = data_snapshot[data_snapshot["origin"] == origin] if "origin" in data_snapshot.columns else data_snapshot
-                written = self._store.upsert(origin, origin_data)
-                logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Flushed {written} rows (origin={origin}) to H5 store.')
-            except Exception as e:
-                logger.error(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Failed flush for origin={origin}: {e}')
 
 
 # Create global instance with config-driven parameters

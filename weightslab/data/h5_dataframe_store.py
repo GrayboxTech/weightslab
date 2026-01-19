@@ -149,7 +149,7 @@ class H5DataFrameStore:
                 if val.ndim == 0:
                     val = val.reshape(-1)
                 val = val.tolist()
-            if isinstance(val, (int, float, str, bool)):
+            if isinstance(val, (int, float, bool)):
                 val = [val]
             if isinstance(val, (list, dict)):
                 try:

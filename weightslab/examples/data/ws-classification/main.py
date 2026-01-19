@@ -303,7 +303,7 @@ if __name__ == "__main__":
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Periodic validation and test evaluation
-        if train_step % eval_every == 0:
+        if train_step > 0 and train_step % eval_every == 0:
             # Validate
             val_loader_iter = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
             val_loss, val_metric = test(

@@ -111,13 +111,15 @@ def load_label(dataset, sample_id):
     # Try common dataset patterns
     if hasattr(wrapped, '__getitem__'):
         data = wrapped[index]
-        if isinstance(data, (list, tuple)) and len(data) >= 2:
+        if isinstance(data, (list, tuple)) and len(data) > 2:
             # Detection/Segmentation often has extra elements
             classes = _to_numpy_safe(data[3]) if len(data) >= 4 else None
             if classes is not None:
                 label = _to_numpy_safe(data[2])  # Second element is typically the label
                 # Concat label with classes if available (detection)
                 label = np.concatenate([label, classes[..., None]], axis=1)
+            else:
+                label = _to_numpy_safe(data[2])  # Second element is typically the label
         else:
             label = _to_numpy_safe(data[1])  # Second element is typically the label
         label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
