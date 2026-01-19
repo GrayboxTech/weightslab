@@ -361,7 +361,6 @@ class H5DataFrameStore:
 
         # Create backup BEFORE any writes
         backup_path = self._create_backup()
-        checksum_before_write = None
 
         with self._local_lock:
             with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
