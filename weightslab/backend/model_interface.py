@@ -460,6 +460,7 @@ class ModelInterface(NetworkWithOps):
 
         # Generate the graph dependencies
         if not use_onnx:
+            self.shape_propagation()
             self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
                 self.model,
                 self.traced_model.graph

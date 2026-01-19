@@ -109,13 +109,21 @@ class LayerWiseOperations(NeuronWiseOperations):
         return value
 
     def get_neurons(self, attr_name: str) -> int:
-        """Getter: Returns the value of in_neurons."""
+        """Getter: Returns the value of in_neurons or out_neurons."""
         if not hasattr(self, attr_name):
             raise AttributeError(
-                "Accessing 'in_neurons' before calling" +
+                f"Accessing '{attr_name}' before calling " +
                 "_initialize_neuron_attributes."
             )
-        return self.get_neurons_value(getattr(self, attr_name))
+        
+        val = getattr(self, attr_name)
+        if val is None and getattr(self, 'wl_same_flag', False):
+            # For pass-through layers, falling back to the other dimension if one is None
+            other_attr = 'out_neurons' if attr_name == 'in_neurons' else 'in_neurons'
+            if hasattr(self, other_attr):
+                val = getattr(self, other_attr)
+                
+        return self.get_neurons_value(val)
 
     def set_neurons(
             self,

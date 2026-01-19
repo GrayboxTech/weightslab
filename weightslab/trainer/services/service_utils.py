@@ -93,24 +93,30 @@ def load_label(dataset, sample_id):
 
     Returns the label in its native format (int, array, etc.).
     """
+    # Get index from sample_id
+    try:
+        index = dataset.get_index_from_sample_id(sample_id)
+    except (KeyError, ValueError, IndexError):
+        logger.debug(f"Sample ID {sample_id} not found in current dataset. Likely a ghost record from a previous run.")
+        return None
+
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
-    index = dataset.get_index_from_sample_id(sample_id)
 
     # Try common dataset patterns
     if hasattr(wrapped, '__getitem__'):
-        data = wrapped[index]
-        if isinstance(data, (list, tuple)) and len(data) >= 2:
-            classes = _to_numpy_safe(data[3]) if len(data) >= 4 else None
-            if classes is not None:
-                label = _to_numpy_safe(data[2])  # Second element is typically the label
-
-                # Concat label with classes if available (detection)
+        try:
+            data = wrapped[index]
+            if isinstance(data, (list, tuple)) and len(data) >= 2:
+                # Detection/Segmentation often has extra elements
+                classes = _to_numpy_safe(data[3]) if len(data) >= 4 else None
                 if classes is not None:
+                    label = _to_numpy_safe(data[2])  # Second element is typically the label
+                    # Concat label with classes if available (detection)
                     label = np.concatenate([label, classes[..., None]], axis=1)
             else:
                 label = _to_numpy_safe(data[1])  # Second element is typically the label
-
+            label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
             return label
 
     # Try targets/labels attribute
