@@ -25,17 +25,15 @@ logger = logging.getLogger(__name__)
 DATAFRAME_M = None
 
 def save_signals(
-    model_age: int,
     batch_ids: th.Tensor,
     signals: dict,
     preds_raw: th.Tensor,
-    preds: th.Tensor = None,
-    target: th.Tensor = None
+    targets: th.Tensor,
+    preds: th.Tensor = None
 ):
     """
         Save data statistics to the tracked dataset.
         Args:
-            model_age (int): The age of the model.
             batch_ids (th.Tensor): The batch ids.
             signals (th.Tensor): The batch losses.
             preds (th.Tensor, optional): The batch predictions. Defaults to None.
@@ -48,11 +46,9 @@ def save_signals(
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(int)
     pred_np = preds.detach().cpu().numpy().astype(np.uint16) if preds is not None else None
     pred_raw_np = preds_raw.detach().cpu().numpy().astype(float) if preds_raw is not None else None
-    target_np = target.detach().cpu().numpy().astype(np.uint16) if target is not None else None
+    target_np = targets.detach().cpu().numpy().astype(np.uint16) if targets is not None else None
 
     # Processing
-    # # Process model age
-    model_age = int(model_age) // len(batch_ids_np)  # How old was the model when processing this batch, i.e., how many batches seen before me ?
     # # Process signals
     if isinstance(signals, dict):
         losses_data = {\
@@ -64,12 +60,18 @@ def save_signals(
         losses_data = {"signals//default": signals.detach().cpu().numpy() if hasattr(signals, 'detach') else np.asarray(signals)}
     else:
         losses_data = None
+    # # Process targets
+    if target_np.ndim == 1:
+        target_np = target_np[:, np.newaxis]
+    if pred_np is not None and pred_np.ndim == 1:
+        pred_np = pred_np[:, np.newaxis]
+    if pred_raw_np is not None and pred_raw_np.ndim == 1:
+        pred_raw_np = pred_raw_np[:, np.newaxis]
 
     # Enqueue to dataframe manager buffer for efficientcy
     enqueue = getattr(DATAFRAME_M, 'enqueue_batch', None)
     if callable(enqueue):
         enqueue(
-            model_age=model_age,
             sample_ids=batch_ids_np,
             preds_raw=pred_raw_np,
             preds=pred_np,
@@ -91,11 +93,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Remove parameters
     _ = kw.pop('flag', None)
     ids = kw.pop('batch_ids', None)
-    model_age = kw.pop('model_age', None)
     preds = kw.pop('preds', None)
     manual_signals_batch = kw.pop('signals', None)
     preds_raw = a[0]
-    target = a[1]
+    targets = a[1]
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
@@ -194,15 +195,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             pass
 
     # Save statistics if requested and applicable
-    if batch_scalar is not None and ids is not None and model_age is not None:
+    if batch_scalar is not None and ids is not None:
         signals = {reg_name: batch_scalar}
         save_signals(
-            model_age=model_age,
             batch_ids=ids,
             preds=preds,
             preds_raw=preds_raw,
             signals=signals,
-            target=target
+            targets=targets
         )
     return out
 

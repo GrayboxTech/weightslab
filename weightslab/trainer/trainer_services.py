@@ -37,9 +37,21 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # -------------------------------------------------------------------------
     def StreamStatus(self, request_iterator, context):
         logger.debug(f"ExperimentServiceServicer.StreamStatus({request_iterator})")
-        # delegate to domain ExperimentService
-        for status in self._exp_service.stream_status(request_iterator):
-            yield status
+
+        # # Get context components to fetch signal logger
+        # self._ctx.ensure_components()
+        # components = self._ctx.components
+        # is_model_interfaced = components.get("model") is not None
+
+        # # delegate to domain ExperimentService
+        # if not is_model_interfaced:
+        #     logger.warning("No signal_logger found in context components for StreamStatus")
+        #     return None
+
+        # # stream status updates to client
+        # for status in self._exp_service.stream_status(request_iterator):
+        #     yield status
+        return self._exp_service.StreamStatus(request_iterator, context)
 
     # -------------------------------------------------------------------------
     # Sample retrieval (images / segmentation / recon)
@@ -66,18 +78,23 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # Data service helpers + RPCs (for weights_studio UI)
     # -------------------------------------------------------------------------
     def ApplyDataQuery(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.ApplyDataQuery({request})")
         return self._exp_service.data_service.ApplyDataQuery(request, context)
 
     def GetDataSamples(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.GetDataSamples({request})")
         return self._exp_service.data_service.GetDataSamples(request, context)
 
     def EditDataSample(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.EditDataSample({request})")
         return self._exp_service.data_service.EditDataSample(request, context)
 
     def GetDataSplits(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.GetDataSplits({request})")
         return self._exp_service.data_service.GetDataSplits(request, context)
 
     def CheckAgentHealth(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.CheckAgentHealth({request})")
         return self._exp_service.data_service.CheckAgentHealth(request, context)
 
     # -------------------------------------------------------------------------

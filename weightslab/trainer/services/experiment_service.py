@@ -34,14 +34,25 @@ class ExperimentService:
     # Training status stream
     # -------------------------------------------------------------------------
     def stream_status(self, request_iterator):
+        import queue
+
         self._ctx.ensure_components()
         components = self._ctx.components
+        signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
 
         while True:
-            signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
+            try:
+                if signal_logger == None:
+                    # No signal logger available, wait briefly and continue
+                    time.sleep(0.01)
+                    continue
 
-            if signal_logger != None:
-                signal_log = signal_logger.queue.get()
+                # Use timeout to avoid blocking indefinitely
+                try:
+                    signal_log = signal_logger.queue.get(timeout=0.5)
+                except queue.Empty:
+                    # No signals available, continue waiting
+                    continue
 
                 if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:
                     logger.debug(f"[signal_log] {signal_log['metric_name']} = {signal_log['metric_value']:.2f}")
@@ -75,6 +86,11 @@ class ExperimentService:
                     pass
 
                 yield training_status
+
+            except GeneratorExit:
+                # Client disconnected, exit gracefully
+                logger.debug("Stream status client disconnected")
+                break
 
     # -------------------------------------------------------------------------
     # Training & hyperparameter commands

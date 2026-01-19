@@ -13,6 +13,7 @@ from torchvision import transforms as T
 from torchvision import datasets as ds
 
 from torch.utils.data import DataLoader
+
 from weightslab.baseline_models.pytorch.models import FashionCNN
 from weightslab.components.checkpoint import CheckpointManager
 
@@ -29,6 +30,21 @@ class CheckpointManagerTest(unittest.TestCase):
         # Init Variables
         self.stamp = time.time()
         self.temporary_directory = '/tmp/utests/'; os.makedirs('/tmp/utests/', exist_ok=True)
+
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
 
         # Initialize the checkpoint manager
         self.checkpoint_manager = CheckpointManager(self.temporary_directory)

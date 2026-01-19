@@ -1,20 +1,24 @@
 experiment_name: cls_usecase
 device: cuda
-root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/ws-classification-usecase"
-tqdm_display: true
 
-eval_full_to_train_steps_ratio: 1000
+eval_full_to_train_steps_ratio: 150
 experiment_dump_to_train_steps_ratio: 200
 skip_checkpoint_load: true
+tqdm_display: true
 
 # start training immediately or not
 is_training: false
 
 # Configure global dataframe storage
-ledger_enable_h5_persistence: false
-ledger_flush_max_rows: 250
-ledger_flush_interval: 10.0
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 750
+ledger_flush_interval: 30.0
 
+# Configure clients
+serving_grpc: true
+serving_cli: false
+
+# DataLoader parameters
 data:
   train_loader:
     shuffle: false

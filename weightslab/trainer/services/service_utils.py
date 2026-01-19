@@ -26,14 +26,14 @@ def _to_numpy_safe(x):
     return None
 
 
-def get_mask(raw, dataset, dataset_index):
-    # Check if prediction_raw appears to be bounding boxes (N, 4-6)
-    # Masks are typically (H, W) or (C, H, W) with large dimensions, 
-    # while bboxes have exactly 4 to 6 columns in their last dimension.
-    if isinstance(raw, np.ndarray) and (raw.ndim == 2 or raw.ndim == 3) and raw.shape[-1] in [4, 5, 6]:
+def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
+    # Check if prediction_raw is a numpy array (could be bboxes)
+    if isinstance(raw, np.ndarray) and (raw.ndim == 2 or raw.ndim == 3) and raw.shape[-1] >= 4:
         # raw appears to be bboxes (N, 4+) format
         # Get the item (image) to determine mask dimensions
-        raw_data = dataset[dataset_index]
+        raw_data = dataset[dataset_index] if dataset is not None and dataset_index is not None else raw_data
+        if raw_data is None:
+            return raw
 
         # Extract the item (first element of the tuple)
         if isinstance(raw_data, tuple):
@@ -85,7 +85,6 @@ def get_mask(raw, dataset, dataset_index):
 
             return segmentation_map
 
-    # Not bounding boxes, return as is
     return raw
 
 
@@ -115,13 +114,10 @@ def load_label(dataset, sample_id):
                     label = _to_numpy_safe(data[2])  # Second element is typically the label
                     # Concat label with classes if available (detection)
                     label = np.concatenate([label, classes[..., None]], axis=1)
-                else:
-                    label = _to_numpy_safe(data[1])  # Second element is typically the label
-                return label
-        except Exception as e:
-            logger.warning(f"Failed to load label for sample {sample_id} at index {index}: {e}")
-            return None
-
+            else:
+                label = _to_numpy_safe(data[1])  # Second element is typically the label
+            label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+            return label
 
     # Try targets/labels attribute
     if hasattr(wrapped, "targets"):
@@ -130,6 +126,8 @@ def load_label(dataset, sample_id):
             label = label.numpy()
         if hasattr(label, 'item') and hasattr(label, 'shape') and label.shape == ():
             label = label.item()
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+
         return label
 
     if hasattr(wrapped, "labels"):
@@ -138,15 +136,18 @@ def load_label(dataset, sample_id):
             label = label.numpy()
         if hasattr(label, 'item') and hasattr(label, 'shape') and label.shape == ():
             label = label.item()
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
         return label
 
     # Try samples/imgs pattern (returns tuple of path, label)
     if hasattr(wrapped, "samples"):
         _, label = wrapped.samples[index]
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
         return label
 
     if hasattr(wrapped, "imgs"):
         _, label = wrapped.imgs[index]
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
         return label
 
     return None
@@ -188,13 +189,7 @@ def load_raw_image(dataset, index) -> Image.Image:
         img = Image.open(img_path)
         return img.convert("RGB")
     elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
-        if hasattr(wrapped, "dataset"):
-            wrapped_data = wrapped.dataset.base.data if hasattr(wrapped.dataset, "base") else wrapped.dataset
-        elif hasattr(wrapped, "data"):
-            wrapped_data = wrapped.data
-        else:
-            wrapped_data = wrapped
-        np_img = wrapped_data[index]
+        np_img = wrapped[index]
         if isinstance(np_img, (list, tuple)):
             np_img = np_img[0]
         if hasattr(np_img, 'numpy'):

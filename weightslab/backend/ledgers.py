@@ -22,9 +22,6 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# # Module-level lock for thread-safe hyperparams operations
-# _hyperparams_lock = threading.RLock()
-
 
 class Proxy:
     """A small forwarding proxy that holds a mutable reference to an object.
@@ -112,21 +109,21 @@ class Proxy:
         return target(*args, **kwargs)
 
     def __repr__(self):
-        with self._lock:
-            return f"Proxy({repr(self._obj)})"
+        # with self._lock:
+        return f"Proxy({repr(self._obj)})"
 
     def __eq__(self, other):
         """Enable equality comparison with the wrapped object.
 
         This allows `Proxy(None) == None` to return True.
         """
-        with self._lock:
-            return self._obj == other
+        # with self._lock:
+        return self._obj == other
 
     def __ne__(self, other):
         """Enable inequality comparison with the wrapped object."""
-        with self._lock:
-            return self._obj != other
+        # with self._lock:
+        return self._obj != other
 
     def __bool__(self):
         """Enable boolean evaluation of the proxy based on the wrapped object.
@@ -134,10 +131,10 @@ class Proxy:
         This allows `bool(Proxy(None))` to return False and
         `if not proxy:` to work correctly when proxy wraps None.
         """
-        with self._lock:
-            if self._obj is None:
-                return False
-            return bool(self._obj)
+        # with self._lock:
+        if self._obj is None:
+            return False
+        return bool(self._obj)
 
     def __next__(self):
         """Allow the Proxy itself to act as an iterator when `next(proxy)` is
@@ -230,6 +227,7 @@ class Ledger:
             if weak:
                 registry.pop(name, None)
                 registry_weak[name] = obj
+                return registry_weak[name]
             else:
                 proxy = proxies.get(name)
                 if proxy is not None:
@@ -243,7 +241,7 @@ class Ledger:
                         del registry_weak[name]
                     except KeyError:
                         pass
-        return registry[name]
+                return registry[name]
 
     def _get(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: Optional[str] = None) -> Any:
         with self._lock:
@@ -610,7 +608,6 @@ def register_hyperparams(name: str, params: Dict[str, Any], weak: bool = False) 
     GLOBAL_LEDGER.register_hyperparams(name, params, weak=weak)
 
 def get_hyperparams(name: Optional[str] = None) -> Any:
-    # with _hyperparams_lock:
     return GLOBAL_LEDGER.get_hyperparams(name)
 
 def list_hyperparams() -> List[str]:
@@ -632,7 +629,6 @@ def resolve_hp_name() -> str | None:
     return names[-1]  # first is empty proxy parameters generated at init
 
 def set_hyperparam(name: str, key_path: str, value: Any) -> None:
-    # with _hyperparams_lock:
     try:
         return GLOBAL_LEDGER.set_hyperparam(name, key_path, value)
     except IndexError:
