@@ -418,7 +418,6 @@ class TestDataSampleTrackingWrapperStateDict(unittest.TestCase):
         mock_ledger.register_split = Mock()
         mock_df = pd.DataFrame({
             "prediction_loss": [0.1, 0.2],
-            "encountered": [1, 2],
         })
         mock_ledger.get_df_view = Mock(return_value=mock_df)
         mock_ledger.get_dense_map = Mock(return_value={})
@@ -645,7 +644,6 @@ class TestDataSampleTrackingWrapperAsRecords(unittest.TestCase):
         mock_df = pd.DataFrame({
             "sample_id": [1, 2, 3],
             "prediction_loss": [0.1, 0.2, 0.3],
-            "encountered": [1, 2, 3],
         }).set_index("sample_id")
         mock_ledger.get_df_view = Mock(return_value=mock_df)
 

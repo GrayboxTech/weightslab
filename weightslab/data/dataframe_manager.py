@@ -1,5 +1,6 @@
 import threading
 import logging
+import types
 
 from datetime import datetime
 
@@ -50,7 +51,7 @@ class LedgeredDataFrameManager:
         self._flush_event = threading.Event()  # Event to wake thread for force flush
         self._flush_queue_count = 0
         self._dense_store: Dict[str, Dict[int, np.ndarray]] = {}
-        self._buffer: List[Dict[str, Any]] = []
+        self._buffer: Dict[int, Dict[str, Any]] = {}  # {sample_id: {col: value}}
         self._enable_h5_persistence = enable_h5_persistence
         # Columns that should store arrays in separate H5 file
         self._array_columns = [
@@ -139,7 +140,7 @@ class LedgeredDataFrameManager:
             return
 
         # Normalize incoming frame: ensure `origin` column and sample_id index
-        df_norm = df_local.copy() if isinstance(df_local, pd.DataFrame) else pd.DataFrame(df_local).set_index('sample_id')
+        df_norm = df_local if isinstance(df_local, pd.DataFrame) else pd.DataFrame(df_local).set_index('sample_id')
         if origin is not None and "origin" not in df_norm.columns:
             df_norm["origin"] = origin
 
@@ -204,7 +205,7 @@ class LedgeredDataFrameManager:
         try:
             arr = np.asanyarray(value)
             # Store arrays with size > 1 separately
-            return arr.size > 1 and arr.ndim >= 1
+            return arr.size > 1 and (arr.ndim >= 1 and (arr.shape[0] >= 28 or arr.shape[-1] >= 28))
         except Exception:
             return False
 
@@ -274,53 +275,80 @@ class LedgeredDataFrameManager:
 
     def enqueue_batch(
         self,
-        model_age: int,
         sample_ids: Sequence[int],
         preds_raw: np.ndarray | None,
         preds: np.ndarray | None,
         losses: Dict[str, Any] | None,
         targets: np.ndarray | None = None,
     ):
+        """
+            Enqueue a batch of sample stats for later flush.
+        """
         if sample_ids is None or len(sample_ids) == 0:
             return
 
         self._ensure_flush_thread()
 
+        # Helper to check if value is meaningful (not None/NaN)
+        def is_meaningful(v):
+            if v is None:
+                return False
+            try:
+                return not np.isnan(v)
+            except (TypeError, ValueError):
+                return True
+
+        # Build all records BEFORE acquiring lock (faster)
+        records_to_add = []
+        for i, sid in enumerate(sample_ids):
+            sample_id = int(sid)
+
+            # Build record incrementally - keep numpy arrays as-is for speed
+            rec: Dict[str, Any] = {
+                "sample_id": sample_id,
+            }
+
+            # Store arrays directly without conversion (FAST)
+            if targets is not None:
+                try:
+                    rec[SampleStats.Ex.TARGET.value] = targets[i]
+                except Exception:
+                    pass
+
+            if preds_raw is not None:
+                try:
+                    rec[SampleStats.Ex.PREDICTION_RAW.value] = preds_raw[i]
+                except Exception:
+                    pass
+
+            if preds is not None:
+                try:
+                    rec[SampleStats.Ex.PREDICTION.value] = preds[i]
+                except Exception:
+                    pass
+
+            loss_dict = self._safe_loss_dict(losses, i)
+            if loss_dict is not None:
+                rec.update(loss_dict)
+
+            records_to_add.append((sample_id, rec))
+
+        # Single lock acquisition for entire batch (minimize lock time)
         with self._buffer_lock:
-            for i, sid in enumerate(sample_ids):
-                rec: Dict[str, Any] = {
-                    "sample_id": int(sid),
-                    SampleStats.Ex.PREDICTION_AGE.value: model_age,
-                }
+            for sample_id, rec in records_to_add:
+                if sample_id in self._buffer:
+                    # Update only meaningful (non-NaN) values
+                    updates = {k: v for k, v in rec.items() if is_meaningful(v)}
+                    self._buffer[sample_id].update(updates)
+                else:
+                    self._buffer[sample_id] = rec
 
-                # Store arrays as-is initially; they'll be moved to array H5 during flush
-                if targets is not None:
-                    try:
-                        rec[SampleStats.Ex.TARGET.value] = targets[i]
-                    except Exception:
-                        pass
+            # Check buffer size and trigger flush if needed
+            should_flush = len(self._buffer) >= self._flush_max_rows
 
-                if preds_raw is not None:
-                    try:
-                        rec[SampleStats.Ex.PREDICTION_RAW.value] = preds_raw[i]
-                    except Exception:
-                        pass
-
-                if preds is not None:
-                    try:
-                        rec[SampleStats.Ex.PREDICTION.value] = preds[i]
-                    except Exception:
-                        pass
-
-                loss_dict = self._safe_loss_dict(losses, i)
-                if loss_dict is not None:
-                    rec.update(loss_dict)
-
-                # Add to buffer data
-                self._buffer.append(rec)
-
-                if len(self._buffer) >= self._flush_max_rows:
-                    self.flush_async()
+        # Trigger flush outside lock
+        if should_flush:
+            self.flush_async()
 
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
         if not updates:
@@ -411,12 +439,12 @@ class LedgeredDataFrameManager:
             return {k: dict(v) for k, v in origin_store.items()}
 
     def _drain_buffer(self) -> List[Dict[str, Any]]:
-        with self._buffer_lock:
-            if not self._buffer:
-                return []
-            drained = self._buffer
-            self._buffer = []
-            return drained
+        # with self._buffer_lock:
+        if not self._buffer:
+            return []
+        drained = list(self._buffer.values())
+        self._buffer = {}
+        return drained
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -442,10 +470,19 @@ class LedgeredDataFrameManager:
         return None
 
     def _normalize_arrays_for_storage(self, row: pd.Series) -> Any:
+        """Normalize array columns to use get_mask before H5 storage."""
+        dataset = None
         for col in row.index:
             value = row[col]
+
+            # Process and norm np array
             if self._is_array_column_to_norm(col, value):
-                row[col] = get_mask(value, dataset=self._get_loader_by_origin(row.get("origin")), dataset_index=row.name)
+                # GP: Not sure about this part - Maybe remove this and draw BB in WS
+                if dataset is None:
+                    loader = self._get_loader_by_origin(row.get("origin"))
+                    dataset = getattr(loader, "wrapped_dataset", None)
+                dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
+                row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
         return row
 
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
@@ -455,16 +492,12 @@ class LedgeredDataFrameManager:
         current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
         logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applying {len(records)} buffered records to Global DataFrame.")
 
-        # Extract sample IDs
+        # Extract sample IDs and build df_updates OUTSIDE the lock (fast)
         sample_ids = [rec["sample_id"] for rec in records]
+        df_updates = pd.DataFrame(records).set_index("sample_id")
 
-        # Step 1: Batch update regular columns using DataFrame
-        if records:
-            df_updates = pd.DataFrame(records).set_index("sample_id")
-
-            # Normalize array columns to safe values
-            df_updates = df_updates.apply(self._normalize_arrays_for_storage, axis=1)
-
+        # Hold lock only for the actual DataFrame update (minimize lock time)
+        with self._lock:
             # Ensure columns exist (vectorized, no Python loop)
             if not set(df_updates.columns).issubset(self._df.columns):
                 self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
@@ -484,11 +517,164 @@ class LedgeredDataFrameManager:
                 self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
             )
 
-        # Mark all as pending for h5 flush
+        # Mark all as pending for h5 flush (outside lock)
         self.mark_dirty_batch(sample_ids)
 
         current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
         logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applied {len(records)} buffered records to Global DataFrame.")
+
+    def _apply_buffer_records_nonblocking(self, records: List[Dict[str, Any]]):
+        """Non-blocking version - if can't get lock, add records back to buffer."""
+        if not records:
+            return
+
+        # Build df_updates OUTSIDE any lock
+        sample_ids = [rec["sample_id"] for rec in records]
+        df_updates = pd.DataFrame(records).set_index("sample_id")
+
+        # Try to acquire main lock with short timeout
+        if not self._lock.acquire(timeout=0.001):
+            # Can't get lock, put records back in buffer for next cycle
+            with self._buffer_lock:
+                for rec in records:
+                    sid = rec["sample_id"]
+                    if sid in self._buffer:
+                        self._buffer[sid].update(rec)
+                    else:
+                        self._buffer[sid] = rec
+            return
+
+        try:
+            # Quick DataFrame update while holding lock
+            if not set(df_updates.columns).issubset(self._df.columns):
+                self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
+
+            missing_idx = df_updates.index.difference(self._df.index)
+            if len(missing_idx) > 0:
+                self._df = pd.concat(
+                    [self._df, pd.DataFrame(index=missing_idx, columns=self._df.columns)],
+                    copy=False,
+                )
+
+            mask = df_updates.notna()
+            self._df.loc[df_updates.index, df_updates.columns] = (
+                self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
+            )
+        finally:
+            self._lock.release()
+
+        # Det to seg conversion - pre-fetch dataset once for efficiency
+        if df_updates.index.size > 0:
+            self._df.loc[df_updates.index] = self._df.loc[df_updates.index].apply(lambda row: self._normalize_arrays_for_storage(row), axis=1)
+
+        # Mark dirty outside lock
+        self.mark_dirty_batch(sample_ids)
+
+    def _flush_to_h5_if_needed(self, force: bool = False):
+        """Flush pending records to H5 - optimized for minimal main thread interference."""
+        if not self._enable_h5_persistence:
+            with self._lock:
+                self._pending.clear()
+                self._force_flush = False
+            return
+
+        # Quick lock check
+        if not force:
+            with self._lock:
+                should_flush = len(self._pending) >= self._flush_max_rows or self._force_flush
+            if not should_flush:
+                return
+
+        # Extract data with minimal lock time
+        if not self._lock.acquire(timeout=0.005):
+            # Can't get lock quickly, defer to next cycle
+            return
+
+        try:
+            if self._store is None or self._df.empty or not self._pending:
+                return
+
+            work = list(self._pending)
+            self._pending.clear()
+            self._force_flush = False
+
+            cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
+            if not cols_to_save:
+                return
+
+            # Quick copy of needed data (use .values for speed, then rebuild)
+            data_snapshot = self._df.loc[work, cols_to_save]
+        finally:
+            self._lock.release()
+
+        # Everything below happens WITHOUT locks - fully async
+        self._flush_snapshot_to_h5(data_snapshot, work)
+
+    def _flush_snapshot_to_h5(self, data_snapshot: pd.DataFrame, work: List[int]):
+        """Flush data snapshot to H5 - runs completely outside locks.
+
+        Key strategy:
+        - H5 file stores: path reference strings (lightweight)
+        - In-memory DataFrame keeps: ArrayH5Proxy objects (lazy-loaded access)
+        """
+        if data_snapshot is None or data_snapshot.empty:
+            return
+
+        # Array processing (no locks)
+        if self._array_store is not None and self._enable_h5_persistence:
+            arrays_to_store = {}
+            for sample_id in work:
+                if sample_id not in data_snapshot.index:
+                    continue
+                row_data = data_snapshot.loc[sample_id].to_dict() if isinstance(data_snapshot.loc[sample_id], pd.Series) else data_snapshot.loc[sample_id]
+                arrays = self._extract_arrays_for_storage(sample_id, row_data)
+                if arrays:
+                    arrays_to_store[sample_id] = arrays
+
+            if arrays_to_store:
+                path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
+                if path_refs:
+                    # === FOR H5 FILE: Store path references (strings for lightweight persistence) ===
+                    # Update snapshot with path refs strings so H5 gets lightweight references
+                    for sample_id in path_refs:
+                        for col_name, path_ref in path_refs[sample_id].items():
+                            if sample_id in data_snapshot.index and col_name in data_snapshot.columns and path_ref is not None:
+                                data_snapshot.loc[sample_id, col_name] = path_ref
+
+                    # === FOR IN-MEMORY DF: Store ArrayH5Proxy objects (lazy-loaded access) ===
+                    # Update main df with ArrayH5Proxy objects instead of strings
+                    # This allows users to access arrays on-demand via proxy.load()
+                    if self._lock.acquire(timeout=0.001):
+                        try:
+                            for sample_id in path_refs:
+                                for col_name, path_ref in path_refs[sample_id].items():
+                                    if col_name in self._df.columns and path_ref is not None:
+                                        # Create ArrayH5Proxy for lazy loading
+                                        proxy = ArrayH5Proxy(path_ref, array_store=self._array_store)
+                                        # Use .at for scalar assignment to avoid pandas array broadcasting issues
+                                        mask = self._df.index == sample_id
+                                        for idx in self._df.index[mask]:
+                                            self._df.at[idx, col_name] = proxy
+                        except Exception as e:
+                            logger.warning(f"[LedgeredDataFrameManager] Error updating array proxies: {e}")
+                        finally:
+                            self._lock.release()
+
+        # Write to H5 (no locks, pure I/O)
+        # data_snapshot now contains path reference strings for H5 persistence
+        if "origin" in data_snapshot.columns:
+            origins = data_snapshot["origin"].unique()
+        else:
+            origins = ["unknown"]
+
+        logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] flushing to H5 store.')
+        for origin in origins:
+            try:
+                origin_data = data_snapshot[data_snapshot["origin"] == origin] if "origin" in data_snapshot.columns else data_snapshot
+                written = self._store.upsert(origin, origin_data)
+                logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Flushed {written} rows (origin={origin}) to H5 store.')
+            except Exception as e:
+                logger.error(f"[LedgeredDataFrameManager] Error flushing to H5: {e}")
 
     def _ensure_flush_thread(self):
         if self._flush_thread and self._flush_thread.is_alive():
@@ -505,14 +691,14 @@ class LedgeredDataFrameManager:
 
                     if force_requested:
                         self._flush_event.clear()  # Clear before flush
-                        self.flush_if_needed(force=True)
+                        self.flush_if_needed_nonblocking(force=True)
 
                     # Wait for flush event (force) or timeout (periodic)
                     self._flush_event.wait(timeout=self._flush_interval)
                     self._flush_event.clear()
 
                     if not self._flush_stop.is_set():
-                        self.flush_if_needed()
+                        self.flush_if_needed_nonblocking()
                         self._flush_queue_count = 0  # Reset queue count after periodic flush
                 except Exception as e:
                     traceback_str = logging.Formatter().formatException(e.__traceback__)
@@ -560,28 +746,78 @@ class LedgeredDataFrameManager:
         return df
 
     def _coerce_df_for_h5(self, df: pd.DataFrame) -> pd.DataFrame:
-        df2 = df.copy()
-        cols_to_fill = {col: default for col, default in SAMPLES_STATS_DEFAULTS.items() if col in df2.columns}
+        df2 = df
+
+        # First, fill NA values with defaults (vectorized fillna)
+        # Filter out None values as fillna doesn't accept them
+        cols_to_fill = {col: pd.Series(default) for col, default in SAMPLES_STATS_DEFAULTS.items()
+                        if col in df2.columns and default is not None}
         if cols_to_fill:
-            for col, default in cols_to_fill.items():
-                try:
-                    if df2[col].isna().any():
-                        df2[col] = df2[col].fillna(default)
-                except Exception:
-                    pass
-        dtype_groups = {}
-        for col, dtype in SAMPLES_STATS_DEFAULTS_TYPES.items():
-            if col in df2.columns:
-                dtype_groups.setdefault(dtype, []).append(col)
-        for dtype, cols in dtype_groups.items():
-            for col in cols:
-                try:
-                    if dtype is str:
-                        df2[col] = df2[col].astype(str)
-                    else:
+            df2 = df2.fillna(cols_to_fill)
+
+        # Group columns by target dtype for batch processing
+        str_cols = []
+        int_cols = []
+        float_cols = []
+        bool_cols = []
+        ndarray_cols = []
+
+        for col in df2.columns:
+            if col not in SAMPLES_STATS_DEFAULTS_TYPES:
+                continue
+
+            target_dtype = SAMPLES_STATS_DEFAULTS_TYPES[col]
+
+            # Handle union types (e.g., int | list, str | list)
+            if hasattr(target_dtype, '__origin__'):  # Python 3.10+ union types
+                if hasattr(target_dtype, '__args__'):
+                    target_dtype = target_dtype.__args__[0]
+
+            # Categorize columns by target type
+            if target_dtype is str or (isinstance(target_dtype, type) and issubclass(target_dtype, str)):
+                str_cols.append(col)
+                continue
+            elif target_dtype is int:
+                int_cols.append(col)
+                continue
+            elif target_dtype is float:
+                float_cols.append(col)
+                continue
+            elif target_dtype is bool:
+                bool_cols.append(col)
+                continue
+            elif target_dtype is list or target_dtype is np.ndarray:
+                ndarray_cols.append(col)
+                continue
+
+        # Batch apply type conversions (vectorized astype)
+        try:
+            if str_cols:
+                df2[str_cols] = df2[str_cols].astype(str)
+            if int_cols:
+                df2[int_cols] = df2[int_cols].astype(int)
+            if float_cols:
+                df2[float_cols] = df2[float_cols].astype(float)
+            if bool_cols:
+                df2[bool_cols] = df2[bool_cols].astype(bool)
+            if ndarray_cols:
+                for col in ndarray_cols:
+                    df2[col] = df2[col].apply(
+                        # lambda x: np.asanyarray(x).reshape(-1) if x is not None else (np.nan if isinstance(x, (np.ndarray, list)) and np.isnan(x[0]) else x)
+                        lambda x: np.asanyarray(x).reshape(-1).tolist() if x is not None else x
+                    )
+        except Exception as e:
+            # Fallback: apply column-by-column if batch fails
+            logger.debug(f"Batch type coercion failed, falling back to column-by-column: {e}")
+            for col_list, dtype in [(str_cols, str), (int_cols, int), (float_cols, float), (bool_cols, bool), (ndarray_cols, np.ndarray)]:
+                for col in col_list:
+                    if dtype is np.ndarray:
+                        df2[col] = df2[col].apply(lambda x: np.asanyarray(x) if x is not None and not isinstance(x, np.ndarray) and not np.isnan(x) else x)
+                    try:
                         df2[col] = df2[col].astype(dtype)
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+
         return df2
 
     def _should_flush(self) -> bool:
@@ -592,7 +828,29 @@ class LedgeredDataFrameManager:
         with self._queue_lock:
             self._flush_queue_count += 1
         self._flush_event.set()  # Wake thread immediately
-        self._ensure_flush_thread()
+
+    def flush_if_needed_nonblocking(self, force: bool = False):
+        """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
+        # Try to acquire buffer lock with timeout
+        if not self._buffer_lock.acquire(blocking=False):
+            # Buffer is being written to by main thread, skip this cycle
+            return
+
+        try:
+            if not self._buffer:
+                return
+            # Drain buffer quickly
+            buffered = list(self._buffer.values())
+            self._buffer = {}
+        finally:
+            self._buffer_lock.release()
+
+        # Apply records outside buffer lock
+        if buffered:
+            self._apply_buffer_records_nonblocking(buffered)
+
+        # Flush to H5 if needed
+        self._flush_to_h5_if_needed(force=force)
 
     def flush_if_needed(self, force: bool = False):
         buffered = self._drain_buffer()
@@ -608,53 +866,64 @@ class LedgeredDataFrameManager:
             return
 
         # === PHASE 1: Extract data snapshot (FAST, lock held briefly) ===
-        work = None
-        data_snapshot = None
-        cols_to_save = None
+        with self._lock:
+            work = None
+            data_snapshot = None
+            cols_to_save = None
 
-        # Quick checks and data extraction
-        if self._store is None or self._df.empty or not self._pending:
-            return
+            # Quick checks and data extraction
+            if self._store is None or self._df.empty or not self._pending:
+                return
 
-        # Extract work set and clear pending
-        work = list(self._pending)
-        self._pending.clear()
-        self._force_flush = False
+            # Extract work set and clear pending
+            work = list(self._pending)
+            self._pending.clear()
+            self._force_flush = False
 
-        # Filter columns while holding lock (fast operation)
-        cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
-        if not cols_to_save:
-            return
+            # Filter columns while holding lock (fast operation)
+            cols_to_save = _filter_columns_by_patterns(self._df.columns.tolist(), SAMPLES_STATS_TO_SAVE_TO_H5)
+            if not cols_to_save:
+                return
 
-        # Create a snapshot copy of the data we need (deep copy to isolate from training thread)
-        data_snapshot = self._df.loc[work, cols_to_save]
+            # Create a snapshot copy of the data we need
+            data_snapshot = self._df.loc[work, cols_to_save]
 
         # === PHASE 1.5: Extract and store arrays to H5 (if enabled) ===
-        if self._array_store is not None and self._enable_h5_persistence:
+        # Extract array data from snapshot (already copied, no lock needed)
+        if self._array_store is not None and self._enable_h5_persistence and data_snapshot is not None:
             arrays_to_store = {}  # {sample_id: {col_name: array}}
 
             for sample_id in work:
-                if sample_id not in self._df.index:
+                if sample_id not in data_snapshot.index:
                     continue
-                row_data = self._df.loc[sample_id].to_dict() if isinstance(self._df.loc[sample_id], pd.Series) else self._df.loc[sample_id]
+                row_data = data_snapshot.loc[sample_id].to_dict() if isinstance(data_snapshot.loc[sample_id], pd.Series) else data_snapshot.loc[sample_id]
                 arrays = self._extract_arrays_for_storage(sample_id, row_data)
                 if arrays:
                     arrays_to_store[sample_id] = arrays
 
-            # Batch save arrays and get path references
+            # Batch save arrays and get path references (no lock needed)
             if arrays_to_store:
                 path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
 
-                # Replace array values with path references in DataFrame
-                try:
-                    for sample_id in path_refs:
-                        for col_name, path_ref in path_refs[sample_id].items():
-                            if col_name in self._df.columns and path_ref is not None:
-                                self._df.loc[sample_id, col_name] = path_ref
-                                if sample_id in data_snapshot.index and col_name in data_snapshot.columns:
+                # Replace array values with path references in both DataFrame and snapshot
+                if path_refs:
+                    with self._lock:
+                        try:
+                            for sample_id in path_refs:
+                                for col_name, path_ref in path_refs[sample_id].items():
+                                    if col_name in self._df.columns and path_ref is not None:
+                                        self._df.loc[sample_id, col_name] = path_ref
+                        except Exception as e:
+                            logger.warning(f"[LedgeredDataFrameManager] Error updating array refs: {e}")
+
+                    # Update snapshot too (no lock needed, it's a copy)
+                    try:
+                        for sample_id in path_refs:
+                            for col_name, path_ref in path_refs[sample_id].items():
+                                if sample_id in data_snapshot.index and col_name in data_snapshot.columns and path_ref is not None:
                                     data_snapshot.loc[sample_id, col_name] = path_ref
-                except Exception as e:
-                    print()
+                    except Exception as e:
+                        logger.warning(f"[LedgeredDataFrameManager] Error updating snapshot array refs: {e}")
         # === PHASE 2: Process and write H5 (NO LOCKS, training proceeds in parallel) ===
         if data_snapshot is None or data_snapshot.empty:
             return
@@ -666,15 +935,14 @@ class LedgeredDataFrameManager:
             origins = ["unknown"]
 
         # Write each origin's data independently (no locks held)
+        logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] flushing to H5 store.')
         for origin in origins:
             try:
                 origin_data = data_snapshot[data_snapshot["origin"] == origin] if "origin" in data_snapshot.columns else data_snapshot
                 written = self._store.upsert(origin, origin_data)
-                current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Flushed {written} rows (origin={origin}) to H5 store.")
+                logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Flushed {written} rows (origin={origin}) to H5 store.')
             except Exception as e:
-                current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                logger.error(f"[{current_time}] [LedgeredDataFrameManager] Failed flush for origin={origin}: {e}")
+                logger.error(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Failed flush for origin={origin}: {e}')
 
 # Create global instance with config-driven parameters
 def _create_ledger_manager():

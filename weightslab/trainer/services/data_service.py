@@ -285,12 +285,9 @@ class DataService:
             # ====== Step 1: Load dataset ======
             dataset = self._get_dataset(origin)
 
-            # ====== Step 3: Get dataset and label ======
-            dataset = self._get_dataset(origin)
-
-            # ====== Step 4: Determine task type ======
+            # ====== Step 2: Determine task type ======
             label = row.get(SampleStatsEx.TARGET.value)
-            if label is None and dataset:
+            if (label is None or (isinstance(label, list) and label == [])) and dataset:
                 label = load_label(dataset, sample_id)
 
             # Scalar / single element -> treat as classification
@@ -327,7 +324,10 @@ class DataService:
             # Optimized bulk processing of stats
             for stat_name in stats_to_retrieve:
                 value = row.get(stat_name)
-
+                if isinstance(value, float):
+                    value = round(value, 7)
+                if isinstance(value, bool):
+                    value = int(value)
                 data_stats.append(
                     create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
                 )
@@ -386,10 +386,10 @@ class DataService:
                     )
                 )
 
-            else:
+            elif label is not None and not np.isnan(label):
                 # Classification / other scalar-like labels
-                if label.size == 1:
-                    label = float(label.reshape(-1)[0])
+                if isinstance(label, (np.ndarray, list)) and np.asarray(label).size == 1:
+                    label = float(np.asarray(label).reshape(-1)[0])
                     data_stats.append(
                         create_data_stat(
                             name='label',
@@ -405,8 +405,8 @@ class DataService:
                         create_data_stat(
                             name='label',
                             stat_type='array',
-                            shape=list(label.shape),
-                            value=label.astype(float).ravel().tolist(),
+                            shape=list(np.asanyarray(label).shape),
+                            value=np.asanyarray(label).astype(float).ravel().tolist(),
                             thumbnail=b""
                         )
                     )
@@ -442,8 +442,8 @@ class DataService:
                             )
                         )
 
-                    elif isinstance(pred, np.ndarray) and pred.size == 1:
-                        pred_val = int(pred.reshape(-1)[0])
+                    elif isinstance(pred, (np.ndarray, list)) and np.asanyarray(pred).size == 1:
+                        pred_val = int(np.asanyarray(pred).reshape(-1)[0])
                         data_stats.append(
                             create_data_stat(
                                 name='pred',
@@ -496,7 +496,6 @@ class DataService:
                     raw_img = raw_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
                 # Generate raw data bytes
-                step_start = time.time()
                 raw_buf = io.BytesIO()
                 raw_img.save(raw_buf, format='JPEG')
                 raw_data_bytes = raw_buf.getvalue()
@@ -1172,7 +1171,7 @@ class DataService:
                         else:
                             # Fallback: origin / sample_id as columns
                             mask = (
-                                (self._all_datasets_df[SampleStatsEx.SAMPLE_ID.value] == sid)
+                                (self._all_datasets_df.index == sid)
                                 & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
                             )
                             self._all_datasets_df.loc[mask, request.stat_name] = target_val

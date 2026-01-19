@@ -12,6 +12,8 @@ import sys
 import time
 import logging
 import threading
+import hashlib
+import shutil
 from pathlib import Path
 from typing import Dict, Optional, Union, Any, Tuple
 from collections import OrderedDict
@@ -354,6 +356,37 @@ class H5ArrayStore:
     def _ensure_parent(self):
         """Create parent directory if it doesn't exist."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+    def _compute_array_checksum(self, array: np.ndarray) -> str:
+        """Compute checksum of array for corruption detection."""
+        try:
+            return hashlib.md5(array.tobytes()).hexdigest()
+        except Exception as e:
+            logger.warning(f"[H5ArrayStore] Failed to compute checksum: {e}")
+            return ""
+
+    def _create_backup(self) -> Optional[Path]:
+        """Create backup of array file before write."""
+        if not self._path.exists():
+            return None
+        try:
+            backup_path = self._path.with_suffix(".h5.backup")
+            shutil.copy2(self._path, backup_path)
+            logger.debug(f"[H5ArrayStore] Created backup at {backup_path}")
+            return backup_path
+        except Exception as e:
+            logger.warning(f"[H5ArrayStore] Failed to create backup: {e}")
+            return None
+
+    def _restore_backup(self, backup_path: Path) -> bool:
+        """Restore array file from backup on write failure."""
+        try:
+            if backup_path and backup_path.exists():
+                shutil.copy2(backup_path, self._path)
+                logger.info(f"[H5ArrayStore] Restored from backup: {backup_path}")
+                return True
+        except Exception as e:
+            logger.error(f"[H5ArrayStore] Failed to restore backup: {e}")
+        return False
 
     def _build_path_reference(self, sample_id: int, key_name: str) -> str:
         """Build path reference string for main dataframe."""

@@ -262,7 +262,6 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
         record = pb2.RecordMetadata(
             sample_id=row.get('sample_id', sample_id),
             sample_last_loss=float(row.get('prediction_loss', -1)),
-            sample_encounters=int(row.get('encountered', row.get('exposure_amount', 0))),
             sample_discarded=bool(row.get('deny_listed', False)),
             task_type=sample_stats.task_type,
         )
