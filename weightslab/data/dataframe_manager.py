@@ -958,28 +958,24 @@ def _create_ledger_manager():
     flush_interval = 3.0
     flush_max_rows = 100
     enable_h5 = True
+    enable_flush = True
 
     try:
-        not_init = True
         hp = get_hyperparams(resolve_hp_name())
         if isinstance(hp, dict):
             flush_interval = hp.get('ledger_flush_interval', flush_interval)
             flush_max_rows = hp.get('ledger_flush_max_rows', flush_max_rows)
             enable_h5 = hp.get('ledger_enable_h5_persistence', enable_h5)
             enable_flush = hp.get('ledger_enable_flushing_threads', True)
-            not_init = False
 
+            return LedgeredDataFrameManager(
+                flush_interval=flush_interval,
+                flush_max_rows=flush_max_rows,
+                enable_h5_persistence=enable_h5,
+                enable_flushing_threads=enable_flush
+            )
     except Exception:
-        not_init = True
         pass  # Use defaults if hyperparams not available
-
-    if not not_init:
-        return LedgeredDataFrameManager(
-            flush_interval=flush_interval,
-            flush_max_rows=flush_max_rows,
-            enable_h5_persistence=enable_h5,
-            enable_flushing_threads=enable_flush
-        )
 
 
 # Global LedgeredDataFrameManager instance

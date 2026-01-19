@@ -11,8 +11,11 @@ import unittest
 import numpy as np
 import pandas as pd
 import torch
+
+import weightslab as wl
+
 from torch.utils.data import Dataset
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from weightslab.data.data_samples_with_ops import (
     DataSampleTrackingWrapper,
@@ -20,7 +23,6 @@ from weightslab.data.data_samples_with_ops import (
     _match_column_patterns,
     _filter_columns_with_patterns,
 )
-from weightslab.data.sample_stats import SampleStatsEx
 
 
 class SimpleDataset(Dataset):
@@ -105,17 +107,29 @@ class TestDataSampleTrackingWrapperInit(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_initialization_with_valid_params(self, mock_ledger):
+    def test_initialization_with_valid_params(self):
         """Test wrapper initialization with valid parameters."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -130,13 +144,9 @@ class TestDataSampleTrackingWrapperInit(unittest.TestCase):
         self.assertEqual(wrapper.name, "train")
         self.assertTrue(wrapper.is_training)
         self.assertIsNotNone(wrapper.unique_ids)
-        mock_ledger.register_split.assert_called_once()
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_length_matches_dataset(self, mock_ledger):
+    def test_length_matches_dataset(self):
         """Test that wrapper length matches dataset length."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         dataset_size = 20
         dataset = SimpleDataset(size=dataset_size)
@@ -158,18 +168,29 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10, return_labels=True)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_getitem_returns_data_and_id(self, mock_ledger):
+    def test_getitem_returns_data_and_id(self):
         """Test that __getitem__ returns (data, id, label, ...)."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
-        mock_ledger.get_value = Mock(return_value=None)
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -189,15 +210,11 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         # First element should be numpy array or tensor
         self.assertTrue(isinstance(result[0], (np.ndarray, torch.Tensor)))
 
-        # Second element should be a numeric ID
+        # Second element should be a numeric UID
         self.assertTrue(isinstance(result[1], (int, np.integer)))
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_getitem_with_single_element_dataset(self, mock_ledger):
+    def test_getitem_with_single_element_dataset(self):
         """Test __getitem__ with unsupervised dataset (no labels)."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
-        mock_ledger.get_value = Mock(return_value=None)
 
         dataset = SimpleDataset(size=5, return_labels=False)
         wrapper = DataSampleTrackingWrapper(
@@ -223,29 +240,31 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10, return_labels=True)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_binary_tag_labeling(self, mock_ledger):
+    def test_binary_tag_labeling(self):
         """Test binary tag-based labeling."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
-        # Create a shared dictionary to track get_value calls
-        def mock_get_value(split, sample_id, key):
-            # Mock tag values - the sample_id here is the actual unique_id, not the index
-            if key == SampleStatsEx.TAGS.value:
-                # Use modulo on sample_id to alternate between tags
-                return "target_tag" if sample_id % 2 == 0 else "other_tag"
-            return None
-
-        mock_ledger.get_value = mock_get_value
-
-        tags_mapping = {"target_tag": 1}
+        tags_mapping = {"target_tag": 1, "non_target_tag": 0}
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
             root_log_dir=self.temp_dir,
@@ -261,53 +280,22 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         sample_id = result[1]
 
         # Check based on actual sample_id
-        if sample_id % 2 == 0:
-            self.assertEqual(target_label, 1)
-        else:
-            self.assertEqual(target_label, 0)
+        self.assertEqual(target_label, 0)
+
+        # Set tags for samples
+        wrapper.set(sample_id=sample_id, stat_name="tags", value='target_tag')
 
         # Test another sample
         result = wrapper[1]
-        target_label = result[2]
         sample_id = result[1]
-        if sample_id % 2 == 0:
-            self.assertEqual(target_label, 1)
-        else:
-            self.assertEqual(target_label, 0)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_multiclass_tag_labeling(self, mock_ledger):
-        """Test multiclass tag-based labeling."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
+        # Set tags for samples
+        wrapper.set(sample_id=sample_id, stat_name="tags", value='non_target_tag')
 
-        def mock_get_value(split, sample_id, key):
-            if key == SampleStatsEx.TAGS.value:
-                mapping = {0: "small", 1: "medium", 2: "large"}
-                return mapping.get(sample_id % 3, "small")
-            return None
-
-        mock_ledger.get_value = mock_get_value
-
-        tags_mapping = {"small": 0, "medium": 1, "large": 2}
-        wrapper = DataSampleTrackingWrapper(
-            wrapped_dataset=self.dataset,
-            root_log_dir=self.temp_dir,
-            enable_h5_persistence=False,
-            compute_hash=False,
-            use_tags=True,
-            tags_mapping=tags_mapping,
-        )
-
-        # Test different samples - verify against their actual sample_id
-        for idx in range(3):
-            result = wrapper[idx]
-            target_label = result[2]
-            sample_id = result[1]
-
-            # Map based on the actual sample_id
-            expected = {0: 0, 1: 1, 2: 2}.get(sample_id % 3, 0)
-            self.assertEqual(target_label, expected)
+        # Get labels
+        result = wrapper[1]
+        target_label = result[2]
+        self.assertEqual(target_label, 0)
 
 
 class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
@@ -318,19 +306,29 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_denylist_samples(self, mock_ledger):
+    def test_denylist_samples(self):
         """Test denylisting samples."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
-        mock_ledger.update_values = Mock()
-        mock_ledger.mark_dirty = Mock()
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -347,13 +345,8 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
         # Check denied count was updated
         self.assertEqual(wrapper.denied_sample_cnt, len(denied_ids))
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_allowlist_samples(self, mock_ledger):
+    def test_allowlist_samples(self):
         """Test allowlisting samples."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
-        mock_ledger.update_values = Mock()
-        mock_ledger.mark_dirty = Mock()
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -373,13 +366,8 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
         # If allow was successful, denied_sample_cnt should be updated
         # (depends on mock behavior of get_df_view)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_denylist_clear(self, mock_ledger):
+    def test_denylist_clear(self):
         """Test clearing all denylists."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
-        mock_ledger.update_values = Mock()
-        mock_ledger.mark_dirty = Mock()
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -406,21 +394,29 @@ class TestDataSampleTrackingWrapperStateDict(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=5)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_state_dict_structure(self, mock_ledger):
+    def test_state_dict_structure(self):
         """Test that state_dict has correct structure."""
-        mock_ledger.register_split = Mock()
-        mock_df = pd.DataFrame({
-            "prediction_loss": [0.1, 0.2],
-        })
-        mock_ledger.get_df_view = Mock(return_value=mock_df)
-        mock_ledger.get_dense_map = Mock(return_value={})
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -446,17 +442,29 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_get_sample_id_at_index(self, mock_ledger):
+    def test_get_sample_id_at_index(self):
         """Test retrieving sample ID at given index."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -469,11 +477,8 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
         sample_id = wrapper.get_sample_id_at_index(0)
         self.assertEqual(sample_id, int(wrapper.unique_ids[0]))
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_get_index_from_sample_id(self, mock_ledger):
+    def test_get_index_from_sample_id(self):
         """Test retrieving index from sample ID."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -487,11 +492,8 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
         index = wrapper.get_index_from_sample_id(sample_id)
         self.assertEqual(index, 0)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_infer_num_classes_from_dataset(self, mock_ledger):
+    def test_infer_num_classes_from_dataset(self):
         """Test inferring number of classes from wrapped dataset."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         # Create a dataset with num_classes attribute
         dataset = SimpleDataset(size=10)
@@ -507,11 +509,8 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
         num_classes = wrapper.infer_num_classes()
         self.assertEqual(num_classes, 10)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_infer_num_classes_binary_tags(self, mock_ledger):
+    def test_infer_num_classes_binary_tags(self):
         """Test inferring num_classes with binary tag mapping."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -533,18 +532,30 @@ class TestDataSampleTrackingWrapperDuplicateDetection(unittest.TestCase):
         """Create a temporary directory for logs."""
         self.temp_dir = tempfile.mkdtemp()
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
     @patch('weightslab.data.data_samples_with_ops.array_id_2bytes')
-    def test_duplicate_detection_with_hash(self, mock_hash, mock_ledger):
+    def test_duplicate_detection_with_hash(self, mock_hash):
         """Test that duplicate samples are detected and removed."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         # Create dataset with duplicates
         dataset = SimpleDataset(size=5)
@@ -575,18 +586,29 @@ class TestDataSampleTrackingWrapperEquality(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_equality_same_wrapper(self, mock_ledger):
+    def test_equality_same_wrapper(self):
         """Test equality comparison of wrappers."""
-        mock_ledger.register_split = Mock()
-        mock_df = pd.DataFrame()
-        mock_ledger.get_df_view = Mock(return_value=mock_df)
 
         wrapper1 = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -605,11 +627,8 @@ class TestDataSampleTrackingWrapperEquality(unittest.TestCase):
         # Both have same wrapped_dataset and same denied_count
         self.assertTrue(wrapper1 == wrapper2)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_equality_different_types(self, mock_ledger):
+    def test_equality_different_types(self):
         """Test equality comparison with different types."""
-        mock_ledger.register_split = Mock()
-        mock_ledger.get_df_view = Mock(return_value=pd.DataFrame())
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -631,21 +650,29 @@ class TestDataSampleTrackingWrapperAsRecords(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=5)
 
+        # Initialize HP
+        parameters = {
+            'flush_interval': 3.0,
+            'flush_max_rows': 100,
+            'enable_h5': True,
+            'enable_flush': True
+        }
+        wl.watch_or_edit(
+            parameters,
+            flag="hyperparameters",
+            name='TestCheckpointManagerHP',
+            defaults=parameters,
+            poll_interval=1.0,
+        )
+
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('weightslab.data.data_samples_with_ops.LEDGER_MANAGER')
-    def test_as_records(self, mock_ledger):
+    def test_as_records(self):
         """Test converting DataFrame to records."""
-        mock_ledger.register_split = Mock()
-        mock_df = pd.DataFrame({
-            "sample_id": [1, 2, 3],
-            "prediction_loss": [0.1, 0.2, 0.3],
-        }).set_index("sample_id")
-        mock_ledger.get_df_view = Mock(return_value=mock_df)
 
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,

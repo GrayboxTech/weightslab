@@ -22,9 +22,6 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# # Module-level lock for thread-safe hyperparams operations
-# _hyperparams_lock = threading.RLock()
-
 
 class Proxy:
     """A small forwarding proxy that holds a mutable reference to an object.
@@ -230,6 +227,7 @@ class Ledger:
             if weak:
                 registry.pop(name, None)
                 registry_weak[name] = obj
+                return registry_weak[name]
             else:
                 proxy = proxies.get(name)
                 if proxy is not None:
@@ -243,7 +241,7 @@ class Ledger:
                         del registry_weak[name]
                     except KeyError:
                         pass
-        return registry[name]
+                return registry[name]
 
     def _get(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: Optional[str] = None) -> Any:
         with self._lock:
@@ -610,7 +608,6 @@ def register_hyperparams(name: str, params: Dict[str, Any], weak: bool = False) 
     GLOBAL_LEDGER.register_hyperparams(name, params, weak=weak)
 
 def get_hyperparams(name: Optional[str] = None) -> Any:
-    # with _hyperparams_lock:
     return GLOBAL_LEDGER.get_hyperparams(name)
 
 def list_hyperparams() -> List[str]:
@@ -632,7 +629,6 @@ def resolve_hp_name() -> str | None:
     return names[-1]  # first is empty proxy parameters generated at init
 
 def set_hyperparam(name: str, key_path: str, value: Any) -> None:
-    # with _hyperparams_lock:
     try:
         return GLOBAL_LEDGER.set_hyperparam(name, key_path, value)
     except IndexError:

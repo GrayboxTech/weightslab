@@ -69,19 +69,15 @@ class SampleStats:
         base_list = [
             # cls.Ex.PREDICTION_SIGNALS_VALUES.value,
             "signals.*",  # Prefix for dynamic signals
+
             cls.Ex.DENY_LISTED.value,
             cls.Ex.TAGS.value,
             cls.Ex.ORIGIN.value,
-        ]\
 
-        # Check environment variable to include predictions and targets
-        if os.getenv('WEIGHTSLAB_SAVE_PREDICTIONS_TO_H5', "1").lower() in ('true', '1', 'yes'):
-            # Include prediction arrays and targets
-            base_list.extend([
-                cls.Ex.PREDICTION.value,
-                cls.Ex.PREDICTION_RAW.value,
-                cls.Ex.TARGET.value,
-            ])
+            cls.Ex.PREDICTION.value,
+            cls.Ex.PREDICTION_RAW.value,
+            cls.Ex.TARGET.value,
+        ]
 
         return base_list
 
