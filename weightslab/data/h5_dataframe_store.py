@@ -5,12 +5,17 @@ import logging
 import threading
 import hashlib
 import shutil
-from pathlib import Path
-from typing import Iterable, Optional, Union
 
 import pandas as pd
 import numpy as np
 
+from pathlib import Path
+from typing import Iterable, Optional, Union
+
+from weightslab.data.sample_stats import SampleStats
+
+
+# Initialize logger
 logger = logging.getLogger(__name__)
 
 
@@ -134,14 +139,7 @@ class H5DataFrameStore:
         df = df.fillna(np.nan)
 
         # Identify columns that need serialization (contain lists/dicts)
-        cols_to_serialize = []
-        for col in df.columns:
-            # Quick sample check: if first non-null value is list/dict/array, process this column
-            sample_vals = df[col].dropna().head(1)
-            if not sample_vals.empty:
-                val = sample_vals.iloc[0]
-                if isinstance(val, (list, dict, np.ndarray)):
-                    cols_to_serialize.append(col)
+        cols_to_serialize = SampleStats.MODEL_INOUT_LIST
 
         # Serialize only the columns that need it
         def serialize_value(val):

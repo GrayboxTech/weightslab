@@ -1,3 +1,4 @@
+import os
 
 from enum import Enum
 from typing import Dict, Any, List
@@ -61,6 +62,12 @@ class SampleStats:
         Ex.TASK_TYPE.value: "",
     }
 
+    MODEL_INOUT_LIST = [
+        Ex.PREDICTION.value,
+        Ex.TARGET.value,
+        Ex.PREDICTION_RAW.value,
+    ]
+
     @classmethod
     def get_to_save_to_h5_list(cls) -> List[str]:
         """Return list of stats to save to H5, conditionally including predictions and targets."""
@@ -71,12 +78,12 @@ class SampleStats:
             cls.Ex.DENY_LISTED.value,
             cls.Ex.TAGS.value,
             cls.Ex.ORIGIN.value,
-
-            cls.Ex.PREDICTION.value,
-            cls.Ex.PREDICTION_RAW.value,
-            cls.Ex.TARGET.value,
         ]
 
+        if os.getenv("WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5", "1") == "1":
+            base_list.extend(
+                cls.MODEL_INOUT_LIST
+            )
         return base_list
 
 
@@ -86,3 +93,4 @@ SAMPLES_STATS_TO_SAVE_TO_H5 = SampleStats.get_to_save_to_h5_list()
 SAMPLES_STATS_DEFAULTS = SampleStats.DEFAULTS
 SAMPLES_STATS_DEFAULTS_TYPES = SampleStats.DEFAULTS_TYPES
 SAMPLE_STATS_ALL = set(SampleStatsEx.ALL())
+MODEL_INOUT_LIST = SampleStats.MODEL_INOUT_LIST
