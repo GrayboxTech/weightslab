@@ -8,7 +8,6 @@ main dataframe as paths like 'arrays.h5:/sample_id/key_name'.
 """
 
 import os
-import sys
 import time
 import logging
 import threading

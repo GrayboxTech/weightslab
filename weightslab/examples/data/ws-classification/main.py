@@ -1,4 +1,3 @@
-from datetime import datetime
 import itertools
 import os
 import time
@@ -18,7 +17,6 @@ from torchmetrics.classification import Accuracy
 from torchvision import datasets, transforms
 
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
-from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context

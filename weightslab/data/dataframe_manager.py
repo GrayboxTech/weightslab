@@ -1,6 +1,5 @@
 import threading
 import logging
-import types
 
 from datetime import datetime
 

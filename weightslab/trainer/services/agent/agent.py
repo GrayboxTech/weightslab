@@ -254,12 +254,6 @@ class DataManipulationAgent:
         """Uses the LLM to wrap the raw analysis result in a conversational sentence."""
         try:
              # Simple prompt for wrapping
-             wrapper_prompt = (
-                 f"You are a helpful data assistant. The user asked: '{original_question}'. "
-                 f"The analysis code returned this raw result: '{raw_answer}'. "
-                 "Please respond to the user with a clear, concise sentence summarizing this finding. "
-                 "Do not show code. Just the answer."
-             )
 
              # Re-use the existing chain/client logic if possible, or simplified direct call
              # For simplicity, we just use the same method _try_query_provider effectively but with a different prompt?
@@ -272,7 +266,7 @@ class DataManipulationAgent:
 
              # TODO: Implement full wrapper once stability is confirmed.
              return f"Analysis Result: {raw_answer}"
-        except Exception as e:
+        except Exception:
             return str(raw_answer)
 
     def _try_query_provider(self, provider: str, instruction: str, system_prompt: str) -> Optional[List[dict]]:

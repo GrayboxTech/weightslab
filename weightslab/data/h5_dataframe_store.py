@@ -6,7 +6,7 @@ import threading
 import hashlib
 import shutil
 from pathlib import Path
-from typing import Iterable, Optional, Union, Tuple
+from typing import Iterable, Optional, Union
 
 import pandas as pd
 import numpy as np
