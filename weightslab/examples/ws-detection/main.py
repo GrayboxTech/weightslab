@@ -1,7 +1,6 @@
 import os
 import time
 import tempfile
-import itertools
 import logging
 
 import tqdm
@@ -174,6 +173,7 @@ class COCOBBoxSegmentationDataset(Dataset):
         image_transform=None,
         mask_transform=None,
         class_map=None,
+        max_samples=None,
     ):
         super().__init__()
         try:
@@ -188,7 +188,8 @@ class COCOBBoxSegmentationDataset(Dataset):
         self.image_transform = image_transform
         self.mask_transform = mask_transform
         self.class_map = class_map or {}
-        self.image_ids = list(self.coco.imgs.keys())[:SUBSET]  # Use all images
+        subset_limit = max_samples if max_samples is not None else SUBSET
+        self.image_ids = list(self.coco.imgs.keys())[:subset_limit]
 
     def __len__(self):
         return len(self.image_ids)
@@ -289,7 +290,6 @@ def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_l
                 loss_batch = criterion_mlt(
                     pbbxs[..., :-1],  # Remove class for loss
                     tbbxs,
-                    model_age=model.get_age(),
                     batch_ids=ids,
                     preds=pbbxs,  # Full preds for data store logging, bboxs with cls
                 )
@@ -318,7 +318,6 @@ def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_
                 loss_batch = criterion_mlt(
                     pbbxs[..., :-1],  # Remove class for loss
                     tbbxs,
-                    model_age=model.get_age(),
                     batch_ids=ids,
                     preds=pbbxs,  # Full preds for data store logging, bboxs with cls
                 )
@@ -428,6 +427,7 @@ if __name__ == "__main__":
         image_transform=image_transform,
         mask_transform=mask_transform,
         class_map=None,
+        max_samples=SUBSET // 2,
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -452,8 +452,7 @@ if __name__ == "__main__":
     )
 
     # --- 6) Model, optimizer, losses, metric ---
-    _model = Yolov11(img_size=parameters.get("img_size", 128))
-    model = wl.watch_or_edit(_model, flag="model", name=exp_name, device=device, use_onnx=True)
+    model = Yolov11(img_size=parameters.get("img_size", 128)).to(device)
 
     # --- Compute class weights to handle class imbalance ---
     print("\n" + "=" * 60)
@@ -462,8 +461,8 @@ if __name__ == "__main__":
 
     # --- 7) Start WeightsLab services ---
     wl.serve(
-        serving_grpc=True,
-        serving_cli=True,
+        serving_grpc=parameters.get("serving_grpc", True),
+        serving_cli=parameters.get("serving_cli", True),
     )
 
     print("=" * 60)
@@ -471,43 +470,25 @@ if __name__ == "__main__":
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    # ================
+    # ==============================
     # 7. Optional Trainset iteration
     train_cfg = data_cfg.get("train_loader", {})
     train_loss = None
-    if train_cfg:
-        _train_dataset = COCOBBoxSegmentationDataset(
-            train_cfg["images_dir"],
-            train_cfg["annotations_file"],
-            image_transform=image_transform,
-            mask_transform=mask_transform,
-            class_map=None,
-        )
-        train_loader = wl.watch_or_edit(
-            _train_dataset,
-            flag="data",
-            name="train_loader",
-            batch_size=train_cfg.get("batch_size", 2),
-            shuffle=train_cfg.get("shuffle", True),
-            compute_hash=True,
-            is_training=True,
-        )
-
-        train_loader_len = len(train_loader)
-        train_loss = pseudo_train(
-            train_loader,
-            model,
-            criterion_mlt=train_criterion,
-            device=device,
-            train_loader_len=train_loader_len,
-            tqdm_display=tqdm_display,
-        )
-        if train_loss is not None:
-            print(f"Train loss (GIoU-based, no backprop): {train_loss:.4f}")
+    train_loader = test_loader
+    train_loader_len = len(train_loader)
+    train_loss = pseudo_train(
+        train_loader,
+        model,
+        criterion_mlt=train_criterion,
+        device=device,
+        train_loader_len=train_loader_len,
+        tqdm_display=tqdm_display,
+    )
+    if train_loss is not None:
+        print(f"Train loss (GIoU-based, no backprop): {train_loss:.4f}")
 
     # ===============
     # 8. Testing Loop
-    train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
     test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
     test_loss, test_metric = None, None

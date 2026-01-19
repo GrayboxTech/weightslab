@@ -15,6 +15,10 @@ ledger_enable_h5_persistence: false
 ledger_flush_max_rows: 250
 ledger_flush_interval: 10.0
 
+# Serving
+serving_grpc: true
+serving_cli: true
+
 data:
   train_loader:
     batch_size: 1
