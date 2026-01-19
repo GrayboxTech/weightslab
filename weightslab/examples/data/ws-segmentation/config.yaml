@@ -16,6 +16,7 @@ serving_grpc: true
 serving_cli: true
 
 # Configure global dataframe storage
+ledger_enable_flushing_threads: true
 ledger_enable_h5_persistence: true
 ledger_flush_max_rows: 250
 ledger_flush_interval: 10.0

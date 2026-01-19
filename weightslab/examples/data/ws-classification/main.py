@@ -162,12 +162,10 @@ if __name__ == "__main__":
 
     # Model
     model = CNN().to(device)
-    # model = wl.watch_or_edit(model, flag="model", name=exp_name, device=device)
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    # optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
 
     # Data (MNIST train/val/test)
     _full_train_dataset = datasets.MNIST(
