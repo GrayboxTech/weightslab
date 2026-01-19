@@ -159,6 +159,12 @@ class GuardContext:
             except Exception:
                 pass
 
+        # Auto-increment step count for UI progress
+        if self.for_training and self.model is not None:
+            if not hasattr(self.model, 'current_step'):
+                self.model.current_step = 0
+            self.model.current_step += 1
+
         return False
 
 
@@ -233,5 +239,5 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
 # Start sync thread once at module import
 if not _pause_sync_thread_started:
     _pause_sync_thread_started = True
-    t = threading.Thread(target=_pause_hp_sync_loop, name='pause-hp-sync', daemon=True)
+    t = threading.Thread(target=_pause_hp_sync_loop, name='WL-HP_Sync_Loop', daemon=True)
     t.start()

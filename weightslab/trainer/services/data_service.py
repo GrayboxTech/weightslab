@@ -13,6 +13,7 @@ import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
 
+from PIL import Image
 from typing import List
 from pathlib import Path
 from concurrent import futures
@@ -186,6 +187,45 @@ def _infer_task_type_from_label(label, default="classification"):
     return default
 
 
+def generate_thumbnail(pil_image, max_size=(128, 128), quality=85):
+    """Generate a JPEG thumbnail from a PIL image.
+
+    Args:
+        pil_image: PIL Image object
+        max_size: Max dimensions (width, height) for thumbnail
+        quality: JPEG quality (1-95)
+
+    Returns:
+        bytes: JPEG thumbnail as bytes
+    """
+    try:
+        # Create a copy to avoid modifying original
+        thumb = pil_image.copy()
+
+        # Use LANCZOS for high-quality downsampling
+        thumb.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+        # Convert to RGB if needed (JPEG doesn't support RGBA)
+        if thumb.mode in ('RGBA', 'LA', 'P'):
+            # Create white background
+            background = Image.new('RGB', thumb.size, (255, 255, 255))
+            if thumb.mode == 'P':
+                thumb = thumb.convert('RGBA')
+            if thumb.mode in ('RGBA', 'LA'):
+                background.paste(thumb, mask=thumb.split()[-1])  # Use alpha channel as mask
+                thumb = background
+        elif thumb.mode != 'RGB':
+            thumb = thumb.convert('RGB')
+
+        # Save as JPEG to buffer
+        buffer = io.BytesIO()
+        thumb.save(buffer, format='JPEG', quality=quality, optimize=True)
+        return buffer.getvalue()
+    except Exception as e:
+        logger.warning(f"Failed to generate thumbnail: {e}")
+        return b""
+
+
 class DataService:
 
     """
@@ -211,7 +251,20 @@ class DataService:
         self._agent = DataManipulationAgent(self)
 
         self._last_internals_update_time = None
-        logger.info("DataService initialized.")
+
+        # Shared thread pool for data processing (avoid thread explosion)
+        # Size: min(CPU cores * 2, 16) to balance concurrency without excessive threading
+        cpu_count = os.cpu_count() or 4
+        max_data_workers = min(cpu_count * 2, 16)
+        self._data_executor = futures.ThreadPoolExecutor(
+            max_workers=max_data_workers,
+            thread_name_prefix="WL-DataProcessing"
+        )
+
+        logger.info("DataService initialized.", extra={
+            "data_workers": max_data_workers,
+            "cpu_count": cpu_count
+        })
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -404,9 +457,15 @@ class DataService:
 
                     # Attempt to load raw image from dataset if available
                     if dataset:
-                        index = dataset.get_index_from_sample_id(sample_id)
-                        raw_img = load_raw_image(dataset, index)
-                        original_size = raw_img.size
+                        try:
+                            index = dataset.get_index_from_sample_id(sample_id)
+                        except (KeyError, ValueError, IndexError):
+                            index = None
+                        
+                        if index is not None:
+                            raw_img = load_raw_image(dataset, index)
+                            raw_img_array = np.array(raw_img)
+                            original_size = raw_img.size
 
                         # Handle resize request
                         # Negative values indicate percentage mode (e.g., -50 means 50% of original)
@@ -419,15 +478,18 @@ class DataService:
 
                             # Only resize if we're actually reducing size
                             if target_width < original_size[0] or target_height < original_size[1]:
-                                raw_img = raw_img.resize((target_width, target_height))
+                                raw_img = Image.fromarray(raw_img_array).resize((target_width, target_height))
 
                         elif request.resize_width > 0 and request.resize_height > 0:
                             if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
-                                raw_img = raw_img.resize((request.resize_width, request.resize_height))
+                                raw_img = Image.fromarray(raw_img_array).resize((request.resize_width, request.resize_height))
+
+                        else:
+                            raw_img = Image.fromarray(raw_img_array)
 
                         raw_shape = [raw_img.height, raw_img.width, len(raw_img.getbands())]
                         raw_buf = io.BytesIO()
-                        raw_img.save(raw_buf, format='PNG')
+                        raw_img.save(raw_buf, format='JPEG')
                         raw_data_bytes = raw_buf.getvalue()
 
                 except Exception as e:
@@ -439,11 +501,20 @@ class DataService:
             # And get label from the dataset
             label = row.get(SampleStatsEx.TARGET.value)
             dataset = self._get_dataset(origin)
-            dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset else None
+            try:
+                dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset else None
+            except (KeyError, ValueError, IndexError):
+                dataset_index = None
             if label is None:
                 # Try loading label from dataset if available
                 if dataset:
                     label = load_label(dataset, sample_id)  # Load cls, seg, or det labels
+            
+            if label is None:
+                # If still None, it's a ghost record. Return a minimal response or skip.
+                logger.debug(f"Skipping ghost sample {sample_id} (not found in dataset)")
+                return None
+
             task_type = _infer_task_type_from_label(label, default='Segmentation')
 
             stats_to_retrieve = list(request.stats_to_retrieve)
@@ -629,10 +700,21 @@ class DataService:
             # ====================================================================
             # ========================== Processing ==============================
             if raw_data_bytes:
+                # Generate thumbnail for grid display
+                try:
+                    raw_img_for_thumb = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
+                    thumbnail_bytes = generate_thumbnail(raw_img_for_thumb, max_size=(256, 256), quality=85)
+                except Exception as e:
+                    logger.debug(f"Could not generate thumbnail for sample {sample_id}: {e}")
+                    thumbnail_bytes = b""
+
                 data_stats.append(
                     pb2.DataStat(
-                        name='raw_data', type='bytes', shape=raw_shape,
-                        value=raw_data_bytes
+                        name='raw_data',
+                        type='bytes',
+                        shape=raw_shape,
+                        value=raw_data_bytes,
+                        thumbnail=thumbnail_bytes  # Add thumbnail
                     )
                 )
             if transformed_data_bytes:
@@ -702,6 +784,92 @@ class DataService:
             analysis_result=analysis_result
         )
 
+    def _parse_direct_query(self, query: str) -> list:
+        """
+        Parse a simple direct query string into operations list.
+        Expected format: "col > val and col2 == val2 sortby col desc"
+        
+        This bypasses the LLM agent for deterministic filtering.
+        """
+        operations = []
+        query = query.strip()
+        
+        logger.debug(f"[_parse_direct_query] Parsing query: {repr(query)}")
+        
+        if query.lower().startswith("sortby "):
+            filter_part = None
+            sort_part = query[7:].strip()
+        elif " sortby " in query.lower():
+            parts = query.split(" sortby ", 1)
+            filter_part = parts[0].strip() if parts[0].strip() else None
+            sort_part = parts[1].strip() if len(parts) > 1 else None
+        else:
+            filter_part = query
+            sort_part = None
+        
+        logger.debug(f"[_parse_direct_query] filter_part: {repr(filter_part)}, sort_part: {repr(sort_part)}")
+        
+        # Parse filter part
+        if filter_part:
+            # For now, treat the entire filter as a pandas query expression
+            operations.append({
+                "function": "df.query",
+                "params": {"expr": filter_part}
+            })
+        
+        # Parse sort part
+        if sort_part:
+            sort_cols = []
+            sort_ascs = []
+            
+            # Split by comma to support multiple columns: "tags asc, target desc"
+            # We need to respect quotes potentially, but for now assume simple CSV structure
+            parts = [p.strip() for p in sort_part.split(',')]
+            
+            for p in parts:
+                if not p:
+                    continue
+                    
+                ascending = True
+                col_raw = p
+                
+                # Check for direction suffix
+                lower_s = p.lower()
+                if lower_s.endswith(" asc"):
+                    ascending = True
+                    col_raw = p[:-4].strip()
+                elif lower_s.endswith(" desc"):
+                    ascending = False
+                    col_raw = p[:-5].strip()
+                
+                # Clean up quotes from column name
+                col = col_raw.replace('`', '').strip()
+                
+                if col:
+                    sort_cols.append(col)
+                    sort_ascs.append(ascending)
+            
+            if sort_cols:
+                logger.debug(f"[_parse_direct_query] Sort: cols={sort_cols}, asc={sort_ascs}")
+                
+                # Special optimization for single 'index' sort
+                if len(sort_cols) == 1 and sort_cols[0].lower() == 'index':
+                    operations.append({
+                        "function": "df.sort_index",
+                        "params": {"ascending": sort_ascs[0]}
+                    })
+                else:
+                    # Multi-column or single column sort
+                    # Note: 'index' mixed with columns in sort_values requires actual column named 'index' 
+                    # or index level support (which sort_values handles if named).
+                    operations.append({
+                        "function": "df.sort_values",
+                        "params": {"by": sort_cols, "ascending": sort_ascs}
+                    })
+        
+        logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
+        return operations
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -711,22 +879,40 @@ class DataService:
         # A) Agent-driven df.query → keep/filter rows via in-place drop
         if func == "df.query":
             expr = params.get("expr", "")
-            before = len(df)
 
             try:
-                # We use raw eval() on a mask expression for maximum flexibility.
-                # This allows the expression to contain complex df[...] logic.
-                mask = eval(expr, {"df": df, "np": np, "pd": pd})
-                kept = df[mask]
-
+                # 1. Try pandas query() first: Handles 'col == val' and backticks natively.
+                # This is the cleanest syntax for the agent.
+                kept = df.query(expr)
                 df.drop(index=df.index.difference(kept.index), inplace=True)
                 return f"Applied query: {expr}"
-            except Exception as e:
-                logger.error(f"Query failed: {e}")
-                return f"Failed to apply query: {e}"
+            except Exception as query_error:
+                try:
+                    # 2. Try df.eval(): Handles column names AND explicit 'df' prefixes.
+                    # This covers cases like "mean_loss > df['mean_loss'].mean()"
+                    mask = df.eval(expr, local_dict={"df": df, "np": np, "pd": pd})
+                    if isinstance(mask, (pd.Series, np.ndarray)):
+                        kept = df[mask]
+                        df.drop(index=df.index.difference(kept.index), inplace=True)
+                        return f"Applied query (df.eval): {expr}"
+                    else:
+                        raise ValueError("eval did not return a boolean mask")
+                except Exception as eval_error:
+                    try:
+                        # 3. Final fallback to raw eval() for complex logic that pandas might block.
+                        mask = eval(expr, {"df": df, "np": np, "pd": pd})
+                        if isinstance(mask, (pd.Series, np.ndarray, list)):
+                            kept = df[mask]
+                            df.drop(index=df.index.difference(kept.index), inplace=True)
+                            return f"Applied query (raw eval): {expr}"
+                        else:
+                            raise ValueError("raw eval did not return a mask")
+                    except Exception as raw_eval_error:
+                        logger.error(f"Query failed. query() error: {query_error}, eval() error: {eval_error}, raw_eval() error: {raw_eval_error}")
+                        return f"Failed to apply query: {query_error}"
 
         # B) Other supported Pandas operations (drop, sort, head, tail, sample)
-        if func in {"df.drop", "df.sort_values", "df.head", "df.tail", "df.sample"}:
+        if func in {"df.drop", "df.sort_values", "df.sort_index", "df.head", "df.tail", "df.sample"}:
             func_name = func.replace("df.", "")
 
             try:
@@ -744,14 +930,83 @@ class DataService:
                 # ---- SORT_VALUES ----
                 if func_name == "sort_values":
                     safe_params = params.copy()
-                    by = safe_params.get("by", [])
-                    if isinstance(by, str):
-                        by = [by]
+                    raw_by = safe_params.get("by", [])
+                    if isinstance(raw_by, str):
+                        raw_by = [raw_by]
+                    
+                    # 1. Flatten comma-separated strings and extract direction (asc/desc)
+                    # Agent LLMs sometimes return ["col1, col2"] or ["col1 asc", "col2 desc"]
+                    final_by = []
+                    final_ascs = []
+                    
+                    # Initialize default ascending from params if present
+                    # params["ascending"] can be a bool or a list
+                    input_ascending = params.get("ascending", True)
+
+                    for b in raw_by:
+                        # Split by comma
+                        parts = [p.strip() for p in str(b).split(',')]
+                        for p in parts:
+                            if not p: continue
+                            
+                            # Default direction for this specific item
+                            item_asc = True
+                            if isinstance(input_ascending, list) and len(final_by) < len(input_ascending):
+                                item_asc = input_ascending[len(final_by)]
+                            elif isinstance(input_ascending, bool):
+                                item_asc = input_ascending
+
+                            col_name = p
+                            lower_p = p.lower()
+                            if lower_p.endswith(" asc"):
+                                item_asc = True
+                                col_name = p[:-4].strip()
+                            elif lower_p.endswith(" desc"):
+                                item_asc = False
+                                col_name = p[:-5].strip()
+                            
+                            final_by.append(col_name)
+                            final_ascs.append(item_asc)
+
+                    by = final_by
+                    # If we found explicit directions or have a list, use the list for ascending
+                    if len(final_ascs) > 1 or (len(final_ascs) == 1 and "desc" in str(raw_by).lower()):
+                         safe_params["ascending"] = final_ascs
 
                     logger.debug(
                         "[ApplyDataQuery] Preparing in-place sort_values on columns %s with params %s",
                         by, safe_params
                     )
+
+                    # Case-insensitive and format-tolerant column matching
+                    corrected_by = []
+                    
+                    def normalize_name(n):
+                        return str(n).lower().replace(' ', '').replace('_', '')
+
+                    # Build map of normalized names to actual column/index names
+                    df_cols_map = {}
+                    # Priority to columns, then index
+                    candidates = list(df.columns) + list(df.index.names)
+                    for c in candidates:
+                        if c:
+                            df_cols_map[normalize_name(c)] = c
+
+                    for col in by:
+                        # Strip backticks if present (from agent or UI)
+                        col = col.replace('`', '').strip()
+                        
+                        if col in df.columns or col in df.index.names:
+                            corrected_by.append(col)
+                        else:
+                            norm_col = normalize_name(col)
+                            if norm_col in df_cols_map:
+                                corrected_col = df_cols_map[norm_col]
+                                logger.debug(f"[ApplyDataQuery] Fuzzy matched sort column '{col}' to '{corrected_col}'")
+                                corrected_by.append(corrected_col)
+                            else:
+                                corrected_by.append(col)
+                    by = corrected_by
 
                     from pandas.api.types import (
                         is_categorical_dtype,
@@ -761,6 +1016,10 @@ class DataService:
 
                     # Sanitize sort columns so sort_values is less fragile
                     for col in by:
+                        # Skip index columns for sanitization
+                        if col in df.index.names and col not in df.columns:
+                             continue
+                             
                         if col not in df.columns:
                             continue
 
@@ -795,10 +1054,64 @@ class DataService:
                     # Ensure all sort columns exist and are sortable (scalars only)
                     valid_cols = []
                     for c in by:
-                        if c not in df.columns:
+                        is_index = c in df.index.names
+                        
+                        # Handle nested signal columns (e.g., signals//train_loss/mlt_loss)
+                        if "//" in c and c not in df.columns:
+                            root_col, nested_path = c.split("//", 1)
+                            if root_col in df.columns:
+                                logger.debug(f"[ApplyDataQuery] Extracting nested column {c} from {root_col}")
+                                def extract_nested(val, path):
+                                    if not isinstance(val, dict): return None
+                                    keys = path.split('/')
+                                    curr = val
+                                    for k in keys:
+                                        if isinstance(curr, dict) and k in curr:
+                                            curr = curr[k]
+                                        else:
+                                            return None
+                                    return curr
+                                
+                                # Extract and assign to a temporary column so subsequent logic works
+                                df[c] = df[root_col].apply(lambda x: extract_nested(x, nested_path))
+                        
+                        if c not in df.columns and not is_index:
+                            continue
+                            
+                        # Skip array check for index (assumed scalar/hashable)
+                        if is_index and c not in df.columns:
+                             valid_cols.append(c)
+                             continue
+
+                        # 1. Handle special string-based columns irrespective of content type
+                        c_lower = c.lower()
+
+                        if c_lower == "tags":
+                            logger.debug("[ApplyDataQuery] Column 'tags': normalizing for alphabetical sort (grouping)")
+                            # Normalize tags: split, sort items, join. This ensures ['b', 'a'] == ['a', 'b']
+                            def normalize_tags(x):
+                                if pd.isna(x): return ""
+                                if isinstance(x, str):
+                                    # robust split by ; or ,
+                                    import re
+                                    parts = re.split(r'[;,]', x)
+                                    items = [t.strip() for t in parts if t.strip()]
+                                elif isinstance(x, (list, tuple, np.ndarray)):
+                                    items = [str(i).strip() for i in x if str(i).strip()]
+                                else:
+                                    items = [str(x)]
+                                return ";".join(sorted(items))
+                            
+                            df[c] = df[c].apply(normalize_tags)
+                            valid_cols.append(c)
                             continue
 
-                        # Check for non-scalar types (like numpy arrays in 'prediction_loss')
+                        if c_lower == "task_type":
+                             df[c] = df[c].astype(str)
+                             valid_cols.append(c)
+                             continue
+
+                        # 2. Check for non-scalar types (like numpy arrays in 'prediction_loss')
                         # We use a heuristic on the first non-null value
                         non_null_s = df[c].dropna()
                         if not non_null_s.empty:
@@ -806,15 +1119,51 @@ class DataService:
                             # If it's a collection but not a string/bytes, pandas can't sort it directly
                             if hasattr(first_val, "__len__") and not isinstance(first_val, (str, bytes)):
                                 # Fallback: if user asked for 'prediction_loss', help them by using 'mean_loss'
-                                if c == "prediction_loss" and "mean_loss" in df.columns:
+                                if c_lower == "prediction_loss" and "mean_loss" in df.columns:
                                     logger.info("[ApplyDataQuery] Column %r contains arrays; redirecting to 'mean_loss' for sorting", c)
                                     valid_cols.append("mean_loss")
+                                    continue
+
+                                # Robust handling for prediction/target: 
+                                # 1) If multi-element list -> REJECT sort (return error message)
+                                # 2) If single-element -> Extract scalar
+                                if c_lower in ["prediction", "target", "label", "pred", "prediction_raw"]:
+                                    # Peek at the column to check data shape
+                                    sub_non_null = df[c].dropna()
+                                    if not sub_non_null.empty:
+                                        # Check first few items to see if they are generic lists > 1
+                                        sample_vals = sub_non_null.head(5)
+                                        is_multi_dim = False
+                                        for v in sample_vals:
+                                            if hasattr(v, "__len__") and not isinstance(v, (str, bytes)):
+                                                if len(v) > 1:
+                                                    is_multi_dim = True
+                                                    break
+                                        
+                                        if is_multi_dim:
+                                            logger.info(f"[ApplyDataQuery] Cannot sort by '{c}': contains multi-dimensional data.")
+                                            return f"Cannot sort by '{c}': Data is multi-dimensional"
+
+                                    logger.debug("[ApplyDataQuery] Column %r is scalar-like; attempting scalar extraction for sort", c)
+                                    try:
+                                        def try_scalar(x):
+                                            if hasattr(x, "__len__") and not isinstance(x, (str, bytes)):
+                                                if len(x) > 0: return x[0]
+                                                return None
+                                            return x
+                                        df[c] = df[c].apply(try_scalar)
+                                        df[c] = pd.to_numeric(df[c], errors='ignore')
+                                    except Exception as e:
+                                        logger.debug(f"[ApplyDataQuery] Scalar extraction failed for {c}: {e}")
+                                        df[c] = df[c].astype(str)
+                                    valid_cols.append(c)
                                     continue
                                 else:
                                     logger.warning("[ApplyDataQuery] Skipping column %r for sorting: contains non-scalar values (e.g. arrays)", c)
                                     continue
 
                         valid_cols.append(c)
+
 
                     if not valid_cols:
                         logger.warning("[ApplyDataQuery] No valid sort columns found in %s", by)
@@ -824,6 +1173,8 @@ class DataService:
 
                     # Fill NaN values in sort columns to avoid sort failures or inconsistent behaviors
                     for c in valid_cols:
+                         if c in df.index.names and c not in df.columns:
+                             continue
                          if df[c].isna().any():
                              # Use a type-appropriate fill value
                              if is_numeric_dtype(df[c].dtype):
@@ -855,6 +1206,19 @@ class DataService:
                             raise
 
                     return "Applied operation: sort_values"
+
+                # -------- SORT INDEX --------
+                if func_name == "sort_index":
+                    safe_params = {}
+                    if "ascending" in params:
+                        safe_params["ascending"] = params["ascending"]
+                    
+                    logger.debug(
+                        "[ApplyDataQuery] Applying df.sort_index(inplace=True) with params=%s",
+                        safe_params
+                    )
+                    df.sort_index(inplace=True, **safe_params)
+                    return "Applied operation: sort_index"
 
                 # -------- HEAD --------
                 if func_name == "head":
@@ -977,25 +1341,28 @@ class DataService:
             # AND if the index types are compatible (both numeric)
             if not self._all_datasets_df.index.is_monotonic_increasing:
                  # We have a custom sort.
-                 old_index = self._all_datasets_df.index
-                 new_index = updated_df.index
+                 # 1. Check strict equality first (fastest)
+                 if self._all_datasets_df.index.equals(updated_df.index):
+                     pass  # Index match, just use updated_df as is
 
-                 # 1. Identify rows that are in BOTH (intersection) -> keep old order
-                 # use .intersection to preserve order of left argument (old_index)
-                 kept_indices = [x for x in old_index if x in new_index]
+                 else:
+                     # We have a custom sort or mismatch.
+                     old_index = self._all_datasets_df.index
+                     new_index = updated_df.index
 
-                 # 2. Identify rows that are NEW (difference) -> append to end
-                 # Use set difference for speed, then sort or just append
-                 old_index_set = set(old_index)
-                 newly_added_indices = [x for x in new_index if x not in old_index_set]
+                     # Optimize intersection using set for O(1) lookups
+                     new_index_set = set(new_index)
+                     kept_indices = [x for x in old_index if x in new_index_set]
 
-                 # 3. Construct the full requested order
-                 full_order = kept_indices + newly_added_indices
+                     # Identify rows that are NEW
+                     old_index_set = set(old_index)
+                     newly_added_indices = [x for x in new_index if x not in old_index_set]
 
-                 # 4. Reindex using this full order.
-                 # The 'updated_df' contains ALL the data (old items updated + new items).
-                 # This safely reorders it.
-                 updated_df = updated_df.reindex(full_order)
+                     # Construct full order
+                     full_order = kept_indices + newly_added_indices
+
+                     # Reindex using this full order.
+                     updated_df = updated_df.reindex(full_order)
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
@@ -1023,13 +1390,42 @@ class DataService:
                 )
 
         try:
-            # 2) All non-empty queries go through the agent (IO BOUND - NO LOCK)
+            # 2) Check if we should bypass the agent (Quick Filters path)
             if not request.is_natural_language:
-                logger.debug(
-                    "[ApplyDataQuery] Non-NL flag received but structured path was removed; "
-                    "treating query as natural language: %r",
+                logger.info(
+                    "[ApplyDataQuery] ⚡ BYPASSING AGENT - Direct query execution: %r",
                     request.query,
                 )
+                
+                # Parse the query directly without agent
+                # Expected format: "col > val and col2 == val2 sortby col desc"
+                operations = self._parse_direct_query(request.query)
+                
+                # Apply operations with lock
+                with self._lock:
+                    df = self._all_datasets_df
+                    messages = []
+                    
+                    for op in operations:
+                        func = op.get("function")
+                        params = op.get("params", {}) or {}
+                        msg = self._apply_agent_operation(df, func, params)
+                        messages.append(msg)
+                    
+                    final_message = " | ".join(messages) if messages else "No operation performed"
+                    self._all_datasets_df = df
+                    
+                    return self._build_success_response(
+                        df=df,
+                        message=final_message,
+                        intent_type=pb2.INTENT_FILTER
+                    )
+            
+            # 3) Natural language path - go through agent
+            logger.debug(
+                "[ApplyDataQuery] Using AGENT for natural language query: %r",
+                request.query,
+            )
 
             if self._agent is None:
                 return pb2.DataQueryResponse(
@@ -1141,15 +1537,12 @@ class DataService:
             logger.info(
                 "Retrieving samples from %s to %s", request.start_index, end_index)
 
-            # Build the data records list in parallel with optimized worker count
+            # Build the data records list using shared executor
             data_records = []
             tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
 
-            # Use more workers for I/O-bound image processing (CPU count * 2)
-            max_workers = max(min(len(tasks), os.cpu_count() * 2 if os.cpu_count() else 8), 1)
-            with futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="get_data_samples_worker") as executor:
-                results = executor.map(self._process_sample_row, tasks, timeout=30)
-                data_records = [res for res in results if res is not None]
+            results = self._data_executor.map(self._process_sample_row, tasks, timeout=120)
+            data_records = [res for res in results if res is not None]
 
             logger.info("Retrieved %s data records", len(data_records))
             return pb2.DataSamplesResponse(
@@ -1234,47 +1627,67 @@ class DataService:
                             )
                             self._all_datasets_df.loc[mask, request.stat_name] = target_val
 
+
                     except Exception as e:
                         logger.debug(
                             f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
                         )
 
-        # ------------------------------------------------------------------
-        # 3) Persist edits into the global dataframe manager (in-memory ledger)
-        # ------------------------------------------------------------------
-        try:
-            if request.samples_ids and self._df_manager is not None:
-                updates_by_origin = {}
-                for sid, origin in zip(request.samples_ids, request.sample_origins):
-                    # Tags
-                    if request.stat_name == SampleStatsEx.TAGS.value:
-                        value = request.string_value  #if request.stat_name == SampleStatsEx.TAGS.value else request.bool_value
+            # ------------------------------------------------------------------
+            # 3) Persist edits into the global dataframe manager (in-memory ledger)
+            # MOVED INSIDE LOCK to prevent race conditions with _slowUpdateInternals
+            # ------------------------------------------------------------------
+            try:
+                if request.samples_ids and self._df_manager is not None:
+                    updates_by_origin = {}
+                    for sid, origin in zip(request.samples_ids, request.sample_origins):
+                        # Tags
+                        if request.stat_name == SampleStatsEx.TAGS.value:
+                            value = request.string_value  #if request.stat_name == SampleStatsEx.TAGS.value else request.bool_value
 
-                        # Aggregate old values
-                        old_tags = self._df_manager.get_row(origin=origin, sample_id=int(sid))[SampleStatsEx.TAGS.value]
-                        if value in old_tags.split(';'):
-                            continue  # No change
+                            # Logic to calculate new tags based on edit type
+                            # use self._all_datasets_df (which was just updated above) as source of truth
+                            # instead of pulling from _df_manager again, to ensure consistency inside the lock.
+                            
+                            uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
+                            current_val = ""
+                            try:
+                                if uses_multiindex:
+                                    current_val = self._all_datasets_df.loc[(origin, sid), SampleStatsEx.TAGS.value]
+                                else:
+                                    # Fallback
+                                    mask = (self._all_datasets_df[SampleStatsEx.SAMPLE_ID.value] == sid) & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
+                                    if mask.any():
+                                        current_val = self._all_datasets_df.loc[mask, SampleStatsEx.TAGS.value].iloc[0]
+                            except Exception:
+                                pass
+                                
+                            target_val = current_val # Already updated above in step 1
 
-                        new_tags = old_tags + "; " + value if old_tags and old_tags.replace(' ', '') != '' and value != '' else value
-                        updates_by_origin.setdefault(origin, []).append({
-                            "sample_id": int(sid),
-                            SampleStatsEx.ORIGIN.value: origin,
-                            request.stat_name: new_tags,
-                        })
-                    else:
-                        # Deny_listed
-                        updates_by_origin.setdefault(origin, []).append({
-                            "sample_id": int(sid),
-                            SampleStatsEx.ORIGIN.value: origin,
-                            request.stat_name: request.bool_value,
-                        })
+                            updates_by_origin.setdefault(origin, []).append({
+                                "sample_id": int(sid),
+                                SampleStatsEx.ORIGIN.value: origin,
+                                request.stat_name: target_val,
+                            })
+                        else:
+                            # Deny_listed
+                            updates_by_origin.setdefault(origin, []).append({
+                                "sample_id": int(sid),
+                                SampleStatsEx.ORIGIN.value: origin,
+                                request.stat_name: request.bool_value,
+                            })
 
-                for origin, rows in updates_by_origin.items():
-                    df_update = pd.DataFrame(rows).set_index("sample_id")
-                    self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+                    for origin, rows in updates_by_origin.items():
+                        df_update = pd.DataFrame(rows).set_index("sample_id")
+                        # upsert_df updates the ledger's dataframe immediately
+                        self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
 
-        except Exception as e:
-            logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
+            except Exception as e:
+                logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
+
+            # Prevent _slowUpdateInternals from overwriting our in-memory edits with stale data
+            # from the disk/db for a few seconds.
+            self._last_internals_update_time = time.time()
 
         return pb2.DataEditsResponse(
             success=True,

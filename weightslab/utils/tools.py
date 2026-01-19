@@ -66,7 +66,20 @@ def extract_in_out_params(module: nn.Module) -> List[int | str]:
         module.wl_same_flag = True
         return in_dim, out_dim, in_name, out_name
 
-    # 4. Layers using in or out shape/size attributes
+    # 4. Pass-through layers (Pooling, Upsampling, Dropout, Activations)
+    # These layers maintain the same number of channels/neurons.
+    pass_through_types = [
+        'Pool', 'Upsample', 'Dropout', 'ReLU', 'PReLU', 'LeakyReLU', 
+        'Sigmoid', 'Tanh', 'ELU', 'Softmax', 'Identity'
+    ]
+    module_name = module._get_name()
+    if any(pt in module_name for pt in pass_through_types):
+        # We can't determine dimensions statically, but we mark it as "same"
+        # so the tracer can propagate from neighbors.
+        module.wl_same_flag = True
+        return None, None, None, None
+
+    # 5. Layers using in or out shape/size attributes
     shape_attrs = [
         i for i in list(module.__dict__.keys())
         if '_size' in i or '_shape' in i

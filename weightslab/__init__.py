@@ -12,7 +12,12 @@ from .art import _BANNER
 from .utils.logs import setup_logging
 
 import os
+import threading
 
+# Change the name of the current (main) thread
+threading.current_thread().name = "WL-MainThread"
+
+print(threading.current_thread().name)  # Output: MyMainThread
 
 # Auto-initialize logging if not already configured
 # Check for environment variable to control log level

@@ -435,16 +435,22 @@ if __name__ == "__main__":
         name="test_loader",
         batch_size=test_cfg.get("batch_size", 2),
         shuffle=test_cfg.get("shuffle", False),
-        compute_hash=False,
+        compute_hash=True,
         is_training=False
     )
 
     # --- Define criterion and metric ---
+    train_criterion = wl.watch_or_edit(
+        GIoULoss(reduction=None),
+        flag="criterion",
+        name="train_metric/GIoULoss",
+    )
     test_criterion = wl.watch_or_edit(
         GIoULoss(reduction=None),
         flag="criterion",
-        name="test_criterion",
+        name="test_metric/GIoULoss",
     )
+
     # --- 6) Model, optimizer, losses, metric ---
     _model = Yolov11(img_size=parameters.get("img_size", 128))
     model = wl.watch_or_edit(_model, flag="model", name=exp_name, device=device, use_onnx=True)
@@ -456,11 +462,7 @@ if __name__ == "__main__":
 
     # --- 7) Start WeightsLab services ---
     wl.serve(
-        serving_ui=False,
-        root_directory=log_dir,
-
         serving_grpc=True,
-
         serving_cli=True,
     )
 
@@ -487,7 +489,7 @@ if __name__ == "__main__":
             name="train_loader",
             batch_size=train_cfg.get("batch_size", 2),
             shuffle=train_cfg.get("shuffle", True),
-            compute_hash=False,
+            compute_hash=True,
             is_training=True,
         )
 
@@ -495,7 +497,7 @@ if __name__ == "__main__":
         train_loss = pseudo_train(
             train_loader,
             model,
-            criterion_mlt=test_criterion,
+            criterion_mlt=train_criterion,
             device=device,
             train_loader_len=train_loader_len,
             tqdm_display=tqdm_display,

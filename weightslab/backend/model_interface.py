@@ -88,8 +88,12 @@ class ModelInterface(NetworkWithOps):
         self.init_attributes(self.model)
 
         if not use_onnx:
-            # Propagate the shape over the graph
-            self.shape_propagation()
+            # Only propagate shapes if we need them for visualization
+            if self.print_graph:
+                self.shape_propagation()
+                # Clean up any leftover threads from shape propagation
+                # import gc
+                # gc.collect()
 
             # Generate the graph vizualisation
             self.generate_graph_vizu()
@@ -456,6 +460,7 @@ class ModelInterface(NetworkWithOps):
 
         # Generate the graph dependencies
         if not use_onnx:
+            self.shape_propagation()
             self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
                 self.model,
                 self.traced_model.graph

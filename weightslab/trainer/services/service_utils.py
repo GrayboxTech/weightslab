@@ -27,8 +27,10 @@ def _to_numpy_safe(x):
 
 
 def get_mask(raw, dataset, dataset_index):
-    # Check if prediction_raw is a numpy array (could be bboxes)
-    if isinstance(raw, np.ndarray) and (raw.ndim == 2 or raw.ndim == 3) and raw.shape[-1] >= 4:
+    # Check if prediction_raw appears to be bounding boxes (N, 4-6)
+    # Masks are typically (H, W) or (C, H, W) with large dimensions, 
+    # while bboxes have exactly 4 to 6 columns in their last dimension.
+    if isinstance(raw, np.ndarray) and (raw.ndim == 2 or raw.ndim == 3) and raw.shape[-1] in [4, 5, 6]:
         # raw appears to be bboxes (N, 4+) format
         # Get the item (image) to determine mask dimensions
         raw_data = dataset[dataset_index]
@@ -92,24 +94,34 @@ def load_label(dataset, sample_id):
 
     Returns the label in its native format (int, array, etc.).
     """
+    # Get index from sample_id
+    try:
+        index = dataset.get_index_from_sample_id(sample_id)
+    except (KeyError, ValueError, IndexError):
+        logger.debug(f"Sample ID {sample_id} not found in current dataset. Likely a ghost record from a previous run.")
+        return None
+
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
-    index = dataset.get_index_from_sample_id(sample_id)
 
     # Try common dataset patterns
     if hasattr(wrapped, '__getitem__'):
-        data = wrapped[index]
-        if isinstance(data, (list, tuple)) and len(data) >= 2:
-            classes = _to_numpy_safe(data[3]) if len(data) >= 4 else None
-            if classes is not None:
-                label = _to_numpy_safe(data[2])  # Second element is typically the label
-
-                # Concat label with classes if available (detection)
+        try:
+            data = wrapped[index]
+            if isinstance(data, (list, tuple)) and len(data) >= 2:
+                # Detection/Segmentation often has extra elements
+                classes = _to_numpy_safe(data[3]) if len(data) >= 4 else None
                 if classes is not None:
+                    label = _to_numpy_safe(data[2])  # Second element is typically the label
+                    # Concat label with classes if available (detection)
                     label = np.concatenate([label, classes[..., None]], axis=1)
-            else:
-                label = _to_numpy_safe(data[1])  # Second element is typically the label
-            return label
+                else:
+                    label = _to_numpy_safe(data[1])  # Second element is typically the label
+                return label
+        except Exception as e:
+            logger.warning(f"Failed to load label for sample {sample_id} at index {index}: {e}")
+            return None
+
 
     # Try targets/labels attribute
     if hasattr(wrapped, "targets"):
@@ -158,8 +170,8 @@ def load_raw_image(dataset, index) -> Image.Image:
         if np.issubdtype(np_img.dtype, np.floating):
             min_v = float(np.nanmin(np_img)) if np_img.size else 0.0
             max_v = float(np.nanmax(np_img)) if np_img.size else 1.0
-            if max_v <= 1.0 and min_v >= 0.0:
-                np_img = np_img * 255.0
+            if max_v <= 128.0:  # TODO fix convert image type
+                np_img = (np_img - min_v) / (max_v - min_v) * 255.0
         # Clip to valid byte range then cast
         np_img = np.clip(np_img, 0, 255)
         return np_img.astype(np.uint8)

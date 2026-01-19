@@ -20,6 +20,7 @@ class NetworkWithOps(nn.Module):
 
         # Initialize variables
         self.seen_samples = 0
+        self.current_step = 0
         self.seen_batched_samples = 0
         self.visited_nodes = set()  # Memory trace of explored nodes
         self.visited_incoming_nodes = set()  # Memory trace of explored nodes
@@ -131,6 +132,7 @@ class NetworkWithOps(nn.Module):
             setattr(tracked_input, 'batch_size', tracked_input.shape[0])
         self.seen_samples += tracked_input.batch_size
         self.seen_batched_samples += 1
+        self.current_step += 1
 
         # If an instance provides an auto-dump hook (e.g., ModelInterface), call it.
         try:
@@ -477,12 +479,14 @@ class NetworkWithOps(nn.Module):
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
         state = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
         state[prefix + 'seen_samples'] = self.seen_samples
+        state[prefix + 'current_step'] = self.current_step
         state[prefix + 'tracking_mode'] = self.tracking_mode
         return state
 
     def load_state_dict(
             self, state_dict, strict, assign=True, **kwargs):
         self.seen_samples = state_dict['seen_samples']
+        self.current_step = state_dict.get('current_step', 0)
         self.tracking_mode = state_dict['tracking_mode']
         super().load_state_dict(
             state_dict, strict=strict, assign=assign, **kwargs)

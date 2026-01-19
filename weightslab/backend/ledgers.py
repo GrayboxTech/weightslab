@@ -115,6 +115,30 @@ class Proxy:
         with self._lock:
             return f"Proxy({repr(self._obj)})"
 
+    def __eq__(self, other):
+        """Enable equality comparison with the wrapped object.
+
+        This allows `Proxy(None) == None` to return True.
+        """
+        with self._lock:
+            return self._obj == other
+
+    def __ne__(self, other):
+        """Enable inequality comparison with the wrapped object."""
+        with self._lock:
+            return self._obj != other
+
+    def __bool__(self):
+        """Enable boolean evaluation of the proxy based on the wrapped object.
+
+        This allows `bool(Proxy(None))` to return False and
+        `if not proxy:` to work correctly when proxy wraps None.
+        """
+        with self._lock:
+            if self._obj is None:
+                return False
+            return bool(self._obj)
+
     def __next__(self):
         """Allow the Proxy itself to act as an iterator when `next(proxy)` is
         called. We cache an internal iterator per-proxy so successive calls to
@@ -213,12 +237,13 @@ class Ledger:
                     proxy.set(obj)
                     registry[name] = proxy
                 else:
-                    registry[name] = obj
+                    registry[name] = obj if obj is not None else Proxy(None)
                 if name in registry_weak:
                     try:
                         del registry_weak[name]
                     except KeyError:
                         pass
+        return registry[name]
 
     def _get(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: Optional[str] = None) -> Any:
         with self._lock:
@@ -365,7 +390,7 @@ class Ledger:
                         # swallow errors to keep watcher alive; user can inspect file
                         time.sleep(poll_interval)
 
-            th = threading.Thread(target=_watcher, name=f"hp-watcher-{name}", daemon=True)
+            th = threading.Thread(target=_watcher, name=f"WL-HP_Watcher_{name}", daemon=True)
             self._hp_watchers[name] = {'path': path, 'thread': th, 'stop_event': stop_event}
             th.start()
 
@@ -453,7 +478,7 @@ class Ledger:
 
     # DataFrames (e.g., shared sample stats managers)
     def register_dataframe(self, name: str, dataframe: Any, weak: bool = False) -> None:
-        self._register(self._dataframes, self._dataframes_weak, self._proxies_dataframes, name, dataframe, weak=weak)
+        return self._register(self._dataframes, self._dataframes_weak, self._proxies_dataframes, name, dataframe, weak=weak)
 
     def get_dataframe(self, name: Optional[str] = None) -> Any:
         return self._get(self._dataframes, self._dataframes_weak, self._proxies_dataframes, name)
@@ -648,7 +673,7 @@ def unregister_signal(name: str) -> None:
 
 # DataFrames
 def register_dataframe(name: str, dataframe: Any, weak: bool = False) -> None:
-    GLOBAL_LEDGER.register_dataframe(name, dataframe, weak=weak)
+    return GLOBAL_LEDGER.register_dataframe(name, dataframe, weak=weak)
 
 def get_dataframe(name: Optional[str] = None) -> Any:
     """Return a dataframe handle; if none registered, return a Proxy placeholder.
