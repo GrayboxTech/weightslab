@@ -17,6 +17,21 @@ from typing import List, Union
 logger = logging.getLogger(__name__)
 
 
+class _NoOpLock:
+    """No-op lock that does nothing - useful for disabling locking."""
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+    def acquire(self, *args, **kwargs):
+        return True
+    def release(self):
+        pass
+
+
+# ----------------------------------------------------------------------------
+# -------------------------- Utils Functions ---------------------------------
+# ----------------------------------------------------------------------------
 def seed_everything(seed):
     """Seed everything for reproducibility."""
     np.random.seed(seed)
@@ -24,10 +39,6 @@ def seed_everything(seed):
     random.seed(seed)
     th.backends.cudnn.deterministic = True
 
-
-# ----------------------------------------------------------------------------
-# -------------------------- Utils Functions ---------------------------------
-# ----------------------------------------------------------------------------
 def extract_in_out_params(module: nn.Module) -> List[int | str]:
     """
     Detects and returns the primary input and output dimension parameters

@@ -71,7 +71,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
 
     for (inputs, ids, labels) in loader:
         with guard_testing_context, torch.no_grad():
-            logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [test] Evaluating batch with ids: {ids}')
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -106,7 +105,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
                 signals={"valOrtest/accuracy_per_sample": acc_per_sample},
                 preds=preds,
             )
-            logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [test] Completed evaluating batch with ids: {ids}')
 
 
     loss = losses / test_loader_len
@@ -306,9 +304,7 @@ if __name__ == "__main__":
     test_loss, test_metric = None, None
     for train_step in train_range:
         # Train one step
-        logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}]  Starting training step {train_step + 1}/{parameters["training_steps_to_do"]}')
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
-        logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}]  Completed training step {train_step + 1}/{parameters["training_steps_to_do"]}')
 
         # Periodic validation and test evaluation
         if train_step % eval_every == 0:

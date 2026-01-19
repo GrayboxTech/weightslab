@@ -22,6 +22,7 @@ from weightslab.data.sample_stats import (
 )
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe
 from weightslab.trainer.services.service_utils import get_mask
+from weightslab.utils.tools import _NoOpLock
 
 
 # Set up logger
@@ -35,15 +36,12 @@ class LedgeredDataFrameManager:
     as a normal column to simplify downstream operations.
     """
 
-    def __init__(self, flush_interval: float = 3.0, flush_max_rows: int = 100, enable_h5_persistence: bool = True):
+    def __init__(self, flush_interval: float = 3.0, flush_max_rows: int = 100, enable_flushing_threads: bool = True, enable_h5_persistence: bool = True):
         self._df: pd.DataFrame = pd.DataFrame()
         self._store: H5DataFrameStore | None = None
         self._array_store: H5ArrayStore | None = None
         self._pending: set[int] = set()
         self._force_flush = False
-        self._lock = threading.RLock()
-        self._queue_lock = threading.Lock()
-        self._buffer_lock = threading.Lock()
         self._flush_interval = flush_interval
         self._flush_max_rows = flush_max_rows
         self._flush_thread: threading.Thread | None = None
@@ -52,7 +50,16 @@ class LedgeredDataFrameManager:
         self._flush_queue_count = 0
         self._dense_store: Dict[str, Dict[int, np.ndarray]] = {}
         self._buffer: Dict[int, Dict[str, Any]] = {}  # {sample_id: {col: value}}
+        self._enable_flushing_threads = enable_flushing_threads
         self._enable_h5_persistence = enable_h5_persistence
+
+        # TODO (GP): Remove multi-threads lock madness, let s see if it brokes anywhere
+        # TODO (GP): Review locking strategy to minimize contention and opt. perfs.
+        # Locks
+        self._lock = _NoOpLock()  # threading.RLock()
+        self._queue_lock = _NoOpLock()  # threading.Lock()
+        self._buffer_lock = _NoOpLock()  # threading.Lock()
+
         # Columns that should store arrays in separate H5 file
         self._array_columns = [
             SampleStats.Ex.PREDICTION.value,
@@ -439,11 +446,11 @@ class LedgeredDataFrameManager:
             return {k: dict(v) for k, v in origin_store.items()}
 
     def _drain_buffer(self) -> List[Dict[str, Any]]:
-        # with self._buffer_lock:
-        if not self._buffer:
-            return []
-        drained = list(self._buffer.values())
-        self._buffer = {}
+        with self._buffer_lock:
+            if not self._buffer:
+                return []
+            drained = list(self._buffer.values())
+            self._buffer = {}
         return drained
 
     def _get_loader_by_origin(self, origin: str):
@@ -677,7 +684,7 @@ class LedgeredDataFrameManager:
                 logger.error(f"[LedgeredDataFrameManager] Error flushing to H5: {e}")
 
     def _ensure_flush_thread(self):
-        if self._flush_thread and self._flush_thread.is_alive():
+        if not self._enable_flushing_threads or (self._flush_thread and self._flush_thread.is_alive()):
             return
 
         def _worker():
@@ -944,6 +951,7 @@ class LedgeredDataFrameManager:
             except Exception as e:
                 logger.error(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Failed flush for origin={origin}: {e}')
 
+
 # Create global instance with config-driven parameters
 def _create_ledger_manager():
     """Create LedgeredDataFrameManager with parameters from config if available."""
@@ -958,6 +966,7 @@ def _create_ledger_manager():
             flush_interval = hp.get('ledger_flush_interval', flush_interval)
             flush_max_rows = hp.get('ledger_flush_max_rows', flush_max_rows)
             enable_h5 = hp.get('ledger_enable_h5_persistence', enable_h5)
+            enable_flush = hp.get('ledger_enable_flushing_threads', True)
             not_init = False
 
     except Exception:
@@ -968,7 +977,8 @@ def _create_ledger_manager():
         return LedgeredDataFrameManager(
             flush_interval=flush_interval,
             flush_max_rows=flush_max_rows,
-            enable_h5_persistence=enable_h5
+            enable_h5_persistence=enable_h5,
+            enable_flushing_threads=enable_flush
         )
 
 

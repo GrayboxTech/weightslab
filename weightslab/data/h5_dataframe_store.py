@@ -147,15 +147,18 @@ class H5DataFrameStore:
         def serialize_value(val):
             if not isinstance(val, (list, set, np.ndarray)) and pd.isna(val):
                 return np.nan
-            if isinstance(val, np.ndarray) and val.ndim == 1:
+            if isinstance(val, np.ndarray) and val.ndim <= 1:
                 if val.ndim == 0:
                     val = val.reshape(-1)
                 val = val.tolist()
+            if isinstance(val, (int, float, str, bool)):
+                val = [val]
             if isinstance(val, (list, dict)):
                 try:
                     return json.dumps(val)
                 except Exception:
                     return str(val)
+
             return val
 
         for col in cols_to_serialize:
