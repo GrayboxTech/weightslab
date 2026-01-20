@@ -31,31 +31,27 @@ class Proxy:
     """
 
     def __init__(self, obj: Any = None):
-        self._lock = threading.RLock()
         self._obj = obj
 
     def set(self, obj: Any) -> None:
-        with self._lock:
-            self._obj = obj
-            # invalidate any cached iterator when target changes
-            if hasattr(self, '_iterator'):
-                try:
-                    del self._iterator
-                except Exception:
-                    pass
+        self._obj = obj
+        # invalidate any cached iterator when target changes
+        if hasattr(self, '_iterator'):
+            try:
+                del self._iterator
+            except Exception:
+                pass
 
     def get(self, default=None) -> Any:
-        with self._lock:
-            return self._obj if self._obj is not None and default is not None else default
+        return self._obj if self._obj is not None and default is not None else default
 
     def __getattr__(self, item):
-        with self._lock:
-            if self._obj is None:
-                raise AttributeError("Proxy target not set")
-            try:
-                return getattr(self._obj, item)
-            except AttributeError:
-                return None
+        if self._obj is None:
+            raise AttributeError("Proxy target not set")
+        try:
+            return getattr(self._obj, item)
+        except AttributeError:
+            return None
 
     # Special method forwarding for common container/iterable operations.
     # CPython looks up special methods on the type, so we must implement
@@ -64,10 +60,9 @@ class Proxy:
         # Return a small iterator wrapper that delegates to the underlying
         # object's iterator. We return a fresh wrapper each call so multiple
         # concurrent iterations can proceed independently.
-        with self._lock:
-            if self._obj is None:
-                raise TypeError("Proxy target not set")
-            underlying_iter = iter(self._obj)
+        if self._obj is None:
+            raise TypeError("Proxy target not set")
+        underlying_iter = iter(self._obj)
 
         class _ProxyIterator:
             def __init__(self, it):
@@ -82,16 +77,14 @@ class Proxy:
         return _ProxyIterator(underlying_iter)
 
     def __len__(self):
-        with self._lock:
-            if self._obj is None:
-                raise TypeError("Proxy target not set")
-            return len(self._obj)
+        if self._obj is None:
+            raise TypeError("Proxy target not set")
+        return len(self._obj)
 
     def __getitem__(self, idx):
-        with self._lock:
-            if self._obj is None:
-                raise TypeError("Proxy target not set")
-            return self._obj[idx]
+        if self._obj is None:
+            raise TypeError("Proxy target not set")
+        return self._obj[idx]
 
     def __call__(self, *args, **kwargs):
         """Forward callable invocation to the wrapped object.
@@ -99,17 +92,15 @@ class Proxy:
         This allows code that receives a ledger Proxy for a callable
         (e.g., a model or function) to call it directly: `proxy(x)`.
         """
-        with self._lock:
-            if self._obj is None:
-                raise TypeError("Proxy target not set")
-            target = self._obj
+        if self._obj is None:
+            raise TypeError("Proxy target not set")
+        target = self._obj
 
         # Perform call outside lock to avoid deadlocks if target itself
         # acquires locks and calls back into ledger.
         return target(*args, **kwargs)
 
     def __repr__(self):
-        # with self._lock:
         return f"Proxy({repr(self._obj)})"
 
     def __eq__(self, other):
@@ -117,12 +108,10 @@ class Proxy:
 
         This allows `Proxy(None) == None` to return True.
         """
-        # with self._lock:
         return self._obj == other
 
     def __ne__(self, other):
         """Enable inequality comparison with the wrapped object."""
-        # with self._lock:
         return self._obj != other
 
     def __bool__(self):
@@ -131,7 +120,6 @@ class Proxy:
         This allows `bool(Proxy(None))` to return False and
         `if not proxy:` to work correctly when proxy wraps None.
         """
-        # with self._lock:
         if self._obj is None:
             return False
         return bool(self._obj)
@@ -147,22 +135,20 @@ class Proxy:
             return next(self._obj)
         except Exception:
             # clear cached iterator so future next(proxy) restarts
-            with self._lock:
-                try:
-                    delattr(self, '_iterator')
-                except Exception:
-                    pass
-            raise StopIteration
+            try:
+                delattr(self, '_iterator')
+            except Exception:
+                pass
+        raise StopIteration
 
     # Context manager support so `with proxy as x:` works when the proxy
     # wraps an object that implements the context manager protocol. If the
     # wrapped object does not implement __enter__/__exit__, the proxy will
     # simply return the wrapped object from __enter__ and do nothing on exit.
     def __enter__(self):
-        with self._lock:
-            if self._obj is None:
-                raise TypeError("Proxy target not set")
-            target = self._obj
+        if self._obj is None:
+            raise TypeError("Proxy target not set")
+        target = self._obj
 
         enter = getattr(target, '__enter__', None)
         if callable(enter):
@@ -172,10 +158,9 @@ class Proxy:
         return target
 
     def __exit__(self, exc_type, exc, tb):
-        with self._lock:
-            if self._obj is None:
-                raise TypeError("Proxy target not set")
-            target = self._obj
+        if self._obj is None:
+            raise TypeError("Proxy target not set")
+        target = self._obj
 
         exit_fn = getattr(target, '__exit__', None)
         if callable(exit_fn):

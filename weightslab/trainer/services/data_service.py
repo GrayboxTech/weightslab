@@ -88,7 +88,7 @@ class DataService:
         # Size: min(CPU cores * 2, 16) to balance concurrency without excessive threading
         self._data_executor = futures.ThreadPoolExecutor(
             thread_name_prefix="WL-DataProcessing",
-            max_workers=2
+            max_workers=8
         )
 
         logger.info("DataService initialized.")
@@ -574,14 +574,14 @@ class DataService:
         """
         Parse a simple direct query string into operations list.
         Expected format: "col > val and col2 == val2 sortby col desc"
-        
+
         This bypasses the LLM agent for deterministic filtering.
         """
         operations = []
         query = query.strip()
-        
+
         logger.debug(f"[_parse_direct_query] Parsing query: {repr(query)}")
-        
+
         if query.lower().startswith("sortby "):
             filter_part = None
             sort_part = query[7:].strip()
@@ -592,9 +592,9 @@ class DataService:
         else:
             filter_part = query
             sort_part = None
-        
+
         logger.debug(f"[_parse_direct_query] filter_part: {repr(filter_part)}, sort_part: {repr(sort_part)}")
-        
+
         # Parse filter part
         if filter_part:
             # For now, treat the entire filter as a pandas query expression
@@ -602,23 +602,23 @@ class DataService:
                 "function": "df.query",
                 "params": {"expr": filter_part}
             })
-        
+
         # Parse sort part
         if sort_part:
             sort_cols = []
             sort_ascs = []
-            
+
             # Split by comma to support multiple columns: "tags asc, target desc"
             # We need to respect quotes potentially, but for now assume simple CSV structure
             parts = [p.strip() for p in sort_part.split(',')]
-            
+
             for p in parts:
                 if not p:
                     continue
-                    
+
                 ascending = True
                 col_raw = p
-                
+
                 # Check for direction suffix
                 lower_s = p.lower()
                 if lower_s.endswith(" asc"):
@@ -627,17 +627,17 @@ class DataService:
                 elif lower_s.endswith(" desc"):
                     ascending = False
                     col_raw = p[:-5].strip()
-                
+
                 # Clean up quotes from column name
                 col = col_raw.replace('`', '').strip()
-                
+
                 if col:
                     sort_cols.append(col)
                     sort_ascs.append(ascending)
-            
+
             if sort_cols:
                 logger.debug(f"[_parse_direct_query] Sort: cols={sort_cols}, asc={sort_ascs}")
-                
+
                 # Special optimization for single 'index' sort
                 if len(sort_cols) == 1 and sort_cols[0].lower() == 'index':
                     operations.append({
@@ -646,13 +646,13 @@ class DataService:
                     })
                 else:
                     # Multi-column or single column sort
-                    # Note: 'index' mixed with columns in sort_values requires actual column named 'index' 
+                    # Note: 'index' mixed with columns in sort_values requires actual column named 'index'
                     # or index level support (which sort_values handles if named).
                     operations.append({
                         "function": "df.sort_values",
                         "params": {"by": sort_cols, "ascending": sort_ascs}
                     })
-        
+
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
         return operations
 
@@ -719,12 +719,12 @@ class DataService:
                     raw_by = safe_params.get("by", [])
                     if isinstance(raw_by, str):
                         raw_by = [raw_by]
-                    
+
                     # 1. Flatten comma-separated strings and extract direction (asc/desc)
                     # Agent LLMs sometimes return ["col1, col2"] or ["col1 asc", "col2 desc"]
                     final_by = []
                     final_ascs = []
-                    
+
                     # Initialize default ascending from params if present
                     # params["ascending"] can be a bool or a list
                     input_ascending = params.get("ascending", True)
@@ -734,7 +734,7 @@ class DataService:
                         parts = [p.strip() for p in str(b).split(',')]
                         for p in parts:
                             if not p: continue
-                            
+
                             # Default direction for this specific item
                             item_asc = True
                             if isinstance(input_ascending, list) and len(final_by) < len(input_ascending):
@@ -750,7 +750,7 @@ class DataService:
                             elif lower_p.endswith(" desc"):
                                 item_asc = False
                                 col_name = p[:-5].strip()
-                            
+
                             final_by.append(col_name)
                             final_ascs.append(item_asc)
 
@@ -766,7 +766,7 @@ class DataService:
 
                     # Case-insensitive and format-tolerant column matching
                     corrected_by = []
-                    
+
                     def normalize_name(n):
                         return str(n).lower().replace(' ', '').replace('_', '')
 
@@ -781,7 +781,7 @@ class DataService:
                     for col in by:
                         # Strip backticks if present (from agent or UI)
                         col = col.replace('`', '').strip()
-                        
+
                         if col in df.columns or col in df.index.names:
                             corrected_by.append(col)
                         else:
@@ -805,7 +805,7 @@ class DataService:
                         # Skip index columns for sanitization
                         if col in df.index.names and col not in df.columns:
                              continue
-                             
+
                         if col not in df.columns:
                             continue
 
@@ -841,7 +841,7 @@ class DataService:
                     valid_cols = []
                     for c in by:
                         is_index = c in df.index.names
-                        
+
                         # Handle nested signal columns (e.g., signals//train_loss/mlt_loss)
                         if "//" in c and c not in df.columns:
                             root_col, nested_path = c.split("//", 1)
@@ -857,13 +857,13 @@ class DataService:
                                         else:
                                             return None
                                     return curr
-                                
+
                                 # Extract and assign to a temporary column so subsequent logic works
                                 df[c] = df[root_col].apply(lambda x: extract_nested(x, nested_path))
-                        
+
                         if c not in df.columns and not is_index:
                             continue
-                            
+
                         # Skip array check for index (assumed scalar/hashable)
                         if is_index and c not in df.columns:
                              valid_cols.append(c)
@@ -887,7 +887,7 @@ class DataService:
                                 else:
                                     items = [str(x)]
                                 return ";".join(sorted(items))
-                            
+
                             df[c] = df[c].apply(normalize_tags)
                             valid_cols.append(c)
                             continue
@@ -910,7 +910,7 @@ class DataService:
                                     valid_cols.append("mean_loss")
                                     continue
 
-                                # Robust handling for prediction/target: 
+                                # Robust handling for prediction/target:
                                 # 1) If multi-element list -> REJECT sort (return error message)
                                 # 2) If single-element -> Extract scalar
                                 if c_lower in ["prediction", "target", "label", "pred", "prediction_raw"]:
@@ -925,7 +925,7 @@ class DataService:
                                                 if len(v) > 1:
                                                     is_multi_dim = True
                                                     break
-                                        
+
                                         if is_multi_dim:
                                             logger.info(f"[ApplyDataQuery] Cannot sort by '{c}': contains multi-dimensional data.")
                                             return f"Cannot sort by '{c}': Data is multi-dimensional"
@@ -998,7 +998,7 @@ class DataService:
                     safe_params = {}
                     if "ascending" in params:
                         safe_params["ascending"] = params["ascending"]
-                    
+
                     logger.debug(
                         "[ApplyDataQuery] Applying df.sort_index(inplace=True) with params=%s",
                         safe_params
@@ -1238,31 +1238,31 @@ class DataService:
                     "[ApplyDataQuery] ⚡ BYPASSING AGENT - Direct query execution: %r",
                     request.query,
                 )
-                
+
                 # Parse the query directly without agent
                 # Expected format: "col > val and col2 == val2 sortby col desc"
                 operations = self._parse_direct_query(request.query)
-                
+
                 # Apply operations with lock
                 with self._lock:
                     df = self._all_datasets_df
                     messages = []
-                    
+
                     for op in operations:
                         func = op.get("function")
                         params = op.get("params", {}) or {}
                         msg = self._apply_agent_operation(df, func, params)
                         messages.append(msg)
-                    
+
                     final_message = " | ".join(messages) if messages else "No operation performed"
                     self._all_datasets_df = df
-                    
+
                     return self._build_success_response(
                         df=df,
                         message=final_message,
                         intent_type=pb2.INTENT_FILTER
                     )
-            
+
             # 3) Natural language path - go through agent
             logger.debug(
                 "[ApplyDataQuery] Using AGENT for natural language query: %r",
@@ -1349,7 +1349,7 @@ class DataService:
         # Check if this exact request is already being processed
         with self._request_lock:
             if request_hash in self._pending_requests:
-                logger.debug(f"Duplicate GetDataSamples request detected (hash={request_hash[:8]}...), waiting for existing request")
+                logger.debug(f"Duplicate GetDataSamples request detected (hash={request_hash[:8]}, request={request}...), waiting for existing request")
                 pending_future = self._pending_requests[request_hash]
             else:
                 # Mark this request as being processed
@@ -1361,7 +1361,7 @@ class DataService:
             # If this is not the first request with this hash, wait for the result
             if not is_first_request:
                 result = pending_future.result(timeout=300)
-                logger.debug(f"Duplicate request returned cached result (hash={request_hash[:8]}...)")
+                logger.debug(f"Duplicate request returned cached result (hash={request_hash[:8]}, request={request}...)")
                 return result
 
             # Otherwise, process the request normally
@@ -1490,7 +1490,7 @@ class DataService:
                             # Logic to calculate new tags based on edit type
                             # use self._all_datasets_df (which was just updated above) as source of truth
                             # instead of pulling from _df_manager again, to ensure consistency inside the lock.
-                            
+
                             uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
                             current_val = ""
                             try:
@@ -1503,7 +1503,7 @@ class DataService:
                                         current_val = self._all_datasets_df.loc[mask, SampleStatsEx.TAGS.value].iloc[0]
                             except Exception:
                                 pass
-                                
+
                             target_val = current_val # Already updated above in step 1
 
                             updates_by_origin.setdefault(origin, []).append({
