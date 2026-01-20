@@ -1316,11 +1316,11 @@ class DataService:
                         intent_type=pb2.INTENT_FILTER
                     )
 
-            # 3) Natural language path - go through agent
-            logger.debug(
-                "[ApplyDataQuery] Using AGENT for natural language query: %r",
-                request.query,
-            )
+                # 3) Natural language path - go through agent
+                logger.debug(
+                    "[ApplyDataQuery] Using AGENT for natural language query: %r",
+                    request.query,
+                )
 
                 # Parse the query directly without agent
                 # Expected format: "col > val and col2 == val2 sortby col desc"
