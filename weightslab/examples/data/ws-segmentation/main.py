@@ -493,7 +493,7 @@ if __name__ == "__main__":
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Test
-        if train_step > 0 and train_step % eval_every == 0:
+        if train_step % eval_every == 0:
             test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
 

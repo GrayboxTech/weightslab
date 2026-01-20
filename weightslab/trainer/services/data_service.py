@@ -1581,7 +1581,7 @@ class DataService:
                                     current_val = self._all_datasets_df.loc[(origin, sid), SampleStatsEx.TAGS.value]
                                 else:
                                     # Fallback
-                                    mask = (self._all_datasets_df[SampleStatsEx.SAMPLE_ID.value] == sid) & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
+                                    mask = (self._all_datasets_df.index == sid) & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
                                     if mask.any():
                                         current_val = self._all_datasets_df.loc[mask, SampleStatsEx.TAGS.value].iloc[0]
                             except Exception:

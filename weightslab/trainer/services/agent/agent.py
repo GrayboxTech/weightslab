@@ -24,7 +24,7 @@ load_dotenv()
 # --- Pydantic Models ---
 class Condition(BaseModel):
     column: str = Field(description="The column name to filter/check")
-    op: Literal["==", "!=", ">", "<", ">=", "<=", "between", "contains", "in"] = Field(description="The operator")
+    op: Literal["==", "!=", ">", "<", ">=", "<=", "between", "contains", "in", "not in"] = Field(description="The operator")
     value: Optional[Union[float, int, str]] = Field(default=None, description="The primary value")
     value2: Optional[Union[float, int]] = Field(default=None, description="The secondary value for 'between'")
 
@@ -409,7 +409,7 @@ class DataManipulationAgent:
         return best_col
 
     def _build_condition_string(self, conditions: List[Condition]) -> Optional[str]:
-        """Converts structured conditions into a pandas mask expression."""
+        """Converts structured conditions into a pandas mask expression (Python syntax)."""
         if not conditions:
             return None
             
@@ -420,28 +420,43 @@ class DataManipulationAgent:
                 _LOGGER.warning("Skipping condition due to unresolvable column: %s", cond.column)
                 continue
 
-            if re.match(r'^[\w]+$', resolved_col):
-                col_ref = resolved_col
-            else:
-                col_ref = f"`{resolved_col}`"
+            # Always use df['col'] syntax for robustness with eval()
+            col_ref = f"df['{resolved_col}']"
 
             op = cond.op.lower()
             val = cond.value
 
+            # Handle dynamic column references in value
+            val_is_col = False
+            if isinstance(val, str):
+                possible_col = self._resolve_column(val)
+                if possible_col and possible_col in self.df_schema['columns']:
+                    # Use df['col'] syntax for value column reference too
+                    val = f"df['{possible_col}']"
+                    val_is_col = True
+
             if op in ("==", "!=", ">", "<", ">=", "<="):
-                if isinstance(cond.value, str) and (cond.value.startswith("df[") or cond.value.startswith("df.")):
-                    val = cond.value
+                if val_is_col:
+                    parts.append(f"({col_ref} {op} {val})")
+                elif isinstance(cond.value, str) and (cond.value.startswith("df[") or cond.value.startswith("df.")):
+                     # Trust the agent generated python code for value if it looks like a ref
+                    parts.append(f"({col_ref} {op} {cond.value})")
                 else:
-                    val = f"'{cond.value}'" if isinstance(cond.value, str) else str(cond.value)
-                parts.append(f"({col_ref} {op} {val})")
+                    safe_val = repr(cond.value) # Use repr to safely quote strings/numbers
+                    parts.append(f"({col_ref} {op} {safe_val})")
+                    
             elif op == "between" and cond.value is not None and cond.value2 is not None:
                 parts.append(f"({col_ref}.between({cond.value}, {cond.value2}))")
+                
             elif op == "contains" and cond.value is not None:
                 parts.append(f"({col_ref}.str.contains('{cond.value}', na=False, regex=False))")
+                
             elif op == "in" and cond.value is not None:
-                # For checking if value is in a list/array column (e.g., tags)
-                # Handle both string representations and actual lists
+                 # Check if element in list-type column
                 parts.append(f"({col_ref}.apply(lambda x: '{cond.value}' in (x if isinstance(x, list) else str(x).split(',')) if pd.notna(x) else False))")
+                
+            elif op == "not in" and cond.value is not None:
+                parts.append(f"({col_ref}.apply(lambda x: '{cond.value}' not in (x if isinstance(x, list) else str(x).split(',')) if pd.notna(x) else True))")
 
         return " & ".join(parts) if parts else None
 
@@ -487,19 +502,30 @@ class DataManipulationAgent:
 
                 if kind == "keep":
                     if step.keep_frac:
+                        # Use new Python mask syntax for complex sampling
                         op["function"] = "df.drop"
-                        op["params"] = {"index": f"df.index.difference(df.query({repr(expr)}).sample(frac={step.keep_frac}).index)"}
+                        op["params"] = {"index": f"df.index.difference(df[{expr}].sample(frac={step.keep_frac}).index)"}
                     else:
+                        # Use df.query - DataService logic handles fallback to python-eval for complex syntax
                         op["function"] = "df.query"
                         op["params"] = {"expr": expr}
                 else:
-                    base = f"df.query({repr(expr)})"
+                    base = f"df[{expr}]"
                     op["function"] = "df.drop"
                     op["params"] = {"index": f"{base}.sample(frac={step.drop_frac}).index" if step.drop_frac else f"{base}.index"}
 
             elif (kind == "analysis" or (kind in ("keep", "drop") and not step.conditions)) and step.analysis_expression:
+                code = step.analysis_expression
+                # Strip markdown code blocks if present
+                if code.startswith("```"):
+                    code = code.split("\n", 1)[1] if "\n" in code else code
+                    if code.endswith("```"):
+                         code = code[:-3]
+                    # Also strip "python" or similar from start if user did ```python
+                    if code.startswith("python"): code = code[6:].strip()
+                
                 op["function"] = "df.analyze"
-                op["params"] = {"code": step.analysis_expression}
+                op["params"] = {"code": code.strip()}
 
             elif kind == "reset":
                 op["function"] = "df.reset_view"

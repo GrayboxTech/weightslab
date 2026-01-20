@@ -1,6 +1,7 @@
 device: cuda
 experiment_name: seg_usecase
 data_root: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/BDD100k_reduced
+root_log_dir: C:\Users\GUILLA~1\AppData\Local\Temp\tmpcg41bdfm\
 
 eval_full_to_train_steps_ratio: 1500
 experiment_dump_to_train_steps_ratio: 200
@@ -9,7 +10,7 @@ image_size: 128
 tqdm_display: true
 
 # start training immediately or not
-is_training: true
+is_training: false
 
 # Serving
 serving_grpc: true
