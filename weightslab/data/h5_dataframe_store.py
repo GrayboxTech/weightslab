@@ -177,6 +177,28 @@ class H5DataFrameStore:
         elif isinstance(df, pd.Series):
             df = df.reset_index().rename(columns={df.name: "sample_id"})
         df["origin"] = origin
+
+        # Handle deserialization of nested objects (lists, dicts) stored as JSON strings
+        cols_to_deserialize = [col for col in SampleStats.MODEL_INOUT_LIST if col in df.columns]
+        if not cols_to_deserialize:
+            return df
+
+        def deserialize_value(val):
+            if not isinstance(val, str) or not (val.startswith('[') or val.startswith('{')):
+                return val
+            try:
+                obj = json.loads(val)
+            except Exception:
+                return val
+
+            # Unwrap single-element lists to scalars for consistency with active training data
+            if isinstance(obj, list) and len(obj) == 1:
+                return obj[0]
+            return obj
+
+        for col in cols_to_deserialize:
+            df[col] = df[col].apply(deserialize_value)
+
         return df
 
     def _compute_checksum(self, df: pd.DataFrame) -> str:
