@@ -142,7 +142,8 @@ if __name__ == "__main__":
     # Logging dir
     if not parameters.get("root_log_dir"):
         tmp_dir = tempfile.mkdtemp()
-        parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
+        parameters["root_log_dir"] = tmp_dir
+        print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
     verbose = parameters.get('verbose', True)
