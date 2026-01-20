@@ -1,5 +1,6 @@
 import threading
 import logging
+import traceback
 
 from datetime import datetime
 
@@ -707,8 +708,8 @@ class LedgeredDataFrameManager:
                         self.flush_if_needed_nonblocking()
                         self._flush_queue_count = 0  # Reset queue count after periodic flush
                 except Exception as e:
-                    traceback_str = logging.Formatter().formatException(e.__traceback__)
-                    logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}: {traceback_str}")
+                    traceback_str = traceback.format_exc()
+                    logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}\n{traceback_str}")
 
         self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush")
         self._flush_thread.start()

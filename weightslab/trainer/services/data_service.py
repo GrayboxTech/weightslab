@@ -306,6 +306,22 @@ class DataService:
             dataset = getattr(loader, "tracked_dataset", None)
             return dataset
 
+    def _is_nan_value(self, value):
+        """Check if a value is NaN, handling both scalars and arrays."""
+        try:
+            # For scalars, np.isnan works directly
+            if np.isscalar(value):
+                return np.isnan(value)
+            return False
+        except (TypeError, ValueError):
+            # For arrays/tensors, check if it's a single NaN value
+            try:
+                value_arr = np.asarray(value)
+                return value_arr.size == 1 and np.isnan(value_arr.item())
+            except (TypeError, ValueError):
+                return False
+
+
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
         row, request, df_columns = args
@@ -422,30 +438,41 @@ class DataService:
                     )
                 )
 
-            elif label is not None and not np.isnan(label):
+
+            elif label is not None:
                 # Classification / other scalar-like labels
-                if isinstance(label, (np.ndarray, list)) and np.asarray(label).size == 1:
-                    label = float(np.asarray(label).reshape(-1)[0])
+                # Check if label is NaN (handle both scalars and arrays)
+                if self._is_nan_value(label):
+                    pass  # Skip NaN labels
+
+                # Handle scalar labels
+                try:
                     data_stats.append(
                         create_data_stat(
                             name='label',
                             stat_type='scalar',
                             shape=[1],
-                            value=[label],
+                            value=[float(label)],
                             thumbnail=b""
                         )
                     )
-                else:
+                except (ValueError, TypeError):
                     # Fallback for non-scalar labels in non-segmentation tasks
-                    data_stats.append(
-                        create_data_stat(
-                            name='label',
-                            stat_type='array',
-                            shape=list(np.asanyarray(label).shape),
-                            value=np.asanyarray(label).astype(float).ravel().tolist(),
-                            thumbnail=b""
+                    try:
+                        label_arr = np.asanyarray(label)
+                        data_stats.append(
+                            create_data_stat(
+                                name='label',
+                                stat_type='array',
+                                shape=list(label_arr.shape),
+                                value=label_arr.astype(float).ravel().tolist(),
+                                thumbnail=b""
+                            )
                         )
-                    )
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Could not convert label to array: {label}, error: {e}")
+
+
 
             # ====== Step 8: Process predictions ======
             pred = row.get(SampleStatsEx.PREDICTION.value)
@@ -465,21 +492,13 @@ class DataService:
                     )
             else:
                 # Classification: get prediction from row or dataset
-                if pred is not None:
-                    if isinstance(pred, (int, float)):
-                        pred_val = pred
-                        data_stats.append(
-                            create_data_stat(
-                                name='pred',
-                                stat_type='scalar',
-                                shape=[1],
-                                value=[pred_val],
-                                thumbnail=b""
-                            )
-                        )
+                if pred is None:
+                    pass  # No prediction to process
 
-                    elif isinstance(pred, (np.ndarray, list)) and np.asanyarray(pred).size == 1:
-                        pred_val = int(np.asanyarray(pred).reshape(-1)[0])
+                else:
+                    # Handle scalar predictions (int, float, or unwrapped from H5)
+                    try:
+                        pred_val = float(np.asanyarray(pred).item()) if hasattr(pred, '__iter__') else float(pred)
                         data_stats.append(
                             create_data_stat(
                                 name='pred',
@@ -489,18 +508,23 @@ class DataService:
                                 thumbnail=b""
                             )
                         )
-                    else:
-                        # Fallback for non-scalar labels in non-segmentation tasks
-                        pred_ = np.array(pred)
-                        data_stats.append(
-                            create_data_stat(
-                                name='pred',
-                                stat_type='array',
-                                shape=list(pred_.shape),
-                                value=pred_.astype(float).ravel().tolist(),
-                                thumbnail=b""
+                    except (ValueError, TypeError):
+                        # Fallback for non-scalar predictions in non-segmentation tasks
+                        try:
+                            pred_ = np.array(pred)
+                            data_stats.append(
+                                create_data_stat(
+                                    name='pred',
+                                    stat_type='array',
+                                    shape=list(pred_.shape),
+                                    value=pred_.astype(float).ravel().tolist(),
+                                    thumbnail=b""
+                                )
                             )
-                        )
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
+
+
 
             # ====== Step 9: Generate raw data bytes and thumbnail ======
             if request.include_raw_data:
@@ -1004,12 +1028,15 @@ class DataService:
 
                     try:
                         df.sort_values(**safe_params)
-                    except ValueError as e:
-                        # Fallback for categorical issues
-                        if "Categorical categories must be unique" in str(e):
+                    except (ValueError, TypeError) as e:
+                        # Fallback for categorical or mixed type mismatch issues
+                        is_categorical_error = isinstance(e, ValueError) and "Categorical categories must be unique" in str(e)
+                        is_type_mismatch = isinstance(e, TypeError) and "'<' not supported between instances" in str(e)
+
+                        if is_categorical_error or is_type_mismatch:
                             logger.warning(
-                                "[ApplyDataQuery] sort_values failed due to non-unique categorical "
-                                "categories; casting sort columns to str and retrying."
+                                "[ApplyDataQuery] sort_values failed (categorical/mixed types: %s); "
+                                "casting sort columns to str and retrying.", e
                             )
                             for col in by:
                                 if col in df.columns:
@@ -1405,7 +1432,7 @@ class DataService:
         # Check if this exact request is already being processed
         with self._request_lock:
             if request_hash in self._pending_requests:
-                logger.debug(f"Duplicate GetDataSamples request detected (hash={request_hash[:8]}, request={request}...), waiting for existing request")
+                logger.debug(f"Duplicate GetDataSamples request detected (hash={request_hash[:8]}...), waiting for existing request")
                 pending_future = self._pending_requests[request_hash]
             else:
                 # Mark this request as being processed
@@ -1417,7 +1444,7 @@ class DataService:
             # If this is not the first request with this hash, wait for the result
             if not is_first_request:
                 result = pending_future.result(timeout=300)
-                logger.debug(f"Duplicate request returned cached result (hash={request_hash[:8]}, request={request}...)")
+                logger.debug(f"Duplicate request returned cached result (hash={request_hash[:8]}...)")
                 return result
 
             # Otherwise, process the request normally
