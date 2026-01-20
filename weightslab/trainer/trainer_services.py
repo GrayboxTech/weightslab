@@ -83,16 +83,36 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     def StreamStatus(self, request_iterator, context):
         logger.debug(f"ExperimentServiceServicer.StreamStatus({request_iterator})")
 
-        # Get context components to fetch signal logger
-        self._ctx.ensure_components()
-        components = self._ctx.components
-        is_model_interfaced = components.get("model") is not None
-        has_streaming_logger = components.get("signal_logger") is not None
+        # Retry to ensure components are ready
+        max_retries = 10
+        for attempt in range(max_retries):
+            self._ctx.ensure_components()
+            components = self._ctx.components
+            is_model_interfaced = components.get("model") is not None
+            has_streaming_logger = components.get("signal_logger") is not None
 
-        # delegate to domain ExperimentService
+            if is_model_interfaced and has_streaming_logger:
+                logger.info(f"StreamStatus: Components ready on attempt {attempt + 1}")
+                break
+
+            if attempt < max_retries - 1:
+                logger.debug(f"StreamStatus: Waiting for components (attempt {attempt + 1}/{max_retries})")
+                import time
+                time.sleep(0.5)
+
         if not is_model_interfaced or not has_streaming_logger:
-            logger.warning("No model or signal_logger found in context components for StreamStatus. \{'is_model_interfaced': {is_model_interfaced}, 'has_streaming_logger': {has_streaming_logger}'\}")
-            return None
+            logger.warning(
+                f"StreamStatus: Components not ready after {max_retries} attempts. "
+                f"{{'is_model_interfaced': {is_model_interfaced}, 'has_streaming_logger': {has_streaming_logger}}}"
+            )
+            # Yield empty/placeholder status instead of closing stream
+            import weightslab.proto.experiment_service_pb2 as pb2
+            yield pb2.TrainingStatusEx(
+                timestamp="N/A",
+                experiment_name="N/A",
+                model_age=0
+            )
+            return
 
         # stream status updates to client
         for status in self._exp_service.StreamingStatus(request_iterator):
