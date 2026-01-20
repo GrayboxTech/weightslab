@@ -98,12 +98,12 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
 
 def get_layer_representation(layer) -> pb2.LayerRepresentation:
     layer_representation = None
-    layer_id = layer.get_module_id(),
-    layer_name = layer.__class__.__name__,
-    layer_type = layer.module_name,
-    incoming_neurons_count = layer.in_neurons,
-    neurons_count = layer.out_neurons,
-    kernel_size = (layer.kernel_size[0] if not isinstance(layer.kernel_size, (int, float)) else layer.kernel_size) if hasattr(layer, 'kernel_size') else None,
+    layer_id = layer.get_module_id()
+    layer_name = layer.__class__.__name__
+    layer_type = layer.module_name
+    incoming_neurons_count = layer.in_neurons
+    neurons_count = layer.out_neurons
+    kernel_size = (layer.kernel_size[0] if not isinstance(layer.kernel_size, (int, float)) else layer.kernel_size) if hasattr(layer, 'kernel_size') else None
     stride = (layer.stride[0] if not isinstance(layer.stride, (int, float)) else layer.stride) if hasattr(layer, 'stride') else None
 
     parameters = {

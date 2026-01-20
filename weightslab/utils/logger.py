@@ -1,10 +1,22 @@
 import queue
 
+from weightslab.backend.ledgers import get_logger, register_logger
 
-class Dash:
-    def __init__(self) -> None:
+
+class LoggerQueue:
+    def __init__(self, name: str = None, register: bool = True) -> None:
         self.queue = queue.Queue()
         self.graph_names = set()
+
+        if register:
+            # # Initialize the proxy before setting the logger
+            try:
+                get_logger(name)
+            except Exception:
+                pass
+
+            # Register the logger into the ledger. This will update any proxy in-place.
+            register_logger(name, self)
 
     def get_graph_names(self):
         return list(self.graph_names)

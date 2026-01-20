@@ -17,6 +17,7 @@ from weightslab.backend.ledgers import get_model, get_dataloader, get_dataframe,
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.ui.weightslab_ui import ui_serve
+from weightslab.utils.logger import LoggerQueue
 
 
 # Get global logger
@@ -263,6 +264,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs)
 
+        # Register related logger for model training
+        # # Init the logger
+        LoggerQueue(name=reg_name)
+
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
@@ -450,6 +455,7 @@ def serve(serving_ui: bool = False, serving_cli: bool = False, serving_grpc: boo
     """ Serve the trainer services.
 
     Args:
+        serving_ui (bool): Whether to serve the UI.
         serving_cli (bool): Whether to use the CLI.
         serving_grpc (bool): Whether to serve gRPC.
     """

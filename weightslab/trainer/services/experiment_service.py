@@ -1,6 +1,7 @@
 import time
-import logging
 import types
+import queue
+import logging
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import weightslab_rlock
@@ -8,6 +9,8 @@ from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 
+
+# Logger
 logger = logging.getLogger(__name__)
 
 
@@ -33,23 +36,27 @@ class ExperimentService:
     # -------------------------------------------------------------------------
     # Training status stream
     # -------------------------------------------------------------------------
-    def stream_status(self, request_iterator):
-        import queue
+    def StreamingStatus(self, request_iterator):
+        """
+        Stream training status updates to the client.
+        """
 
+        # Initialize components
         self._ctx.ensure_components()
         components = self._ctx.components
-        signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
+        signal_logger = components.get("signal_logger")
 
         while True:
             try:
                 if signal_logger == None:
                     # No signal logger available, wait briefly and continue
+                    signal_logger = components.get("signal_logger")
                     time.sleep(0.01)
                     continue
 
                 # Use timeout to avoid blocking indefinitely
                 try:
-                    signal_log = signal_logger.queue.get(timeout=0.5)
+                    signal_log = signal_logger.queue.get(timeout=0.1)
                 except queue.Empty:
                     # No signals available, continue waiting
                     continue

@@ -30,28 +30,8 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         if exp_service is None:
             ctx = ExperimentContext(exp_name=exp_name)
             exp_service = ExperimentService(ctx=ctx)
+            self._ctx = ctx
         self._exp_service = exp_service
-
-    # -------------------------------------------------------------------------
-    # Training status stream
-    # -------------------------------------------------------------------------
-    def StreamStatus(self, request_iterator, context):
-        logger.debug(f"ExperimentServiceServicer.StreamStatus({request_iterator})")
-
-        # # Get context components to fetch signal logger
-        # self._ctx.ensure_components()
-        # components = self._ctx.components
-        # is_model_interfaced = components.get("model") is not None
-
-        # # delegate to domain ExperimentService
-        # if not is_model_interfaced:
-        #     logger.warning("No signal_logger found in context components for StreamStatus")
-        #     return None
-
-        # # stream status updates to client
-        # for status in self._exp_service.stream_status(request_iterator):
-        #     yield status
-        return self._exp_service.StreamStatus(request_iterator, context)
 
     # -------------------------------------------------------------------------
     # Sample retrieval (images / segmentation / recon)
@@ -100,6 +80,24 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # -------------------------------------------------------------------------
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
+    def StreamStatus(self, request_iterator, context):
+        logger.debug(f"ExperimentServiceServicer.StreamStatus({request_iterator})")
+
+        # Get context components to fetch signal logger
+        self._ctx.ensure_components()
+        components = self._ctx.components
+        is_model_interfaced = components.get("model") is not None
+        has_streaming_logger = components.get("signal_logger") is not None
+
+        # delegate to domain ExperimentService
+        if not is_model_interfaced or not has_streaming_logger:
+            logger.warning("No model or signal_logger found in context components for StreamStatus. \{'is_model_interfaced': {is_model_interfaced}, 'has_streaming_logger': {has_streaming_logger}'\}")
+            return None
+
+        # stream status updates to client
+        for status in self._exp_service.StreamingStatus(request_iterator):
+            yield status
+
     def ExperimentCommand(self, request, context):
         logger.debug(f"ExperimentServiceServicer.ExperimentCommand({request})")
         return self._exp_service.ExperimentCommand(request, context)
