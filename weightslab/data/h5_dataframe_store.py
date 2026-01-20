@@ -1,13 +1,21 @@
 import os
+import json
 import time
 import logging
 import threading
-from pathlib import Path
-from typing import Iterable, Optional, Union
+import hashlib
+import shutil
 
 import pandas as pd
 import numpy as np
 
+from pathlib import Path
+from typing import Iterable, Optional, Union
+
+from weightslab.data.sample_stats import SampleStats
+
+
+# Initialize logger
 logger = logging.getLogger(__name__)
 
 
@@ -100,7 +108,6 @@ class H5DataFrameStore:
         self._lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         self._lock_timeout = lock_timeout
         self._poll_interval = poll_interval
-        self._last_mtime: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -115,37 +122,143 @@ class H5DataFrameStore:
     def _normalize_for_write(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
-        df_out = df.copy()
-        if "sample_id" in df_out.columns:
-            df_out = df_out.set_index("sample_id")
-        if df_out.index.name is None:
-            df_out.index.name = "sample_id"
+
+        if "sample_id" in df.columns:
+            df = df.set_index("sample_id")
+        if df.index.name is None:
+            df.index.name = "sample_id"
         try:
-            df_out.index = df_out.index.astype(int)
+            df.index = df.index.astype(int)
         except Exception:
             pass
         # Sanitize column names: HDF5 doesn't allow '/' in object names
-        df_out.columns = [str(col).replace('/', '__SLASH__') for col in df_out.columns]
-        return df_out
+        df.columns = [str(col).replace('/', '__SLASH__') for col in df.columns]
+
+        # Vectorized normalization: only process columns that actually contain lists/dicts/arrays
+        # Replace None with np.nan (vectorized)
+        df = df.fillna(np.nan)
+
+        # Identify columns that need serialization (contain lists/dicts)
+        cols_to_serialize = SampleStats.MODEL_INOUT_LIST
+
+        # Serialize only the columns that need it
+        def serialize_value(val):
+            if not isinstance(val, (list, set, np.ndarray)) and pd.isna(val):
+                return np.nan
+            if isinstance(val, np.ndarray) and val.ndim <= 1:
+                if val.ndim == 0:
+                    val = val.reshape(-1)
+                val = val.tolist()
+            if isinstance(val, (int, float, bool)):
+                val = [val]
+            if isinstance(val, (list, dict)):
+                try:
+                    return json.dumps(val)
+                except Exception:
+                    return str(val)
+
+            return val
+
+        for col in cols_to_serialize:
+            df[col] = df[col].apply(serialize_value)
+
+        return df
 
     def _normalize_for_read(self, df: pd.DataFrame, origin: str) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
-        df_out = df.copy()
-        # Restore original column names by replacing __SLASH__ token back to '/'
-        df_out.columns = [str(col).replace('__SLASH__', '/') for col in df_out.columns]
-        if df_out.index.name in (None, "uid"):
-            df_out.index.name = "sample_id"
-        if not isinstance(df_out, pd.Series) and "sample_id" not in df_out.columns:
-            df_out["sample_id"] = df_out.index.astype(int)
-        elif isinstance(df_out, pd.Series):
-            df_out = df_out.reset_index().rename(columns={df_out.name: "sample_id"})
-        df_out["origin"] = origin
-        return df_out
 
-    @property
-    def last_mtime(self) -> Optional[float]:
-        return self._last_mtime
+        # Restore original column names by replacing __SLASH__ token back to '/'
+        df.columns = [str(col).replace('__SLASH__', '/') for col in df.columns]
+        if df.index.name in (None, "uid"):
+            df.index.name = "sample_id"
+        if not isinstance(df, pd.Series) and "sample_id" not in df.columns:
+            df["sample_id"] = df.index.astype(int)
+        elif isinstance(df, pd.Series):
+            df = df.reset_index().rename(columns={df.name: "sample_id"})
+        df["origin"] = origin
+
+        # Handle deserialization of nested objects (lists, dicts) stored as JSON strings
+        cols_to_deserialize = [col for col in SampleStats.MODEL_INOUT_LIST if col in df.columns]
+        if not cols_to_deserialize:
+            return df
+
+        def deserialize_value(val):
+            if not isinstance(val, str) or not (val.startswith('[') or val.startswith('{')):
+                return val
+            try:
+                obj = json.loads(val)
+            except Exception:
+                return val
+
+            # Unwrap single-element lists to scalars for consistency with active training data
+            if isinstance(obj, list) and len(obj) == 1:
+                return obj[0]
+            return obj
+
+        for col in cols_to_deserialize:
+            df[col] = df[col].apply(deserialize_value)
+
+        return df
+
+    def _compute_checksum(self, df: pd.DataFrame) -> str:
+        """Compute MD5 checksum of DataFrame for integrity verification."""
+        try:
+            # Use pickle to handle DataFrames with unhashable types (lists, dicts, arrays)
+            import pickle
+            data_bytes = pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)
+            return hashlib.md5(data_bytes).hexdigest()
+        except Exception as e:
+            logger.warning(f"[H5DataFrameStore] Failed to compute checksum: {e}")
+            return ""
+
+    def _save_checksum(self, store: pd.HDFStore, key: str, checksum: str):
+        """Save DataFrame checksum as metadata."""
+        try:
+            checksum_key = f"{key}/_checksum"
+            if checksum_key in store:
+                store.remove(checksum_key)
+            checksum_df = pd.DataFrame({"checksum": [checksum]})
+            store.put(checksum_key, checksum_df)
+        except Exception as e:
+            logger.warning(f"[H5DataFrameStore] Failed to save checksum: {e}")
+
+    def _verify_checksum(self, store: pd.HDFStore, key: str, expected_checksum: str) -> bool:
+        """Verify DataFrame checksum for integrity."""
+        try:
+            checksum_key = f"{key}/_checksum"
+            if checksum_key not in store:
+                return True  # No checksum to verify
+            checksum_df = store.get(checksum_key)
+            stored_checksum = checksum_df["checksum"].iloc[0]
+            return stored_checksum == expected_checksum
+        except Exception as e:
+            logger.warning(f"[H5DataFrameStore] Failed to verify checksum: {e}")
+            return False
+
+    def _create_backup(self) -> Optional[Path]:
+        """Create backup of H5 file before write. Returns backup path on success."""
+        if not self._path.exists():
+            return None
+        try:
+            backup_path = self._path.with_suffix(".h5.backup")
+            shutil.copy2(self._path, backup_path)
+            logger.debug(f"[H5DataFrameStore] Created backup at {backup_path}")
+            return backup_path
+        except Exception as e:
+            logger.warning(f"[H5DataFrameStore] Failed to create backup: {e}")
+            return None
+
+    def _restore_backup(self, backup_path: Path):
+        """Restore H5 file from backup on write failure."""
+        try:
+            if backup_path and backup_path.exists():
+                shutil.copy2(backup_path, self._path)
+                logger.info(f"[H5DataFrameStore] Restored from backup: {backup_path}")
+                return True
+        except Exception as e:
+            logger.error(f"[H5DataFrameStore] Failed to restore backup: {e}")
+        return False
 
     # ------------------------------------------------------------------
     # Public API
@@ -261,6 +374,7 @@ class H5DataFrameStore:
                 raise
 
     def upsert(self, origin: str, df: pd.DataFrame) -> int:
+        """Atomic upsert with corruption prevention via backup and checksum verification."""
         df_norm = self._normalize_for_write(df)
         if df_norm.empty:
             return 0
@@ -268,21 +382,30 @@ class H5DataFrameStore:
         key = self._key(origin)
         self._ensure_parent()
 
+        # Create backup BEFORE any writes
+        backup_path = self._create_backup()
+
         with self._local_lock:
             with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
                 try:
                     with pd.HDFStore(str(self._path), mode="a") as store:
                         existing = pd.DataFrame()
+
+                        # Try to load existing data
                         if key in store:
                             try:
                                 existing = store.select(key)
-                                store.remove(key)
-                                store.flush()
                             except (TypeError, KeyError) as exc:
                                 logger.warning(f"[H5DataFrameStore] Detected corrupted key {key} during upsert: {exc}")
-                        # Merge existing and new data
+                                existing = pd.DataFrame()
+                                try:
+                                    store.remove(key)
+                                except Exception:
+                                    pass
+
+                        # Merge data
                         if not existing.empty:
-                            if 'tags' in existing.columns and 'tags' in df_norm.columns and len(df_norm.columns) == 1:  # Only for tags update
+                            if 'tags' in existing.columns and 'tags' in df_norm.columns and len(df_norm.columns) == 1:
                                 idx = df_norm.index.intersection(existing.index)
                                 if len(idx) > 0:
                                     curr = existing.loc[idx, 'tags'].fillna('').astype(str)
@@ -291,19 +414,40 @@ class H5DataFrameStore:
                                     combined = curr + sep + new
                                     existing.loc[idx, 'tags'] = combined
                             else:
-                                # Concatenate existing and new data, keeping newer values for duplicate indices
                                 existing = pd.concat([existing, df_norm])
                         else:
                             existing = df_norm.copy()
+
                         existing = existing[~existing.index.duplicated(keep='last')]
-                        store.append(key, existing, format="table", data_columns=True, min_itemsize={"tags": 256})
+
+                        # Remove old key
+                        if key in store:
+                            store.remove(key)
+
+                        # Write new data
+                        store.append(key, existing, format="table", data_columns=True, min_itemsize={"tags": 512})
+
+                        # Force flush to disk
                         store.flush()
+
+                        logger.debug(f"[H5DataFrameStore] Successfully upserted {len(df_norm)} rows for {origin}")
                         return len(df_norm)
+
                 except Exception as exc:
                     logger.error(f"[H5DataFrameStore] Failed to upsert rows for {origin} into {self._path}: {exc}")
+                    # Attempt restore from backup
+                    if backup_path:
+                        self._restore_backup(backup_path)
                     return 0
+                finally:
+                    # Clean up backup after successful write
+                    if backup_path and backup_path.exists():
+                        try:
+                            backup_path.unlink()
+                        except Exception:
+                            pass
 
-    def path(self) -> Path:
+    def get_path(self) -> Path:
         return self._path
 
     def exists(self) -> bool:

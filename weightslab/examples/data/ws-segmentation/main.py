@@ -222,7 +222,6 @@ def train(loader, model, optimizer, criterion_mlt, device):
         loss_batch = criterion_mlt(
             outputs.float(),
             labels.long(),
-            model_age=model.get_age(),
             batch_ids=ids,
             preds=preds,
         )  # CrossEntropyLoss(reduction="none") → [B,H,W]
@@ -250,7 +249,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
             loss_batch = criterion_mlt(
                 outputs.float(),
                 labels.long(),
-                model_age=model.get_age(),
                 batch_ids=ids,
                 preds=preds,
             )
@@ -300,7 +298,8 @@ if __name__ == "__main__":
     # --- 3) Logging directory ---
     if not parameters.get("root_log_dir"):
         tmp_dir = tempfile.mkdtemp()
-        parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
+        parameters["root_log_dir"] = tmp_dir
+        print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
     log_dir = parameters["root_log_dir"]
@@ -350,29 +349,35 @@ if __name__ == "__main__":
         flag="data",
         name="train_loader",
         batch_size=train_cfg.get("batch_size", 2),
-        shuffle=train_cfg.get("train_shuffle", True),
+        shuffle=train_cfg.get("shuffle", True),
         compute_hash=False,
-        is_training=True
+        is_training=True,
+        array_autoload_arrays=False,
+        array_return_proxies=True,
+        array_use_cache=True,
+        preload_labels = False,
     )
     test_loader = wl.watch_or_edit(
         _val_dataset,
         flag="data",
         name="test_loader",
         batch_size=test_cfg.get("batch_size", 2),
-        shuffle=test_cfg.get("test_shuffle", False),
+        shuffle=test_cfg.get("shuffle", False),
         compute_hash=False,
-        is_training=False
+        is_training=False,
+        array_autoload_arrays=False,
+        array_return_proxies=True,
+        array_use_cache=True,
+        preload_labels = False,
     )
 
     # --- 6) Model, optimizer, losses, metric ---
-    _model = SmallUNet(
+    model = SmallUNet(
         in_channels=3, num_classes=num_classes, image_size=image_size
-    )
-    model = wl.watch_or_edit(_model, flag="model", name=exp_name, device=device)
+    ).to(device)
 
     lr = parameters.get("optimizer", {}).get("lr", 1e-3)
-    _optimizer = optim.Adam(model.parameters(), lr=lr)
-    optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # --- Compute class weights to handle class imbalance ---
     print("\n" + "=" * 60)
@@ -465,8 +470,8 @@ if __name__ == "__main__":
 
     # --- 7) Start WeightsLab services ---
     wl.serve(
-        serving_grpc=True,
-        serving_cli=True,
+        serving_grpc=parameters.get("serving_grpc", True),
+        serving_cli=parameters.get("serving_cli", True),
     )
 
     print("=" * 60)
@@ -481,7 +486,6 @@ if __name__ == "__main__":
     # 7. Training Loop
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
-    test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
     test_loss, test_metric = None, None
     start_time = time.time()
     for train_step in train_range:
@@ -489,7 +493,8 @@ if __name__ == "__main__":
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Test
-        if train_step == 0 or train_step % eval_every == 0:
+        if train_step > 0 and train_step % eval_every == 0:
+            test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
 
         # Verbose

@@ -1,18 +1,23 @@
 device: cuda
 experiment_name: seg_usecase
 data_root: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/BDD100k_reduced
-root_log_dir: "C:/Users/GuillaumePELLUET/Desktop/trash/ws-segmentation-usecase"
-training_steps_to_do: 2000
-eval_full_to_train_steps_ratio: 50
+
+eval_full_to_train_steps_ratio: 1500
+experiment_dump_to_train_steps_ratio: 200
 num_classes: 6
 image_size: 128
 tqdm_display: true
 
 # start training immediately or not
-is_training: false
+is_training: true
+
+# Serving
+serving_grpc: true
+serving_cli: false
 
 # Configure global dataframe storage
-ledger_enable_h5_persistence: false
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
 ledger_flush_max_rows: 250
 ledger_flush_interval: 10.0
 

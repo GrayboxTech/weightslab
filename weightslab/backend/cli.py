@@ -224,7 +224,7 @@ def _handle_command(cmd: str) -> Any:
                 out['hyperparams'] = {}
             return {'ok': True, 'ledger': out}
 
-        if verb == 'dump':
+        if verb == 'dump' or verb == 'd':
             # legacy `dump` now returns the ledger dump (sanitized)
             out = {}
             snap = GLOBAL_LEDGER.snapshot()

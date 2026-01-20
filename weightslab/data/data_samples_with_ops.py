@@ -14,8 +14,9 @@ from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
-from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
+from weightslab.trainer.services.service_utils import load_label
 from weightslab.data.dataframe_manager import _create_ledger_manager
+from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
 from weightslab.data.data_utils import (
     _detect_dataset_split,
     _to_numpy_safe
@@ -32,6 +33,11 @@ from weightslab.data.sample_stats import (
 logger = logging.getLogger(__name__)
 global _UID_CNT
 _UID_CNT = 0
+
+# Global registry for cross-loader duplicate detection
+# Format: {origin: set(uid1, uid2, ...)}
+_GLOBAL_UID_REGISTRY: Dict[str, Set[int]] = {}
+_REGISTRY_LOCK = threading.Lock()
 
 
 def _has_regex_symbols(pattern: str) -> bool:
@@ -116,6 +122,10 @@ class DataSampleTrackingWrapper(Dataset):
         stats_store: Optional[H5DataFrameStore] = None,
         enable_h5_persistence: bool = True,
         name: Optional[str] = 'unknown',
+        array_autoload_arrays: bool = False,
+        array_return_proxies: bool = True,
+        array_use_cache: bool = True,
+        preload_labels: bool = False,
         **_,
     ):
         # Set name
@@ -136,6 +146,11 @@ class DataSampleTrackingWrapper(Dataset):
         self._h5_pending_uids = set()  # Track UIDs with pending H5 saves
         self._stats_store = stats_store
         self._enable_h5_persistence = enable_h5_persistence
+
+        # Arrays autoloading configuration
+        self.array_autoload_arrays = array_autoload_arrays
+        self.array_return_proxies = array_return_proxies
+        self.array_use_cache = array_use_cache
 
         # Tag-based labeling configuration
         self._use_tags = use_tags
@@ -178,6 +193,10 @@ class DataSampleTrackingWrapper(Dataset):
         seen_uid: Dict[int, int] = {}
         kept_indices = []
 
+        # Detect dataset split for H5 storage
+        original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
+        split = name or _detect_dataset_split(original_ds)
+
         for idx, uid in enumerate(self.unique_ids):
             uid_int = int(uid)
             if uid_int not in seen_uid:
@@ -189,11 +208,33 @@ class DataSampleTrackingWrapper(Dataset):
         self.unique_id_to_index = {uid: i for i, uid in enumerate(self.unique_ids)}
         if num_duplicates > 0:
             logger.warning(
-                f"[DataSampleTrackingWrapper] Found {num_duplicates} duplicate samples. "
+                f"[DataSampleTrackingWrapper] Found {num_duplicates} duplicate samples within '{split}' loader. "
                 f"Keeping {len(kept_indices)} unique samples. Duplicates removed from the dataset."
             )
             # Wrap the original dataset with Subset to only expose non-duplicate indices
             wrapped_dataset = Subset(wrapped_dataset, kept_indices)
+
+        # Check for cross-loader duplicates (samples appearing in multiple loaders)
+        cross_loader_duplicates = self._detect_cross_loader_duplicates(split)
+        if cross_loader_duplicates:
+            # Filter out cross-loader duplicates
+            non_duplicate_indices = [
+                i for i, uid in enumerate(self.unique_ids)
+                if int(uid) not in cross_loader_duplicates
+            ]
+            num_cross_duplicates = len(self.unique_ids) - len(non_duplicate_indices)
+
+            if num_cross_duplicates > 0:
+                logger.warning(
+                    f"[DataSampleTrackingWrapper] Found {num_cross_duplicates} cross-loader duplicate samples "
+                    f"in '{split}' loader that already exist in other loaders. Removing them to avoid data leakage."
+                )
+                self.unique_ids = self.unique_ids[non_duplicate_indices]
+                self.unique_id_to_index = {uid: i for i, uid in enumerate(self.unique_ids)}
+                wrapped_dataset = Subset(wrapped_dataset, non_duplicate_indices)
+
+        # Register this loader's UIDs in global registry for future cross-loader checks
+        self._register_loader_uids(split)
 
         # Now proceed with initialization using the deduplicated dataset
         self.__name__ = wrapped_dataset.__name__ if hasattr(
@@ -205,26 +246,27 @@ class DataSampleTrackingWrapper(Dataset):
         self._ex_columns_cache: Set[str] = set()
         self._map_updates_hook_fns = []
         self._df_lock = threading.RLock()
-
-        # Detect dataset split for H5 storage
-        original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
-        split = name or _detect_dataset_split(original_ds)
         self.is_training = is_training
         self._dataset_split = split  # Store for H5 filename (can be train, test, val, validation, eval, etc.)
 
         # Initialize DataFrame as single source of truth
-        # Start with defaults for all UIDs
-        default_data = []
-        for uid in self.unique_ids:
-            row = {}
-            row.update(SampleStats.DEFAULTS)
-            row.update(
-                {"sample_id": int(uid), "origin": self._dataset_split}
-            )
-            default_data.append(row)
+        # Start with defaults for all UIDs (single dict build per row to trim overhead)
+        sample_ids = [int(uid) for uid in self.unique_ids]
+        defaults = SampleStats.DEFAULTS
+        default_data = [
+            dict(defaults, sample_id=sid, origin=self._dataset_split, label=load_label(self, sid) if preload_labels else None)
+            for sid in sample_ids
+        ]
 
         # Register this split with the global ledger manager (shared across loaders) and load existing data
-        ledger_manager.register_split(self._dataset_split, default_data, self._stats_store)
+        ledger_manager.register_split(
+            self._dataset_split,
+            default_data,
+            self._stats_store,
+            autoload_arrays=self.array_autoload_arrays,
+            return_proxies=self.array_return_proxies,
+            use_cache=self.array_use_cache
+        )
 
         # Log tag-based labeling configuration if enabled
         if self._use_tags:
@@ -577,12 +619,6 @@ class DataSampleTrackingWrapper(Dataset):
         else:
             self.denied_sample_cnt = 0
 
-    def get_prediction_age(self, sample_id: int) -> int:
-        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION_AGE, raw=True)
-
-    def get_exposure_amount(self, sample_id: int) -> int:
-        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.ENCOUNTERED, raw=True)
-
     def is_deny_listed(self, sample_id: int) -> bool:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DENY_LISTED, raw=True)
 
@@ -841,3 +877,41 @@ class DataSampleTrackingWrapper(Dataset):
         """
         with self._df_lock:
             self._set_values(sample_id=sample_id, updates={stat_name: value})
+
+    def _detect_cross_loader_duplicates(self, current_origin: str) -> Set[int]:
+        """
+        Detect UIDs that already exist in other registered loaders.
+        Returns set of UIDs that are duplicates across loaders.
+        """
+        global _GLOBAL_UID_REGISTRY
+        cross_duplicates = set()
+
+        with _REGISTRY_LOCK:
+            current_uids = set(int(uid) for uid in self.unique_ids)
+
+            # Check against all other registered loaders
+            for origin, registered_uids in _GLOBAL_UID_REGISTRY.items():
+                if origin != current_origin:
+                    overlapping = current_uids & registered_uids
+                    if overlapping:
+                        logger.warning(
+                            f"[DataSampleTrackingWrapper] Found {len(overlapping)} overlapping samples "
+                            f"between '{current_origin}' and '{origin}' loaders."
+                        )
+                        cross_duplicates.update(overlapping)
+
+        return cross_duplicates
+
+    def _register_loader_uids(self, origin: str):
+        """
+        Register this loader's UIDs in the global registry for future cross-loader checks.
+        """
+        global _GLOBAL_UID_REGISTRY
+
+        with _REGISTRY_LOCK:
+            current_uids = set(int(uid) for uid in self.unique_ids)
+            _GLOBAL_UID_REGISTRY[origin] = current_uids
+            logger.debug(
+                f"[DataSampleTrackingWrapper] Registered {len(current_uids)} UIDs "
+                f"for '{origin}' loader in global registry."
+            )

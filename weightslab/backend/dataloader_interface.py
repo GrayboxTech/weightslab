@@ -27,6 +27,7 @@ from weightslab.backend.ledgers import (
     get_hyperparams,
     resolve_hp_name
 )
+from weightslab.utils import filter_kwargs_for_callable
 
 
 # Get Global Logger
@@ -293,7 +294,7 @@ class DataLoaderInterface:
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 collate_fn=collate_fn,
-                **kwargs
+                **filter_kwargs_for_callable(DataLoader, kwargs)
             )
 
         self.init_attributes(self.dataloader)

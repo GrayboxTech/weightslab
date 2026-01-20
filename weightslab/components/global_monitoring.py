@@ -94,10 +94,11 @@ class GuardContext:
         self.architecture_guard.__enter__()
 
         # The exact logic requested by the user:
-        if self.for_training:
-            self.model.set_tracking_mode(TrackingMode.TRAIN)
-        else:
-            self.model.set_tracking_mode(TrackingMode.EVAL)
+        if self.model is not None:
+            if self.for_training:
+                self.model.set_tracking_mode(TrackingMode.TRAIN)
+            else:
+                self.model.set_tracking_mode(TrackingMode.EVAL)
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         """

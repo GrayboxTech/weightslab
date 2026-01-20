@@ -17,7 +17,6 @@ from torchmetrics.classification import Accuracy
 from torchvision import datasets, transforms
 
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
-from weightslab.utils.board import Dash as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context
@@ -26,12 +25,12 @@ from weightslab.components.global_monitoring import (
 
 # Setup logging
 logging.basicConfig(level=logging.ERROR)
-
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_bin, criterion_mlt, device):
+def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
@@ -52,28 +51,10 @@ def train(loader, model, optimizer, criterion_bin, criterion_mlt, device):
         loss_batch_mlt = criterion_mlt(
             preds_raw.float(),
             labels.long(),
-            model_age=model.get_age(),
             batch_ids=ids,
             preds=preds
         )
-        loss_batch_bin = criterion_bin(
-            preds_raw[:, 7] if preds_raw.ndim > 1 else preds_raw,
-            (labels == 7).float(),
-            model_age=model.get_age(),
-            batch_ids=ids,
-            preds=preds
-        )
-        total_loss = (loss_batch_mlt + loss_batch_bin)/2.0
-
-        # Save the global signals for this batch as it is computed manually
-        wl.save_signals(
-            preds_raw=preds_raw,
-            model_age=model.get_age(),
-            batch_ids=ids,
-            signals={'train/combined_loss': total_loss},
-            preds=preds
-        )  # Save per-sample losses as signals manually
-        total_loss = total_loss.mean()  # Final scalar loss
+        total_loss = loss_batch_mlt.mean()  # Final scalar loss
 
         # Model
         total_loss.backward()
@@ -82,7 +63,7 @@ def train(loader, model, optimizer, criterion_bin, criterion_mlt, device):
     return total_loss.detach().cpu().item()
 
 
-def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_loader_len):
+def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
     losses = 0.0
 
@@ -101,18 +82,9 @@ def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_l
                 preds = outputs.argmax(dim=1, keepdim=True)
 
             # Compute signals
-            loss_bin_batch = criterion_bin(
-                outputs[:, 7] if outputs.ndim > 1 else outputs,
-                (labels == 7).float(),
-                model_age=model.get_age(),
-                batch_ids=ids,
-                preds=preds,
-            )
-            losses += torch.mean(loss_bin_batch)
             loss_batch = criterion_mlt(
                 outputs,
                 labels,
-                model_age=model.get_age(),
                 batch_ids=ids,
                 preds=preds,
             )
@@ -126,11 +98,12 @@ def test(loader, model, criterion_bin, criterion_mlt, metric_mlt, device, test_l
             # Log per-sample metric alongside signals; persists via the storer
             wl.save_signals(
                 preds_raw=outputs,
-                model_age=model.get_age(),
+                targets=labels,
                 batch_ids=ids,
                 signals={"valOrtest/accuracy_per_sample": acc_per_sample},
                 preds=preds,
             )
+
 
     loss = losses / test_loader_len
     metric = metric_mlt.compute() * 100
@@ -169,7 +142,8 @@ if __name__ == "__main__":
     # Logging dir
     if not parameters.get("root_log_dir"):
         tmp_dir = tempfile.mkdtemp()
-        parameters["root_log_dir"] = os.path.join(tmp_dir, "logs")
+        parameters["root_log_dir"] = tmp_dir
+        print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
     verbose = parameters.get('verbose', True)
@@ -177,11 +151,6 @@ if __name__ == "__main__":
     tqdm_display = parameters.get("tqdm_display", True)
     eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
-
-    # Register components in the GLOBAL_LEDGER via watch_or_edit
-    # Logger
-    logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
 
     # Hyperparameters (must use 'hyperparameters' flag for trainer services / UI)
     wl.watch_or_edit(
@@ -193,13 +162,11 @@ if __name__ == "__main__":
     )
 
     # Model
-    _model = CNN()
-    model = wl.watch_or_edit(_model, flag="model", name=exp_name, device=device)
+    model = CNN().to(device)
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)
-    _optimizer = optim.Adam(model.parameters(), lr=lr)
-    optimizer = wl.watch_or_edit(_optimizer, flag="optimizer", name=exp_name)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # Data (MNIST train/val/test)
     _full_train_dataset = datasets.MNIST(
@@ -286,34 +253,16 @@ if __name__ == "__main__":
         name="train_mlt_loss/CE",
         log=True,
     )
-    train_criterion_bin = wl.watch_or_edit(
-        nn.BCELoss(reduction="none"),
-        flag="loss",
-        name="train_bin_loss/BCE",
-        log=True,
-    )
     val_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="val_mlt_loss/CE",
         log=True,
     )
-    val_criterion_bin = wl.watch_or_edit(
-        nn.BCELoss(reduction="none"),
-        flag="loss",
-        name="val_bin_loss/BCE",
-        log=True,
-    )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
         name="test_mlt_loss/CE",
-        log=True,
-    )
-    test_criterion_bin = wl.watch_or_edit(
-        nn.BCELoss(reduction="none"),
-        flag="loss",
-        name="test_bin_loss/BCE",
         log=True,
     )
 
@@ -332,8 +281,8 @@ if __name__ == "__main__":
 
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
-        serving_grpc=True,
-        serving_cli=True,
+        serving_grpc=parameters.get("serving_grpc", False),
+        serving_cli=parameters.get("serving_cli", False),
     )
 
     print("=" * 60)
@@ -347,23 +296,20 @@ if __name__ == "__main__":
     val_loader_len = len(val_loader)  # Store length before wrapping with tqdm
     test_loader_len = len(test_loader)
 
-    val_loader_iter = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
-    test_loader_iter = tqdm.tqdm(test_loader, desc="Testing") if tqdm_display else test_loader
-
     train_loss = None
     val_loss, val_metric = None, None
     test_loss, test_metric = None, None
     for train_step in train_range:
         # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion_bin, train_criterion_mlt, device)
+        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Periodic validation and test evaluation
-        if train_step % eval_every == 0:
+        if train_step > 0 and train_step % eval_every == 0:
             # Validate
+            val_loader_iter = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
             val_loss, val_metric = test(
                 val_loader_iter,
                 model,
-                val_criterion_bin,
                 val_criterion_mlt,
                 val_metric_mlt,
                 device,
@@ -371,10 +317,10 @@ if __name__ == "__main__":
             )
 
             # Test (less frequent or same as val)
+            test_loader_iter = tqdm.tqdm(test_loader, desc="Testing") if tqdm_display else test_loader
             test_loss, test_metric = test(
                 test_loader_iter,
                 model,
-                test_criterion_bin,
                 test_criterion_mlt,
                 test_metric_mlt,
                 device,
