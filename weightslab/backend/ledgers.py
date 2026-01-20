@@ -250,11 +250,7 @@ class Ledger:
                         del registry_weak[name]
                     except KeyError:
                         pass
-<<<<<<< HEAD
                 return registry[name]
-=======
-        return registry[name]
->>>>>>> deffee37451fa445b065b836e8c7bf225b569383
 
     def _get(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: Optional[str] = None) -> Any:
         with self._lock:
