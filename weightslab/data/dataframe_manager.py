@@ -884,6 +884,7 @@ def _create_ledger_manager():
     except Exception:
         pass  # Use defaults if hyperparams not available
 
+    return None
 
 # Global LedgeredDataFrameManager instance
 # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args

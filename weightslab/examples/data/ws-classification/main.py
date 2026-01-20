@@ -222,7 +222,7 @@ if __name__ == "__main__":
         batch_size=train_bs,
         shuffle=train_shuffle,
         is_training=True,
-        compute_hash=False,
+        compute_hash=True,
         enable_h5_persistence=enable_h5_persistence
     )
     val_loader = wl.watch_or_edit(
@@ -232,7 +232,7 @@ if __name__ == "__main__":
         batch_size=val_bs,
         shuffle=val_shuffle,
         is_training=False,
-        compute_hash=False,
+        compute_hash=True,
         enable_h5_persistence=enable_h5_persistence
     )
     test_loader = wl.watch_or_edit(
@@ -242,7 +242,7 @@ if __name__ == "__main__":
         batch_size=test_bs,
         shuffle=test_shuffle,
         is_training=False,
-        compute_hash=False,
+        compute_hash=True,
         enable_h5_persistence=enable_h5_persistence
     )
 

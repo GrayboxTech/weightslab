@@ -124,6 +124,30 @@ class Proxy:
             return False
         return bool(self._obj)
 
+    def __eq__(self, other):
+        """Enable equality comparison with the wrapped object.
+
+        This allows `Proxy(None) == None` to return True.
+        """
+        with self._lock:
+            return self._obj == other
+
+    def __ne__(self, other):
+        """Enable inequality comparison with the wrapped object."""
+        with self._lock:
+            return self._obj != other
+
+    def __bool__(self):
+        """Enable boolean evaluation of the proxy based on the wrapped object.
+
+        This allows `bool(Proxy(None))` to return False and
+        `if not proxy:` to work correctly when proxy wraps None.
+        """
+        with self._lock:
+            if self._obj is None:
+                return False
+            return bool(self._obj)
+
     def __next__(self):
         """Allow the Proxy itself to act as an iterator when `next(proxy)` is
         called. We cache an internal iterator per-proxy so successive calls to
@@ -226,7 +250,11 @@ class Ledger:
                         del registry_weak[name]
                     except KeyError:
                         pass
+<<<<<<< HEAD
                 return registry[name]
+=======
+        return registry[name]
+>>>>>>> deffee37451fa445b065b836e8c7bf225b569383
 
     def _get(self, registry: Dict[str, Any], registry_weak: weakref.WeakValueDictionary, proxies: Dict[str, Proxy], name: Optional[str] = None) -> Any:
         with self._lock:

@@ -54,6 +54,45 @@ def create_data_stat(name, stat_type, shape=None, value=None, value_string="", t
     )
 
 
+def generate_thumbnail(pil_image, max_size=(128, 128), quality=85):
+    """Generate a JPEG thumbnail from a PIL image.
+
+    Args:
+        pil_image: PIL Image object
+        max_size: Max dimensions (width, height) for thumbnail
+        quality: JPEG quality (1-95)
+
+    Returns:
+        bytes: JPEG thumbnail as bytes
+    """
+    try:
+        # Create a copy to avoid modifying original
+        thumb = pil_image.copy()
+
+        # Use LANCZOS for high-quality downsampling
+        thumb.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+        # Convert to RGB if needed (JPEG doesn't support RGBA)
+        if thumb.mode in ('RGBA', 'LA', 'P'):
+            # Create white background
+            background = Image.new('RGB', thumb.size, (255, 255, 255))
+            if thumb.mode == 'P':
+                thumb = thumb.convert('RGBA')
+            if thumb.mode in ('RGBA', 'LA'):
+                background.paste(thumb, mask=thumb.split()[-1])  # Use alpha channel as mask
+                thumb = background
+        elif thumb.mode != 'RGB':
+            thumb = thumb.convert('RGB')
+
+        # Save as JPEG to buffer
+        buffer = io.BytesIO()
+        thumb.save(buffer, format='JPEG', quality=quality, optimize=True)
+        return buffer.getvalue()
+    except Exception as e:
+        logger.warning(f"Failed to generate thumbnail: {e}")
+        return b""
+
+
 class DataService:
 
     """
@@ -574,7 +613,6 @@ class DataService:
         """
         Parse a simple direct query string into operations list.
         Expected format: "col > val and col2 == val2 sortby col desc"
-
         This bypasses the LLM agent for deterministic filtering.
         """
         operations = []
@@ -602,7 +640,6 @@ class DataService:
                 "function": "df.query",
                 "params": {"expr": filter_part}
             })
-
         # Parse sort part
         if sort_part:
             sort_cols = []
@@ -652,7 +689,6 @@ class DataService:
                         "function": "df.sort_values",
                         "params": {"by": sort_cols, "ascending": sort_ascs}
                     })
-
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
         return operations
 
@@ -719,12 +755,10 @@ class DataService:
                     raw_by = safe_params.get("by", [])
                     if isinstance(raw_by, str):
                         raw_by = [raw_by]
-
                     # 1. Flatten comma-separated strings and extract direction (asc/desc)
                     # Agent LLMs sometimes return ["col1, col2"] or ["col1 asc", "col2 desc"]
                     final_by = []
                     final_ascs = []
-
                     # Initialize default ascending from params if present
                     # params["ascending"] can be a bool or a list
                     input_ascending = params.get("ascending", True)
@@ -734,7 +768,6 @@ class DataService:
                         parts = [p.strip() for p in str(b).split(',')]
                         for p in parts:
                             if not p: continue
-
                             # Default direction for this specific item
                             item_asc = True
                             if isinstance(input_ascending, list) and len(final_by) < len(input_ascending):
@@ -750,7 +783,6 @@ class DataService:
                             elif lower_p.endswith(" desc"):
                                 item_asc = False
                                 col_name = p[:-5].strip()
-
                             final_by.append(col_name)
                             final_ascs.append(item_asc)
 
@@ -766,7 +798,6 @@ class DataService:
 
                     # Case-insensitive and format-tolerant column matching
                     corrected_by = []
-
                     def normalize_name(n):
                         return str(n).lower().replace(' ', '').replace('_', '')
 
@@ -781,7 +812,6 @@ class DataService:
                     for col in by:
                         # Strip backticks if present (from agent or UI)
                         col = col.replace('`', '').strip()
-
                         if col in df.columns or col in df.index.names:
                             corrected_by.append(col)
                         else:
@@ -805,7 +835,6 @@ class DataService:
                         # Skip index columns for sanitization
                         if col in df.index.names and col not in df.columns:
                              continue
-
                         if col not in df.columns:
                             continue
 
@@ -841,7 +870,6 @@ class DataService:
                     valid_cols = []
                     for c in by:
                         is_index = c in df.index.names
-
                         # Handle nested signal columns (e.g., signals//train_loss/mlt_loss)
                         if "//" in c and c not in df.columns:
                             root_col, nested_path = c.split("//", 1)
@@ -925,7 +953,6 @@ class DataService:
                                                 if len(v) > 1:
                                                     is_multi_dim = True
                                                     break
-
                                         if is_multi_dim:
                                             logger.info(f"[ApplyDataQuery] Cannot sort by '{c}': contains multi-dimensional data.")
                                             return f"Cannot sort by '{c}': Data is multi-dimensional"
@@ -998,7 +1025,6 @@ class DataService:
                     safe_params = {}
                     if "ascending" in params:
                         safe_params["ascending"] = params["ascending"]
-
                     logger.debug(
                         "[ApplyDataQuery] Applying df.sort_index(inplace=True) with params=%s",
                         safe_params
@@ -1238,6 +1264,36 @@ class DataService:
                     "[ApplyDataQuery] ⚡ BYPASSING AGENT - Direct query execution: %r",
                     request.query,
                 )
+
+                # Parse the query directly without agent
+                # Expected format: "col > val and col2 == val2 sortby col desc"
+                operations = self._parse_direct_query(request.query)
+
+                # Apply operations with lock
+                with self._lock:
+                    df = self._all_datasets_df
+                    messages = []
+
+                    for op in operations:
+                        func = op.get("function")
+                        params = op.get("params", {}) or {}
+                        msg = self._apply_agent_operation(df, func, params)
+                        messages.append(msg)
+
+                    final_message = " | ".join(messages) if messages else "No operation performed"
+                    self._all_datasets_df = df
+
+                    return self._build_success_response(
+                        df=df,
+                        message=final_message,
+                        intent_type=pb2.INTENT_FILTER
+                    )
+
+            # 3) Natural language path - go through agent
+            logger.debug(
+                "[ApplyDataQuery] Using AGENT for natural language query: %r",
+                request.query,
+            )
 
                 # Parse the query directly without agent
                 # Expected format: "col > val and col2 == val2 sortby col desc"
