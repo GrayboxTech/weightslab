@@ -13,14 +13,19 @@ MODE SELECTION HEURISTIC:
 ALLOWED OPERATIONS (inside 'steps'):
 - "kind": "keep" | "drop" | "sort" | "head" | "tail" | "reset" | "analysis" | "noop"
 - "conditions": List of {{column, op, value}} (for keep/drop)
-  - Available operators: "==", "!=", ">", "<", ">=", "<=", "between", "contains", "in"
-  - Use "in" for checking if a value exists in list-like columns (e.g., tags)
+  - Available operators: "==", "!=", ">", "<", ">=", "<=", "between", "contains", "in", "not in"
+  - Use "in" / "not in" for checking if a value exists in list-like columns (e.g., tags)
   - Use "contains" for substring matching in string columns
 - "sort_by": List of columns (for sort)
 - "ascending": Boolean (for sort)
 - "n": Integer (for head/tail)
 - "drop_frac" / "keep_frac": Float 0-1 (for random sampling)
 - "analysis_expression": Python/Pandas code (ONLY for kind="analysis")
+
+CRITICAL SCHEMA RULE:
+- You must ONLY use legitimate column names found in the `Schema` list above. 
+- Do NOT fabricate columns like "mean_loss", "label", "predictions" if they are not in the list. 
+- If the schema says "target", use "target". If it says "loss", use "loss".
 
 EXAMPLES (Manipulation / Grid View):
 
@@ -37,12 +42,12 @@ EXAMPLES (Manipulation / Grid View):
       }}
   ]
 
-- "Keep samples with label 4 and loss below 0.001"
+- "Keep samples with target 4 and loss below 0.001"
   (Goal: Complex Filter) -> steps=[
       {{
         "kind": "keep",
         "conditions": [
-          {{"column": "label", "op": "==", "value": 4}},
+          {{"column": "target", "op": "==", "value": 4}},
           {{"column": "loss", "op": "<", "value": 0.001}}
         ]
       }}
@@ -102,22 +107,22 @@ EXAMPLES (Analysis / Questions):
 
 - "What is the highest loss?"
   (Goal: Get a specific number) -> steps=[
-      {{kind="analysis", analysis_expression="df['mean_loss'].max()"}}
+      {{kind="analysis", analysis_expression="df['loss'].max()"}}
   ]
 
 - "How many samples have tag 'sky'?"
   (Goal: Count specific rows) -> steps=[
-      {{kind="analysis", analysis_expression="len(df.query('tags.str.contains(\"sky\")'))"}}
+      {{kind="analysis", analysis_expression="len(df[df.tags.apply(lambda x: 'sky' in x)])"}}
   ]
 
 - "What is the average loss for class 2?"
   (Goal: Aggregation) -> steps=[
-      {{kind="analysis", analysis_expression="df.query('label == 2')['mean_loss'].mean()"}}
+      {{kind="analysis", analysis_expression="df.query('target == 2')['loss'].mean()"}}
   ]
 
 - "What index does the sample with the highest loss have?"
   (Goal: Get specific ID) -> steps=[
-      {{"kind": "analysis", "analysis_expression": "df['mean_loss'].idxmax()"}}
+      {{"kind": "analysis", "analysis_expression": "df['loss'].idxmax()"}}
   ]
 
 - "Which sample has the lowest score?"
@@ -157,7 +162,7 @@ EXAMPLES OF THE DISTINCTION:
 User: "Show me the worst 10 images of class 5"
 -> primary_goal="ui_manipulation"
 -> steps=[
-    {{"kind": "keep", "conditions": [{{"column": "label", "op": "==", "value": 5}}]}},
+    {{"kind": "keep", "conditions": [{{"column": "target", "op": "==", "value": 5}}]}},
     {{"kind": "sort", "sort_by": ["loss_class_5"], "ascending": false}},
     {{"kind": "head", "n": 10}}
 ]
@@ -172,7 +177,7 @@ User: "Show me the worst images"
 User: "Keep samples with loss above the average"
 -> primary_goal="ui_manipulation"
 -> steps=[
-    {{"kind": "keep", "conditions": [{{"column": "mean_loss", "op": ">", "value": "df['mean_loss'].mean()"}}]}}
+    {{"kind": "keep", "conditions": [{{"column": "loss", "op": ">", "value": "df['loss'].mean()"}}]}}
 ]
 
 User: "Keep only the sample with the lowest max_loss"
@@ -185,19 +190,19 @@ User: "Keep only the sample with the lowest max_loss"
 User: "What is the index of the worst image?"
 -> primary_goal="data_analysis"
 -> steps=[
-    {{"kind": "analysis", "analysis_expression": "df['mean_loss'].idxmax()"}}
+    {{"kind": "analysis", "analysis_expression": "df['loss'].idxmax()"}}
 ]
 
 User: "What samples have tag 'abc'?"
 -> primary_goal="data_analysis"
 -> steps=[
-    {{"kind": "analysis", "analysis_expression": "df.query('tags.str.contains(\"abc\")').index.tolist()"}}
+    {{"kind": "analysis", "analysis_expression": "df[df.tags.apply(lambda x: 'abc' in x)].index.tolist()"}}
 ]
 
 User: "What is the average loss for origin train?"
 -> primary_goal="data_analysis"
 -> steps=[
-    {{"kind": "analysis", "analysis_expression": "df.query('origin == \"train\"')['mean_loss'].mean()"}}
+    {{"kind": "analysis", "analysis_expression": "df.query('origin == \"train\"')['loss'].mean()"}}
 ]
 
 User: "How many samples are there?"
@@ -210,6 +215,7 @@ Final Checklist:
 1. Did I pick the right primary_goal?
 2. If it's UI_MANIPULATION, am I using grid operations (keep, sort, head)?
 3. If it's DATA_ANALYSIS, am I using analysis_expression to return a value/list?
+4. Did I use valid columns from the provided SCHEMA?
 
 User Request: {instruction}
 
