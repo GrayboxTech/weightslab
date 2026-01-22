@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager
 from weightslab.components.tracking import TrackingMode
 
 
@@ -23,19 +23,28 @@ class PauseController:
     def __init__(self):
         self._event = Event()
         self._event.clear()
-        # self._event.set() # Set by default so training starts running
+
+        # Get checkpoint manager instance
+        self.checkpoint_manager = None
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
         self._event.wait()   # releases GIL while waiting
 
     def pause(self):
-        logger.info('\nTraining paused.')
         self._event.clear()
+        logger.info('\nTraining paused.')
 
     def resume(self):
-        logger.info('\nTraining resumed.')
+        # On resume, first dump any pending changes to checkpoint manager
+        if self.checkpoint_manager is None:
+            self.checkpoint_manager = get_checkpoint_manager()
+        if self.checkpoint_manager is not None:
+            self.checkpoint_manager.dump_pending_changes()
+
+        # Then resume execution
         self._event.set()
+        logger.info('\nTraining resumed.')
 
     def is_paused(self):
         return not self._event.is_set()
@@ -112,53 +121,6 @@ class GuardContext:
             return True  # suppress the exception
 
         self.architecture_guard.__exit__(exc_type, exc_value, traceback)
-
-        # Use provided op_context if present, otherwise fall back to module-level
-        ctx = op_context if getattr(self, 'op_context', None) is not None else op_context
-        with ctx:
-            # decrement training steps and store result in ledgered hyperparams
-            try:
-                # resolve a sensible hyperparam set name (reuse helper in this module)
-                name = resolve_hp_name()
-                if name is not None:
-                    try:
-                        hp_handle = get_hyperparams(name)
-                    except Exception:
-                        hp_handle = None
-
-                    try:
-                        if hp_handle is None:
-                            raise RuntimeError('no hyperparams')
-                        # unwrap proxy if present
-                        if hasattr(hp_handle, 'get') and not isinstance(hp_handle, dict):
-                            hp = hp_handle.get()
-                        else:
-                            hp = hp_handle
-
-                        if not isinstance(hp, dict):
-                            raise RuntimeError('hyperparams not a dict')
-
-                        cur = hp.get('training_steps_to_do', 0)
-                        try:
-                            cur_int = int(cur)
-                        except Exception:
-                            cur_int = 0
-                        new = max(0, cur_int - 1)
-
-                        # try ledger API first
-                        try:
-                            set_hyperparam(name, 'training_steps_to_do', new)
-                        except Exception:
-                            # best-effort fallback: update dict directly
-                            try:
-                                hp['training_steps_to_do'] = new
-                            except Exception:
-                                pass
-                    except Exception:
-                        # swallow errors - don't let monitoring break training
-                        pass
-            except Exception:
-                pass
 
         return False
 

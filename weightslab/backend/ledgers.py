@@ -46,10 +46,16 @@ class Proxy:
         return self._obj if self._obj is not None and default is not None else default
 
     def __getattr__(self, item):
-        if self._obj is None:
+        # Use object.__getattribute__ to avoid infinite recursion during unpickling
+        try:
+            obj = object.__getattribute__(self, '_obj')
+        except AttributeError:
+            raise AttributeError("Proxy target not set")
+
+        if obj is None:
             raise AttributeError("Proxy target not set")
         try:
-            return getattr(self._obj, item)
+            return getattr(obj, item)
         except AttributeError:
             return None
 
@@ -183,16 +189,19 @@ class Ledger:
         self._dataloaders: Dict[str, Any] = {}
         self._optimizers: Dict[str, Any] = {}
         self._dataframes: Dict[str, Any] = {}
+        self._checkpoint_managers: Dict[str, Any] = {}
         # weak refs
         self._models_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
         self._dataloaders_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
         self._optimizers_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
         self._dataframes_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
+        self._checkpoint_managers_weak: "weakref.WeakValueDictionary[str, Any]" = weakref.WeakValueDictionary()
         # proxies mapping name -> Proxy for placeholders
         self._proxies_models: Dict[str, Proxy] = {}
         self._proxies_dataloaders: Dict[str, Proxy] = {}
         self._proxies_optimizers: Dict[str, Proxy] = {}
         self._proxies_dataframes: Dict[str, Proxy] = {}
+        self._proxies_checkpoint_managers: Dict[str, Proxy] = {}
         # hyperparameters registry (name -> dict)
         self._hyperparams: Dict[str, Dict[str, Any]] = {}
         self._proxies_hyperparams: Dict[str, Proxy] = {}
@@ -458,6 +467,19 @@ class Ledger:
             self._signals.pop(name, None)
             self._proxies_signals.pop(name, None)
 
+    # Checkpoint managers
+    def register_checkpoint_manager(self, name: str, manager: Any, weak: bool = False) -> Any:
+        return self._register(self._checkpoint_managers, self._checkpoint_managers_weak, self._proxies_checkpoint_managers, name, manager, weak=weak)
+
+    def get_checkpoint_manager(self, name: Optional[str] = None) -> Any:
+        return self._get(self._checkpoint_managers, self._checkpoint_managers_weak, self._proxies_checkpoint_managers, name)
+
+    def list_checkpoint_managers(self) -> List[str]:
+        return self._list(self._checkpoint_managers, self._checkpoint_managers_weak)
+
+    def unregister_checkpoint_manager(self, name: str) -> None:
+        self._unregister(self._checkpoint_managers, self._checkpoint_managers_weak, self._proxies_checkpoint_managers, name)
+
     # DataFrames (e.g., shared sample stats managers)
     def register_dataframe(self, name: str, dataframe: Any, weak: bool = False) -> None:
         return self._register(self._dataframes, self._dataframes_weak, self._proxies_dataframes, name, dataframe, weak=weak)
@@ -519,14 +541,17 @@ class Ledger:
             self._dataloaders.clear()
             self._optimizers.clear()
             self._dataframes.clear()
+            self._checkpoint_managers.clear()
             self._models_weak.clear()
             self._dataloaders_weak.clear()
             self._optimizers_weak.clear()
             self._dataframes_weak.clear()
+            self._checkpoint_managers_weak.clear()
             self._proxies_models.clear()
             self._proxies_dataloaders.clear()
             self._proxies_optimizers.clear()
             self._proxies_dataframes.clear()
+            self._proxies_checkpoint_managers.clear()
 
     def snapshot(self) -> Dict[str, List[str]]:
         """Return the current keys for all registries (a lightweight snapshot)."""
@@ -538,6 +563,7 @@ class Ledger:
                 "dataframes": list(self._dataframes.keys()),
                 "hyperparams": list(self._hyperparams.keys()),
                 "loggers": list(self._loggers.keys()),
+                "checkpoint_managers": list(self._checkpoint_managers.keys()),
             }
 
     def __repr__(self) -> str:
@@ -548,7 +574,8 @@ class Ledger:
 # Module-level singleton
 GLOBAL_LEDGER = Ledger()
 
-# Convenience top-level wrappers (preserve optional weak param)
+
+# Model
 def list_models() -> List[str]:
     return GLOBAL_LEDGER.list_models()
 
@@ -556,12 +583,14 @@ def register_model(name: str, model: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_model(name, model, weak=weak)
 
 def get_model(name: Optional[str] = None) -> Any:
+    name = name or GLOBAL_LEDGER.list_models()[-1]
     return GLOBAL_LEDGER.get_model(name)
 
 def get_models() -> List[str]:
     return GLOBAL_LEDGER.list_models()
 
 
+# Dataloaders
 def list_dataloaders() -> List[str]:
     return GLOBAL_LEDGER.list_dataloaders()
 
@@ -569,12 +598,14 @@ def register_dataloader(name: str, dataloader: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_dataloader(name, dataloader, weak=weak)
 
 def get_dataloader(name: Optional[str] = None) -> Any:
+    name = name or GLOBAL_LEDGER.list_dataloaders()[-1]
     return GLOBAL_LEDGER.get_dataloader(name)
 
 def get_dataloaders() -> List[str]:
     return GLOBAL_LEDGER.list_dataloaders()
 
 
+# Optimizer
 def list_optimizers() -> List[str]:
     return GLOBAL_LEDGER.list_optimizers()
 
@@ -582,16 +613,19 @@ def register_optimizer(name: str, optimizer: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_optimizer(name, optimizer, weak=weak)
 
 def get_optimizer(name: Optional[str] = None) -> Any:
+    name = name or GLOBAL_LEDGER.list_optimizers()[-1]
     return GLOBAL_LEDGER.get_optimizer(name)
 
 def get_optimizers() -> List[str]:
     return GLOBAL_LEDGER.list_optimizers()
 
 
+# Hyperparameters
 def register_hyperparams(name: str, params: Dict[str, Any], weak: bool = False) -> None:
     GLOBAL_LEDGER.register_hyperparams(name, params, weak=weak)
 
 def get_hyperparams(name: Optional[str] = None) -> Any:
+    name = name or GLOBAL_LEDGER.list_hyperparams()[-1]
     return GLOBAL_LEDGER.get_hyperparams(name)
 
 def list_hyperparams() -> List[str]:
@@ -625,10 +659,12 @@ def unwatch_hyperparams_file(name: str) -> None:
     return GLOBAL_LEDGER.unwatch_hyperparams_file(name)
 
 
+# Logger
 def register_logger(name: str, logger: Any) -> None:
     GLOBAL_LEDGER.register_logger(name, logger)
 
 def get_logger(name: Optional[str] = None) -> Any:
+    name = name or GLOBAL_LEDGER.list_loggers()[-1]
     return GLOBAL_LEDGER.get_logger(name)
 
 def list_loggers() -> List[str]:
@@ -638,10 +674,12 @@ def unregister_logger(name: str) -> None:
     return GLOBAL_LEDGER.unregister_logger(name)
 
 
+# Signals
 def register_signal(name: str, signal: Any) -> None:
     GLOBAL_LEDGER.register_signal(name, signal)
 
 def get_signal(name: Optional[str] = None) -> Any:
+    name = name or GLOBAL_LEDGER.list_signals()[-1]
     return GLOBAL_LEDGER.get_signal(name)
 
 def list_signals() -> List[str]:
@@ -651,17 +689,27 @@ def unregister_signal(name: str) -> None:
     return GLOBAL_LEDGER.unregister_signal(name)
 
 
+# Checkpoint managers
+def register_checkpoint_manager(name: str, manager: Any, weak: bool = False) -> Any:
+    return GLOBAL_LEDGER.register_checkpoint_manager(name, manager, weak=weak)
+
+def get_checkpoint_manager(name: Optional[str] = None) -> Any:
+    name = name or GLOBAL_LEDGER.list_checkpoint_managers()[-1]
+    return GLOBAL_LEDGER.get_checkpoint_manager(name)
+
+def list_checkpoint_managers() -> List[str]:
+    return GLOBAL_LEDGER.list_checkpoint_managers()
+
+def unregister_checkpoint_manager(name: str) -> None:
+    GLOBAL_LEDGER.unregister_checkpoint_manager(name)
+
+
 # DataFrames
 def register_dataframe(name: str, dataframe: Any, weak: bool = False) -> None:
     return GLOBAL_LEDGER.register_dataframe(name, dataframe, weak=weak)
 
 def get_dataframe(name: Optional[str] = None) -> Any:
-    """Return a dataframe handle; if none registered, return a Proxy placeholder.
-
-    When name is omitted, default to "sample_stats" so callers get a stable
-    proxy that will be updated in-place once the dataframe manager registers.
-    """
-    name = name or "sample_stats"
+    name = name or GLOBAL_LEDGER.list_dataframes()[-1]
     return GLOBAL_LEDGER.get_dataframe(name)
 
 def list_dataframes() -> List[str]:
@@ -671,6 +719,7 @@ def unregister_dataframe(name: str) -> None:
     return GLOBAL_LEDGER.unregister_dataframe(name)
 
 
+# Main
 if __name__ == "__main__":
     # Quick demonstration
     import torch

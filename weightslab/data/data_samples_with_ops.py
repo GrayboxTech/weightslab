@@ -12,6 +12,7 @@ from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
+from weightslab.backend import ledgers
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.trainer.services.service_utils import load_label
@@ -27,6 +28,8 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_TO_SAVE_TO_H5,
     SAMPLE_STATS_ALL,
 )
+
+from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 
 
 # Global logger
@@ -166,9 +169,13 @@ class DataSampleTrackingWrapper(Dataset):
             logger.info(f"[DataSampleTrackingWrapper] Using temporary directory {self._root_log_dir} for H5 persistence. Please copy final results in a safe location after training.")
 
         if self._enable_h5_persistence and self._root_log_dir:
+            # Store H5 files in PARENT directory (shared across all experiment hashes)
+            # Only checkpoint-specific JSON files go in hash directories
             data_dir = self._root_log_dir / "checkpoints" / "data"
             data_dir.mkdir(parents=True, exist_ok=True)
-            self._h5_path = data_dir / "data_with_ops.h5"
+
+            # Use shared data.h5 file (not hash-specific)
+            self._h5_path = data_dir / "data.h5"
             logger.info(f"[DataSampleTrackingWrapper] H5 persistence enabled at {self._h5_path}")
 
             # If no shared store provided, create one pointing to the same path
@@ -290,6 +297,34 @@ class DataSampleTrackingWrapper(Dataset):
                     f"[DataSampleTrackingWrapper] use_tags=True but no tags_mapping provided. "
                     f"Labels will remain unchanged."
                 )
+
+        # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
+        root_log_dir = root_log_dir or os.path.join('.', 'root_log_dir')
+        try:
+            # Check if a checkpoint manager is already registered in ledger
+            try:
+                existing_manager = ledgers.get_checkpoint_manager()
+                if existing_manager is not None and not isinstance(existing_manager, ledgers.Proxy):
+                    self._checkpoint_manager = existing_manager
+                    logger.info("Using checkpoint manager from ledger")
+                else:
+                    raise KeyError("No manager in ledger")
+            except (KeyError, AttributeError):
+                # Create new manager and register it
+                self._checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
+                try:
+                    ledgers.register_checkpoint_manager('default', self._checkpoint_manager)
+                    logger.info("Registered new checkpoint manager in ledger")
+                except Exception:
+                    pass
+
+            # On resume: if hash changed, dump HP/data/architecture
+            try:
+                new_hash, is_new, _ = self._checkpoint_manager.update_experiment_hash()
+            except Exception:
+                pass
+        except Exception:
+            self._checkpoint_manager = None
 
     @property
     def num_classes(self) -> int:

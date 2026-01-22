@@ -6,10 +6,11 @@ import weightslab as wl
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
 
-from weightslab.components.checkpoint import CheckpointManager
+from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 from weightslab.components.tracking import TrackingMode
 from weightslab.models.model_with_ops import NetworkWithOps
 from weightslab.modules.neuron_ops import NeuronWiseOperations
+from weightslab.data.sample_stats import SampleStatsEx
 
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.models.monkey_patcher import monkey_patch_modules
@@ -19,6 +20,7 @@ from weightslab.utils.computational_graph import \
     generate_index_maps
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
+from weightslab.backend import ledgers
 
 
 # Global logger
@@ -140,12 +142,9 @@ class ModelInterface(NetworkWithOps):
         # skip_checkpoint_load: bool = False,
         # auto_dump_every_steps: int = 0
         self._checkpoint_manager = None
-        # self._checkpoint_auto_every_steps = int(auto_dump_every_steps or 0)
         _checkpoint_auto_every_steps = 0
-        _checkpoint_dir = None
-        _skip_checkpoint_load = False
-        # If checkpoint_dir not provided, try to read `root_log_dir` from
-        # ledger hyperparams, otherwise fallback to './root_log_dir/checkpoints'
+        _root_log_dir = None
+        # If root_log_dir not provided, try to read it from hyperparams
         try:
             from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
             names = list_hyperparams()
@@ -154,8 +153,8 @@ class ModelInterface(NetworkWithOps):
                 chosen = 'main'
             elif 'experiment' in names:
                 chosen = 'experiment'
-            elif len(names) == 1:
-                chosen = names[0]
+            elif len(names) > 1:
+                chosen = names[-1]
 
             if chosen:
                 hp = get_hyperparams(chosen)
@@ -165,33 +164,40 @@ class ModelInterface(NetworkWithOps):
                     except Exception:
                         hp = None
                 if isinstance(hp, dict):
-                    # Root dir for checkpoints
-                    root = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
-                    _checkpoint_dir = os.path.join(str(root), 'checkpoints') if root else None
-                    # Auto dump every N steps
+                    _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
                     _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
-                    # Skip loading at init
-                    _skip_checkpoint_load = hp.get('skip_checkpoint_load') or hp.get('skip-checkpoint-load') or False
         except Exception:
-            _checkpoint_dir = None
+            _root_log_dir = None
             _checkpoint_auto_every_steps = 0
-            _skip_checkpoint_load = False
         self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
 
-        if _checkpoint_dir:
+        # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
+        root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
+        try:
+            # Check if a checkpoint manager is already registered in ledger
             try:
-                self._checkpoint_manager = CheckpointManager(_checkpoint_dir)
-                # attempt to load latest checkpoint unless skipped
-                if not _skip_checkpoint_load:
-                    try:
-                        latest = self._checkpoint_manager.get_latest_checkpoint_path()
-                        if latest:
-                            # best-effort load into ledger-registered objects
-                            self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
-                    except Exception:
-                        pass
+                existing_manager = ledgers.get_checkpoint_manager()
+                if existing_manager is not None and not isinstance(existing_manager, ledgers.Proxy):
+                    self._checkpoint_manager = existing_manager
+                    logger.info("Using checkpoint manager from ledger")
+                else:
+                    raise KeyError("No manager in ledger")
+            except (KeyError, AttributeError):
+                # Create new manager and register it
+                self._checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
+                try:
+                    ledgers.register_checkpoint_manager('default', self._checkpoint_manager)
+                    logger.info("Registered new checkpoint manager in ledger")
+                except Exception:
+                    pass
+
+            # On resume: if hash changed, dump HP/data/architecture
+            try:
+                new_hash, is_new, changed_components = self._checkpoint_manager.update_experiment_hash()
             except Exception:
-                self._checkpoint_manager = None
+                pass
+        except Exception:
+            self._checkpoint_manager = None
 
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
@@ -309,14 +315,40 @@ class ModelInterface(NetworkWithOps):
 
     def _maybe_auto_dump(self):
         # Called from base class hook after seen_samples updates.
+        # Auto-dump: save model weights only (and architecture if changed).
         try:
             if not self.is_training() or self._checkpoint_manager is None or self._checkpoint_auto_every_steps <= 0:
                 return
             batched_age = int(self.get_batched_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
-                    # best-effort managed dump using ledger names
-                    self._checkpoint_manager.dump(model_name=getattr(self, '_ledger_name', None))
+                    hp_snapshot = ledgers.get_hyperparams()
+                    dfm_snapshot = ledgers.get_dataframe()
+                    model_snapshot = ledgers.get_model()
+                    # Update hash for current experiment state (marks changes as pending, doesn't dump)
+                    new_hash, is_new, changed_components = self._checkpoint_manager.update_experiment_hash(
+                        model_snapshot=model_snapshot,
+                        hp_snapshot=hp_snapshot,
+                        dfm_snapshot=dfm_snapshot
+                    )
+                    # If model architecture changed, save it
+                    if 'model' in changed_components:
+                        try:
+                            self._checkpoint_manager.save_model_architecture(self.model)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    # Save model weights checkpoint (no pending dump here)
+                    self._checkpoint_manager.save_model_checkpoint(
+                        model=self.model,
+                        model_name=getattr(self, '_ledger_name', None),
+                        save_optimizer=True,
+                        optimizer_name=getattr(self, '_ledger_name', None),
+                        step=batched_age,
+                        force_dump_pending=False,
+                    )
                 except Exception:
                     pass
         except Exception:
@@ -460,7 +492,7 @@ class ModelInterface(NetworkWithOps):
 
         # Generate the graph dependencies
         if not use_onnx:
-            self.shape_propagation()
+            # self.shape_propagation()
             self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
                 self.model,
                 self.traced_model.graph

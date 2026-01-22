@@ -13,17 +13,62 @@ from typing import Callable
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.ledgers import get_checkpoint_manager, list_hyperparams, register_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.ui.weightslab_ui import ui_serve
 from weightslab.utils.logger import LoggerQueue
+from weightslab.backend import ledgers
+from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 
 
 # Get global logger
 logger = logging.getLogger(__name__)
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
 DATAFRAME_M = None
+
+
+def init_checkpoints_manager(root_log_dir: str = None) -> None:
+    """ Initialize the CheckpointManagerV2 in the ledger if not already present.
+
+    Args:
+        root_log_dir (str): The root log directory for checkpoints.
+    """
+
+    name = list_hyperparams()[-1]  # Get exp name from HP
+    hp = get_hyperparams(name)
+    if root_log_dir is None and isinstance(hp, dict) and 'root_log_dir' in hp:
+        root_log_dir = hp.get('root_log_dir', './output')
+
+    try:
+        # Check if a checkpoint manager is already registered in ledger
+        try:
+            cpm = get_checkpoint_manager(name)
+            logger.info("CheckpointManagerV2 already initialized in ledger.")
+        except Exception:
+            # Not present, create and register a new one
+            cpm = CheckpointManagerV2(root_log_dir=root_log_dir)
+            # Register into ledger
+            register_checkpoint_manager(name, cpm)
+            logger.info("Initialized CheckpointManagerV2 and registered in ledger.")
+    except Exception as e:
+        cpm = None
+        logger.error(f"Failed to initialize CheckpointManagerV2: {e}")
+
+    # On resume: if hash changed, dump HP/data/architecture
+    if cpm is not None:
+        try:
+            hp_snapshot = ledgers.get_hyperparams()
+            model_snapshot = ledgers.get_model()
+            dfm_snapshot = ledgers.get_dataframe()
+            new_hash, is_new, _ = cpm.update_experiment_hash(
+                model_snapshot=model_snapshot,
+                hp_snapshot=hp_snapshot,
+                dfm_snapshot=dfm_snapshot,
+                dump_immediately=False
+            )
+        except Exception:
+            pass
 
 def save_signals(
     batch_ids: th.Tensor,
@@ -237,8 +282,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             if hasattr(obj, '__name__'):
                 obj.__name__ = obj_name
 
-    # Related functions
-    if flag.lower() == 'model' or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
+    # Model
+    if 'model' in flag.lower() or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
         # Derive a sane registration name: prefer explicit `name` kwarg,
         # then a meaningful __name__ if it is not the generic 'model',
         # then the class name. This avoids accidental registration under
@@ -252,6 +297,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             else:
                 clsname = getattr(obj.__class__, '__name__', None)
                 reg_name = clsname if clsname and clsname.lower() != 'model' else (kwargs.get('name') or 'model')
+
+        # First ensure that the model has module input_shape
+        if not hasattr(obj, 'input_shape'):
+            raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
+
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_model` will create a Proxy if
@@ -260,6 +310,9 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             proxy = get_model(reg_name)
         except Exception:
             proxy = None
+
+        # Init Checkpoints Manager
+        init_checkpoints_manager()
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs)
@@ -273,7 +326,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
 
-    elif flag.lower() == 'data' or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
+    # DataLoader
+    elif 'data' in flag.lower() or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
         reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
         kwargs['name'] = reg_name
 
@@ -287,16 +341,24 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             proxy = None
 
         # Auto-inject root_log_dir from hyperparameters if not provided
-        if 'root_log_dir' not in kwargs:
+        if kwargs is None or 'root_log_dir' not in kwargs:
             try:
                 from weightslab.backend.ledgers import resolve_hp_name
                 hp_name = resolve_hp_name()
                 if hp_name:
                     hp_dict = get_hyperparams(hp_name)
+
+                    # Use root_log_dir from hyperparameters if available
                     if isinstance(hp_dict, dict) and 'root_log_dir' in hp_dict:
                         kwargs['root_log_dir'] = hp_dict['root_log_dir']
+
+                    # Update kwargs with relevant hyperparameters
+                    kwargs.update(hp_dict.get('data', {}).get(reg_name, {}))
             except Exception:
                 pass  # If we can't get hyperparameters, continue without root_log_dir
+
+        # Init Checkpoints Manager
+        init_checkpoints_manager()
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
@@ -306,7 +368,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
 
-    elif flag.lower() == 'optimizer' or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
+    # Optimizer
+    elif 'optimizer' in flag.lower() or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
         # Determine registration name first
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj, '__class__', type(obj)).__name__ or '_optimizer'
         # Ensure ledger has a placeholder (Proxy) for this name so callers
@@ -326,7 +389,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # obtainable, return the wrapper itself.
         return proxy if proxy is not None else wrapper
 
-    elif flag.lower() == 'logger' or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
+    # Logger
+    elif 'logger' in flag.lower() or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
         # Determine registration name for the logger (prefer explicit name)
         reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj.__class__, '__name__', None) or 'main'
         # Ensure there's a proxy placeholder if callers already requested the logger
@@ -341,7 +405,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Return a stable handle (proxy) when available, otherwise the registered logger
         return proxy if proxy is not None else get_logger(reg_name)
 
-    # Signals: metrics / losses / custom monitors
+    # Signals
+    # # Loss
     elif 'loss' in flag.lower() or flag.lower() in ('criterion', 'signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
         reg_name = kwargs.get('name') or flag
@@ -372,7 +437,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         except Exception:
             # fall back to hyperparams branch if something unexpected
             pass
-
+    # # Metric
     elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
         reg_name = kwargs.get('name') or flag
@@ -413,6 +478,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             # fall back to hyperparams branch if something unexpected
             pass
 
+    # Hyper parameters
     else:
         # Support hyperparameters/watchable parameter dicts or YAML paths.
         if flag is None:
@@ -432,15 +498,27 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         register_hyperparams(name, defaults)
                     # start ledger-managed watcher
                     watch_hyperparams_file(name, path, poll_interval=kwargs.get('poll_interval', 1.0))
+
+                    # Init Checkpoints Manager
+                    init_checkpoints_manager()
+
                     # return the ledger handle (proxy or dict)
                     return get_hyperparams(name)
                 elif isinstance(obj, dict):
                     register_hyperparams(name, obj)
+
+                    # Init Checkpoints Manager
+                    init_checkpoints_manager()
+
                     return get_hyperparams(name)
                 else:
                     # unsupported type for hp; attempt best-effort registration
                     try:
                         register_hyperparams(name, dict(obj))
+
+                        # Init Checkpoints Manager
+                        init_checkpoints_manager()
+
                         return get_hyperparams(name)
                     except Exception:
                         raise ValueError('Unsupported hyperparams object; provide dict or YAML path')

@@ -104,7 +104,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
                 preds=preds,
             )
 
-
     loss = losses / test_loader_len
     metric = metric_mlt.compute() * 100
 

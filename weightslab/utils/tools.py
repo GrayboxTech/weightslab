@@ -32,7 +32,7 @@ class _NoOpLock:
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
-def seed_everything(seed):
+def seed_everything(seed=42):
     """Seed everything for reproducibility."""
     np.random.seed(seed)
     th.manual_seed(seed)
@@ -80,7 +80,7 @@ def extract_in_out_params(module: nn.Module) -> List[int | str]:
     # 4. Pass-through layers (Pooling, Upsampling, Dropout, Activations)
     # These layers maintain the same number of channels/neurons.
     pass_through_types = [
-        'Pool', 'Upsample', 'Dropout', 'ReLU', 'PReLU', 'LeakyReLU', 
+        'Pool', 'Upsample', 'Dropout', 'ReLU', 'PReLU', 'LeakyReLU',
         'Sigmoid', 'Tanh', 'ELU', 'Softmax', 'Identity'
     ]
     module_name = module._get_name()

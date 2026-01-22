@@ -484,10 +484,10 @@ class NetworkWithOps(nn.Module):
         return state
 
     def load_state_dict(
-            self, state_dict, strict, assign=True, **kwargs):
-        self.seen_samples = state_dict['seen_samples']
-        self.current_step = state_dict.get('current_step', 0)
-        self.tracking_mode = state_dict['tracking_mode']
+            self, state_dict, strict=True, assign=True, **kwargs):
+        self.seen_samples = state_dict.pop('seen_samples', 0)
+        self.current_step = state_dict.pop('current_step', 0)
+        self.tracking_mode = state_dict.pop('tracking_mode', 0)
         super().load_state_dict(
             state_dict, strict=strict, assign=assign, **kwargs)
 
