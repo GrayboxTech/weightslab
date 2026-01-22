@@ -254,6 +254,46 @@ class ExperimentHashGenerator:
             'combined': self._last_hash
         }
 
+    def restore_hashes(
+        self,
+        component_hashes: Optional[Dict[str, Optional[str]]] = None,
+        combined_hash: Optional[str] = None
+    ) -> None:
+        """Restore last known hashes so change detection stays consistent.
+
+        This is used when reloading manager state to keep the hash generator
+        in sync with the previously computed hashes. If a combined hash is
+        provided, it is split into component hashes when they are missing.
+        """
+        hashes = component_hashes or {}
+
+        hp_hash = hashes.get('hp') if isinstance(hashes, dict) else None
+        model_hash = hashes.get('model') if isinstance(hashes, dict) else None
+        data_hash = hashes.get('data') if isinstance(hashes, dict) else None
+
+        combined = (hashes.get('combined') if isinstance(hashes, dict) else None) or combined_hash
+
+        # If we have a combined hash, use it to fill missing components
+        if combined and len(str(combined)) >= 24:
+            combined_str = str(combined)[:24]
+            hp_hash = hp_hash or combined_str[0:8]
+            model_hash = model_hash or combined_str[8:16]
+            data_hash = data_hash or combined_str[16:24]
+            combined = combined_str
+
+        # If components are present but combined is missing, rebuild combined
+        if not combined and hp_hash and model_hash and data_hash:
+            combined = f"{hp_hash}{model_hash}{data_hash}"
+
+        self._last_hp_hash = hp_hash
+        self._last_model_hash = model_hash
+        self._last_data_hash = data_hash
+        self._last_hash = combined
+
+        logger.debug(
+            f"Restored hashes hp={hp_hash}, model={model_hash}, data={data_hash}, combined={combined}"
+        )
+
     def compare_hashes(self, hash1: str, hash2: str) -> Set[str]:
         """Compare two 24-byte hashes and identify what changed.
 

@@ -496,7 +496,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print("Modifying model architecture...")
 
         # Modify model architecture
-        model.operate(0, {-1, -1}, 1)  # Increase conv1 out channels by 2
+        model.operate(0, {-1, -2, -3}, 1)  # Increase conv1 out channels by 2
         model.operate(2, 1, 2)  # Decrease conv2 out channels by 1
         model.operate(-2, {}, 3)  # Freeze fc1 layer
         model.operate(-1, {1}, 4)  # Reset fc2 layer
@@ -755,7 +755,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
             rows.append(
                 {
                     "sample_id": uid,
-                    "tags": f"ugly_{random.randint(0, 100)}",
+                    "tags": f"hugly_{random.randint(0, 100)}",
                     "deny_listed": bool(1 - dfm._df['deny_listed'].iloc[idx])
                 }
             )
@@ -772,30 +772,22 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         self.assertIn('data', changed, "Data should have changed")
 
         # Update ledger
-        register_in_ledger(model_reloaded, flag="model", name="mnist_model")
-        register_in_ledger(hp_reloaded, flag="hyperparameters", name='mnist_hp')
+        # Ledger is already registered as proxy are used
+        pass
 
-        # Extract batch_size from nested config
-        batch_size = hp_reloaded.get('data', {}).get('train_loader', {}).get('batch_size', 1)
-        shuffle = hp_reloaded.get('data', {}).get('train_loader', {}).get('shuffle', True)
-
-        dataloader_e = DataLoader(
-            self.dataset,
-            batch_size=batch_size,
-            shuffle=shuffle
-        )
-        register_in_ledger(dataloader_e, flag="dataloader", name="mnist_loader")
-
-        # Recreate optimizer with nested lr
-        lr = hp_reloaded.get('optimizer', {}).get('lr', 0.0001)
-        optimizer_e = th.optim.Adam(model_reloaded.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss()
+        # Setting training environment from loader
+        dataloader = ledgers.get_dataloader('train_loader')
+        model = ledgers.get_model(exp_name)
+        optimizer = ledgers.get_optimizer(exp_name)
+        criterion = ledgers.get_signal(exp_name)
 
         print("\nResuming training for 21 epochs...")
-        losses_e = self.train_epochs(
-            model_reloaded, dataloader_e, optimizer_e, criterion,
+        pause_controller.resume()
+        self.train_epochs(
+            model_reloaded, dataloader, optimizer, criterion,
             num_epochs=21
         )
+        pause_controller.pause()
 
         print("\nTraining completed.")
 
@@ -807,13 +799,9 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Store state
         self.state['exp_hash_e'] = exp_hash_e
-        self.state['model_e'] = model_reloaded
-        self.state['hp_e'] = hp_reloaded
-        self.state['losses_e'] = losses_e
 
         print(f"\n[OK] TEST E PASSED - Reloaded and branched successfully")
-        if model_reloaded and hasattr(model_reloaded, 'current_step'):
-            print(f"  Final model_age: {model_reloaded.current_step}")
+        print(f"  Final model_age: {model.current_step}")
 
     # ========================================================================
     # Test: 06_final_verification

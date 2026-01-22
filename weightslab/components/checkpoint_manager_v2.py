@@ -40,6 +40,7 @@ import torch as th
 import dill
 import pickle
 
+from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.components.experiment_hash import ExperimentHashGenerator
 from weightslab.backend.ledgers import (
     get_model,
@@ -103,6 +104,7 @@ class CheckpointManagerV2:
         # Hash management
         self.hash_generator = ExperimentHashGenerator()
         self.current_exp_hash: Optional[str] = None
+        self.previous_exp_hash: Optional[str] = None
 
         # Step tracking
         self._step_counter = 0
@@ -209,6 +211,7 @@ class CheckpointManagerV2:
             # Update hash
             old_hash = self.current_exp_hash
             self.current_exp_hash = new_hash
+            self.previous_exp_hash = old_hash
 
             # Create checkpoint subdirectories for this hash
             self._create_exp_hash_directories(new_hash)
@@ -832,8 +835,10 @@ class CheckpointManagerV2:
 
         state = {
             'current_exp_hash': self.current_exp_hash,
+            'previous_exp_hash': self.previous_exp_hash,
             'step_counter': self._step_counter,
-            'last_updated': datetime.now().isoformat()
+            'last_updated': datetime.now().isoformat(),
+            'component_hashes': self.hash_generator.get_component_hashes(),
         }
 
         try:
@@ -854,7 +859,27 @@ class CheckpointManagerV2:
                 state = json.load(f)
 
             self.current_exp_hash = state.get('current_exp_hash')
+            self.previous_exp_hash = state.get('previous_exp_hash')
             self._step_counter = state.get('step_counter', 0)
+
+            component_hashes = state.get('component_hashes')
+
+            # Fallback: derive component hashes from manifest when missing
+            if not component_hashes and self.current_exp_hash:
+                manifest = self._load_manifest()
+                exp_info = manifest.get('experiments', {}).get(self.current_exp_hash, {})
+                if exp_info:
+                    component_hashes = {
+                        'hp': exp_info.get('hp_hash'),
+                        'model': exp_info.get('model_hash'),
+                        'data': exp_info.get('data_hash'),
+                        'combined': self.current_exp_hash
+                    }
+
+            self.hash_generator.restore_hashes(
+                component_hashes,
+                combined_hash=self.current_exp_hash
+            )
 
             logger.info(f"Loaded manager state: hash={self.current_exp_hash}, step={self._step_counter}")
         except Exception as e:
@@ -1048,6 +1073,10 @@ class CheckpointManagerV2:
 
                 # Register in ledger
                 ledgers.register_model(ledgers.resolve_hp_name(), model)
+
+                # Set Model Training Guard
+                guard_training_context.model = model  # Train
+                guard_testing_context.model = model  # Eval
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply model: {e}")
                 success = False
@@ -1060,6 +1089,10 @@ class CheckpointManagerV2:
                     model.load_state_dict(weights['model_state_dict'], strict=False)
                     step = weights.get('step', -1)
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
+
+                # Set Model Training Guard
+                guard_training_context.model = model  # Train
+                guard_testing_context.model = model  # Eval
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply weights: {e}")
                 success = False
@@ -1097,7 +1130,21 @@ class CheckpointManagerV2:
 
         # Update current experiment hash
         if success:
+            old_hash = self.current_exp_hash
             self.current_exp_hash = exp_hash
+            self.previous_exp_hash = old_hash
+
+            # Keep hash generator in sync with loaded experiment
+            manifest = self._load_manifest()
+            exp_info = manifest.get('experiments', {}).get(exp_hash, {})
+            component_hashes = {
+                'hp': exp_info.get('hp_hash'),
+                'model': exp_info.get('model_hash'),
+                'data': exp_info.get('data_hash'),
+                'combined': exp_hash
+            }
+            self.hash_generator.restore_hashes(component_hashes, combined_hash=exp_hash)
+
             self._save_manager_state()
             logger.info(f"\n[OK] Successfully loaded and applied state: {exp_hash[:16]}")
         else:

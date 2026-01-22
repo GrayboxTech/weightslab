@@ -34,6 +34,8 @@ class Proxy:
         self._obj = obj
 
     def set(self, obj: Any) -> None:
+        if isinstance(obj, Proxy):
+            obj = obj.get()
         self._obj = obj
         # invalidate any cached iterator when target changes
         if hasattr(self, '_iterator'):
@@ -43,7 +45,7 @@ class Proxy:
                 pass
 
     def get(self, default=None) -> Any:
-        return self._obj if self._obj is not None and default is not None else default
+        return self._obj if self._obj is not None else default
 
     def __getattr__(self, item):
         # Use object.__getattribute__ to avoid infinite recursion during unpickling
