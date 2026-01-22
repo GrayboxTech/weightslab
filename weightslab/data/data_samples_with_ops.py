@@ -298,34 +298,6 @@ class DataSampleTrackingWrapper(Dataset):
                     f"Labels will remain unchanged."
                 )
 
-        # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
-        root_log_dir = root_log_dir or os.path.join('.', 'root_log_dir')
-        try:
-            # Check if a checkpoint manager is already registered in ledger
-            try:
-                existing_manager = ledgers.get_checkpoint_manager()
-                if existing_manager is not None and not isinstance(existing_manager, ledgers.Proxy):
-                    self._checkpoint_manager = existing_manager
-                    logger.info("Using checkpoint manager from ledger")
-                else:
-                    raise KeyError("No manager in ledger")
-            except (KeyError, AttributeError):
-                # Create new manager and register it
-                self._checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
-                try:
-                    ledgers.register_checkpoint_manager('default', self._checkpoint_manager)
-                    logger.info("Registered new checkpoint manager in ledger")
-                except Exception:
-                    pass
-
-            # On resume: if hash changed, dump HP/data/architecture
-            try:
-                new_hash, is_new, _ = self._checkpoint_manager.update_experiment_hash()
-            except Exception:
-                pass
-        except Exception:
-            self._checkpoint_manager = None
-
     @property
     def num_classes(self) -> int:
         """Expose inferred number of classes as a property."""

@@ -90,7 +90,8 @@ class ExperimentHashGenerator:
         self,
         model: Optional[th.nn.Module] = None,
         config: Optional[Dict[str, Any]] = None,
-        data_state: Optional[Dict[str, Any]] = None
+        data_state: Optional[Dict[str, Any]] = None,
+        force: bool = False
     ) -> tuple[bool, Set[str]]:
         """Check if the experiment configuration has changed.
 
@@ -110,19 +111,19 @@ class ExperimentHashGenerator:
         # Check HP
         if config is not None:
             hp_hash = self._hash_config(config)
-            if hp_hash != self._last_hp_hash:
+            if hp_hash != self._last_hp_hash or force:
                 changed_components.add('hp')
 
         # Check model
         if model is not None:
             model_hash = self._hash_model(model)
-            if model_hash != self._last_model_hash:
+            if model_hash != self._last_model_hash or force:
                 changed_components.add('model')
 
         # Check data
         if data_state is not None:
             data_hash = self._hash_data_state(data_state)
-            if data_hash != self._last_data_hash:
+            if data_hash != self._last_data_hash or force:
                 changed_components.add('data')
 
         has_changed = len(changed_components) > 0

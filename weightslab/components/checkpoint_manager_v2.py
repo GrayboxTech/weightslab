@@ -109,6 +109,9 @@ class CheckpointManagerV2:
         # Step tracking
         self._step_counter = 0
 
+        # First time only
+        self.firsttime = True
+
         # Pending changes tracking
         self._pending_model = None
         self._pending_config = None
@@ -158,6 +161,7 @@ class CheckpointManagerV2:
         hp_snapshot: Optional[Dict[str, Any]] = None,
         dfm_snapshot: Optional[Dict[str, Any]] = None,
         force: bool = False,
+        firsttime: bool = False,
         dump_immediately: bool = False
     ) -> tuple[str, bool, Set[str]]:
         """Update experiment hash and track changes (pending or immediate).
@@ -176,6 +180,10 @@ class CheckpointManagerV2:
         Returns:
             tuple: (exp_hash: str, is_new: bool, changed_components: Set[str])
         """
+        if firsttime and self.firsttime and not force:
+            logger.info("First time initialization; skipping hash update.")
+            self.firsttime = False
+            force = True
 
         # Get ledgered components
         hp_snapshot = ledgers.get_hyperparams()
@@ -189,7 +197,8 @@ class CheckpointManagerV2:
         has_changed, changed_components = self.hash_generator.has_changed(
             model=model_snapshot,
             config=hp_snapshot,
-            data_state=data_state
+            data_state=data_state,
+            force=force
         )
 
         if not has_changed and not force:
@@ -213,10 +222,10 @@ class CheckpointManagerV2:
             self.current_exp_hash = new_hash
             self.previous_exp_hash = old_hash
 
-            # Create checkpoint subdirectories for this hash
-            self._create_exp_hash_directories(new_hash)
-
             if dump_immediately:
+                # Create checkpoint subdirectories for this hash
+                self._create_exp_hash_directories(new_hash)
+
                 # Dump changes immediately
                 self._dump_changes(
                     model=model_snapshot,
@@ -480,7 +489,7 @@ class CheckpointManagerV2:
 
         # Save checkpoint
         model_dir = self.models_dir / self.current_exp_hash
-        model_dir.mkdir(parents=True, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
         checkpoint_file = model_dir / f"{self.current_exp_hash}_step_{step:06d}.pt"
 
         try:
@@ -513,7 +522,7 @@ class CheckpointManagerV2:
             return None
 
         model_dir = self.models_dir / self.current_exp_hash
-        model_dir.mkdir(parents=True, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
         arch_file = model_dir / f"{self.current_exp_hash}_architecture.pkl"
 
         # Don't overwrite if already exists
@@ -553,6 +562,7 @@ class CheckpointManagerV2:
             return None
 
         hp_hash_dir = self.hp_dir / self.current_exp_hash
+        os.makedirs(hp_hash_dir, exist_ok=True)
         config_file = hp_hash_dir / f"{self.current_exp_hash}_{config_name}.yaml"
 
         try:
@@ -613,7 +623,7 @@ class CheckpointManagerV2:
 
             # Save to hash-specific directory
             data_hash_dir = self.data_checkpoint_dir / self.current_exp_hash
-            data_hash_dir.mkdir(parents=True, exist_ok=True)
+            os.makedirs(data_hash_dir, exist_ok=True)
             json_file = data_hash_dir / f"{self.current_exp_hash}_data_snapshot.json"
 
             with open(json_file, 'w') as f:

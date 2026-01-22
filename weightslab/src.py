@@ -28,48 +28,6 @@ logger = logging.getLogger(__name__)
 DATAFRAME_M = None
 
 
-def init_checkpoints_manager(root_log_dir: str = None) -> None:
-    """ Initialize the CheckpointManagerV2 in the ledger if not already present.
-
-    Args:
-        root_log_dir (str): The root log directory for checkpoints.
-    """
-
-    name = list_hyperparams()[-1]  # Get exp name from HP
-    hp = get_hyperparams(name)
-    if root_log_dir is None and isinstance(hp, dict) and 'root_log_dir' in hp:
-        root_log_dir = hp.get('root_log_dir', './output')
-
-    try:
-        # Check if a checkpoint manager is already registered in ledger
-        try:
-            cpm = get_checkpoint_manager(name)
-            logger.info("CheckpointManagerV2 already initialized in ledger.")
-        except Exception:
-            # Not present, create and register a new one
-            cpm = CheckpointManagerV2(root_log_dir=root_log_dir)
-            # Register into ledger
-            register_checkpoint_manager(name, cpm)
-            logger.info("Initialized CheckpointManagerV2 and registered in ledger.")
-    except Exception as e:
-        cpm = None
-        logger.error(f"Failed to initialize CheckpointManagerV2: {e}")
-
-    # On resume: if hash changed, dump HP/data/architecture
-    if cpm is not None:
-        try:
-            hp_snapshot = ledgers.get_hyperparams()
-            model_snapshot = ledgers.get_model()
-            dfm_snapshot = ledgers.get_dataframe()
-            new_hash, is_new, _ = cpm.update_experiment_hash(
-                model_snapshot=model_snapshot,
-                hp_snapshot=hp_snapshot,
-                dfm_snapshot=dfm_snapshot,
-                dump_immediately=False
-            )
-        except Exception:
-            pass
-
 def save_signals(
     batch_ids: th.Tensor,
     signals: dict,
@@ -311,9 +269,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         except Exception:
             proxy = None
 
-        # Init Checkpoints Manager
-        init_checkpoints_manager()
-
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs)
 
@@ -356,9 +311,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     kwargs.update(hp_dict.get('data', {}).get(reg_name, {}))
             except Exception:
                 pass  # If we can't get hyperparameters, continue without root_log_dir
-
-        # Init Checkpoints Manager
-        init_checkpoints_manager()
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
@@ -499,25 +451,16 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     # start ledger-managed watcher
                     watch_hyperparams_file(name, path, poll_interval=kwargs.get('poll_interval', 1.0))
 
-                    # Init Checkpoints Manager
-                    init_checkpoints_manager()
-
                     # return the ledger handle (proxy or dict)
                     return get_hyperparams(name)
                 elif isinstance(obj, dict):
                     register_hyperparams(name, obj)
-
-                    # Init Checkpoints Manager
-                    init_checkpoints_manager()
 
                     return get_hyperparams(name)
                 else:
                     # unsupported type for hp; attempt best-effort registration
                     try:
                         register_hyperparams(name, dict(obj))
-
-                        # Init Checkpoints Manager
-                        init_checkpoints_manager()
 
                         return get_hyperparams(name)
                     except Exception:

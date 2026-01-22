@@ -40,6 +40,7 @@ class PauseController:
         if self.checkpoint_manager is None:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager is not None:
+            self.checkpoint_manager.update_experiment_hash(firsttime=True)
             self.checkpoint_manager.dump_pending_changes()
 
         # Then resume execution

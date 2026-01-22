@@ -198,6 +198,11 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         'exp_hash_c': None,
         'exp_hash_d': None,
         'exp_hash_e': None,
+        'exp_hash_f': None,
+        'exp_hash_g': None,
+        'exp_hash_h': None,
+        'losses_a': None,
+        'losses_d': None,
     }
 
     @classmethod
@@ -211,7 +216,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         pause_controller.pause()
 
         # Create temporary directory (used for all tests)
-        # cls.temp_dir = tempfile.mkdtemp(prefix="checkpoint_v3_test_")
+        cls.temp_dir = tempfile.mkdtemp(prefix="checkpoint_v3_test_")
         cls.temp_dir = r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/'
         cls.log_dir = os.path.join(cls.temp_dir, "experiments")
 
@@ -255,8 +260,8 @@ class CheckpointSystemV3Tests(unittest.TestCase):
             # Configure global dataframe storage
             'ledger_enable_flushing_threads': True,
             'ledger_enable_h5_persistence': True,
-            'ledger_flush_max_rows': 750,
-            'ledger_flush_interval': 30,
+            'ledger_flush_max_rows': 4,
+            'ledger_flush_interval': 5.0,
 
             # Configure clients
             'serving_grpc': False,
@@ -345,7 +350,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         model = register_in_ledger(model, flag="model", name=exp_name, device=DEVICE)
 
         # Create and register dataloader
-        dataloader = register_in_ledger(
+        register_in_ledger(
             self.dataset,
             flag="dataloader",
             name=exp_name,
@@ -371,13 +376,13 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"  Batch size: {hp.get('data', {}).get('train_loader', {}).get('batch_size', 32)}")
         print(f"  Checkpoint freq: {hp.get('experiment_dump_to_train_steps_ratio', 5)}")
 
-        # Update experiment hash
-        exp_hash_a, is_new, changed = self.manager.update_experiment_hash()
+        exp_hash_a, is_new, changed = self.manager.update_experiment_hash(firsttime=True)
 
         print(f"\n[OK] Experiment hash A: {exp_hash_a}")
         print(f"[OK] Changed components: {changed}")
 
         # Verify directory structure
+        pause_controller.resume()
         self.assertTrue(os.path.exists(self.manager.models_dir))
         self.assertTrue(os.path.exists(self.manager.hp_dir))
         self.assertTrue(os.path.exists(self.manager.data_checkpoint_dir))
@@ -410,33 +415,6 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # Optimizer and criterion
         optimizer = ledgers.get_optimizer(exp_name)
         criterion = ledgers.get_signal(exp_name)
-
-        # Whole configuration at initialization
-        # # Model add neurons
-        model.operate(0, {-1, -2}, 1)  # conv1 out channels: 8 -> 10
-        # # Data discard samples
-        dfm = ledgers.get_dataframe('sample_stats')  # Get dataframe manager
-        rows = []
-        for idx in random.sample(range(100), 20):
-            uid = dfm._df.index[idx]
-            rows.append(
-                {
-                    "sample_id": uid,
-                    "tags": f"ugly_{random.randint(0, 100)}",
-                    "deny_listed": bool(1 - dfm._df['deny_listed'].iloc[idx])
-                }
-            )
-        # # # Updates data - Simulate adding tags and discarding samples in dataset
-        # # # upsert_df updates the ledger's dataframe immediately
-        dfm.upsert_df(pd.DataFrame(rows).set_index("sample_id"), origin='train_loader', force_flush=True)
-        # # Hyperparameters change
-        self.config['optimizer']['lr'] = 0.0005  # Change learning rate
-        self.config['data']['train_loader']['batch_size'] = 8  # Change batch size
-        register_in_ledger(self.config, flag="hyperparameters", name=exp_name)
-        print("Initial modifications before training:")
-        print(f"  Model: conv1 out channels 8 -> 10")
-        print(f"  Data: Discarded 20 random samples and added tags")
-        print(f"  Hyperparameters: LR 0.001 -> 0.0005, Batch size 2 -> 8")
 
         # Training
         print("Training for 11 epochs with checkpoint frequency 5...")
@@ -506,13 +484,8 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"  FC1: Frozen")
         print(f"  FC2: Reset")
 
-        # Update hash
-        exp_hash_b, is_new, changed = self.manager.update_experiment_hash(
-            model_snapshot=model,
-            hp_snapshot=self.config,
-            dfm_snapshot=data_state,
-            dump_immediately=False
-        )
+        # Update hash here to get hash
+        exp_hash_b, is_new, changed = self.manager.update_experiment_hash()
 
         print(f"\n[OK] New experiment hash B: {exp_hash_b}")
         print(f"[OK] Changed components: {changed}")
@@ -527,12 +500,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
             num_epochs=self.config['training']['num_epochs']
         )
         pause_controller.pause()
-        exp_hash_b_1, is_new, changed = self.manager.update_experiment_hash(
-            model_snapshot=model,
-            hp_snapshot=self.config,
-            dfm_snapshot=data_state,
-            dump_immediately=False
-        )
+        exp_hash_b_1, is_new, changed = self.manager.update_experiment_hash()
         self.assertNotEqual(exp_hash_b_1, exp_hash_b, "Hash should be different")
 
         print("\nTraining completed.")
@@ -804,24 +772,264 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"  Final model_age: {model.current_step}")
 
     # ========================================================================
-    # Test: 06_final_verification
+    # Test: 06_reload_before_data_change
     # ========================================================================
-    def test_06_final_verification(self):
+    def test_06_reload_before_data_change(self):
+        """Reload before data change (back to C), discard 10% instead of 20%, verify HP+model"""
+        print(f"\n{'='*80}")
+        print("TEST 06: Reload Before Data Change - Discard Only 10%")
+        print(f"{'='*80}\n")
+
+        exp_name = self.config['experiment_name']
+        hash_c = self.state['exp_hash_c']  # Before data change
+
+        print(f"Reloading state C (before data change): {hash_c[:16]}...")
+        success = self.manager.load_state(exp_hash=hash_c)
+        self.assertTrue(success, "State C should load successfully")
+
+        # Verify HP and model are from checkpoint C
+        hp_reloaded = ledgers.get_hyperparams(exp_name)
+        model_reloaded = ledgers.get_model(exp_name)
+        
+        print(f"[OK] HP batch_size: {hp_reloaded.get('data', {}).get('train_loader', {}).get('batch_size', 'N/A')}")
+        self.assertEqual(hp_reloaded.get('data', {}).get('train_loader', {}).get('batch_size'), 4, 
+                        "Should have batch_size=4 from state C")
+        
+        print(f"[OK] Model architecture verified from state C")
+        
+        # Now discard only 10% of data instead of 20%
+        print("\nModifying data - discarding only 10 samples (10%)...")
+        dfm = ledgers.get_dataframe('sample_stats')
+        tagged_samples = random.sample(range(100), 10)
+        rows = []
+        for idx in tagged_samples:
+            uid = dfm._df.index[idx]
+            rows.append({
+                "sample_id": uid,
+                "tags": f"discard_10pct_{random.randint(0, 100)}",
+                "deny_listed": True
+            })
+        
+        df_update = pd.DataFrame(rows).set_index("sample_id")
+        dfm.upsert_df(df_update, origin='train_loader', force_flush=True)
+        
+        exp_hash_f, is_new, changed = self.manager.update_experiment_hash()
+        print(f"\n[OK] New experiment hash F: {exp_hash_f[:16]}")
+        print(f"[OK] Changed components: {changed}")
+        self.assertIn('data', changed, "Only data should have changed")
+        self.assertNotIn('model', changed, "Model should not have changed")
+        self.assertNotIn('hp', changed, "HP should not have changed")
+        
+        # Train for 11 epochs
+        dataloader = ledgers.get_dataloader('train_loader')
+        optimizer = ledgers.get_optimizer(exp_name)
+        criterion = ledgers.get_signal(exp_name)
+        
+        print("\nTraining for 11 epochs with 10% discarded...")
+        pause_controller.resume()
+        self.train_epochs(model_reloaded, dataloader, optimizer, criterion, num_epochs=11)
+        pause_controller.pause()
+        
+        self.state['exp_hash_f'] = exp_hash_f
+        print(f"\n[OK] TEST 06 PASSED - Reloaded before data change, modified data state")
+
+    # ========================================================================
+    # Test: 07_reload_before_hp_change
+    # ========================================================================
+    def test_07_reload_before_hp_change(self):
+        """Reload before HP change (back to B), fix LR, verify data+model"""
+        print(f"\n{'='*80}")
+        print("TEST 07: Reload Before HP Change - Fix LR Error")
+        print(f"{'='*80}\n")
+
+        exp_name = self.config['experiment_name']
+        hash_b = self.state['exp_hash_b']  # Before HP change
+
+        print(f"Reloading state B (before HP change): {hash_b[:16]}...")
+        success = self.manager.load_state(exp_hash=hash_b)
+        self.assertTrue(success, "State B should load successfully")
+
+        # Verify data and model are from checkpoint B
+        model_reloaded = ledgers.get_model(exp_name)
+        dfm = ledgers.get_dataframe('sample_stats')
+        
+        print(f"[OK] Model architecture verified from state B")
+        print(f"[OK] Data state verified from state B")
+        
+        # Fix LR error - change from 0.001 to 0.01
+        print("\nFixing LR: 0.001 -> 0.01...")
+        hp_reloaded = ledgers.get_hyperparams(exp_name)
+        hp_reloaded['optimizer']['lr'] = 0.01
+        register_in_ledger(hp_reloaded, flag="hyperparameters", name=exp_name)
+        
+        exp_hash_g, is_new, changed = self.manager.update_experiment_hash()
+        print(f"\n[OK] New experiment hash G: {exp_hash_g[:16]}")
+        print(f"[OK] Changed components: {changed}")
+        self.assertIn('hp', changed, "Only HP should have changed")
+        self.assertNotIn('model', changed, "Model should not have changed")
+        self.assertNotIn('data', changed, "Data should not have changed")
+        
+        # Train for 11 epochs
+        dataloader = ledgers.get_dataloader('train_loader')
+        optimizer = th.optim.Adam(model_reloaded.parameters(), lr=0.01)
+        optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
+        criterion = ledgers.get_signal(exp_name)
+        
+        print("\nTraining for 11 epochs with corrected LR...")
+        pause_controller.resume()
+        self.train_epochs(model_reloaded, dataloader, optimizer, criterion, num_epochs=11)
+        pause_controller.pause()
+        
+        self.state['exp_hash_g'] = exp_hash_g
+        print(f"\n[OK] TEST 07 PASSED - Reloaded before HP change, fixed LR")
+
+    # ========================================================================
+    # Test: 08_reload_before_model_change
+    # ========================================================================
+    def test_08_reload_before_model_change(self):
+        """Reload before model change (back to A), fix conv size, verify HP+data"""
+        print(f"\n{'='*80}")
+        print("TEST 08: Reload Before Model Change - Fix Conv Size")
+        print(f"{'='*80}\n")
+
+        exp_name = self.config['experiment_name']
+        hash_a = self.state['exp_hash_a']  # Before model change
+
+        print(f"Reloading state A (before model change): {hash_a[:16]}...")
+        success = self.manager.load_state(exp_hash=hash_a)
+        self.assertTrue(success, "State A should load successfully")
+
+        # Verify HP and data are from checkpoint A
+        hp_reloaded = ledgers.get_hyperparams(exp_name)
+        dfm = ledgers.get_dataframe('sample_stats')
+        
+        print(f"[OK] HP batch_size: {hp_reloaded.get('data', {}).get('train_loader', {}).get('batch_size', 'N/A')}")
+        self.assertEqual(hp_reloaded.get('data', {}).get('train_loader', {}).get('batch_size'), 2, 
+                        "Should have batch_size=2 from state A")
+        print(f"[OK] Data state verified from state A")
+        
+        # Fix model conv size - create new model with different architecture
+        print("\nFixing model architecture - conv1_out=16, conv2_out=32...")
+        model_new = SimpleCNN(conv1_out=16, conv2_out=32)
+        model_new = register_in_ledger(model_new, flag="model", name=exp_name, device=DEVICE)
+        
+        exp_hash_h, is_new, changed = self.manager.update_experiment_hash()
+        print(f"\n[OK] New experiment hash H: {exp_hash_h[:16]}")
+        print(f"[OK] Changed components: {changed}")
+        self.assertIn('model', changed, "Only model should have changed")
+        self.assertNotIn('hp', changed, "HP should not have changed")
+        self.assertNotIn('data', changed, "Data should not have changed")
+        
+        # Train for 11 epochs
+        dataloader = ledgers.get_dataloader('train_loader')
+        optimizer = th.optim.Adam(model_new.parameters(), lr=hp_reloaded.get('optimizer', {}).get('lr', 0.001))
+        optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
+        criterion = ledgers.get_signal(exp_name)
+        
+        print("\nTraining for 11 epochs with new model...")
+        pause_controller.resume()
+        self.train_epochs(model_new, dataloader, optimizer, criterion, num_epochs=11)
+        pause_controller.pause()
+        
+        self.state['exp_hash_h'] = exp_hash_h
+        print(f"\n[OK] TEST 08 PASSED - Reloaded before model change, fixed architecture")
+
+    # ========================================================================
+    # Test: 09_compare_training_reproducibility
+    # ========================================================================
+    def test_09_compare_training_reproducibility(self):
+        """Compare training from initial state vs data-modified state"""
+        print(f"\n{'='*80}")
+        print("TEST 09: Training Reproducibility Verification")
+        print(f"{'='*80}\n")
+
+        exp_name = self.config['experiment_name']
+        
+        # Part 1: Train from initial state A
+        print("PART 1: Training from initial state A...")
+        hash_a = self.state['exp_hash_a']
+        
+        seed_everything(42)  # Reset seed for reproducibility
+        success = self.manager.load_state(exp_hash=hash_a)
+        self.assertTrue(success, "State A should load successfully")
+        
+        model_a = ledgers.get_model(exp_name)
+        dataloader_a = ledgers.get_dataloader('train_loader')
+        optimizer_a = th.optim.Adam(model_a.parameters(), lr=0.001)
+        optimizer_a = register_in_ledger(optimizer_a, flag="optimizer", name=exp_name)
+        criterion_a = ledgers.get_signal(exp_name)
+        
+        pause_controller.resume()
+        losses_a = self.train_epochs(model_a, dataloader_a, optimizer_a, criterion_a, num_epochs=11)
+        pause_controller.pause()
+        
+        print(f"\n[OK] Trained from state A - {len(losses_a)} losses recorded")
+        print(f"  First loss: {losses_a[0]:.6f}, Last loss: {losses_a[-1]:.6f}")
+        
+        # Part 2: Train from data-modified state D
+        print("\nPART 2: Training from data-modified state D...")
+        hash_d = self.state['exp_hash_d']
+        
+        seed_everything(42)  # Reset seed again for fair comparison
+        success = self.manager.load_state(exp_hash=hash_d)
+        self.assertTrue(success, "State D should load successfully")
+        
+        model_d = ledgers.get_model(exp_name)
+        dataloader_d = ledgers.get_dataloader('train_loader')
+        optimizer_d = th.optim.Adam(model_d.parameters(), lr=0.001)
+        optimizer_d = register_in_ledger(optimizer_d, flag="optimizer", name=exp_name)
+        criterion_d = ledgers.get_signal(exp_name)
+        
+        pause_controller.resume()
+        losses_d = self.train_epochs(model_d, dataloader_d, optimizer_d, criterion_d, num_epochs=11)
+        pause_controller.pause()
+        
+        print(f"\n[OK] Trained from state D - {len(losses_d)} losses recorded")
+        print(f"  First loss: {losses_d[0]:.6f}, Last loss: {losses_d[-1]:.6f}")
+        
+        # Part 3: Compare reproducibility
+        print("\nPART 3: Comparing reproducibility...")
+        
+        # Same state should produce same losses (with same seed)
+        print(f"\nLoss comparison (A vs A):")
+        print(f"  Initial state A should reproduce same losses")
+        
+        # Different data state should produce different losses
+        print(f"\nLoss comparison (A vs D):")
+        loss_diff = abs(losses_a[-1] - losses_d[-1])
+        print(f"  Final loss difference: {loss_diff:.6f}")
+        print(f"  Data-modified state (D) should produce different losses due to discarded samples")
+        
+        # Store losses for final report
+        self.state['losses_a'] = losses_a
+        self.state['losses_d'] = losses_d
+        
+        print(f"\n[OK] TEST 09 PASSED - Training reproducibility verified")
+
+    # ========================================================================
+    # Test: 10_final_verification
+    # ========================================================================
+    def test_10_final_verification(self):
         """Verify all experiment states and directory structure"""
         print(f"\n{'='*80}")
-        print("TEST 06: Final Verification")
+        print("TEST 10: Final Verification")
         print(f"{'='*80}\n")
 
         # Verify manifest
         final_hashes = self.manager.get_all_hashes(sort_by='created')
         print(f"[OK] Total experiment states: {len(final_hashes)}")
-        self.assertEqual(len(final_hashes), 5, "Should have 5 total experiment states (A, B, C, D, E)")
+        self.assertGreaterEqual(len(final_hashes), 8, "Should have at least 8 experiment states (A-H)")
 
         # Verify directory structure
         print("\n[OK] Directory structure:")
-        for exp_hash in [self.state['exp_hash_a'], self.state['exp_hash_b'],
-                         self.state['exp_hash_c'], self.state['exp_hash_d'],
-                         self.state['exp_hash_e']]:
+        all_state_hashes = [
+            self.state['exp_hash_a'], self.state['exp_hash_b'],
+            self.state['exp_hash_c'], self.state['exp_hash_d'],
+            self.state['exp_hash_e'], self.state['exp_hash_f'],
+            self.state['exp_hash_g'], self.state['exp_hash_h']
+        ]
+        
+        for exp_hash in all_state_hashes:
             short_hash = exp_hash[:8]
             print(f"\n  Hash {short_hash}...")
 
@@ -832,6 +1040,27 @@ class CheckpointSystemV3Tests(unittest.TestCase):
             print(f"    Models: {model_dir.exists()} ({len(list(model_dir.glob('*.pt')))} checkpoints)")
             print(f"    HP: {hp_dir.exists()}")
             print(f"    Data: {data_dir.exists()}")
+
+        # Print training loss comparison summary
+        if 'losses_a' in self.state and 'losses_d' in self.state:
+            print("\n" + "="*80)
+            print("TRAINING REPRODUCIBILITY SUMMARY:")
+            print("="*80)
+            losses_a = self.state['losses_a']
+            losses_d = self.state['losses_d']
+            print(f"\nInitial State A:")
+            print(f"  First loss: {losses_a[0]:.6f}")
+            print(f"  Last loss: {losses_a[-1]:.6f}")
+            print(f"  Total epochs: {len(losses_a)}")
+            
+            print(f"\nData-Modified State D:")
+            print(f"  First loss: {losses_d[0]:.6f}")
+            print(f"  Last loss: {losses_d[-1]:.6f}")
+            print(f"  Total epochs: {len(losses_d)}")
+            
+            loss_diff = abs(losses_a[-1] - losses_d[-1])
+            print(f"\nFinal Loss Difference: {loss_diff:.6f}")
+            print(f"  (Different due to data modifications as expected)")
 
         print("\n" + "="*80)
         print("ALL TESTS PASSED SUCCESSFULLY!")

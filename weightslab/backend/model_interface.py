@@ -191,11 +191,6 @@ class ModelInterface(NetworkWithOps):
                 except Exception:
                     pass
 
-            # On resume: if hash changed, dump HP/data/architecture
-            try:
-                new_hash, is_new, changed_components = self._checkpoint_manager.update_experiment_hash()
-            except Exception:
-                pass
         except Exception:
             self._checkpoint_manager = None
 
