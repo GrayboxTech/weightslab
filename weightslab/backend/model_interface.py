@@ -317,15 +317,8 @@ class ModelInterface(NetworkWithOps):
             batched_age = int(self.get_batched_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
-                    hp_snapshot = ledgers.get_hyperparams()
-                    dfm_snapshot = ledgers.get_dataframe()
-                    model_snapshot = ledgers.get_model()
                     # Update hash for current experiment state (marks changes as pending, doesn't dump)
-                    new_hash, is_new, changed_components = self._checkpoint_manager.update_experiment_hash(
-                        model_snapshot=model_snapshot,
-                        hp_snapshot=hp_snapshot,
-                        dfm_snapshot=dfm_snapshot
-                    )
+                    new_hash, is_new, changed_components = self._checkpoint_manager.update_experiment_hash()
                     # If model architecture changed, save it
                     if 'model' in changed_components:
                         try:

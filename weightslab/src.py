@@ -308,7 +308,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         kwargs['root_log_dir'] = hp_dict['root_log_dir']
 
                     # Update kwargs with relevant hyperparameters
-                    kwargs.update(hp_dict.get('data', {}).get(reg_name, {}))
+                    kwargs.update(
+                        {
+                            u:v for u,v in hp_dict.get('data', {}).get(reg_name, {}).items() if u not in kwargs
+                        }
+                    )
             except Exception:
                 pass  # If we can't get hyperparameters, continue without root_log_dir
 

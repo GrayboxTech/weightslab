@@ -80,6 +80,44 @@ class MaskedSampler(Sampler):
         return max(0, total - denied_count)
 
 
+class OffsetSampler(Sampler):
+    """A sampler wrapper that skips the first N samples without loading them.
+
+    This enables efficient state restoration by avoiding data preprocessing
+    for skipped samples. Works with any base sampler.
+    """
+
+    def __init__(self, base_sampler: Sampler, offset: int = 0):
+        """Initialize with a base sampler and number of samples to skip.
+
+        Args:
+            base_sampler: The underlying sampler to wrap
+            offset: Number of samples to skip from the beginning
+        """
+        self.base_sampler = base_sampler
+        self.offset = max(0, offset)
+
+    def __iter__(self):
+        """Iterate, skipping the first offset samples."""
+        iterator = iter(self.base_sampler)
+        # Skip offset samples without yielding
+        for _ in range(self.offset):
+            try:
+                next(iterator)
+            except StopIteration:
+                return
+        # Yield remaining samples
+        yield from iterator
+
+    def __len__(self):
+        """Return remaining length after offset."""
+        try:
+            total = len(self.base_sampler)
+            return max(0, total - self.offset)
+        except Exception:
+            raise TypeError("len not supported for this sampler")
+
+
 class MutableBatchSampler:
     """A simple mutable batch sampler that yields lists of indices.
 
@@ -299,8 +337,10 @@ class DataLoaderInterface:
 
         self.init_attributes(self.dataloader)
 
-        # Internal iterator used by `_next_batch`
-        self._iterator: Iterator = iter(self.dataloader)
+        # Internal iterator used by `_next_batch` (lazy created to avoid consuming RNG early)
+        self._iterator: Optional[Iterator] = None
+        # Track how many batches have been yielded since last reset (for reproducible seeking)
+        self._batches_yielded: int = 0
 
         # Optionally register in the global ledger for cross-thread access.
         # If no explicit `name` is provided, try to infer a friendly name from
@@ -418,9 +458,10 @@ class DataLoaderInterface:
     def __iter__(self) -> Iterator:
         """Return an iterator over batches (delegates to the wrapped dataloader)."""
         self._sync_batch_size_from_ledger()
-        res = iter(self.dataloader)
         self._wait_if_paused()
-        return res
+        if self._iterator is None:
+            self._reset_iterator()
+        return self._iterator
 
     def __next__(self) -> Any:
         """Retrieve the next batch; used when iterating directly over the interface."""
@@ -486,17 +527,126 @@ class DataLoaderInterface:
         propagated).
         """
         try:
+            if self._iterator is None:
+                self._reset_iterator()
             batch = next(self._iterator)
+            # Count yielded batches to support iteration state capture/restore
+            self._batches_yielded += 1
         except StopIteration:
             if not self.is_training:
                 raise StopIteration("End of dataloader reached.")
             self._reset_iterator()
             batch = next(self._iterator)
+            self._batches_yielded = 1
         return batch
 
     def _reset_iterator(self) -> None:
         """Reset the internal iterator so `_next_batch()` starts from the beginning."""
         self._iterator = iter(self.dataloader)
+        self._batches_yielded = 0
+
+    def reset_iterator(self) -> None:
+        """Recreate the internal iterator (e.g., after restoring RNG state).
+
+        Call this after restore_rng_state() to get a fresh shuffle with the
+        restored RNG state:
+
+            rng_state = capture_rng_state()
+            batch1 = next(dataloader_interface)
+            restore_rng_state(rng_state)
+            dataloader_interface.reset_iterator()  # Create new iterator with restored RNG
+            batch1_repeat = next(dataloader_interface)  # Same batches!
+        """
+        self._reset_iterator()
+
+    # -------------------------------------------------------------------------
+    # Iteration state capture/restore for deterministic resume
+    # -------------------------------------------------------------------------
+    def capture_iteration_state(self) -> dict:
+        """Capture current iteration position for later restoration.
+
+        Returns a serializable dict that can be stored with checkpoints and
+        later supplied to `restore_iteration_state` to resume at the same batch
+        boundary. Works with and without shuffling. When shuffling, ensure
+        RNG state is also captured/restored before calling `restore_iteration_state`.
+        """
+        return {
+            "batches_yielded": int(self._batches_yielded),
+            "batch_size": self.batch_size or 1
+        }
+
+    def restore_iteration_state(self, state: dict) -> None:
+        """Restore iteration position efficiently without reprocessing skipped data.
+
+        For dataloaders we built (with _dl_build_kwargs), this recreates the
+        dataloader with an OffsetSampler that skips samples at the index level,
+        avoiding expensive data loading and transforms for skipped batches.
+
+        For shuffled loaders, call this after restoring RNG state.
+        """
+        try:
+            batches_yielded = int(state.get("batches_yielded", 0))
+            batch_size = int(state.get("batch_size", self.batch_size or 1))
+        except Exception:
+            batches_yielded = 0
+            batch_size = self.batch_size or 1
+
+        # Calculate sample offset (how many individual samples to skip)
+        sample_offset = batches_yielded * batch_size
+
+        # If we own the dataloader construction, rebuild with offset sampler
+        if getattr(self, "_dl_build_kwargs", None) is not None and sample_offset > 0:
+            try:
+                kwargs = dict(self._dl_build_kwargs)
+                shuffle = kwargs.pop("shuffle", False)
+                num_workers = kwargs.pop("num_workers", 0)
+                drop_last = kwargs.pop("drop_last", False)
+                pin_memory = kwargs.pop("pin_memory", False)
+                collate_fn = kwargs.pop("collate_fn", None)
+
+                # Create base sampler
+                base_sampler = (
+                    RandomSampler(self.tracked_dataset)
+                    if shuffle
+                    else SequentialSampler(self.tracked_dataset)
+                )
+
+                # Wrap with offset to skip already-yielded samples
+                offset_sampler = OffsetSampler(base_sampler, offset=sample_offset)
+
+                # Wrap with masked sampler for deny-listed samples
+                masked_sampler = MaskedSampler(offset_sampler, self.tracked_dataset)
+
+                # Rebuild mutable batch sampler
+                mbs_cls = type(self._mutable_batch_sampler) if self._mutable_batch_sampler else MutableBatchSampler
+                mbs = mbs_cls(masked_sampler, batch_size=batch_size, drop_last=drop_last)
+                self._mutable_batch_sampler = mbs
+
+                # Rebuild dataloader with offset sampler
+                self.dataloader = DataLoader(
+                    self.tracked_dataset,
+                    batch_sampler=mbs,
+                    num_workers=num_workers,
+                    pin_memory=pin_memory,
+                    collate_fn=collate_fn,
+                    **filter_kwargs_for_callable(DataLoader, kwargs)
+                )
+
+                # Reset iterator and counter
+                self._iterator = None
+                self._batches_yielded = batches_yielded
+                return
+            except Exception as e:
+                logger.warning(f"Failed to restore with offset sampler, falling back to fast-forward: {e}")
+
+        # Fallback: fast-forward approach (less efficient but works for user-supplied dataloaders)
+        self._reset_iterator()
+        for _ in range(max(0, batches_yielded)):
+            try:
+                next(self._iterator)
+                self._batches_yielded += 1
+            except StopIteration:
+                break
 
     # -------------------------------------------------------------------------
     # Batch-size management

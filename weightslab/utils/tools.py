@@ -39,6 +39,92 @@ def seed_everything(seed=42):
     random.seed(seed)
     th.backends.cudnn.deterministic = True
 
+def capture_rng_state():
+    """
+    Capture all RNG states in a JSON-serializable format.
+
+    Returns:
+        dict: Dictionary with python_random, numpy_random, torch_rng, torch_cuda_rng
+              in serializable formats (lists/tuples)
+    """
+    rng_state = {
+        'python_random': random.getstate(),
+        'numpy_random': np.random.get_state().tolist() if hasattr(np.random.get_state(), 'tolist') else str(np.random.get_state()),
+        'torch_rng': th.get_rng_state().cpu().tolist() if hasattr(th.get_rng_state(), 'tolist') else str(th.get_rng_state()),
+    }
+
+    # Add CUDA RNG if available
+    if th.cuda.is_available():
+        try:
+            rng_state['torch_cuda_rng'] = th.cuda.get_rng_state().cpu().tolist() if hasattr(th.cuda.get_rng_state(), 'tolist') else str(th.cuda.get_rng_state())
+        except Exception as e:
+            logger.warning(f"Failed to capture CUDA RNG state: {e}")
+
+    return rng_state
+
+def restore_rng_state(rng_state):
+    """
+    Restore RNG states from captured state dictionary.
+
+    Args:
+        rng_state (dict): Dictionary with RNG states (python_random, numpy_random, torch_rng, torch_cuda_rng)
+    """
+    if not rng_state:
+        logger.warning("RNG state is None or empty, skipping restoration")
+        return
+
+    try:
+        # Restore Python random state
+        if 'python_random' in rng_state:
+            try:
+                random.setstate(rng_state['python_random'])
+                logger.debug("Restored Python random state")
+            except Exception as e:
+                logger.warning(f"Failed to restore Python random state: {e}")
+
+        # Restore NumPy random state
+        if 'numpy_random' in rng_state:
+            try:
+                state_data = rng_state['numpy_random']
+                if isinstance(state_data, list):
+                    state_data = tuple(state_data)
+                np.random.set_state(state_data)
+                logger.debug("Restored NumPy random state")
+            except Exception as e:
+                logger.warning(f"Failed to restore NumPy random state: {e}")
+
+        # Restore PyTorch RNG state
+        if 'torch_rng' in rng_state:
+            try:
+                torch_state = rng_state['torch_rng']
+                if isinstance(torch_state, list):
+                    torch_state = th.tensor(torch_state, dtype=th.uint8)
+                elif isinstance(torch_state, str):
+                    logger.warning("Torch RNG state is a string representation, cannot restore")
+                    return
+                th.set_rng_state(torch_state)
+                logger.debug("Restored PyTorch RNG state")
+            except Exception as e:
+                logger.warning(f"Failed to restore PyTorch RNG state: {e}")
+
+        # Restore CUDA RNG state if available
+        if 'torch_cuda_rng' in rng_state and th.cuda.is_available():
+            try:
+                cuda_state = rng_state['torch_cuda_rng']
+                if isinstance(cuda_state, list):
+                    cuda_state = th.tensor(cuda_state, dtype=th.uint8)
+                elif isinstance(cuda_state, str):
+                    logger.debug("CUDA RNG state is a string representation, skipping")
+                    return
+                th.cuda.set_rng_state(cuda_state)
+                logger.debug("Restored CUDA RNG state")
+            except Exception as e:
+                logger.warning(f"Failed to restore CUDA RNG state: {e}")
+
+        logger.debug("Successfully restored RNG states")
+    except Exception as e:
+        logger.error(f"Error restoring RNG state: {e}")
+
 def extract_in_out_params(module: nn.Module) -> List[int | str]:
     """
     Detects and returns the primary input and output dimension parameters

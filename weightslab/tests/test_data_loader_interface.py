@@ -1,7 +1,11 @@
 import math
 import unittest
 import torch
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, Subset
+from torchvision import datasets, transforms
+
+from weightslab.backend.dataloader_interface import DataLoaderInterface
+from weightslab.utils.tools import capture_rng_state, restore_rng_state, seed_everything
 
 
 def infinite_loader(loader):
@@ -76,6 +80,154 @@ class TestDataLoaderInterface(unittest.TestCase):
         self.assertEqual(len(set(labels)), len(self.train_loader.dataset))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestDataLoaderReproducibility(unittest.TestCase):
+    """Test RNG and iteration state reproducibility for dataloaders."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test dataset once for all reproducibility tests."""
+        # Use a small MNIST subset for testing
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+
+        try:
+            # Try to load from common location
+            full_dataset = datasets.MNIST(
+                root='C:/Users/GuillaumePelluet/Desktop/mnist_data/',
+                train=False,
+                download=False,
+                transform=transform
+            )
+        except:
+            # Fallback to temp directory
+            import tempfile
+            temp_dir = tempfile.mkdtemp()
+            full_dataset = datasets.MNIST(
+                root=temp_dir,
+                train=False,
+                download=True,
+                transform=transform
+            )
+
+        # Create subset with 100 samples
+        subset_indices = list(range(100))
+        cls.dataset = Subset(full_dataset, subset_indices)
+
+    def test_rng_reproducibility_with_shuffle(self):
+        """Test dataloader reproducibility with shuffle: save RNG → generate batches → reload RNG → verify same batches.
+
+        Key insight: Shuffle happens when iter() is called. Restoring RNG before
+        reset_iterator() ensures identical shuffle ordering.
+        """
+        print(f"\n{'='*60}")
+        print("RNG State Reproducibility - Shuffle Enabled")
+        print(f"{'='*60}\n")
+
+        # 1. Initialize with seed and create dataloader
+        print("1. Initializing with seed=42...")
+        seed_everything(42)
+
+        dataloader = DataLoaderInterface(
+            self.dataset,
+            batch_size=2,
+            shuffle=True,
+            num_workers=0
+        )
+        print(f"[OK] DataLoader created (batch_size=2, shuffle=True)")
+
+        # Consume initial batches
+        _, bids_1_init = next(dataloader)
+        _, bids_2_init = next(dataloader)
+        print(f"Initial warmup batches: {bids_1_init.tolist()}, {bids_2_init.tolist()}")
+
+        # 2. Capture RNG state
+        print("\n2. Capturing RNG state...")
+        rng_state = capture_rng_state()
+        dataloader.reset_iterator()  # Reset to use captured RNG
+        print(f"[OK] RNG state captured and iterator reset")
+
+        # 3. Generate batches with current RNG
+        print("\n3. Generating batches...")
+        _, bids_1 = next(dataloader)
+        _, bids_2 = next(dataloader)
+        print(f"Batches: {bids_1.tolist()}, {bids_2.tolist()}")
+
+        # 4. Restore RNG and reset iterator
+        print("\n4. Restoring RNG state and resetting iterator...")
+        restore_rng_state(rng_state)
+        dataloader.reset_iterator()
+        print(f"[OK] RNG restored, iterator reset")
+
+        # 5. Generate batches again - should be identical
+        print("\n5. Generating batches with restored RNG...")
+        _, bids_1_repeat = next(dataloader)
+        _, bids_2_repeat = next(dataloader)
+        print(f"Repeated batches: {bids_1_repeat.tolist()}, {bids_2_repeat.tolist()}")
+
+        # Verify
+        print(f"\n{'='*60}")
+        print("Verification:")
+        print(f"  Batch 1 match: {torch.equal(bids_1, bids_1_repeat)}")
+        print(f"  Batch 2 match: {torch.equal(bids_2, bids_2_repeat)}")
+        self.assertTrue(torch.equal(bids_1, bids_1_repeat), "First batches should be identical")
+        self.assertTrue(torch.equal(bids_2, bids_2_repeat), "Second batches should be identical")
+        print(f"[OK] RNG reproducibility verified!\n")
+
+    def test_iteration_state_reproducibility_without_shuffle(self):
+        """Test dataloader reproducibility without shuffle: capture iteration state → resume identically.
+
+        With shuffle disabled, RNG is irrelevant. We capture the iteration position
+        (number of batches yielded) and restore that position efficiently using
+        OffsetSampler to skip samples at the index level without data reprocessing.
+        """
+        print(f"\n{'='*60}")
+        print("Iteration State Reproducibility - No Shuffle")
+        print(f"{'='*60}\n")
+
+        print("1. Creating dataloader (shuffle=False)...")
+        dataloader = DataLoaderInterface(
+            self.dataset,
+            batch_size=2,
+            shuffle=False,
+            num_workers=0
+        )
+        print(f"[OK] DataLoader created (batch_size=2, shuffle=False)")
+
+        # 2. Consume two batches, then capture state
+        print("\n2. Consuming first 2 batches...")
+        _, bids_1 = next(dataloader)
+        _, bids_2 = next(dataloader)
+        print(f"Batches 1-2: {bids_1.tolist()}, {bids_2.tolist()}")
+
+        iter_state = dataloader.capture_iteration_state()
+        print(f"[OK] Iteration state captured: {iter_state}")
+
+        # 3. Consume next two batches
+        print("\n3. Consuming batches 3-4...")
+        _, bids_3 = next(dataloader)
+        _, bids_4 = next(dataloader)
+        print(f"Batches 3-4: {bids_3.tolist()}, {bids_4.tolist()}")
+
+        # 4. Restore iteration state
+        print(f"\n4. Restoring to position after batch 2...")
+        dataloader.restore_iteration_state(iter_state)
+        print(f"[OK] Iteration state restored (skipped first 2 batches efficiently)")
+
+        # 5. Generate batches again - should match 3 and 4
+        print("\n5. Generating next batches (should match 3-4)...")
+        _, bids_3_repeat = next(dataloader)
+        _, bids_4_repeat = next(dataloader)
+        print(f"Repeated batches: {bids_3_repeat.tolist()}, {bids_4_repeat.tolist()}")
+
+        # Verify
+        print(f"\n{'='*60}")
+        print("Verification:")
+        print(f"  Batch 3 match: {torch.equal(bids_3, bids_3_repeat)}")
+        print(f"  Batch 4 match: {torch.equal(bids_4, bids_4_repeat)}")
+        self.assertTrue(torch.equal(bids_3, bids_3_repeat), "Batch 3 should be identical")
+        self.assertTrue(torch.equal(bids_4, bids_4_repeat), "Batch 4 should be identical")
+        print(f"[OK] Iteration state reproducibility verified!\n")
+
 
