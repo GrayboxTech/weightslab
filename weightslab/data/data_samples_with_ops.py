@@ -254,7 +254,7 @@ class DataSampleTrackingWrapper(Dataset):
         sample_ids = [int(uid) for uid in self.unique_ids]
         defaults = SampleStats.DEFAULTS
         default_data = [
-            dict(defaults, sample_id=sid, origin=self._dataset_split, label=load_label(self, sid) if preload_labels else None)
+            dict(defaults, sample_id=sid, origin=self._dataset_split)
             for sid in sample_ids
         ]
 
