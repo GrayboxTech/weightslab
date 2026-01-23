@@ -539,13 +539,21 @@ class DataService:
                 aspect_ratio = original_size[0] / original_size[1]
                 if request.resize_width < 0 and request.resize_height < 0:
                     percent = abs(request.resize_width) / 100.0
-                    target_width = int(original_size[0] * percent * aspect_ratio)
+                    target_width = int(original_size[0] * percent)
                     target_height = int(original_size[1] * percent)
 
                 elif request.resize_width > 0 and request.resize_height > 0:
-                    if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
-                        target_width = int(request.resize_width * aspect_ratio)
-                        target_height = int(request.resize_height)
+                    # Bounding box resize preserving aspect ratio.
+                    # Fit the image inside (resize_width x resize_height).
+                    w_limit, h_limit = request.resize_width, request.resize_height
+                    if w_limit / h_limit > aspect_ratio:
+                        # Box is wider than image relative to height, height is the constraint
+                        target_height = h_limit
+                        target_width = int(target_height * aspect_ratio)
+                    else:
+                        # Image is wider than box relative to height, width is the constraint
+                        target_width = w_limit
+                        target_height = int(target_width / aspect_ratio)
 
                 else:
                     # Default to 360p (height=360) maintaining aspect ratio if no resize requested
