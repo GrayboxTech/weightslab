@@ -12,17 +12,14 @@ with state preserved in class variables between tests.
 """
 
 import os
-import sys
-import time
-import shutil
 import random
 import unittest
 import tempfile
 import warnings
+import json
 import pandas as pd
-from sympy import true
-import yaml
 import dill
+from pathlib import Path
 warnings.filterwarnings("ignore")
 
 import weightslab as wl
@@ -38,6 +35,7 @@ from tqdm import trange
 # Import components directly to avoid full weightslab initialization
 from weightslab.utils.tools import capture_rng_state, restore_rng_state
 from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
+from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.global_monitoring import (
     guard_training_context,
@@ -96,7 +94,7 @@ def register_in_ledger(obj, flag, name, device='cpu', **kwargs):
 # Set seed for reproducibility
 seed_everything()
 DEVICE = "cuda" if th.cuda.is_available() else "cpu"
-
+EXP_NAME = "mnist_checkpoint_test_v3"
 
 class SimpleCNN(nn.Module):
     """Simple CNN for MNIST classification"""
@@ -230,7 +228,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Create temporary directory (used for all tests)
         cls.temp_dir = tempfile.mkdtemp(prefix="checkpoint_v3_test_")
-        # cls.temp_dir = r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/'
+        # cls.temp_dir = r'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_17c8pljj'
         cls.log_dir = os.path.join(cls.temp_dir, "experiments")
 
         # Load MNIST subset (100 samples for all tests)
@@ -247,6 +245,9 @@ class CheckpointSystemV3Tests(unittest.TestCase):
             transform=transform
         )
 
+        # Init logger
+        cls.logger = LoggerQueue(name=EXP_NAME, register=True)
+
         # Create subset with 100 samples
         subset_indices = list(range(100))
         mnist_subset = Subset(full_dataset, subset_indices)
@@ -256,7 +257,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Initialize config from YAML-like dict (similar to ws-classification)
         cls.config = {
-            'experiment_name': 'mnist_checkpoint_test',
+            'experiment_name': EXP_NAME,
             'device': DEVICE,
             'root_log_dir': cls.log_dir,
 
@@ -291,23 +292,24 @@ class CheckpointSystemV3Tests(unittest.TestCase):
                 'lr': 0.001
             }
         }
+        cls.config_cp = cls.config.copy()
 
         # Initialize checkpoint manager for everyone
-        cls.manager = CheckpointManagerV2(root_log_dir=cls.log_dir)
+        cls.chkpt_manager = CheckpointManagerV2(root_log_dir=cls.config.get('root_log_dir'))
 
         # Register in ledger so model_interface can use it
-        cls.manager = ledgers.register_checkpoint_manager(cls.config['experiment_name'], cls.manager)
+        cls.chkpt_manager = ledgers.register_checkpoint_manager(cls.config['experiment_name'], cls.chkpt_manager)
 
         # Print setup info
         print(f"[OK] Created MNIST subset: {len(cls.dataset)} samples")
         print(f"[OK] Temporary directory: {cls.temp_dir}")
         print(f"[OK] Config initialized")
-        print(f"[OK] Checkpoint manager initialized at {cls.log_dir}\n")
+        print(f"[OK] Checkpoint manager initialized at {cls.config.get('root_log_dir')}\n")
 
-    def train_epochs(self, model, loader, optimizer, criterion, num_epochs):
+    def train_epochs(self, model, loader, optimizer, criterion, num_epochs, criterion_bin=None, return_uids=False):
         """Train model for specified epochs with checkpointing"""
         losses = []
-
+        uids_trained = []
         for _ in trange(num_epochs, desc="Training"):
             with guard_training_context:
                 epoch_loss = 0.0
@@ -315,7 +317,8 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
                 (inputs, ids, labels) = next(loader)
                 inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-                print(f"Input batch ids: {ids} and labels: {labels}")
+
+                uids_trained.extend(ids.tolist())
 
                 optimizer.zero_grad()
                 preds_raw = model(inputs)
@@ -325,6 +328,15 @@ class CheckpointSystemV3Tests(unittest.TestCase):
                     preds = (preds_raw > 0.0).long()
                 else:
                     preds = preds_raw.argmax(dim=1, keepdim=True)
+
+                if criterion_bin is not None:
+                    # Binary loss
+                    loss = criterion_bin(
+                        preds_raw[:, 7],
+                        (labels==7).float(),
+                        batch_ids=ids,
+                        preds=preds
+                    )
 
                 # Loss and backward
                 loss = criterion(
@@ -341,7 +353,9 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
                 avg_loss = epoch_loss / batch_count if batch_count > 0 else 0
                 losses.append(avg_loss)
-
+        print(f"Trained on {uids_trained}.")
+        if return_uids:
+            return losses, uids_trained
         return losses
 
     # ==============================
@@ -381,7 +395,19 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
         # # Create and register signal (criterion)
         criterion = nn.CrossEntropyLoss(reduction='none')
-        criterion = register_in_ledger(criterion, flag="signal", name=exp_name)
+        criterion = register_in_ledger(
+            criterion,
+            flag="signal",
+            name="train_mlt_loss/CE",
+            log=True
+        )
+        criterion_bin = nn.BCEWithLogitsLoss(reduction='none')
+        criterion_bin = register_in_ledger(
+            criterion_bin,
+            flag="signal",
+            name="train_bin_loss/BCE",
+            log=True
+        )
 
         print("Configuration:")
         print(f"  Experiment: {hp['experiment_name']}")
@@ -391,17 +417,17 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"  Batch size: {hp.get('data', {}).get('train_loader', {}).get('batch_size', 32)}")
         print(f"  Checkpoint freq: {hp.get('experiment_dump_to_train_steps_ratio', 5)}")
 
-        exp_hash_a, _, changed = self.manager.update_experiment_hash(firsttime=True)
+        exp_hash_a, _, changed = self.chkpt_manager.update_experiment_hash(firsttime=True)
 
         print(f"\n[OK] Experiment hash A: {exp_hash_a}")
         print(f"[OK] Changed components: {changed}")
 
         # Verify directory structure
         pause_controller.resume()
-        self.assertTrue(os.path.exists(self.manager.models_dir))
-        self.assertTrue(os.path.exists(self.manager.hp_dir))
-        self.assertTrue(os.path.exists(self.manager.data_checkpoint_dir))
-        self.assertTrue(os.path.exists(self.manager.manifest_file))
+        self.assertTrue(os.path.exists(self.chkpt_manager.models_dir))
+        self.assertTrue(os.path.exists(self.chkpt_manager.hp_dir))
+        self.assertTrue(os.path.exists(self.chkpt_manager.data_checkpoint_dir))
+        self.assertTrue(os.path.exists(self.chkpt_manager.manifest_file))
 
         # Store in state for next tests
         self.state['exp_hash_a'] = exp_hash_a
@@ -419,18 +445,20 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # Get stored state from previous test
         exp_hash_a = self.state['exp_hash_a']
         exp_name = self.config['experiment_name']
-        success = self.manager.load_state(exp_hash=self.state['exp_hash_a'])
+        success = self.chkpt_manager.load_state(exp_hash=self.state['exp_hash_a'])
+        self.assertTrue(success, "Checkpoint load should succeed")
         pause_controller.resume()
 
         # Model
-        model = ledgers.get_model(exp_name)
+        model = ledgers.get_model()
 
         # Dataloader
-        dataloader = ledgers.get_dataloader('train_loader')
+        dataloader = ledgers.get_dataloader()
 
         # Optimizer and criterion
-        optimizer = ledgers.get_optimizer(exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        optimizer = ledgers.get_optimizer()
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         # Training
         print("Training for 11 epochs with checkpoint frequency 5...")
@@ -438,12 +466,13 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         loss_A = self.train_epochs(
             model, dataloader, optimizer, criterion,
             num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin
         )
         pause_controller.pause()
         print("\nTraining completed.")
 
         # Verify checkpoints
-        model_dir_a = self.manager.models_dir / exp_hash_a
+        model_dir_a = self.chkpt_manager.models_dir / exp_hash_a
         self.assertTrue(model_dir_a.exists(), "Model checkpoint directory should exist")
 
         # Check for weight checkpoints
@@ -452,11 +481,11 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         self.assertGreaterEqual(len(weight_files), 2, "Should have at least 2 weight checkpoints")
 
         # Check HP directory
-        hp_dir_a = self.manager.hp_dir / exp_hash_a
+        hp_dir_a = self.chkpt_manager.hp_dir / exp_hash_a
         self.assertTrue(hp_dir_a.exists(), "HP checkpoint directory should exist")
 
         # Check data directory
-        data_dir_a = self.manager.data_checkpoint_dir / exp_hash_a
+        data_dir_a = self.chkpt_manager.data_checkpoint_dir / exp_hash_a
         self.assertTrue(data_dir_a.exists(), "Data checkpoint directory should exist")
 
         self.state['exp_hash_a'] = exp_hash_a
@@ -477,14 +506,15 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         exp_name = self.config['experiment_name']
 
         # Model
-        model = ledgers.get_model(exp_name)
+        model = ledgers.get_model()
 
         # Dataloader
-        dataloader = ledgers.get_dataloader('train_loader')
+        dataloader = ledgers.get_dataloader()
 
         # Optimizer and criterion
-        optimizer = ledgers.get_optimizer(exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        optimizer = ledgers.get_optimizer()
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("Modifying model architecture...")
 
@@ -500,7 +530,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"  FC2: Reset")
 
         # Update hash here to get hash
-        exp_hash_b, _, changed = self.manager.update_experiment_hash()
+        exp_hash_b, _, changed = self.chkpt_manager.update_experiment_hash()
 
         print(f"\n[OK] New experiment hash B: {exp_hash_b}")
         print(f"[OK] Changed components: {changed}")
@@ -512,16 +542,17 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         pause_controller.resume()
         loss_B = self.train_epochs(
             model, dataloader, optimizer, criterion,
-            num_epochs=self.config['training']['num_epochs']
+            num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin
         )
         pause_controller.pause()
-        exp_hash_b_1, _, changed = self.manager.update_experiment_hash()
+        exp_hash_b_1, _, changed = self.chkpt_manager.update_experiment_hash()
         self.assertNotEqual(exp_hash_b_1, exp_hash_b, "Hash should be different")
 
         print("\nTraining completed.")
 
         # Verify new model directory
-        model_dir_b = self.manager.models_dir / exp_hash_b_1
+        model_dir_b = self.chkpt_manager.models_dir / exp_hash_b_1
         self.assertTrue(model_dir_b.exists(), "New model checkpoint directory should exist")
         weight_files_b = list(model_dir_b.glob("*_step_*.pt"))
         print(f"[OK] Found {len(weight_files_b)} weight checkpoint files in new directory")
@@ -547,14 +578,15 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         exp_name = self.config['experiment_name']
 
         # Model
-        model = ledgers.get_model(exp_name)
+        model = ledgers.get_model()
 
         # Dataloader
-        dataloader = ledgers.get_dataloader('train_loader')
+        dataloader = ledgers.get_dataloader()
 
         # Optimizer and criterion
-        optimizer = ledgers.get_optimizer(exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        optimizer = ledgers.get_optimizer()
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("Changing hyperparameters...")
 
@@ -566,7 +598,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         register_in_ledger(self.config, flag="hyperparameters", name=exp_name)
 
         # Update hash
-        exp_hash_c, _, _ = self.manager.update_experiment_hash()
+        exp_hash_c, _, _ = self.chkpt_manager.update_experiment_hash()
 
         print(f"\n[OK] New experiment hash C: {exp_hash_c}")
         self.assertNotEqual(self.state['exp_hash_b'], exp_hash_c, "Hash should be different sa hp changedcd")
@@ -575,18 +607,19 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         pause_controller.resume()
         loss_C = self.train_epochs(
             model, dataloader, optimizer, criterion,
-            num_epochs=self.config['training']['num_epochs']
+            num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin
         )
         pause_controller.pause()
 
         print("\nTraining completed.")
 
         # Verify new HP directory
-        hp_dir_c = self.manager.hp_dir / exp_hash_c
+        hp_dir_c = self.chkpt_manager.hp_dir / exp_hash_c
         self.assertTrue(hp_dir_c.exists(), "New HP checkpoint directory should exist")
 
         # Verify model weights still being saved
-        model_dir_c = self.manager.models_dir / exp_hash_c
+        model_dir_c = self.chkpt_manager.models_dir / exp_hash_c
         weight_files_c = list(model_dir_c.glob("*_step_*.pt"))
         print(f"[OK] Found {len(weight_files_c)} weight checkpoint files")
         self.assertGreaterEqual(len(weight_files_c), 2, "Should have at least 2 weight checkpoints")
@@ -611,15 +644,16 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         exp_name = self.config['experiment_name']
 
         # Model
-        model = ledgers.get_model(exp_name)
+        model = ledgers.get_model()
 
         # Data
-        dataloader = ledgers.get_dataloader('train_loader')  # Get dataloader
+        dataloader = ledgers.get_dataloader()  # Get dataloader
         dfm = ledgers.get_dataframe('sample_stats')  # Get dataframe manager
 
         # Optimizer and criterion
-        optimizer = ledgers.get_optimizer(exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        optimizer = ledgers.get_optimizer()
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("Modifying data...")
 
@@ -646,7 +680,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"  Discarded 20 samples")
 
         # Update hash
-        exp_hash_d, _, changed = self.manager.update_experiment_hash()
+        exp_hash_d, _, changed = self.chkpt_manager.update_experiment_hash()
 
         print(f"\n[OK] New experiment hash D: {exp_hash_d}")
         print(f"[OK] Changed components: {changed}")
@@ -657,18 +691,19 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         pause_controller.resume()  # Pending changes to dump: data state
         loss_D = self.train_epochs(
             model, dataloader, optimizer, criterion,
-            num_epochs=self.config['training']['num_epochs']
+            num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin
         )
         pause_controller.pause()
 
         print("\nTraining completed.")
 
         # Verify new data directory
-        data_dir_d = self.manager.data_checkpoint_dir / exp_hash_d
+        data_dir_d = self.chkpt_manager.data_checkpoint_dir / exp_hash_d
         self.assertTrue(data_dir_d.exists(), "New data checkpoint directory should exist")
 
         # Verify model weights still being saved
-        model_dir_d = self.manager.models_dir / exp_hash_d
+        model_dir_d = self.chkpt_manager.models_dir / exp_hash_d
         weight_files_d = list(model_dir_d.glob("*_step_*.pt"))
         print(f"[OK] Found {len(weight_files_d)} weight checkpoint files")
         self.assertGreaterEqual(len(weight_files_d), 2, "Should have at least 2 weight checkpoints")
@@ -696,7 +731,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print("Experiment paused. Analyzing experiment history...")
 
         # Get all hashes
-        all_hashes = self.manager.get_all_hashes(sort_by='created')
+        all_hashes = self.chkpt_manager.get_all_hashes(sort_by='created')
         print(f"\n[OK] Found {len(all_hashes)} experiment states:")
         for i, entry in enumerate(all_hashes):
             print(f"  {i+1}. {entry['hash'][:16]}... (created: {entry['created'][:19]})")
@@ -707,11 +742,11 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"\n[OK] Reloading state B: {hash_a_from_manifest[:16]}...")
 
         # Use new load_state method to load and apply checkpoint in-place
-        success = self.manager.load_state(exp_hash=hash_a_from_manifest)
+        success = self.chkpt_manager.load_state(exp_hash=hash_a_from_manifest)
         self.assertTrue(success, "State should be loaded successfully")
 
         # Get components from ledger (they were updated in-place)
-        model_reloaded = ledgers.get_model(exp_name)
+        model_reloaded = ledgers.get_model()
         hp_reloaded = ledgers.get_hyperparams(exp_name)
 
         print(f"[OK] State applied successfully")
@@ -750,7 +785,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         dfm.upsert_df(pd.DataFrame(rows).set_index("sample_id"), origin='train_loader', force_flush=True)
 
         # Update hash with all changes
-        exp_hash_e, _, changed = self.manager.update_experiment_hash()
+        exp_hash_e, _, changed = self.chkpt_manager.update_experiment_hash()
 
         print(f"\n[OK] New experiment hash E (branch): {exp_hash_e}")
         print(f"[OK] Changed components: {changed}")
@@ -762,23 +797,24 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         pass
 
         # Setting training environment from loader
-        dataloader = ledgers.get_dataloader('train_loader')
-        model = ledgers.get_model(exp_name)
-        optimizer = ledgers.get_optimizer(exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        dataloader = ledgers.get_dataloader()
+        model = ledgers.get_model()
+        optimizer = ledgers.get_optimizer()
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("\nResuming training for 21 epochs...")
         pause_controller.resume()
         loss_E = self.train_epochs(
             model_reloaded, dataloader, optimizer, criterion,
-            num_epochs=21
+            num_epochs=self.config['training']['num_epochs'] * 2,
         )
         pause_controller.pause()
 
         print("\nTraining completed.")
 
         # Verify checkpoints for E
-        model_dir_e = self.manager.models_dir / exp_hash_e
+        model_dir_e = self.chkpt_manager.models_dir / exp_hash_e
         weight_files_e = list(model_dir_e.glob("*_step_*.pt"))
         print(f"[OK] Found {len(weight_files_e)} weight checkpoint files")
         self.assertGreaterEqual(len(weight_files_e), 4, "Should have at least 4 weight checkpoints for 21 epochs")
@@ -804,7 +840,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         loss_a = self.state['losses_a']  # Before model change
 
         print(f"Reloading state A (before model change): {hash_a[:16]}...")
-        success = self.manager.load_state(exp_hash=hash_a)
+        success = self.chkpt_manager.load_state(exp_hash=hash_a)
         self.assertTrue(success, "State A should load successfully")
 
         # Verify HP and data are from checkpoint A
@@ -818,15 +854,17 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Train with original model to verify batches are the same
         print("\nTraining with original model from state A (11 epochs)...")
-        model_original = ledgers.get_model(exp_name)
-        dataloader_original = ledgers.get_dataloader('train_loader')
-        optimizer_original = ledgers.get_optimizer(exp_name)
-        criterion_original = ledgers.get_signal(exp_name)
+        model_original = ledgers.get_model()
+        dataloader_original = ledgers.get_dataloader()
+        optimizer_original = ledgers.get_optimizer()
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         pause_controller.resume()
         loss_A_original = self.train_epochs(
-            model_original, dataloader_original, optimizer_original, criterion_original,
-            num_epochs=11
+            model_original, dataloader_original, optimizer_original, criterion,
+            num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin
         )
         pause_controller.pause()
 
@@ -846,18 +884,18 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Reload again and fix model, should get same batches due to restored RNG
         print(f"\nReloading state A again (to reset RNG for fair comparison)...")
-        success = self.manager.load_state(exp_hash=hash_a)
+        success = self.chkpt_manager.load_state(exp_hash=hash_a)
         self.assertTrue(success, "State A should load successfully second time")
 
         # Fix model conv size - create new model with different architecture
         print("\nFixing model architecture...")
-        model = ledgers.get_model(exp_name)
+        model = ledgers.get_model()
         model.operate(0, {-1}, 1)
         model.operate(2, {-1}, 2)
         model.operate(-2, {}, 3)
         model.operate(-1, {-1 }, 4)
 
-        exp_hash_h, _, changed = self.manager.update_experiment_hash()
+        exp_hash_h, _, changed = self.chkpt_manager.update_experiment_hash()
         print(f"\n[OK] New experiment hash H: {exp_hash_h[:16]}")
         print(f"[OK] Changed components: {changed}")
         self.assertIn('model', changed, "Only model should have changed")
@@ -865,14 +903,16 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         self.assertNotIn('data', changed, "Data should not have changed")
 
         # Train with new model - should get same batches due to restored RNG
-        dataloader = ledgers.get_dataloader('train_loader')
+        dataloader = ledgers.get_dataloader()
         optimizer = th.optim.Adam(model.parameters(), lr=hp_reloaded.get('optimizer', {}).get('lr', 0.001))
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("\nTraining for 11 epochs with new model (same RNG state = same batches)...")
         pause_controller.resume()
-        loss_H = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=11)
+        loss_H = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin)
         pause_controller.pause()
 
         print(f"[OK] Fixed model training loss (first/last): {loss_H} / {loss_H}")
@@ -919,21 +959,23 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         df_update = pd.DataFrame(rows).set_index("sample_id")
         dfm.upsert_df(df_update, origin='train_loader', force_flush=True)
 
-        exp_hash_i, _, changed = self.manager.update_experiment_hash()
+        exp_hash_i, _, changed = self.chkpt_manager.update_experiment_hash()
         print(f"\n[OK] New experiment hash I: {exp_hash_i[:16]}")
         print(f"[OK] Changed components: {changed}")
         self.assertIn('data', changed, "Only data should have changed")
 
         # Train for 11 epochs
-        model = ledgers.get_model(exp_name)
-        dataloader = ledgers.get_dataloader('train_loader')
+        model = ledgers.get_model()
+        dataloader = ledgers.get_dataloader()
         optimizer = th.optim.Adam(model.parameters(), lr=0.001)
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("\nTraining for 11 epochs with 25% discarded...")
         pause_controller.resume()
-        loss_I = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=11)
+        loss_I = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin)
         pause_controller.pause()
 
         # Store state
@@ -958,19 +1000,21 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"Part A: Reloading state C and verifying training reproducibility...")
         print(f"Reloading state C: {hash_c[:16]}...")
 
-        success = self.manager.load_state(exp_hash=hash_c)
+        success = self.chkpt_manager.load_state(exp_hash=hash_c)
         self.assertTrue(success, "State C should load successfully")
 
         # Verify training produces same results
-        model = ledgers.get_model(exp_name)
-        dataloader = ledgers.get_dataloader('train_loader')
+        model = ledgers.get_model()
+        dataloader = ledgers.get_dataloader()
         optimizer = th.optim.Adam(model.parameters(), lr=0.001)
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("\nTraining for 11 epochs to verify reproducibility...")
         pause_controller.resume()
-        loss_C_verify = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=11)
+        loss_C_verify = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin)
         pause_controller.pause()
 
         # Check reproducibility
@@ -988,26 +1032,27 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"\nPart B: Modifying model from reloaded state C...")
 
         # Reload again to reset state
-        success = self.manager.load_state(exp_hash=hash_c)
+        success = self.chkpt_manager.load_state(exp_hash=hash_c)
 
         # Modify model
-        model = ledgers.get_model(exp_name)
+        model = ledgers.get_model()
         print("\nModifying model architecture...")
         model.operate(0, {-2}, 1)  # Change conv1
         model.operate(2, {-2}, 2)  # Change conv2
 
-        exp_hash_j, _, changed = self.manager.update_experiment_hash()
+        exp_hash_j, _, changed = self.chkpt_manager.update_experiment_hash()
         print(f"\n[OK] New experiment hash J: {exp_hash_j[:16]}")
         self.assertIn('model', changed, "Model should have changed")
 
         # Train with modified model
-        dataloader = ledgers.get_dataloader('train_loader')
+        dataloader = ledgers.get_dataloader()
         optimizer = th.optim.Adam(model.parameters(), lr=0.001)
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
 
         print("\nTraining for 11 epochs with modified model...")
         pause_controller.resume()
-        loss_J = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=11)
+        loss_J = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin)
         pause_controller.pause()
 
         # Store state
@@ -1032,19 +1077,21 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"Part A: Reloading state B and verifying training reproducibility...")
         print(f"Reloading state B: {hash_b[:16]}...")
 
-        success = self.manager.load_state(exp_hash=hash_b)
+        success = self.chkpt_manager.load_state(exp_hash=hash_b)
         self.assertTrue(success, "State B should load successfully")
 
         # Verify training produces same results
-        model = ledgers.get_model(exp_name)
-        dataloader = ledgers.get_dataloader('train_loader')
+        model = ledgers.get_model()
+        dataloader = ledgers.get_dataloader()
         optimizer = th.optim.Adam(model.parameters(), lr=0.001)
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("\nTraining for 11 epochs to verify reproducibility...")
         pause_controller.resume()
-        loss_B_verify = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=11)
+        loss_B_verify = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin)
         pause_controller.pause()
 
         # Check reproducibility
@@ -1062,7 +1109,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print(f"\nPart B: Fixing HP, model, and data from reloaded state B...")
 
         # Reload again to reset state
-        success = self.manager.load_state(exp_hash=hash_b)
+        success = self.chkpt_manager.load_state(exp_hash=hash_b)
 
         # Fix HP
         hp = ledgers.get_hyperparams(exp_name)
@@ -1071,7 +1118,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         register_in_ledger(hp, flag="hyperparameters", name=exp_name)
 
         # Fix model
-        model = ledgers.get_model(exp_name)
+        model = ledgers.get_model()
         model.operate(0, {-3}, 1)  # Further modify conv1
 
         # Fix data - discard 5 samples
@@ -1088,7 +1135,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         df_update = pd.DataFrame(rows).set_index("sample_id")
         dfm.upsert_df(df_update, origin='train_loader', force_flush=True)
 
-        exp_hash_k, _, changed = self.manager.update_experiment_hash()
+        exp_hash_k, _, changed = self.chkpt_manager.update_experiment_hash()
         print(f"\n[OK] New experiment hash K: {exp_hash_k[:16]}")
         print(f"[OK] Changed components: {changed}")
         self.assertIn('hp', changed, "HP should have changed")
@@ -1096,14 +1143,16 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         self.assertIn('data', changed, "Data should have changed")
 
         # Train with all fixes
-        dataloader = ledgers.get_dataloader('train_loader')
+        dataloader = ledgers.get_dataloader()
         optimizer = th.optim.Adam(model.parameters(), lr=0.005)
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("\nTraining for 11 epochs with all fixes...")
         pause_controller.resume()
-        loss_K = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=11)
+        loss_K = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin)
         pause_controller.pause()
 
         # Store state
@@ -1127,20 +1176,23 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         print(f"Reloading branch J: {hash_j[:16]}...")
 
-        success = self.manager.load_state(exp_hash=hash_j)
+        success = self.chkpt_manager.load_state(exp_hash=hash_j)
         self.assertTrue(success, "State J should load successfully")
 
         # Train again to verify reproducibility
-        model = ledgers.get_model(exp_name)
-        dataloader = ledgers.get_dataloader('train_loader')
+        model = ledgers.get_model()
+        dataloader = ledgers.get_dataloader()
         optimizer = th.optim.Adam(model.parameters(), lr=0.001)
         optimizer = register_in_ledger(optimizer, flag="optimizer", name=exp_name)
-        criterion = ledgers.get_signal(exp_name)
+        criterion = ledgers.get_signal(name="train_mlt_loss/CE")
+        criterion_bin = ledgers.get_signal(name="train_bin_loss/BCE")
 
         print("\nTraining for 11 epochs to verify reproducibility...")
         pause_controller.resume()
-        loss_J_verify = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=11)
+        loss_J_verify, uids_j = self.train_epochs(model, dataloader, optimizer, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin, return_uids=True)
         pause_controller.pause()
+        self.state['uids_j'] = uids_j  # Store UIDs for later verification
 
         # Check reproducibility
         loss_diff = abs(sum(loss_j) - sum(loss_J_verify))
@@ -1155,6 +1207,129 @@ class CheckpointSystemV3Tests(unittest.TestCase):
                        msg=f"Training should be reproducible within 10%")
 
         print(f"\n[OK] TEST 10 PASSED - Branch J training is reproducible")
+
+    # ========================================================================
+    # Test: 11_restart_from_config_verify_reproducibility
+    # ========================================================================
+    def test_11_restart_from_config_verify_reproducibility(self):
+        """Test 11: Restart experiment from config - verify all components load to branch_j state"""
+        print(f"\n{'='*80}")
+        print("TEST 11: Restart Experiment from Config - Verify Full Reproducibility")
+        print(f"{'='*80}\n")
+
+        # Reference variables
+        target_hash = self.state['exp_hash_j']  # Target is branch_j
+        loss_j_original = self.state['losses_j']
+        originals_uids = self.state.get('uids_j', None)
+
+        print(f"Simulating fresh restart: loading everything from config...")
+        print(f"Target state: {target_hash[:16]} (branch_j)")
+
+        # Simulate fresh Python process: re-register everything from config
+        config_reloaded = self.config_cp
+        exp_name = EXP_NAME
+
+        # Clear existing ledger entries
+        ledgers.clear_all()
+        print("[OK] Cleared existing ledger entries")
+
+        # =================================================
+        # Automotically load components from existing chkpt
+        # =================================================
+        # First init a checkpoint manager with reloaded config
+        self.chkpt_manager = CheckpointManagerV2(root_log_dir=self.config.get('root_log_dir'))
+        ledgers.register_checkpoint_manager(exp_name, self.chkpt_manager)
+
+        # Re-register HP
+        register_in_ledger(config_reloaded, flag="hyperparameters", name=exp_name)
+        print("[OK] Hyperparameters re-registered")
+
+        # Create fresh model
+        model_restarted = SimpleCNN(conv1_out=8, conv2_out=16)  # Match branch_j architecture
+        # # Model arch. and weights are updated at the init of model interface
+        model_restarted = register_in_ledger(model_restarted, flag="model", name=exp_name, device=DEVICE)
+
+        # Re-register dataloader
+        # # Same here, dataloader is created from HP at init of dataloader interface, and data are loaded from chkpt
+        register_in_ledger(
+            self.dataset,
+            flag="dataloader",
+            name=exp_name,
+            compute_hash=False,
+            is_training=True,
+            batch_size=config_reloaded.get('data', {}).get('train_loader', {}).get('batch_size', 32),
+            shuffle=config_reloaded.get('data', {}).get('train_loader', {}).get('shuffle', True)
+        )
+
+        # Create and register dataloader
+        dataloader = register_in_ledger(
+            self.dataset,
+            flag="dataloader",
+            name=exp_name,
+            compute_hash=False,
+            is_training=True,
+            batch_size=self.config.get('data', {}).get('train_loader', {}).get('batch_size', 32),
+            shuffle=self.config.get('data', {}).get('train_loader', {}).get('shuffle', True)
+        )
+
+        # Optimizer and criterion
+        optimizer_restarted = th.optim.Adam(
+            model_restarted.parameters(),
+            lr=config_reloaded.get('optimizer', {}).get('lr', 0.001)
+        )
+        optimizer_restarted = register_in_ledger(optimizer_restarted, flag="optimizer", name=exp_name)
+        # # Create and register signal (criterion)
+        criterion = nn.CrossEntropyLoss(reduction='none')
+        criterion = register_in_ledger(
+            criterion,
+            flag="signal",
+            name="train_mlt_loss/CE",
+            log=True
+        )
+        criterion_bin = nn.BCEWithLogitsLoss(reduction='none')
+        criterion_bin = register_in_ledger(
+            criterion_bin,
+            flag="signal",
+            name="train_bin_loss/BCE",
+            log=True
+        )
+        print("[OK] Fresh registrations complete")
+
+        print("\nTraining for 11 epochs to verify reproducibility...")
+        pause_controller.resume()
+        loss_J_verify, uids_j_restarted = self.train_epochs(model_restarted, dataloader, optimizer_restarted, criterion, num_epochs=self.config['training']['num_epochs'],
+            criterion_bin=criterion_bin, return_uids=True)
+        pause_controller.pause()
+
+        # Verify UIDs match original branch_j
+        self.assertListEqual(uids_j_restarted, originals_uids,
+                             msg="Sample UIDs should match original branch_j after restart")
+        # Verify training produces same results
+                # Check reproducibility
+        loss_diff = abs(sum(loss_j_original) - sum(loss_J_verify))
+        loss_relative_diff = loss_diff / sum(loss_j_original) if sum(loss_j_original) != 0 else 0
+
+        print(f"\n[OK] Loss comparison:")
+        print(f"  Original: {sum(loss_j_original):.6f}")
+        print(f"  Reloaded: {sum(loss_J_verify):.6f}")
+        print(f"  Relative difference: {loss_relative_diff*100:.3f}%")
+        self.assertLess(loss_relative_diff, 0.1,
+                       msg=f"Training should be reproducible within 10%")
+
+    def test_logger_queue_saved_with_weights(self):
+        # Initialize hash and dump immediately
+        hash, isnew, changed = self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
+
+        snapshot_path = Path(self.chkpt_manager.loggers_dir) / self.chkpt_manager.current_exp_hash / "loggers.json"
+        self.assertTrue(snapshot_path.exists(), "Logger snapshot should be saved with checkpoint")
+
+        with open(snapshot_path, "r") as f:
+            snapshot = json.load(f)
+
+        loggers = snapshot.get("loggers", {})
+        self.assertIn(self.config.get("experiment_name"), loggers, "Logger entry should be present")
+        signals = loggers[self.config.get("experiment_name")].get("signal_history", [])
+        self.assertGreaterEqual(len(signals), 1, "Signal history should contain logged signals")
 
 
 if __name__ == '__main__':
@@ -1173,6 +1348,8 @@ if __name__ == '__main__':
     suite.addTest(CheckpointSystemV3Tests('test_08_reload_before_data_change_verify_and_modify'))
     suite.addTest(CheckpointSystemV3Tests('test_09_reload_before_hp_change_verify_and_fix'))
     suite.addTest(CheckpointSystemV3Tests('test_10_reload_branch_j_verify_reproducibility'))
+    suite.addTest(CheckpointSystemV3Tests('test_11_restart_from_config_verify_reproducibility'))
+    suite.addTest(CheckpointSystemV3Tests('test_logger_queue_saved_with_weights'))
 
     # Run the suite
     runner = unittest.TextTestRunner(verbosity=2)

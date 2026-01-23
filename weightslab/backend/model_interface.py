@@ -194,6 +194,67 @@ class ModelInterface(NetworkWithOps):
         except Exception:
             self._checkpoint_manager = None
 
+        # Auto-load latest model architecture and weights if checkpoints exist
+        if self._checkpoint_manager is not None:
+            try:
+                # Try to get the latest experiment hash
+                latest_hash = None
+                if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
+                    latest_hash = self._checkpoint_manager.current_exp_hash
+                elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
+                    manifest = self._checkpoint_manager.manifest
+                    latest_hash = getattr(manifest, 'latest_hash', None)
+
+                # TODO (GP): Check or do chkpt manager functions to load latest chkpt directly with archi and weights
+                if latest_hash:
+                    # Use checkpoint manager's load_checkpoint to get architecture and weights
+                    checkpoint_data = self._checkpoint_manager.load_checkpoint(
+                        exp_hash=latest_hash,
+                        load_model=True,
+                        load_weights=True,
+                        load_config=False,
+                        load_data=False
+                    )
+
+                    # Apply loaded model if architecture was loaded
+                    if checkpoint_data.get('model'):
+                        loaded_model = checkpoint_data['model']
+                        weights = checkpoint_data.get('weights')
+
+                        # Apply weights if available
+                        if weights and 'model_state_dict' in weights:
+                            loaded_model.load_state_dict(weights['model_state_dict'], strict=False)
+                            step = weights.get('step', -1)
+                            logger.info(f"Auto-loaded model architecture + weights from checkpoint {latest_hash[:16]} (step {step})")
+                        else:
+                            logger.info(f"Auto-loaded model architecture from checkpoint {latest_hash[:16]}")
+
+                        self.model = loaded_model.to(device)
+
+                    elif checkpoint_data.get('weights'):
+                        # Only weights available, load into existing model
+                        weights = checkpoint_data['weights']
+                        if 'model_state_dict' in weights:
+                            self.model.load_state_dict(weights['model_state_dict'], strict=False)
+                            step = weights.get('step', -1)
+                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {step})")
+            except Exception as e:
+                logger.debug(f"Could not auto-load model checkpoint: {e}")
+
+            # Create a property on the ModelInterface class that forwards to
+            # the underlying model attribute. Using a property keeps the
+            # attribute live (reads reflect model changes).
+            try:
+                def _make_getter(n):
+                    return lambda inst: getattr(inst.model, n)
+
+                getter = _make_getter(name)
+                prop = property(fget=getter)
+                setattr(self.__class__, name, prop)
+            except Exception:
+                # Best-effort: skip if we cannot set the property
+                pass
+
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
 

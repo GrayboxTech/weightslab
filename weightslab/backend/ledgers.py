@@ -544,6 +544,9 @@ class Ledger:
             self._optimizers.clear()
             self._dataframes.clear()
             self._checkpoint_managers.clear()
+            self._hyperparams.clear()
+            self._loggers.clear()
+            self._signals.clear()
             self._models_weak.clear()
             self._dataloaders_weak.clear()
             self._optimizers_weak.clear()
@@ -554,6 +557,9 @@ class Ledger:
             self._proxies_optimizers.clear()
             self._proxies_dataframes.clear()
             self._proxies_checkpoint_managers.clear()
+            self._proxies_hyperparams.clear()
+            self._proxies_loggers.clear()
+            self._proxies_signals.clear()
 
     def snapshot(self) -> Dict[str, List[str]]:
         """Return the current keys for all registries (a lightweight snapshot)."""
@@ -585,7 +591,9 @@ def register_model(name: str, model: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_model(name, model, weak=weak)
 
 def get_model(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_models()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_models()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_model(name)
 
 def get_models() -> List[str]:
@@ -600,7 +608,9 @@ def register_dataloader(name: str, dataloader: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_dataloader(name, dataloader, weak=weak)
 
 def get_dataloader(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_dataloaders()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_dataloaders()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_dataloader(name)
 
 def get_dataloaders() -> List[str]:
@@ -615,7 +625,9 @@ def register_optimizer(name: str, optimizer: Any, weak: bool = False) -> None:
     GLOBAL_LEDGER.register_optimizer(name, optimizer, weak=weak)
 
 def get_optimizer(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_optimizers()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_optimizers()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_optimizer(name)
 
 def get_optimizers() -> List[str]:
@@ -627,7 +639,9 @@ def register_hyperparams(name: str, params: Dict[str, Any], weak: bool = False) 
     GLOBAL_LEDGER.register_hyperparams(name, params, weak=weak)
 
 def get_hyperparams(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_hyperparams()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_hyperparams()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_hyperparams(name)
 
 def list_hyperparams() -> List[str]:
@@ -666,7 +680,9 @@ def register_logger(name: str, logger: Any) -> None:
     GLOBAL_LEDGER.register_logger(name, logger)
 
 def get_logger(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_loggers()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_loggers()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_logger(name)
 
 def list_loggers() -> List[str]:
@@ -681,7 +697,9 @@ def register_signal(name: str, signal: Any) -> None:
     GLOBAL_LEDGER.register_signal(name, signal)
 
 def get_signal(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_signals()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_signals()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_signal(name)
 
 def list_signals() -> List[str]:
@@ -696,7 +714,9 @@ def register_checkpoint_manager(name: str, manager: Any, weak: bool = False) -> 
     return GLOBAL_LEDGER.register_checkpoint_manager(name, manager, weak=weak)
 
 def get_checkpoint_manager(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_checkpoint_managers()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_checkpoint_managers()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_checkpoint_manager(name)
 
 def list_checkpoint_managers() -> List[str]:
@@ -711,7 +731,9 @@ def register_dataframe(name: str, dataframe: Any, weak: bool = False) -> None:
     return GLOBAL_LEDGER.register_dataframe(name, dataframe, weak=weak)
 
 def get_dataframe(name: Optional[str] = None) -> Any:
-    name = name or GLOBAL_LEDGER.list_dataframes()[-1]
+    if name is None:
+        existing = GLOBAL_LEDGER.list_dataframes()
+        name = existing[-1] if existing else "main"
     return GLOBAL_LEDGER.get_dataframe(name)
 
 def list_dataframes() -> List[str]:
@@ -719,6 +741,11 @@ def list_dataframes() -> List[str]:
 
 def unregister_dataframe(name: str) -> None:
     return GLOBAL_LEDGER.unregister_dataframe(name)
+
+
+def clear_all() -> None:
+    """Clear all registries (models, dataloaders, optimizers, dataframes, hyperparams, loggers, signals, etc.)"""
+    return GLOBAL_LEDGER.clear()
 
 
 # Main

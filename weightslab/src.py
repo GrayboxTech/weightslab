@@ -106,7 +106,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     out = original_forward(*a, **kw)
 
     if kwargs.get('per_sample', False):
-        out = out.flatten(1).mean(dim=1)  # Works for any shape [B, ...]
+        if out.ndim > 1:
+            out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]
 
     # extract scalar
     batch_scalar = manual_signals_batch
@@ -366,6 +367,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
     elif 'loss' in flag.lower() or flag.lower() in ('criterion', 'signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
         reg_name = kwargs.get('name') or flag
+        if 'log' not in kwargs:
+            kwargs['log'] = True
 
         # decide how to wrap: loss-like (forward) or metric-like (compute)
         # wrap forward
@@ -446,29 +449,62 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             name = kwargs.get('name') or getattr(obj, '__name__', None) or 'hyperparams'
             # If obj is a string, treat as a file path and start watcher
             try:
-                if isinstance(obj, str):
-                    path = obj
-                    # register empty/defaults if provided in kwargs
-                    defaults = kwargs.get('defaults', None)
-                    if defaults:
-                        register_hyperparams(name, defaults)
-                    # start ledger-managed watcher
-                    watch_hyperparams_file(name, path, poll_interval=kwargs.get('poll_interval', 1.0))
+                # First check if hyperparameters are available in checkpoint manager
+                checkpoint_hp_loaded = False
+                try:
+                    chkpt_manager = get_checkpoint_manager()
+                    if chkpt_manager is not None and not isinstance(chkpt_manager, ledgers.Proxy):
+                        # Try to get latest hash and load hyperparameters from checkpoint
+                        latest_hash = None
+                        if hasattr(chkpt_manager, 'current_exp_hash') and chkpt_manager.current_exp_hash:
+                            latest_hash = chkpt_manager.current_exp_hash
+                        elif hasattr(chkpt_manager, 'manifest') and chkpt_manager.manifest:
+                            manifest = chkpt_manager.manifest
+                            latest_hash = getattr(manifest, 'latest_hash', None)
+                        
+                        if latest_hash:
+                            checkpoint_data = chkpt_manager.load_checkpoint(
+                                exp_hash=latest_hash,
+                                load_model=False,
+                                load_weights=False,
+                                load_config=True,
+                                load_data=False
+                            )
+                            if checkpoint_data.get('config'):
+                                config = checkpoint_data['config']
+                                register_hyperparams(name, config)
+                                logger.info(f"Loaded hyperparameters from checkpoint {latest_hash[:16]}")
+                                checkpoint_hp_loaded = True
+                except Exception:
+                    pass  # If checkpoint loading fails, proceed with normal registration
+                
+                if not checkpoint_hp_loaded:
+                    # Normal registration if no checkpoint hyperparameters were loaded
+                    if isinstance(obj, str):
+                        path = obj
+                        # register empty/defaults if provided in kwargs
+                        defaults = kwargs.get('defaults', None)
+                        if defaults:
+                            register_hyperparams(name, defaults)
+                        # start ledger-managed watcher
+                        watch_hyperparams_file(name, path, poll_interval=kwargs.get('poll_interval', 1.0))
 
-                    # return the ledger handle (proxy or dict)
-                    return get_hyperparams(name)
-                elif isinstance(obj, dict):
-                    register_hyperparams(name, obj)
-
-                    return get_hyperparams(name)
-                else:
-                    # unsupported type for hp; attempt best-effort registration
-                    try:
-                        register_hyperparams(name, dict(obj))
+                        # return the ledger handle (proxy or dict)
+                        return get_hyperparams(name)
+                    elif isinstance(obj, dict):
+                        register_hyperparams(name, obj)
 
                         return get_hyperparams(name)
-                    except Exception:
-                        raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
+                    else:
+                        # unsupported type for hp; attempt best-effort registration
+                        try:
+                            register_hyperparams(name, dict(obj))
+
+                            return get_hyperparams(name)
+                        except Exception:
+                            raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
+                
+                return get_hyperparams(name)
             except Exception:
                 # bubble up original error
                 raise

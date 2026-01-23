@@ -96,10 +96,12 @@ class CheckpointManagerV2:
         self.models_dir = self.checkpoints_dir / "models"
         self.hp_dir = self.checkpoints_dir / "HP"
         self.data_checkpoint_dir = self.checkpoints_dir / "data"
+        self.loggers_dir = self.checkpoints_dir / "loggers"
 
         self.models_dir.mkdir(exist_ok=True)
         self.hp_dir.mkdir(exist_ok=True)
         self.data_checkpoint_dir.mkdir(exist_ok=True)
+        self.loggers_dir.mkdir(exist_ok=True)
 
         # Manifest file for tracking hash chronology
         self.manifest_file = self.checkpoints_dir / "manifest.yaml"
@@ -124,6 +126,12 @@ class CheckpointManagerV2:
 
         # Load existing state if available
         self._load_manager_state()
+
+        # Load any existing logger snapshots for visibility when starting
+        self._load_all_logger_snapshots()
+
+        # Automatically resume latest state when an existing root_log_dir is provided
+        self._bootstrap_latest_state()
 
         logger.info(f"CheckpointManagerV2 initialized at {self.root_log_dir}")
 
@@ -157,6 +165,10 @@ class CheckpointManagerV2:
             }
         except Exception:
             return None
+
+    def get_current_experiment_hash(self) -> Optional[str]:
+        """Get the current experiment hash."""
+        return self.current_exp_hash
 
     def update_experiment_hash(
         self,
@@ -312,6 +324,89 @@ class CheckpointManagerV2:
         except Exception as e:
             logger.warning(f"Failed to update manifest: {e}")
 
+    # ------------------------------------------------------------------
+    # Logger snapshot management
+    # ------------------------------------------------------------------
+    def _get_logger_snapshot_path(self, exp_hash: Optional[str] = None) -> Path:
+        exp = exp_hash or self.current_exp_hash
+        return self.loggers_dir / exp / "loggers.json" if exp else None
+
+    def save_logger_snapshot(self, exp_hash: Optional[str] = None) -> Optional[Path]:
+        """Persist logger queues for the given experiment hash.
+
+        Uses the same hash as model/hp/data; does not affect hashing.
+        """
+        exp = exp_hash or self.current_exp_hash
+        if exp is None:
+            return None
+
+        try:
+            logger_names = ledgers.list_loggers()
+            if not logger_names:
+                return None
+
+            snapshot = {"exp_hash": exp, "timestamp": datetime.now().isoformat(), "loggers": {}}
+            for lname in logger_names:
+                lg = ledgers.get_logger(lname)
+                if lg is None:
+                    continue
+                # Expect LoggerQueue interface
+                history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
+                graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
+                snapshot["loggers"][lname] = {
+                    "signal_history": history,
+                    "graph_names": graphs,
+                }
+
+            if not snapshot["loggers"]:
+                return None
+
+            path = self._get_logger_snapshot_path(exp)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(snapshot, f, indent=2)
+            logger.info(f"Saved logger snapshot: {path}")
+            return path
+        except Exception as e:
+            logger.warning(f"Failed to save logger snapshot: {e}")
+            return None
+
+    def load_logger_snapshot(self, exp_hash: str) -> bool:
+        """Load logger queues from snapshot for a specific experiment hash."""
+        path = self._get_logger_snapshot_path(exp_hash)
+        if path is None or not path.exists():
+            return False
+        try:
+            with open(path, "r") as f:
+                snapshot = json.load(f)
+
+            loggers_payload = snapshot.get("loggers", {})
+            for lname, payload in loggers_payload.items():
+                try:
+                    from weightslab.utils.logger import LoggerQueue
+
+                    lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else None
+                    # If no real logger (or only a proxy) exists, create a fresh LoggerQueue so we can enqueue history
+                    if lg is None or not hasattr(lg, "load_snapshot"):
+                        lg = LoggerQueue(name=lname, register=True)
+                    lg.load_snapshot(payload)
+                except Exception as inner_e:
+                    logger.warning(f"Failed to restore logger '{lname}': {inner_e}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load logger snapshot for {exp_hash}: {e}")
+            return False
+
+    def _load_all_logger_snapshots(self):
+        """Load all logger snapshots found under loggers/ for visibility when starting."""
+        if not self.loggers_dir.exists():
+            return
+        for exp_dir in self.loggers_dir.iterdir():
+            if exp_dir.is_dir():
+                snapshot_file = exp_dir / "loggers.json"
+                if snapshot_file.exists():
+                    self.load_logger_snapshot(exp_dir.name)
+
     def _load_manifest(self) -> Dict[str, Any]:
         """Load manifest file."""
         if self.manifest_file.exists():
@@ -424,6 +519,9 @@ class CheckpointManagerV2:
             logger.info("Dumping data snapshot...")
             self.save_data_snapshot()
 
+        # Always save logger snapshot alongside other components (same hash)
+        self.save_logger_snapshot()
+
     def has_pending_changes(self) -> tuple[bool, Set[str]]:
         """Check if there are pending changes.
 
@@ -533,6 +631,12 @@ class CheckpointManagerV2:
         try:
             th.save(checkpoint, checkpoint_file)
             logger.info(f"Saved model checkpoint: {checkpoint_file.name}")
+
+            # Persist logger queues alongside weight checkpoints
+            try:
+                self.save_logger_snapshot()
+            except Exception as e:
+                logger.debug(f"Could not save logger snapshot with checkpoint: {e}")
             return checkpoint_file
         except Exception as e:
             logger.error(f"Failed to save model checkpoint: {e}")
@@ -922,6 +1026,21 @@ class CheckpointManagerV2:
         state_file = self.root_log_dir / ".checkpoint_manager_state.json"
 
         if not state_file.exists():
+            # handled above
+            # No explicit state file; try to derive from manifest
+            manifest = self._load_manifest()
+            latest = manifest.get('latest_hash')
+            if latest:
+                self.current_exp_hash = latest
+                exp_info = manifest.get('experiments', {}).get(latest, {})
+                component_hashes = {
+                    'hp': exp_info.get('hp_hash'),
+                    'model': exp_info.get('model_hash'),
+                    'data': exp_info.get('data_hash'),
+                    'combined': latest,
+                }
+                self.hash_generator.restore_hashes(component_hashes, combined_hash=latest)
+                logger.info(f"Derived manager state from manifest: hash={latest}")
             return
 
         try:
@@ -954,6 +1073,20 @@ class CheckpointManagerV2:
             logger.info(f"Loaded manager state: hash={self.current_exp_hash}, step={self._step_counter}")
         except Exception as e:
             logger.warning(f"Failed to load manager state: {e}")
+
+    def _bootstrap_latest_state(self):
+        """If a current hash is known (or manifest has one), load and apply it.
+
+        This enables auto-resume when instantiating the manager on an existing
+        root_log_dir without requiring an explicit load_state call by the user.
+        """
+        target = self.current_exp_hash or self.get_latest_hash()
+        if not target:
+            return
+        try:
+            self.load_state(target)
+        except Exception as e:
+            logger.warning(f"Auto-resume failed for {target}: {e}")
 
     def load_checkpoint(self, exp_hash: str,
                        load_model: bool = True,
@@ -1276,6 +1409,12 @@ class CheckpointManagerV2:
             except Exception as e:
                 logger.error(f"[ERROR] Failed to restore dataloader iteration state: {e}")
                 success = False
+
+        # Restore logger snapshot for this experiment if available
+        try:
+            self.load_logger_snapshot(exp_hash)
+        except Exception as e:
+            logger.warning(f"Failed to restore logger snapshot for {exp_hash}: {e}")
 
         # Update current experiment hash
         if success:
