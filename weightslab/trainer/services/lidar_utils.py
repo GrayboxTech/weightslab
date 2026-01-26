@@ -1,18 +1,100 @@
 import logging
+import os
+import math
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
+
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+
 logger = logging.getLogger(__name__)
 
+def load_labels_for_scan(bin_path):
+    """
+    Given a path like .../velodyne/000001.bin, try to find .../label_velodyne/000001.txt
+    Returns list of dicts: {'cls': str, 'box': [x, y, z, l, w, h, yaw]}
+    """
+    try:
+        # Resolve Label Path
+        # bin_path: /path/to/velodyne/xxxxx.bin
+        # expected: /path/to/label_velodyne/xxxxx.txt
+        dirname = os.path.dirname(bin_path)
+        filename = os.path.basename(bin_path)
+        file_id = os.path.splitext(filename)[0]
+        
+        # Check standard folder structure
+        # ../velodyne -> ../label_velodyne
+        parent = os.path.dirname(dirname)
+        label_dir = os.path.join(parent, "label_velodyne")
+        label_path = os.path.join(label_dir, f"{file_id}.txt")
+        
+        if not os.path.exists(label_path):
+            return []
 
-def render_lidar(points, config):
+        labels = []
+        with open(label_path, 'r') as f:
+            for line in f.readlines():
+                parts = line.strip().split()
+                if not parts: continue
+                
+                # Format: Class x y z l w h heading
+                cls_name = parts[0]
+                if cls_name == "DontCare": continue
+                
+                # Parse floats
+                vals = [float(x) for x in parts[1:]]
+                if len(vals) < 7: continue
+                
+                labels.append({
+                    'cls': cls_name,
+                    'box': np.array(vals) # [x, y, z, l, w, h, yaw]
+                })
+        return labels
+    except Exception as e:
+        logger.warning(f"Failed to load labels for {bin_path}: {e}")
+        return []
+
+def get_corners_bev(box):
+    """
+    Get 4 corners of the bounding box in BEV (X-Y plane).
+    box: [x, y, z, l, w, h, yaw]
+    """
+    x, y, z, l, w, h, yaw = box
+    
+    # Rotation matrix
+    c = np.cos(yaw)
+    s = np.sin(yaw)
+    R = np.array([[c, -s], [s, c]])
+    
+    # Corners in local coords (centered at 0)
+    # l is along x, w is along y
+    dx = l / 2
+    dy = w / 2
+    
+    # Counter-clockwise 
+    corners_local = np.array([
+        [dx, dy],
+        [-dx, dy],
+        [-dx, -dy],
+        [dx, -dy]
+    ])
+    
+    # Rotate and translate
+    corners_global = (R @ corners_local.T).T + np.array([x, y])
+    return corners_global
+
+def render_lidar(points, config, file_path=None):
     """
     Main entry point for LiDAR visualization. Dispatch options driven by config.
     """
     mode = config.get("mode", "bev")
     cmap_name = config.get("cmap", "turbo")
     max_range = config.get("max_range", 50.0)
+    
+    # Try to load labels if file path provided
+    labels = []
+    if file_path:
+        labels = load_labels_for_scan(file_path)
 
     if mode == "range":
         rv_conf = config.get("range_view", {})
@@ -49,16 +131,14 @@ def render_lidar(points, config):
             cx=bev_conf.get("center_x", 400),
             cy=bev_conf.get("center_y", 400),
             max_dist=max_range,
-            cmap_name=cmap_name
+            cmap_name=cmap_name,
+            labels=labels
         )
 
 
-def render_bev(points, res=0.1, size=800, cx=400, cy=400, max_dist=50.0, cmap_name="turbo"):
+def render_bev(points, res=0.1, size=800, cx=400, cy=400, max_dist=50.0, cmap_name="turbo", labels=None):
     """
-    Render Top-Down Bird's Eye View.
-    X -> Right (Image X)
-    Y -> Forward (Image Y, inverted for pixel coords)
-    Z -> Height (Color)
+    Render Top-Down Bird's Eye View with optional Labels.
     """
     if points.size == 0:
         return Image.new("RGB", (size, size))
@@ -95,21 +175,61 @@ def render_bev(points, res=0.1, size=800, cx=400, cy=400, max_dist=50.0, cmap_na
         norm_z = np.clip((z - z_min) / (z_max - z_min), 0, 1)
         
         try:
+             import matplotlib.pyplot as plt
+             import matplotlib.cm as cm
              cmap = cm.get_cmap(cmap_name)
              
              # Apply Cmap
              colors = cmap(norm_z) # (N, 4)
              rgb = (colors[:, :3] * 255).astype(np.uint8)
-             
-             # Draw points. Simple painter's algorithm (later points overwrite)
-             # For better results in dense clouds, could sort filters or use max-z buffer.
              canvas[v, u] = rgb
              
         except ImportError:
              # Fallback white
              canvas[v, u] = 255
     
-    return Image.fromarray(canvas, mode="RGB")
+    # Convert to PIL for drawing boxes
+    img = Image.fromarray(canvas, mode="RGB")
+    draw = ImageDraw.Draw(img)
+
+    # 5. Draw Labels
+    if labels:
+        for lbl in labels:
+            cls = lbl['cls']
+            box = lbl['box'] # x, y, z, l, w, h, yaw
+            
+            # Get corners
+            corners = get_corners_bev(box)
+            
+            # Project to pixels
+            poly_pts = []
+            for cp in corners:
+                cu = int(cx + cp[0] / res)
+                cv = int(cy - cp[1] / res)
+                poly_pts.append((cu, cv))
+            
+            # Color based on class?
+            color = "green"
+            if cls == "Car": color = "cyan"
+            elif cls == "Pedestrian": color = "red"
+            elif cls == "Cyclist": color = "yellow"
+            
+            # Draw Polygon
+            draw.polygon(poly_pts, outline=color, width=3) # Increased width from default 1 to 3
+            
+            # Draw Heading Line (Front of box)
+            # Front is traditionally +X in Kitti Label/Box convention here
+            # Corners are: FR, FL, BL, BR?
+            # get_corners_bev: [dx, dy] is Front-Left? No.
+            # 0: [dx, dy], 1: [-dx, dy]...
+            # dx is forward (l/2).
+            # So 0-3 is front face? No. 0 is (+,+). 3 is (+,-)
+            # Midpoint of 0 and 3
+            front_u = (poly_pts[0][0] + poly_pts[3][0]) / 2
+            front_v = (poly_pts[0][1] + poly_pts[3][1]) / 2
+            draw.line([poly_pts[0], poly_pts[3]], fill="white", width=3) # Increased heading line width too
+            
+    return img
 
 
 def render_range_view(points, width=1024, height=64, fov_up=45.0, fov_down=45.0, stretch=6, max_dist=50.0, cmap_name="turbo"):

@@ -184,20 +184,30 @@ def load_raw_image(dataset, index) -> Image.Image:
         np_img = np.clip(np_img, 0, 255)
         return np_img.astype(np.uint8)
 
-    # Get dataset wrapper if exists
-    wrapped = getattr(dataset, "wrapped_dataset", dataset)
+    # Get dataset wrapper if exists - RECURSIVE UNWRAP
+    wrapped = dataset
+    while hasattr(wrapped, "wrapped_dataset"):
+        wrapped = wrapped.wrapped_dataset
     
     # Check for Lidar Config (attached in train script)
     # If not present, default to empty dict (will use defaults in render_lidar)
     lidar_config = getattr(wrapped, "viz_config", {})
 
-    if hasattr(wrapped, "images") and isinstance(wrapped.images, list):
-        img_path = wrapped.images[index]
+    # Debug logging
+    # logger.info(f"load_raw_image index={index}, type(wrapped)={type(wrapped)}")
+    
+    if hasattr(wrapped, "images") and isinstance(wrapped.images, (list, tuple, np.ndarray)):
+        try:
+            img_path = wrapped.images[index]
+        except IndexError:
+             logger.error(f"Index {index} out of bounds for images list of len {len(wrapped.images)}")
+             return None
+             
         if isinstance(img_path, str) and img_path.lower().endswith(('.bin', '.npy', '.pcd')):
              points = load_point_cloud_data(img_path)
              if points is not None:
-                 # Dispatch to main renderer with config
-                 return render_lidar(points, lidar_config)
+                 # Dispatch to main renderer with config (and file path for labels)
+                 return render_lidar(points, lidar_config, file_path=img_path)
              else:
                  return Image.new('RGB', (800, 600), color=(50, 50, 50))
 
