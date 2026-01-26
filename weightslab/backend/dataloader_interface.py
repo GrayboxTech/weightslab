@@ -13,6 +13,7 @@ It also supports:
 - global pause control
 - registration in a global ledger and dynamic batch-size updates based on
   hyperparameters
+- checkpoint-based data loading and reproducible iterator restoration
 """
 import logging
 from typing import Any, Iterator, Optional
@@ -25,9 +26,10 @@ from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
-    resolve_hp_name
+    resolve_hp_name,
+    get_checkpoint_manager,
 )
-from weightslab.utils import filter_kwargs_for_callable
+from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
 
 
 # Get Global Logger
@@ -64,6 +66,7 @@ class MaskedSampler(Sampler):
 
         # Iterate through base sampler, yielding only non-denied indices
         for idx in self.base_sampler:
+            # Skip already generated samples based on offset
             uid = int(self.tracked_dataset.unique_ids[idx])
             if uid not in deny_listed_uids:
                 yield idx
@@ -222,6 +225,7 @@ class DataLoaderInterface:
         # Internal flags / helpers
         self._mutable_batch_sampler = None
         self._dl_build_kwargs: Optional[dict] = None
+        self._pending_iteration_state: Optional[dict] = None
 
         if isinstance(data_loader_or_dataset, DataLoader):
             logger.warning(
@@ -257,6 +261,9 @@ class DataLoaderInterface:
             self.tracked_dataset._map_updates_hook_fns.append(
                 (self._reset_iterator, {})
             )
+
+            # Load checkpoint data early (before dataloader is used)
+            self._load_checkpoint_data()
 
             # store kwargs so we can recreate dataloader if needed
             self._dl_build_kwargs = {
@@ -337,10 +344,22 @@ class DataLoaderInterface:
 
         self.init_attributes(self.dataloader)
 
+        # Apply pending iteration state if one was loaded from checkpoint
+        if hasattr(self, '_pending_iteration_state') and self._pending_iteration_state:
+            try:
+                self.restore_iteration_state(self._pending_iteration_state)
+                logger.info(f"Restored dataloader iteration state: {self._pending_iteration_state}")
+            except Exception as e:
+                logger.warning(f"Failed to restore pending iteration state: {e}")
+            finally:
+                self._pending_iteration_state = None
+
         # Internal iterator used by `_next_batch` (lazy created to avoid consuming RNG early)
         self._iterator: Optional[Iterator] = None
-        # Track how many batches have been yielded since last reset (for reproducible seeking)
-        self._batches_yielded: int = 0
+        # Track how many samples have been yielded since last reset (for reproducible seeking)
+        self._samples_yielded: int = 0
+        self._sample_offset: int = 0
+        self._skipped = []
 
         # Optionally register in the global ledger for cross-thread access.
         # If no explicit `name` is provided, try to infer a friendly name from
@@ -359,6 +378,88 @@ class DataLoaderInterface:
             except Exception:
                 # Best-effort: ignore registration failures
                 pass
+
+    def _load_checkpoint_data(self) -> None:
+        """Load data checkpoint, RNG state, and dataloader iteration state early.
+
+        This method is called after tracked_dataset initialization to restore
+        data from the latest checkpoint if available. It:
+        1. Loads data snapshot and applies it to the dataframe
+        2. Restores RNG state for reproducible shuffling
+        3. Restores dataloader iteration state for deterministic seeking
+        """
+        try:
+            checkpoint_manager = get_checkpoint_manager()
+            if checkpoint_manager is None:
+                return
+
+            # Get latest experiment hash
+            latest_hash = None
+            if hasattr(checkpoint_manager, 'current_exp_hash') and checkpoint_manager.current_exp_hash:
+                latest_hash = checkpoint_manager.current_exp_hash
+            elif hasattr(checkpoint_manager, 'get_latest_hash'):
+                latest_hash = checkpoint_manager.get_latest_hash()
+
+            if not latest_hash:
+                return
+
+            # Load checkpoint with data state
+            checkpoint_data = checkpoint_manager.load_checkpoint(
+                exp_hash=latest_hash,
+                load_model=False,
+                load_weights=False,
+                load_config=False,
+                load_data=True,
+                force=True
+            )
+
+            if not checkpoint_data.get('loaded_components'):
+                return
+
+            # Apply data snapshot to dataframe if loaded
+            if 'data' in checkpoint_data['loaded_components']:
+                try:
+                    data_state = checkpoint_data.get('data_state', {})
+                    snapshot_df = data_state.get('snapshot')
+
+                    if snapshot_df is not None and not snapshot_df.empty:
+                        if hasattr(self.tracked_dataset, 'upsert_df'):
+                            self.tracked_dataset.upsert_df(snapshot_df, force_flush=True)
+                            logger.info(f"Applied data snapshot from checkpoint ({len(snapshot_df)} rows)")
+                except Exception as e:
+                    logger.warning(f"Failed to apply data snapshot: {e}")
+
+            # Restore RNG state for reproducible shuffling
+            if checkpoint_data.get('rng_state'):
+                try:
+                    restore_rng_state(checkpoint_data['rng_state'])
+                    logger.debug("Restored RNG state from checkpoint")
+                except Exception as e:
+                    logger.warning(f"Failed to restore RNG state: {e}")
+
+            # Restore dataloader iteration state for deterministic seeking
+            if checkpoint_data.get('dataloader_iteration_state'):
+                try:
+                    iter_state = checkpoint_data['dataloader_iteration_state']
+                    # Normalize to handle both dict and single state formats
+                    if isinstance(iter_state, dict) and 'samples_yielded' in iter_state:
+                        # Single state format; will be applied when dataloader is ready
+                        self._pending_iteration_state = iter_state
+                    elif isinstance(iter_state, dict):
+                        # Multi-loader format; pick one for this loader
+                        state_for_loader = iter_state.get(self._ledger_name) or iter_state.get('default') or next(iter(iter_state.values()), None)
+                        if state_for_loader:
+                            self._pending_iteration_state = state_for_loader
+                    else:
+                        self._pending_iteration_state = iter_state
+
+                    if hasattr(self, '_pending_iteration_state'):
+                        logger.debug(f"Pending iteration state to restore: {self._pending_iteration_state}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse dataloader iteration state: {e}")
+
+        except Exception as e:
+            logger.debug(f"Could not load checkpoint data: {e}")
 
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
@@ -483,7 +584,7 @@ class DataLoaderInterface:
             if hp_name is None:
                 # no hyperparams; optionally use a default
                 try:
-                    self.set_batch_size(64)
+                    self.set_batch_size(1)
                 except RuntimeError:
                     pass
                 return
@@ -523,27 +624,56 @@ class DataLoaderInterface:
         """Return the next batch from the dataloader.
 
         If the iterator is exhausted it is automatically reset and iteration
-        resumes (unless `is_training=False`, in which case StopIteration is
-        propagated).
+        resumes.
         """
         try:
             if self._iterator is None:
                 self._reset_iterator()
+            # # Execute offset
+            self._execute_offset()
+            # Generate batch
             batch = next(self._iterator)
-            # Count yielded batches to support iteration state capture/restore
-            self._batches_yielded += 1
+            # Count yielded samples to support iteration state capture/restore
+            self._samples_yielded += 1
         except StopIteration:
-            if not self.is_training:
-                raise StopIteration("End of dataloader reached.")
+            # Reset iterator and try again
             self._reset_iterator()
+            # Execute offset
+            self._execute_offset()
+            # Generate batch
             batch = next(self._iterator)
-            self._batches_yielded = 1
+            self._samples_yielded += 1
         return batch
+
+    def _execute_offset(self) -> None:
+        """
+            Execute sample offset if set, skipping samples as needed.
+            This is a fallback mechanism for user-supplied dataloaders where
+            we cannot use an OffsetSampler.
+
+            TODO (GP):
+            We can reproduce the random generation of samples by restoring RNG state, if during the previous checkpoints, batchsize changed dynamically and shuffle is True.
+        """
+        if self._sample_offset > 0:
+            current_bs = self.get_batch_size()
+            # Fast-forward the iterator by the offset amount
+            while len(self._skipped) < self._sample_offset:
+                try:
+                    bs = 4 if self._sample_offset - len(self._skipped) >= 4 else self._sample_offset - len(self._skipped)  # Autoscale bs to sample offset
+                    self.set_batch_size(bs)
+                    self._skipped.extend(next(self._iterator)[1].detach().cpu().tolist())
+                    logger.debug(f"Offset sampler: skipped {len(self._skipped)}/{self._sample_offset} samples: {self._skipped}")
+                except StopIteration as e:
+                    logger.debug(f"Offset sampler: reached end of iterator while skipping: {e}")
+                    self._reset_iterator()  # Reset iterator and try again
+
+            self.set_batch_size(current_bs)
+            self._skipped = []
+            self._sample_offset = 0
 
     def _reset_iterator(self) -> None:
         """Reset the internal iterator so `_next_batch()` starts from the beginning."""
         self._iterator = iter(self.dataloader)
-        self._batches_yielded = 0
 
     def reset_iterator(self) -> None:
         """Recreate the internal iterator (e.g., after restoring RNG state).
@@ -571,7 +701,7 @@ class DataLoaderInterface:
         RNG state is also captured/restored before calling `restore_iteration_state`.
         """
         return {
-            "batches_yielded": int(self._batches_yielded),
+            "samples_yielded": int(self._samples_yielded),
             "batch_size": self.batch_size or 1
         }
 
@@ -585,24 +715,29 @@ class DataLoaderInterface:
         For shuffled loaders, call this after restoring RNG state.
         """
         try:
-            batches_yielded = int(state.get("batches_yielded", 0))
+            samples_yielded = int(state.get("samples_yielded", 0))
             batch_size = int(state.get("batch_size", self.batch_size or 1))
         except Exception:
-            batches_yielded = 0
+            samples_yielded = 0
             batch_size = self.batch_size or 1
 
         # Calculate sample offset (how many individual samples to skip)
-        sample_offset = batches_yielded * batch_size
+        sample_offset = samples_yielded
 
         # If we own the dataloader construction, rebuild with offset sampler
         if getattr(self, "_dl_build_kwargs", None) is not None and sample_offset > 0:
             try:
                 kwargs = dict(self._dl_build_kwargs)
+                # Remove kwargs that conflict with using batch_sampler
+                kwargs.pop("batch_size", None)
                 shuffle = kwargs.pop("shuffle", False)
                 num_workers = kwargs.pop("num_workers", 0)
                 drop_last = kwargs.pop("drop_last", False)
                 pin_memory = kwargs.pop("pin_memory", False)
                 collate_fn = kwargs.pop("collate_fn", None)
+                kwargs.pop("sampler", None)
+                kwargs.pop("drop_last", None)
+                kwargs.pop("shuffle", None)
 
                 # Create base sampler
                 base_sampler = (
@@ -611,16 +746,17 @@ class DataLoaderInterface:
                     else SequentialSampler(self.tracked_dataset)
                 )
 
-                # Wrap with offset to skip already-yielded samples
-                offset_sampler = OffsetSampler(base_sampler, offset=sample_offset)
+                # # Wrap with offset to skip already-yielded samples
+                # offset_sampler = OffsetSampler(base_sampler, offset=sample_offset)
 
                 # Wrap with masked sampler for deny-listed samples
-                masked_sampler = MaskedSampler(offset_sampler, self.tracked_dataset)
+                masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
 
                 # Rebuild mutable batch sampler
                 mbs_cls = type(self._mutable_batch_sampler) if self._mutable_batch_sampler else MutableBatchSampler
                 mbs = mbs_cls(masked_sampler, batch_size=batch_size, drop_last=drop_last)
                 self._mutable_batch_sampler = mbs
+                self._sample_offset = sample_offset
 
                 # Rebuild dataloader with offset sampler
                 self.dataloader = DataLoader(
@@ -629,22 +765,23 @@ class DataLoaderInterface:
                     num_workers=num_workers,
                     pin_memory=pin_memory,
                     collate_fn=collate_fn,
+                    # Ensure no conflicting args are passed alongside batch_sampler
                     **filter_kwargs_for_callable(DataLoader, kwargs)
                 )
 
                 # Reset iterator and counter
                 self._iterator = None
-                self._batches_yielded = batches_yielded
+                self._samples_yielded = samples_yielded
                 return
             except Exception as e:
                 logger.warning(f"Failed to restore with offset sampler, falling back to fast-forward: {e}")
 
         # Fallback: fast-forward approach (less efficient but works for user-supplied dataloaders)
         self._reset_iterator()
-        for _ in range(max(0, batches_yielded)):
+        for _ in range(max(0, samples_yielded)):
             try:
                 next(self._iterator)
-                self._batches_yielded += 1
+                self._samples_yielded += 1
             except StopIteration:
                 break
 

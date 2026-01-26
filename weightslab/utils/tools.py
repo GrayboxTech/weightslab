@@ -39,6 +39,12 @@ def seed_everything(seed=42):
     random.seed(seed)
     th.backends.cudnn.deterministic = True
 
+    # Reproducibility
+    rng = capture_rng_state()
+    print(rng)
+    restore_rng_state(rng)
+
+
 def capture_rng_state():
     """
     Capture all RNG states in a JSON-serializable format.
@@ -49,9 +55,12 @@ def capture_rng_state():
     """
     rng_state = {
         'python_random': random.getstate(),
-        'numpy_random': np.random.get_state().tolist() if hasattr(np.random.get_state(), 'tolist') else str(np.random.get_state()),
         'torch_rng': th.get_rng_state().cpu().tolist() if hasattr(th.get_rng_state(), 'tolist') else str(th.get_rng_state()),
     }
+
+    # NumPy random state: (version, internal_state_array, gauss_next)
+    np_state = np.random.get_state()
+    rng_state['numpy_random'] = (np_state[0], np_state[1].tolist(), np_state[2])
 
     # Add CUDA RNG if available
     if th.cuda.is_available():
@@ -77,7 +86,7 @@ def restore_rng_state(rng_state):
         # Restore Python random state
         if 'python_random' in rng_state:
             try:
-                random.setstate(rng_state['python_random'])
+                random.setstate(tuple(tuple(i) if i is not None and not isinstance(i, (int, float)) else i for i in rng_state['python_random']))  # Conver to tuple of tuples
                 logger.debug("Restored Python random state")
             except Exception as e:
                 logger.warning(f"Failed to restore Python random state: {e}")
@@ -86,10 +95,14 @@ def restore_rng_state(rng_state):
         if 'numpy_random' in rng_state:
             try:
                 state_data = rng_state['numpy_random']
-                if isinstance(state_data, list):
-                    state_data = tuple(state_data)
-                np.random.set_state(state_data)
-                logger.debug("Restored NumPy random state")
+                if isinstance(state_data, (list, tuple)) and len(state_data) == 3:
+                    version, internal, gauss = state_data
+                    if isinstance(internal, list):
+                        internal = np.array(internal, dtype=np.uint32)
+                    np.random.set_state((version, internal, gauss))
+                    logger.debug("Restored NumPy random state")
+                else:
+                    logger.warning("NumPy RNG state format invalid")
             except Exception as e:
                 logger.warning(f"Failed to restore NumPy random state: {e}")
 

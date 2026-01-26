@@ -1,6 +1,6 @@
 """ The Experiment class is the main class of the graybox package.
 It is used to train and evaluate models. """
-
+import os
 import sys
 import time
 import functools
@@ -449,7 +449,29 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             name = kwargs.get('name') or getattr(obj, '__name__', None) or 'hyperparams'
             # If obj is a string, treat as a file path and start watcher
             try:
-                # First check if hyperparameters are available in checkpoint manager
+                # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
+                root_log_dir = obj.get('root_log_dir') or os.path.join('.', 'root_log_dir')
+                try:
+                    # Check if a checkpoint manager is already registered in ledger
+                    try:
+                        existing_manager = ledgers.get_checkpoint_manager()
+                        if existing_manager is not None and not isinstance(existing_manager, ledgers.Proxy):
+                            _checkpoint_manager = existing_manager
+                            logger.info("Using checkpoint manager from ledger")
+                        else:
+                            raise KeyError("No manager in ledger")
+                    except (KeyError, AttributeError):
+                        # Create new manager and register it
+                        _checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
+                        try:
+                            ledgers.register_checkpoint_manager('default', _checkpoint_manager)
+                            logger.info("Registered new checkpoint manager in ledger")
+                        except Exception:
+                            pass
+                except Exception:
+                    _checkpoint_manager = None
+
+                # Check if hyperparameters are available in checkpoint manager
                 checkpoint_hp_loaded = False
                 try:
                     chkpt_manager = get_checkpoint_manager()
@@ -461,13 +483,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         elif hasattr(chkpt_manager, 'manifest') and chkpt_manager.manifest:
                             manifest = chkpt_manager.manifest
                             latest_hash = getattr(manifest, 'latest_hash', None)
-                        
+
                         if latest_hash:
                             checkpoint_data = chkpt_manager.load_checkpoint(
                                 exp_hash=latest_hash,
                                 load_model=False,
                                 load_weights=False,
                                 load_config=True,
+                                force=True,
                                 load_data=False
                             )
                             if checkpoint_data.get('config'):
@@ -477,7 +500,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                 checkpoint_hp_loaded = True
                 except Exception:
                     pass  # If checkpoint loading fails, proceed with normal registration
-                
+
                 if not checkpoint_hp_loaded:
                     # Normal registration if no checkpoint hyperparameters were loaded
                     if isinstance(obj, str):
@@ -503,7 +526,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             return get_hyperparams(name)
                         except Exception:
                             raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
-                
+
                 return get_hyperparams(name)
             except Exception:
                 # bubble up original error

@@ -53,7 +53,7 @@ from weightslab.backend.ledgers import (
 from weightslab.backend import ledgers
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.tools import capture_rng_state, restore_rng_state
-
+from weightslab.components.global_monitoring import pause_controller as pause_ctrl
 
 # Init logger
 logger = logging.getLogger(__name__)
@@ -170,6 +170,50 @@ class CheckpointManagerV2:
         """Get the current experiment hash."""
         return self.current_exp_hash
 
+    def get_HP_snapshot(self) -> Dict[str, Any]:
+        """Get current hyperparameters snapshot from ledger."""
+        try:
+            hp = ledgers.get_hyperparams()
+            if hp is None:
+                return {}
+            if isinstance(hp, ledgers.Proxy) and hasattr(hp, 'get') and callable(hp.get):
+                hp = hp.get()
+            if isinstance(hp, dict):
+                return hp
+            elif hasattr(hp, '__dict__'):
+                return vars(hp)
+            else:
+                return {}
+        except Exception:
+            return {}
+
+    def get_model_snapshot(self) -> Optional[th.nn.Module]:
+        """Get current model snapshot from ledger."""
+        try:
+            model = ledgers.get_model()
+            if model is None:
+                return None
+            if isinstance(model, ledgers.Proxy) and hasattr(model, 'get') and callable(model.get):
+                model = model.get()
+            if isinstance(model, th.nn.Module):
+                return model
+            else:
+                return None
+        except Exception:
+            return None
+
+    def get_dataframe_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Get current dataframe snapshot from registered dataloaders."""
+        try:
+            dfm = ledgers.get_dataframe()
+            if isinstance(dfm, ledgers.Proxy) and hasattr(dfm, 'get') and callable(dfm.get):
+                dfm = dfm.get()
+            if dfm is None:
+                return None
+            return self._get_data_state_snapshot(dfm)
+        except Exception:
+            return None
+
     def update_experiment_hash(
         self,
         model_snapshot: Optional[th.nn.Module] = None,
@@ -203,18 +247,15 @@ class CheckpointManagerV2:
             dump_immediately = True
 
         # Get ledgered components
-        hp_snapshot = ledgers.get_hyperparams()
-        dfm_snapshot = ledgers.get_dataframe()
-        model_snapshot = ledgers.get_model()
-
-        # Process dataframe snapshot
-        data_state = self._get_data_state_snapshot(dfm_snapshot)
+        hp_snapshot = self.get_HP_snapshot() if hp_snapshot is None else hp_snapshot
+        data_snapshot = self.get_dataframe_snapshot() if dfm_snapshot is None else dfm_snapshot
+        model_snapshot = self.get_model_snapshot() if model_snapshot is None else model_snapshot
 
         # Check what changed
         has_changed, changed_components = self.hash_generator.has_changed(
             model=model_snapshot,
             config=hp_snapshot,
-            data_state=data_state,
+            data_state=data_snapshot,
             force=force
         )
 
@@ -225,7 +266,7 @@ class CheckpointManagerV2:
         new_hash = self.hash_generator.generate_hash(
             model=model_snapshot,
             config=hp_snapshot,
-            data_state=data_state
+            data_state=data_snapshot
         )
 
         is_new = (new_hash != self.current_exp_hash) or (force or dump_immediately)
@@ -244,7 +285,7 @@ class CheckpointManagerV2:
                 self._dump_changes(
                     model=model_snapshot,
                     config=hp_snapshot,
-                    data_state=data_state,
+                    data_state=data_snapshot,
                     changed_components=changed_components
                 )
                 self._has_pending_changes = False
@@ -268,7 +309,7 @@ class CheckpointManagerV2:
                 # Mark as pending
                 self._pending_model = model_snapshot
                 self._pending_config = hp_snapshot
-                self._pending_data_state = data_state
+                self._pending_data_state = data_snapshot
                 self._has_pending_changes = True
                 self._pending_components = changed_components
                 logger.info(f"Changes pending (not dumped yet): {changed_components}")
@@ -278,7 +319,13 @@ class CheckpointManagerV2:
 
         return new_hash, is_new, changed_components
 
-    def _create_exp_hash_directories(self, exp_hash: str):
+    def _create_exp_hash_directories(
+            self,
+            exp_hash: str,
+            create_model_dir: bool = True,
+            create_hp_dir: bool = True,
+            create_data_dir: bool = True
+    ):
         """Create directory structure for an experiment hash in separate component folders.
 
         Args:
@@ -288,9 +335,12 @@ class CheckpointManagerV2:
         hp_hash_dir = self.hp_dir / exp_hash
         data_hash_dir = self.data_checkpoint_dir / exp_hash
 
-        model_hash_dir.mkdir(exist_ok=True)
-        hp_hash_dir.mkdir(exist_ok=True)
-        data_hash_dir.mkdir(exist_ok=True)
+        if create_model_dir:
+            model_hash_dir.mkdir(exist_ok=True)
+        if create_hp_dir:
+            hp_hash_dir.mkdir(exist_ok=True)
+        if create_data_dir:
+            data_hash_dir.mkdir(exist_ok=True)
 
         logger.debug(f"Created checkpoint directories for {exp_hash}")
         self._update_manifest(exp_hash)
@@ -307,7 +357,9 @@ class CheckpointManagerV2:
                     'model_hash': component_hashes.get('model', exp_hash[8:16]),
                     'data_hash': component_hashes.get('data', exp_hash[16:24]),
                     'created': datetime.now().isoformat(),
-                    'last_used': datetime.now().isoformat()
+                    'last_used': datetime.now().isoformat(),
+                    'latest_weight_checkpoint': None,
+                    'latest_weight_step': None
                 }
             else:
                 manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
@@ -323,6 +375,22 @@ class CheckpointManagerV2:
                 yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
         except Exception as e:
             logger.warning(f"Failed to update manifest: {e}")
+
+    def _update_manifest_weight_checkpoint(self, exp_hash: str, checkpoint_filename: str, step: int):
+        """Update manifest with latest weight checkpoint for given experiment hash."""
+        try:
+            manifest = self._load_manifest()
+            if exp_hash in manifest['experiments']:
+                manifest['experiments'][exp_hash]['latest_weight_checkpoint'] = checkpoint_filename
+                manifest['experiments'][exp_hash]['latest_weight_step'] = step
+                manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
+
+                # Write updated manifest
+                with open(self.manifest_file, 'w') as f:
+                    yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+                logger.debug(f"Updated manifest with weight checkpoint: {checkpoint_filename} (step {step})")
+        except Exception as e:
+            logger.warning(f"Failed to update manifest weight checkpoint: {e}")
 
     # ------------------------------------------------------------------
     # Logger snapshot management
@@ -504,20 +572,52 @@ class CheckpointManagerV2:
             changed_components: Set of changed components ('model', 'config', 'data')
         """
         # Create checkpoint subdirectories for this hash
-        self._create_exp_hash_directories(self.current_exp_hash)
+        self._create_exp_hash_directories(
+            self.current_exp_hash,
+            create_data_dir='data' in changed_components,
+            create_hp_dir='config' in changed_components,
+            create_model_dir='model' in changed_components
+        )
+
+        # Track if we need to save weights
+        should_save_weights = False
+        weights_model = None
 
         if 'model' in changed_components and model is not None:
             logger.info("Dumping model architecture...")
             self.save_model_architecture(model)
-            self.save_model_checkpoint(model)
+            should_save_weights = True
+            weights_model = model
 
         if ('hp' in changed_components or 'config' in changed_components) and config is not None:
             logger.info("Dumping hyperparameters config...")
             self.save_config(config)
+            should_save_weights = True
 
         if 'data' in changed_components:
             logger.info("Dumping data snapshot...")
             self.save_data_snapshot()
+            should_save_weights = True
+
+        # Save weights whenever any component changes to preserve complete state
+        if should_save_weights:
+            try:
+                # Get model from ledger if not provided
+                if weights_model is None:
+                    try:
+                        weights_model = get_model()
+                        if hasattr(weights_model, 'get') and callable(weights_model.get):
+                            weights_model = weights_model.get()
+                    except Exception:
+                        pass
+
+                if weights_model is not None:
+                    logger.info("Saving model weights checkpoint with component changes...")
+                    self.save_model_checkpoint(weights_model)
+                else:
+                    logger.warning("Could not save weights: no model available")
+            except Exception as e:
+                logger.warning(f"Failed to save weights with component changes: {e}")
 
         # Always save logger snapshot alongside other components (same hash)
         self.save_logger_snapshot()
@@ -530,6 +630,9 @@ class CheckpointManagerV2:
         """
         return self._has_pending_changes, self._pending_components.copy()
 
+    # ================
+    # SAVING FUNCTIONS
+    # ================
     def save_model_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -538,7 +641,8 @@ class CheckpointManagerV2:
         save_optimizer: bool = True,
         optimizer_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        force_dump_pending: bool = False
+        force_dump_pending: bool = False,
+        update_manifest: bool = True
     ) -> Optional[Path]:
         """Save model weights checkpoint.
 
@@ -624,13 +728,21 @@ class CheckpointManagerV2:
             checkpoint['metadata'] = metadata
 
         # Save checkpoint
-        model_dir = self.models_dir / self.current_exp_hash
+        model_dir = self.models_dir / self.current_exp_hash[8:-8]
         os.makedirs(model_dir, exist_ok=True)
+        # Use full exp_hash in filename for clarity and uniqueness
         checkpoint_file = model_dir / f"{self.current_exp_hash}_step_{step:06d}.pt"
 
         try:
             th.save(checkpoint, checkpoint_file)
             logger.info(f"Saved model checkpoint: {checkpoint_file.name}")
+
+            # Update manifest with latest weight checkpoint for this experiment
+            if update_manifest:
+                self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name, step)
+
+            # If model architecture doesn't exist in this hash directory, save a reference to where it is
+            self._save_architecture_reference_if_needed()
 
             # Persist logger queues alongside weight checkpoints
             try:
@@ -641,6 +753,61 @@ class CheckpointManagerV2:
         except Exception as e:
             logger.error(f"Failed to save model checkpoint: {e}")
             return None
+
+    def _save_architecture_reference_if_needed(self):
+        """Save architecture reference file if architecture doesn't exist in current hash.
+
+        This handles the case where weights are saved to a new hash (due to HP or data changes)
+        but the model architecture hasn't changed. Instead of duplicating the architecture file,
+        we save a JSON reference pointing to the hash that contains the actual architecture.
+        """
+        if self.current_exp_hash is None:
+            return
+
+        model_dir = self.models_dir / self.current_exp_hash[8:-8]
+        arch_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture.pkl"
+        arch_ref_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture_ref.json"
+
+        # If architecture file already exists here, no need for reference
+        if arch_file.exists():
+            return
+
+        # If reference file already exists, no need to create it again
+        if arch_ref_file.exists():
+            return
+
+        # Find the most recent hash with the same model hash that has the architecture
+        try:
+            component_hashes = self.hash_generator.get_component_hashes()
+            current_model_hash = component_hashes.get('model')
+
+            if not current_model_hash:
+                return
+
+            # Get all hashes with the same model hash
+            matching_hashes = self.get_hashes_by_component(model_hash=current_model_hash)
+
+            # Find the most recent one that has the architecture file
+            for hash_candidate in sorted(matching_hashes, reverse=True):
+                arch_candidate = self.models_dir / hash_candidate / f"{hash_candidate}_architecture.pkl"
+                if arch_candidate.exists():
+                    # Save reference to this hash
+                    ref_data = {
+                        'architecture_hash': hash_candidate,
+                        'current_hash': self.current_exp_hash,
+                        'model_hash': current_model_hash,
+                        'reason': 'Model architecture unchanged, reference points to hash where it is stored',
+                        'created': datetime.now().isoformat()
+                    }
+
+                    os.makedirs(model_dir, exist_ok=True)
+                    with open(arch_ref_file, 'w') as f:
+                        json.dump(ref_data, f, indent=2)
+
+                    logger.info(f"Saved architecture reference: {self.current_exp_hash[:16]} → {hash_candidate[:16]}")
+                    return
+        except Exception as e:
+            logger.debug(f"Could not save architecture reference: {e}")
 
     def save_model_architecture(
         self,
@@ -663,13 +830,13 @@ class CheckpointManagerV2:
             logger.warning("No experiment hash set. Call update_experiment_hash first.")
             return None
 
-        model_dir = self.models_dir / self.current_exp_hash
+        model_dir = self.models_dir / self.current_exp_hash[8:-8]
         os.makedirs(model_dir, exist_ok=True)
-        arch_file = model_dir / f"{self.current_exp_hash}_architecture.pkl"
+        arch_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture.pkl"
 
         # Don't overwrite if already exists
         if arch_file.exists():
-            logger.debug(f"Architecture already saved for {self.current_exp_hash}")
+            logger.debug(f"Architecture already saved for {self.current_exp_hash[8:-8]}")
             return arch_file
 
         try:
@@ -684,7 +851,7 @@ class CheckpointManagerV2:
             logger.info(f"Saved model architecture: {arch_file.name}")
 
             # Also save a text representation
-            arch_txt = model_dir / f"{self.current_exp_hash}_architecture.txt"
+            arch_txt = model_dir / f"{self.current_exp_hash[8:-8]}_architecture.txt"
             with open(arch_txt, 'w') as f:
                 f.write(str(model))
 
@@ -703,14 +870,14 @@ class CheckpointManagerV2:
             logger.warning("No experiment hash set. Call update_experiment_hash first.")
             return None
 
-        hp_hash_dir = self.hp_dir / self.current_exp_hash
+        hp_hash_dir = self.hp_dir / self.current_exp_hash[:8]
         os.makedirs(hp_hash_dir, exist_ok=True)
-        config_file = hp_hash_dir / f"{self.current_exp_hash}_{config_name}.yaml"
+        config_file = hp_hash_dir / f"{self.current_exp_hash[:8]}_{config_name}.yaml"
 
         try:
             config_with_meta = {
                 'hyperparameters': config,
-                'exp_hash': self.current_exp_hash,
+                'exp_hash': self.current_exp_hash[:8],
                 'last_updated': datetime.now().isoformat()
             }
 
@@ -786,9 +953,9 @@ class CheckpointManagerV2:
                 logger.debug(f"Could not capture dataloader iteration state: {e}")
 
             # Save to hash-specific directory
-            data_hash_dir = self.data_checkpoint_dir / self.current_exp_hash
+            data_hash_dir = self.data_checkpoint_dir / self.current_exp_hash[-8:]
             os.makedirs(data_hash_dir, exist_ok=True)
-            json_file = data_hash_dir / f"{self.current_exp_hash}_data_snapshot.json"
+            json_file = data_hash_dir / f"{self.current_exp_hash[-8:]}_data_snapshot.json"
 
             with open(json_file, 'w') as f:
                 json.dump(snapshot_data, f, indent=2, default=str)
@@ -800,42 +967,9 @@ class CheckpointManagerV2:
             logger.error(f"Failed to save data snapshot: {e}")
         return None
 
-    def save_data_backup(
-        self,
-        data_h5_path: Path,
-        backup_name: Optional[str] = None
-    ) -> Optional[Path]:
-        """Backup data h5 file for this experiment.
-
-        This creates a copy of the data h5 file in the experiment's data directory.
-        Should only be called for main data h5 files, not large array h5 files.
-
-        Args:
-            data_h5_path: Path to source h5 file
-            backup_name: Optional name for backup (uses source name if None)
-
-        Returns:
-            Path: Path to backup file, or None if failed
-        """
-        if self.current_exp_hash is None:
-            logger.warning("No experiment hash set. Call update_experiment_hash first.")
-            return None
-
-        data_dir = self.checkpoints_dir / self.current_exp_hash / "data"
-
-        if backup_name is None:
-            backup_name = data_h5_path.name
-
-        backup_file = data_dir / f"{self.current_exp_hash}_{backup_name}"
-
-        try:
-            shutil.copy2(data_h5_path, backup_file)
-            logger.info(f"Backed up data: {backup_file.name}")
-            return backup_file
-        except Exception as e:
-            logger.error(f"Failed to backup data: {e}")
-            return None
-
+    # =================
+    # LOADING FUNCTIONS
+    # =================
     def load_latest_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -914,36 +1048,6 @@ class CheckpointManagerV2:
 
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
-            return None
-
-    def load_config(self, exp_hash: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Load hyperparameter configuration.
-
-        Args:
-            exp_hash: Specific experiment hash (uses current if None)
-
-        Returns:
-            dict: Configuration dictionary, or None if not found
-        """
-        target_hash = exp_hash or self.current_exp_hash
-
-        if target_hash is None:
-            logger.warning("No experiment hash specified")
-            return None
-
-        hp_dir = self.checkpoints_dir / target_hash / "hp"
-        config_file = hp_dir / f"{target_hash}_config.yaml"
-
-        if not config_file.exists():
-            logger.warning(f"Config file not found: {config_file}")
-            return None
-
-        try:
-            with open(config_file, 'r') as f:
-                config_data = yaml.safe_load(f)
-            return config_data.get('hyperparameters', config_data)
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}")
             return None
 
     def list_experiment_hashes(self) -> List[str]:
@@ -1088,11 +1192,15 @@ class CheckpointManagerV2:
         except Exception as e:
             logger.warning(f"Auto-resume failed for {target}: {e}")
 
-    def load_checkpoint(self, exp_hash: str,
-                       load_model: bool = True,
-                       load_weights: bool = True,
-                       load_config: bool = True,
-                       load_data: bool = True) -> Dict[str, Any]:
+    def load_checkpoint(self,
+                        exp_hash: str,
+                        load_model: bool = True,
+                        load_weights: bool = True,
+                        load_config: bool = True,
+                        load_data: bool = True,
+                        load_last_weights: bool = False,
+                        force: bool = False
+    ) -> Dict[str, Any]:
         """Load a complete checkpoint state by experiment hash.
 
         This method intelligently loads only the components that differ from
@@ -1104,6 +1212,8 @@ class CheckpointManagerV2:
             load_weights: Whether to load model weights
             load_config: Whether to load hyperparameters if different
             load_data: Whether to load data state if different
+            load_last_weights: If True, always load the latest weights regardless of model change
+            force: If True, force reload of all components regardless of hash comparison
 
         Returns:
             dict: Dictionary with keys:
@@ -1129,7 +1239,6 @@ class CheckpointManagerV2:
         if exp_hash not in manifest.get('experiments', {}):
             logger.error(f"Experiment hash {exp_hash} not found in manifest")
             return result
-
         exp_info = manifest['experiments'][exp_hash]
         target_hp_hash = exp_info.get('hp_hash')
         target_model_hash = exp_info.get('model_hash')
@@ -1141,37 +1250,94 @@ class CheckpointManagerV2:
         current_model_hash = current_hashes.get('model', '')
         current_data_hash = current_hashes.get('data', '')
 
+        # Logger
         logger.info(f"Loading checkpoint {exp_hash[:16]}...")
         logger.info(f"  Target: HP={target_hp_hash} MODEL={target_model_hash} DATA={target_data_hash}")
         logger.info(f"  Current: HP={current_hp_hash} MODEL={current_model_hash} DATA={current_data_hash}")
 
-        # Load model architecture if different
-        if load_model and target_model_hash != current_model_hash:
-            model_dir = self.models_dir / exp_hash
-            arch_file = model_dir / f"{exp_hash}_architecture.pkl"
 
-            if arch_file.exists():
+        # Load model architecture if different, or load only RNG state for reproducibility if model hash is unchanged
+        model_rng_loaded = False
+        if load_model and (target_model_hash != current_model_hash or force):
+            model_dir = self.models_dir / exp_hash[8:-8]
+            arch_ref_file = model_dir / f"{exp_hash[8:-8]}_architecture_ref.json"
+
+            # First check if this is a reference to architecture in another hash
+            actual_arch_hash = exp_hash[8:-8]
+            if arch_ref_file.exists():
                 try:
-                    with open(arch_file, 'rb') as f:
+                    with open(arch_ref_file, 'r') as f:
+                        ref_data = json.load(f)
+                    actual_arch_hash = ref_data.get('architecture_hash', exp_hash[8:-8])
+                    logger.debug(f"  Architecture reference found: pointing to hash {actual_arch_hash}")
+                except Exception as e:
+                    logger.warning(f"Failed to load architecture reference: {e}")
+
+            # Now load from actual location
+            actual_arch_file = self.models_dir / actual_arch_hash / f"{actual_arch_hash}_architecture.pkl"
+
+            if actual_arch_file.exists():
+                try:
+                    with open(actual_arch_file, 'rb') as f:
                         result['model'] = dill.load(f)
                     result['loaded_components'].add('model')
-                    logger.info(f"  [OK] Loaded model architecture (hash changed)")
+                    logger.info(f"  [OK] Loaded model architecture from hash {actual_arch_hash[:16]}")
                 except Exception as e:
                     logger.error(f"  [ERROR] Failed to load model architecture: {e}")
             else:
-                logger.warning(f"  [WARNING] Model architecture file not found: {arch_file}")
+                logger.warning(f"  [WARNING] Model architecture file not found: {actual_arch_file}")
+        elif load_model and (target_model_hash == current_model_hash and not force):
+            # Try to load only the RNG state from the latest model checkpoint for reproducibility
+            model_dir = self.models_dir / exp_hash[8:-8]
+            checkpoint_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
+            if not checkpoint_files:
+                checkpoint_files = sorted(model_dir.glob(f"{exp_hash[8:-8]}_step_*.pt"))
+            if checkpoint_files:
+                latest_checkpoint = checkpoint_files[-1]
+                try:
+                    checkpoint = th.load(latest_checkpoint, weights_only=False)
+                    rng_state = checkpoint.get('rng_state')
+                    if rng_state:
+                        result['rng_state'] = rng_state
+                        model_rng_loaded = True
+                        logger.info(f"  [OK] Loaded model RNG state for reproducibility (model unchanged)")
+                except Exception as e:
+                    logger.debug(f"  [WARNING] Could not load model RNG state: {e}")
+            if not model_rng_loaded:
+                logger.info(f"  [-] Model architecture unchanged, using current model")
         else:
             logger.info(f"  [-] Model architecture unchanged, using current model")
 
         # Load model weights (always if requested)
         if load_weights:
-            model_dir = self.models_dir / exp_hash
-            weight_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
+            model_dir = self.models_dir / exp_hash[8:-8]
 
-            if weight_files:
-                latest_weights = weight_files[0]
+            # First, try to get the weight checkpoint from manifest for this specific experiment
+            checkpoint_file_to_load = None
+            exp_info = manifest['experiments'][exp_hash]
+            manifest_weight_checkpoint = exp_info.get('latest_weight_checkpoint')
+
+            if manifest_weight_checkpoint:
+                checkpoint_path = model_dir / manifest_weight_checkpoint
+                if checkpoint_path.exists():
+                    checkpoint_file_to_load = checkpoint_path
+                    logger.debug(f"  Using weight checkpoint from manifest: {manifest_weight_checkpoint}")
+
+            # Fallback: scan for weight files (old behavior for backward compatibility)
+            if checkpoint_file_to_load is None:
+                # Try new naming format first (with full exp_hash)
+                weight_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
+                # Fallback to old naming format
+                if not weight_files:
+                    weight_files = sorted(model_dir.glob(f"{exp_hash[8:-8]}_step_*.pt"))
+
+                if weight_files:
+                    checkpoint_file_to_load = weight_files[-1]  # Get most recent
+                    logger.debug(f"  Using weight checkpoint from directory scan: {checkpoint_file_to_load.name}")
+
+            if checkpoint_file_to_load:
                 try:
-                    result['weights'] = th.load(latest_weights, weights_only=False)
+                    result['weights'] = th.load(checkpoint_file_to_load, weights_only=False)
                     result['loaded_components'].add('weights')
                     step = result['weights'].get('step', -1)
 
@@ -1187,7 +1353,7 @@ class CheckpointManagerV2:
                     dataloader_iter_state = result['weights'].get('dataloader_iteration_state')
                     if dataloader_iter_state:
                         # Normalize to mapping of loader_name -> state for backward compatibility
-                        if isinstance(dataloader_iter_state, dict) and 'batches_yielded' in dataloader_iter_state:
+                        if isinstance(dataloader_iter_state, dict) and 'samples_yielded' in dataloader_iter_state:
                             iter_state_map = {'default': dataloader_iter_state}
                         elif isinstance(dataloader_iter_state, dict):
                             iter_state_map = dataloader_iter_state
@@ -1199,12 +1365,12 @@ class CheckpointManagerV2:
                 except Exception as e:
                     logger.error(f"  [ERROR] Failed to load weights: {e}")
             else:
-                logger.warning(f"  [WARNING] No weight files found for {exp_hash}")
+                logger.warning(f"  [WARNING] No weight files found for {exp_hash[8:-8]}")
 
         # Load config if different
-        if load_config and target_hp_hash != current_hp_hash:
-            hp_dir = self.hp_dir / exp_hash
-            config_file = hp_dir / f"{exp_hash}_config.yaml"
+        if load_config and (target_hp_hash != current_hp_hash or force):
+            hp_dir = self.hp_dir / exp_hash[:8]
+            config_file = hp_dir / f"{exp_hash[:8]}_config.yaml"
 
             if config_file.exists():
                 try:
@@ -1220,42 +1386,47 @@ class CheckpointManagerV2:
         else:
             logger.info(f"  [-] Config unchanged, using current config")
 
-        # Load data snapshot if different
-        if load_data and target_data_hash != current_data_hash:
-            data_dir = self.data_checkpoint_dir / exp_hash
-            json_file = data_dir / f"{exp_hash}_data_snapshot.json"
+        # Load data snapshot if different, or if only RNG state changed (for reproducibility)
+        if load_data:
+            data_dir = self.data_checkpoint_dir / exp_hash[-8:]
+            json_file = data_dir / f"{exp_hash[-8:]}_data_snapshot.json"
+
+            # Always try to load RNG state for reproducibility, even if data hash is unchanged
+            load_data_snapshot = (target_data_hash != current_data_hash or force)
+            load_rng_only = (target_data_hash == current_data_hash and not force)
 
             if json_file.exists():
                 try:
-                    # Load JSON snapshot
                     with open(json_file, 'r') as f:
                         snapshot_data = json.load(f)
 
-                    # Convert to DataFrame
-                    snapshot_df = pd.DataFrame(snapshot_data.get('data', []))
+                    rng_state = snapshot_data.get('rng_state', {})
 
-                    if not snapshot_df.empty:
-                        result['data_state'] = {'snapshot': snapshot_df}
-                        result['loaded_components'].add('data')
-
-                        # Restore RNG state if available
-                        rng_state = snapshot_data.get('rng_state', {})
-                        if rng_state:
-                            result['rng_state'] = rng_state
-                            logger.info(f"  [OK] Loaded data snapshot ({len(snapshot_df)} rows) with RNG state")
-                        else:
-                            logger.info(f"  [OK] Loaded data snapshot ({len(snapshot_df)} rows)")
+                    if load_data_snapshot:
+                        snapshot_df = pd.DataFrame(snapshot_data.get('data', []))
+                        if not snapshot_df.empty:
+                            result['data_state'] = {'snapshot': snapshot_df}
+                            result['loaded_components'].add('data')
+                            if rng_state:
+                                result['rng_state'] = rng_state
+                                logger.info(f"  [OK] Loaded data snapshot ({len(snapshot_df)} rows) with RNG state")
+                            else:
+                                logger.info(f"  [OK] Loaded data snapshot ({len(snapshot_df)} rows)")
+                    elif load_rng_only and rng_state:
+                        # Only RNG state is needed for reproducibility
+                        result['rng_state'] = rng_state
+                        logger.info(f"  [OK] Loaded RNG state for reproducibility (data unchanged)")
+                    else:
+                        logger.info(f"  [-] Data state unchanged, using current data")
                 except Exception as e:
                     logger.error(f"  [ERROR] Failed to load data snapshot: {e}")
             else:
                 logger.warning(f"  [WARNING] Data snapshot file not found: {json_file}")
-        else:
-            logger.info(f"  [-] Data state unchanged, using current data")
 
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
 
-    def load_state(self, exp_hash: str) -> bool:
+    def load_state(self, exp_hash: str, load_last_weights: bool = False) -> bool:
         """Load and apply a complete checkpoint state by experiment hash.
 
         This method loads all components and updates the system state in-place:
@@ -1266,6 +1437,7 @@ class CheckpointManagerV2:
 
         Args:
             exp_hash: The 24-byte experiment hash to load and apply
+            load_last_weights: If True, always load the latest weights regardless of model change
 
         Returns:
             bool: True if state was successfully loaded and applied
@@ -1280,7 +1452,8 @@ class CheckpointManagerV2:
             load_model=True,
             load_weights=True,
             load_config=True,
-            load_data=True
+            load_data=True,
+            load_last_weights=load_last_weights
         )
 
         if not checkpoint_data['loaded_components']:
@@ -1293,15 +1466,6 @@ class CheckpointManagerV2:
         if 'model' in checkpoint_data['loaded_components']:
             try:
                 model = checkpoint_data['model']
-                weights = checkpoint_data.get('weights')
-
-                # Apply weights if available
-                if weights and 'model_state_dict' in weights:
-                    model.load_state_dict(weights['model_state_dict'], strict=False)
-                    step = weights.get('step', -1)
-                    logger.info(f"[OK] Applied model architecture + weights (step {step})")
-                else:
-                    logger.info(f"[OK] Applied model architecture (no weights)")
 
                 # Register in ledger
                 ledgers.register_model(ledgers.resolve_hp_name(), model)
@@ -1318,7 +1482,7 @@ class CheckpointManagerV2:
                 model = ledgers.get_model()
                 weights = checkpoint_data['weights']
                 if model and weights and 'model_state_dict' in weights:
-                    model.load_state_dict(weights['model_state_dict'], strict=False)
+                    model.load_state_dict(weights['model_state_dict'])
                     step = weights.get('step', -1)
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
 
@@ -1369,11 +1533,20 @@ class CheckpointManagerV2:
                 # Reset dataloaders iterators to ensure reproducibility
                 for loader_name in ledgers.get_dataloaders():
                     loader = ledgers.get_dataloader(loader_name)
-                    if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
-                        loader.reset_iterator()
-                        logger.debug(f"Reset iterator for dataloader: {loader}")
+
+                    if loader is not None:
+                        # Resume loader state
+                        if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                            loader.reset_iterator()
+                            logger.debug(f"Reset iterator for dataloader: {loader}")
+
+                # Restore RNG state again after resetting dataloaders
+                restore_rng_state(checkpoint_data['rng_state'])
+                logger.debug(f"Restored RNG state from checkpoint")
+
             except Exception as e:
                 logger.error(f"[ERROR] Failed to restore RNG state: {e}")
+                pause_ctrl.pause()
                 success = False
 
         # Restore dataloader iteration state if provided
@@ -1382,7 +1555,7 @@ class CheckpointManagerV2:
                 iter_state_raw = checkpoint_data['dataloader_iteration_state']
 
                 # Normalize to mapping loader_name -> state for backward compatibility
-                if isinstance(iter_state_raw, dict) and 'batches_yielded' in iter_state_raw:
+                if isinstance(iter_state_raw, dict) and 'samples_yielded' in iter_state_raw:
                     state_map = {'default': iter_state_raw}
                 elif isinstance(iter_state_raw, dict):
                     state_map = iter_state_raw
@@ -1399,6 +1572,10 @@ class CheckpointManagerV2:
                     if state_for_loader:
                         try:
                             loader.restore_iteration_state(state_for_loader)
+                            # Resume loader state
+                            if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                                loader.reset_iterator()
+                                logger.debug(f"Reset iterator for dataloader: {loader}")
                             logger.info(f"[OK] Restored dataloader iteration state for {loader_name}: {state_for_loader}")
                             restored_any = True
                         except Exception as inner_e:

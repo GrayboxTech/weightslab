@@ -145,6 +145,9 @@ class ExperimentHashGenerator:
 
         Returns:
             str: Hash of model architecture (8 bytes)
+
+        TODO (GP): Hash should be generated directly from the model class and computed on demand. Same for data and HP.
+        Maybe later neurons tracking and values in the hash.
         """
         try:
             # Get model architecture info
@@ -155,19 +158,18 @@ class ExperimentHashGenerator:
 
             # Layer structure
             for name, module in model.named_modules():
+                # Remove these trackers from hash
                 if 'train_dataset_tracker' in name or 'eval_dataset_tracker' in name:
                     continue
                 if name:  # Skip root module
                     module_info = f"{name}:{module.__class__.__name__}"
 
                     # Add key parameters for common layer types
-                    if isinstance(module, th.nn.Conv2d):
-                        module_info += f"_in{module.in_channels}_out{module.out_channels}"
-                        module_info += f"_k{module.kernel_size}_s{module.stride}"
-                    elif isinstance(module, th.nn.Linear):
-                        module_info += f"_in{module.in_features}_out{module.out_features}"
-                    elif isinstance(module, (th.nn.BatchNorm2d, th.nn.BatchNorm1d)):
-                        module_info += f"_nf{module.num_features}"
+                    if isinstance(module, th.nn.Module) and hasattr(module, 'in_neurons') and hasattr(module, 'out_neurons'):
+                        module_info += f"_in{module.in_neurons}_out{module.out_neurons}"
+                    if hasattr(module, 'operation_age'):
+                        for op_type, age in module.operation_age.items():
+                            module_info += f"_{op_type}->{age}"
 
                     arch_info.append(module_info)
 
@@ -192,10 +194,13 @@ class ExperimentHashGenerator:
         Returns:
             str: Hash of configuration (8 bytes)
         """
+        # Remove random state from config, i.e., root log dir as can be generated randomly
+        config_cp = config.copy()
+        config_cp.pop('root_log_dir', None)
         try:
             # Sort keys for deterministic hashing
             # Convert to JSON string for stable representation
-            config_str = json.dumps(config, sort_keys=True, default=str)
+            config_str = json.dumps(config_cp, sort_keys=True, default=str)
             return hashlib.sha256(config_str.encode()).hexdigest()[:8]
         except Exception as e:
             logger.warning(f"Failed to hash config: {e}")

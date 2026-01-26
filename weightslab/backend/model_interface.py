@@ -10,7 +10,6 @@ from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 from weightslab.components.tracking import TrackingMode
 from weightslab.models.model_with_ops import NetworkWithOps
 from weightslab.modules.neuron_ops import NeuronWiseOperations
-from weightslab.data.sample_stats import SampleStatsEx
 
 from weightslab.utils.plot_graph import plot_fx_graph_with_details
 from weightslab.models.monkey_patcher import monkey_patch_modules
@@ -21,6 +20,7 @@ from weightslab.utils.computational_graph import \
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
 from weightslab.backend import ledgers
+from weightslab.utils.tools import restore_rng_state
 
 
 # Global logger
@@ -78,73 +78,11 @@ class ModelInterface(NetworkWithOps):
             self.dummy_input = dummy_input.to(device)
         else:
             self.dummy_input = th.randn(model.input_shape).to(device)
-        if not use_onnx:
-            self.print_graph = print_graph
-            self.print_graph_filename = print_graph_filename
-            self.traced_model = symbolic_trace(model)
-            self.traced_model.name = "N.A."
-        self.guard_training_context = guard_training_context
-        self.guard_testing_context = guard_testing_context
 
-        # Init attributes from super object (i.e., self.model)
-        self.init_attributes(self.model)
-
-        if not use_onnx:
-            # Only propagate shapes if we need them for visualization
-            if self.print_graph:
-                self.shape_propagation()
-                # Clean up any leftover threads from shape propagation
-                # import gc
-                # gc.collect()
-
-            # Generate the graph vizualisation
-            self.generate_graph_vizu()
-
-        # Generate the graph dependencies
-        self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
-
-        # Clean
-        # Optionally register wrapper in global ledger
-        if register:
-            try:
-                # Prefer an explicit name. Otherwise prefer a meaningful
-                # candidate (function __name__ when informative, then
-                # the class name). Avoid using the generic literal
-                # 'model' which can be produced by wrappers/patching and
-                # lead to duplicate registrations.
-                if name:
-                    reg_name = name
-                else:
-                    candidate = getattr(model, '__name__', None)
-                    if candidate and candidate.lower() != 'model':
-                        reg_name = candidate
-                    else:
-                        clsname = getattr(model.__class__, '__name__', None)
-                        reg_name = clsname if clsname and clsname.lower() != 'model' else (name or 'model')
-
-                register_model(reg_name, self, weak=weak)
-                self._ledger_name = reg_name
-            except Exception:
-                pass
-        if not use_onnx:
-            del self.traced_model
-
-        # Hook optimizer update on architecture change
-        self.register_hook_fn_for_architecture_change(
-            lambda model: self._update_optimizer(model)
-        )
-
-        # Set Model Training Guard
-        self.guard_training_context.model = self
-        self.guard_testing_context.model = self
-
-        # Checkpoint manager (optional)
-        # skip_checkpoint_load: bool = False,
-        # auto_dump_every_steps: int = 0
+        # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
         self._checkpoint_manager = None
         _checkpoint_auto_every_steps = 0
         _root_log_dir = None
-        # If root_log_dir not provided, try to read it from hyperparams
         try:
             from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
             names = list_hyperparams()
@@ -190,11 +128,10 @@ class ModelInterface(NetworkWithOps):
                     logger.info("Registered new checkpoint manager in ledger")
                 except Exception:
                     pass
-
         except Exception:
             self._checkpoint_manager = None
 
-        # Auto-load latest model architecture and weights if checkpoints exist
+        # Early auto-load latest model architecture and weights if checkpoints exist
         if self._checkpoint_manager is not None:
             try:
                 # Try to get the latest experiment hash
@@ -205,7 +142,6 @@ class ModelInterface(NetworkWithOps):
                     manifest = self._checkpoint_manager.manifest
                     latest_hash = getattr(manifest, 'latest_hash', None)
 
-                # TODO (GP): Check or do chkpt manager functions to load latest chkpt directly with archi and weights
                 if latest_hash:
                     # Use checkpoint manager's load_checkpoint to get architecture and weights
                     checkpoint_data = self._checkpoint_manager.load_checkpoint(
@@ -213,47 +149,129 @@ class ModelInterface(NetworkWithOps):
                         load_model=True,
                         load_weights=True,
                         load_config=False,
-                        load_data=False
+                        load_data=False,
+                        force=True
                     )
 
                     # Apply loaded model if architecture was loaded
                     if checkpoint_data.get('model'):
-                        loaded_model = checkpoint_data['model']
+                        self = checkpoint_data['model']
                         weights = checkpoint_data.get('weights')
+                        checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
 
-                        # Apply weights if available
-                        if weights and 'model_state_dict' in weights:
-                            loaded_model.load_state_dict(weights['model_state_dict'], strict=False)
-                            step = weights.get('step', -1)
-                            logger.info(f"Auto-loaded model architecture + weights from checkpoint {latest_hash[:16]} (step {step})")
-                        else:
-                            logger.info(f"Auto-loaded model architecture from checkpoint {latest_hash[:16]}")
-
-                        self.model = loaded_model.to(device)
+                        # Restore RNG state if available
+                        restore_rng_state(checkpoint_rng_state)
+                        logger.debug(f"Restored RNG state from checkpoint")
 
                     elif checkpoint_data.get('weights'):
                         # Only weights available, load into existing model
                         weights = checkpoint_data['weights']
                         if 'model_state_dict' in weights:
-                            self.model.load_state_dict(weights['model_state_dict'], strict=False)
-                            step = weights.get('step', -1)
-                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {step})")
+                            self.load_state_dict(weights['model_state_dict'], strict=True)
+                            self.current_step = weights.get('step', -1)
+                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
+
+                    # As model architecture as has been loaded, and it's an instance of the ModelInterface,
+                    # we can set its current step if available in weights
+                    if isinstance(self.model, self.__class__):
+                        self._registration(
+                            model=self.model,
+                            name=name,
+                            weak=weak
+                        )
+                        return
+
             except Exception as e:
                 logger.debug(f"Could not auto-load model checkpoint: {e}")
 
-            # Create a property on the ModelInterface class that forwards to
-            # the underlying model attribute. Using a property keeps the
-            # attribute live (reads reflect model changes).
-            try:
-                def _make_getter(n):
-                    return lambda inst: getattr(inst.model, n)
+        if not use_onnx:
+            self.print_graph = print_graph
+            self.print_graph_filename = print_graph_filename
+            self.traced_model = symbolic_trace(self.model)
+            self.traced_model.name = "N.A."
+        self.guard_training_context = guard_training_context
+        self.guard_testing_context = guard_testing_context
 
-                getter = _make_getter(name)
-                prop = property(fget=getter)
-                setattr(self.__class__, name, prop)
-            except Exception:
-                # Best-effort: skip if we cannot set the property
-                pass
+        # Init attributes from super object (i.e., self.model)
+        self.init_attributes(self.model)
+
+        if not use_onnx:
+            # Only propagate shapes if we need them for visualization
+            if self.print_graph:
+                self.shape_propagation()
+                # Clean up any leftover threads from shape propagation
+                # import gc
+                # gc.collect()
+
+            # Generate the graph vizualisation
+            self.generate_graph_vizu()
+
+        # Generate the graph dependencies
+        self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
+
+        # Clean
+        # Optionally register wrapper in global ledger
+        if register:
+            self._registration(
+                model=self.model,
+                name=name,
+                weak=weak
+            )
+
+        if not use_onnx:
+            del self.traced_model
+
+        # Hook optimizer update on architecture change
+        self.register_hook_fn_for_architecture_change(
+            lambda model: self._update_optimizer(model)
+        )
+
+        # Set Model Training Guard
+        self.guard_training_context.model = self
+        self.guard_testing_context.model = self
+
+    def _registration(self, model, name, weak: bool = False):
+        try:
+            # Prefer an explicit name. Otherwise prefer a meaningful
+            # candidate (function __name__ when informative, then
+            # the class name). Avoid using the generic literal
+            # 'model' which can be produced by wrappers/patching and
+            # lead to duplicate registrations.
+            if name:
+                reg_name = name
+            else:
+                candidate = getattr(model, '__name__', None)
+                if candidate and candidate.lower() != 'model':
+                    reg_name = candidate
+                else:
+                    clsname = getattr(model.__class__, '__name__', None)
+                    reg_name = clsname if clsname and clsname.lower() != 'model' else (name or 'model')
+
+            register_model(reg_name, self, weak=weak)
+            self._ledger_name = reg_name
+        except Exception:
+            pass
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """
+        Loads the state dictionary into the wrapped model.
+
+        This method forwards the provided `state_dict` to the underlying
+        model's `load_state_dict` method, allowing for the restoration
+        of model parameters and buffers from a saved state.
+
+        Args:
+            state_dict (dict): A state dictionary containing model parameters
+                and buffers to be loaded.
+            strict (bool, optional): Whether to strictly enforce that the keys
+                in `state_dict` match the keys returned by the model's
+                `state_dict()` function. Defaults to True.
+
+        Returns:
+            None: This method does not return any value; it modifies the
+            state of the wrapped model in-place.
+        """
+        super().load_state_dict(state_dict, strict=strict)
 
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
@@ -397,6 +415,7 @@ class ModelInterface(NetworkWithOps):
                         optimizer_name=getattr(self, '_ledger_name', None),
                         step=batched_age,
                         force_dump_pending=False,
+                        update_manifest=False
                     )
                 except Exception:
                     pass

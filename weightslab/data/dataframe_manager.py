@@ -170,20 +170,16 @@ class LedgeredDataFrameManager:
 
         with self._lock:
             # Align columns
-            all_cols = self._df.columns.union(df_norm.columns)
+            all_cols = df_norm.columns
             if self._df.empty:
                 self._df = df_norm.reindex(columns=all_cols)
                 return
-            if len(all_cols) != len(self._df.columns):
-                self._df = self._df.reindex(columns=all_cols)
-            if len(all_cols) != len(df_norm.columns):
-                df_norm = df_norm.reindex(columns=all_cols)
 
             # Right-preferred upsert: df_norm overrides existing, adds new rows
-            # Override existing rows where sample_id matches
+            # Only update columns present in df_norm, keep other columns/values from self._df
             existing_idx = df_norm.index.intersection(self._df.index)
             if len(existing_idx) > 0:
-                self._df.loc[existing_idx, df_norm.columns] = df_norm.loc[existing_idx, df_norm.columns]
+                self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
             # Append rows that do not exist yet
             missing_idx = df_norm.index.difference(self._df.index)

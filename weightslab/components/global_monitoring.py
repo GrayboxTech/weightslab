@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_optimizers, get_optimizer
 from weightslab.components.tracking import TrackingMode
 
 
@@ -40,7 +40,6 @@ class PauseController:
         if self.checkpoint_manager is None:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager is not None:
-            self.checkpoint_manager.update_experiment_hash(firsttime=True)
             self.checkpoint_manager.dump_pending_changes()
 
         # Then resume execution

@@ -81,7 +81,7 @@ class LoggerQueue:
         for signal in signals:
             self._signal_history.append(signal)
             try:
-                self.queue.put(signal)
+                self.queue.put(signal)  # Set the signals to be sent
                 metric_name = signal.get("metric_name")
                 if metric_name:
                     # Derive a graph name if encoded as 'graph:metric'
