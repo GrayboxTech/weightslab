@@ -4,6 +4,7 @@ import numpy as np
 
 from PIL import Image
 
+from .lidar_utils import render_lidar, load_point_cloud_data
 
 # Init global logger
 logger = logging.getLogger(__name__)
@@ -177,7 +178,7 @@ def load_raw_image(dataset, index) -> Image.Image:
         if np.issubdtype(np_img.dtype, np.floating):
             min_v = float(np.nanmin(np_img)) if np_img.size else 0.0
             max_v = float(np.nanmax(np_img)) if np_img.size else 1.0
-            if max_v <= 128.0:  # TODO fix convert image type
+            if max_v <= 128.0:
                 np_img = (np_img - min_v) / (max_v - min_v) * 255.0
         # Clip to valid byte range then cast
         np_img = np.clip(np_img, 0, 255)
@@ -185,15 +186,35 @@ def load_raw_image(dataset, index) -> Image.Image:
 
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
+    
+    # Check for Lidar Config (attached in train script)
+    # If not present, default to empty dict (will use defaults in render_lidar)
+    lidar_config = getattr(wrapped, "viz_config", {})
 
     if hasattr(wrapped, "images") and isinstance(wrapped.images, list):
         img_path = wrapped.images[index]
+        if isinstance(img_path, str) and img_path.lower().endswith(('.bin', '.npy', '.pcd')):
+             points = load_point_cloud_data(img_path)
+             if points is not None:
+                 # Dispatch to main renderer with config
+                 return render_lidar(points, lidar_config)
+             else:
+                 return Image.new('RGB', (800, 600), color=(50, 50, 50))
+
         img = Image.open(img_path)
         return img.convert("RGB")
     elif hasattr(wrapped, "files") and isinstance(wrapped.files, list):
         img_path = wrapped.files[index]
         img = Image.open(img_path)
         return img.convert("RGB")
+    elif hasattr(wrapped, "samples") or hasattr(wrapped, "imgs"):
+        # Prioritize file-on-disk for standard ImageFolder/DatasetFolder patterns
+        if hasattr(wrapped, "samples"):
+            img_path, _ = wrapped.samples[index]
+        else:
+            img_path, _ = wrapped.imgs[index]
+        img = Image.open(img_path)
+        return img.convert("L") if img.mode in ["1", "L", "I;16", "I"] else img.convert("RGB")
     elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
         np_img = wrapped[index]
         if isinstance(np_img, (list, tuple)):
@@ -218,12 +239,5 @@ def load_raw_image(dataset, index) -> Image.Image:
             raise ValueError(f"Unsupported channel count: {np_img.shape[-1]}")
         else:
             raise ValueError(f"Unsupported image shape: {np_img.shape}")
-    elif hasattr(wrapped, "samples") or hasattr(wrapped, "imgs"):
-        if hasattr(wrapped, "samples"):
-            img_path, _ = wrapped.samples[index]
-        else:
-            img_path, _ = wrapped.imgs[index]
-        img = Image.open(img_path)
-        return img.convert("L") if img.mode in ["1", "L", "I;16", "I"] else img.convert("RGB")
     else:
         raise ValueError("Dataset type not supported for raw image extraction.")
