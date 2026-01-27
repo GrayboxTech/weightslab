@@ -186,8 +186,12 @@ def load_raw_image(dataset, index) -> Image.Image:
 
     # Get dataset wrapper if exists - RECURSIVE UNWRAP
     wrapped = dataset
-    while hasattr(wrapped, "wrapped_dataset"):
-        wrapped = wrapped.wrapped_dataset
+    while hasattr(wrapped, "wrapped_dataset") or (hasattr(wrapped, "dataset") and hasattr(wrapped, "indices")):
+        if hasattr(wrapped, "wrapped_dataset"):
+            wrapped = wrapped.wrapped_dataset
+        elif hasattr(wrapped, "dataset") and hasattr(wrapped, "indices"):
+            # Handle torch.utils.data.Subset (or similar subsets)
+            wrapped = wrapped.dataset
     
     # Check for Lidar Config (attached in train script)
     # If not present, default to empty dict (will use defaults in render_lidar)

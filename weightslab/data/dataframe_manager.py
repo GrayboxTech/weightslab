@@ -488,7 +488,14 @@ class LedgeredDataFrameManager:
                 if dataset is None:
                     loader = self._get_loader_by_origin(row.get("origin"))
                     dataset = getattr(loader, "wrapped_dataset", None)
-                dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
+                dataset_index = None
+                if dataset is not None:
+                    try:
+                        dataset_index = dataset.get_index_from_sample_id(row.name)
+                    except KeyError:
+                        # Sample ID not found in dataset (possibly deduplicated or cross-origin mismatch)
+                        pass
+
                 row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
         return row
 

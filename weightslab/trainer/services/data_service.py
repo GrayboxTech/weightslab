@@ -534,22 +534,30 @@ class DataService:
                 # Handle resize request
                 target_width = original_size[0]
                 target_height = original_size[1]
-                aspect_ratio = original_size[0] / original_size[1]
+                aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
+
                 if request.resize_width < 0 and request.resize_height < 0:
                     percent = abs(request.resize_width) / 100.0
-                    target_width = int(original_size[0] * percent * aspect_ratio)
+                    target_width = int(original_size[0] * percent)
                     target_height = int(original_size[1] * percent)
 
                 elif request.resize_width > 0 and request.resize_height > 0:
-                    if request.resize_width < original_size[0] or request.resize_height < original_size[1]:
-                        target_width = int(request.resize_width * aspect_ratio)
-                        target_height = int(request.resize_height)
+                    # Request specifies MAX bounding box, preserve aspect ratio
+                    scale_w = request.resize_width / original_size[0]
+                    scale_h = request.resize_height / original_size[1]
+                    scale = min(scale_w, scale_h)
+                    
+                    target_width = int(original_size[0] * scale)
+                    target_height = int(original_size[1] * scale)
 
-                else:
-                    # Default to 360p (height=360) maintaining aspect ratio if no resize requested
-                    if request.resize_width == 0 and request.resize_height == 0:
-                        target_height = 360
-                        target_width = int(target_height * aspect_ratio)
+                elif request.resize_width == 0 and request.resize_height == 0:
+                     # Default to 360p (height=360) maintaining aspect ratio if no resize requested
+                     target_height = 360
+                     target_width = int(target_height * aspect_ratio)
+
+                # Ensure dimensions are at least 1x1
+                target_width = max(1, target_width)
+                target_height = max(1, target_height)
 
                 # Resize image if needed
                 if target_width != original_size[0] or target_height != original_size[1]:
