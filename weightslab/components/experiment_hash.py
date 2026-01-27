@@ -197,6 +197,7 @@ class ExperimentHashGenerator:
         # Remove random state from config, i.e., root log dir as can be generated randomly
         config_cp = config.copy()
         config_cp.pop('root_log_dir', None)
+        config_cp.pop('is_training', None)
         try:
             # Sort keys for deterministic hashing
             # Convert to JSON string for stable representation
@@ -221,14 +222,14 @@ class ExperimentHashGenerator:
         try:
             # Extract components
             uids = list(data_state.get('discarded', dict()).keys())
-            discarded = data_state.get('discarded', set())
+            discarded = data_state.get('discarded', dict())
             tags = data_state.get('tags', {})
 
             # Create deterministic representation
             # Sort UIDs and include discard status and tags
             data_info = []
             for uid in sorted(uids):
-                is_discarded = uid in discarded
+                is_discarded = discarded[uid]
                 uid_tags = sorted(tags.get(uid, []))
                 data_info.append(f"{uid}:d{int(is_discarded)}:t{','.join(uid_tags)}")
 

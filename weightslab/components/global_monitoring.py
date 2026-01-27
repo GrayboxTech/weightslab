@@ -40,15 +40,32 @@ class PauseController:
         if self.checkpoint_manager is None:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager is not None:
+            self.checkpoint_manager.update_experiment_hash(firsttime=True)
             self.checkpoint_manager.dump_pending_changes()
 
         # Then resume execution
-        self._event.set()
-        logger.info('\nTraining resumed.')
+        if self._is_hash_computed():
+            self._event.set()
+            logger.info(f'\nTraining resumed as modules hashes have been computed: {self.checkpoint_manager.hash_by_module}.')
+            return True
+        else:
+            logger.warning(f'Cannot resume training: experiment hash not computed yet for every modules {self.checkpoint_manager.hash_by_module}.')
+            return False
 
     def is_paused(self):
         return not self._event.is_set()
 
+    def _get_checkpoint_manager(self):
+        if self.checkpoint_manager is None:
+            self.checkpoint_manager = get_checkpoint_manager()
+
+    def _is_hash_computed(self):
+        self._get_checkpoint_manager()
+        if self.checkpoint_manager is None:
+            return False
+        fl = self.checkpoint_manager.hash_by_module[0] != "00000000" and self.checkpoint_manager.hash_by_module[1] != "00000000" and self.checkpoint_manager.hash_by_module[2] != "00000000"
+
+        return fl
 
 # Global pause controller instance
 pause_controller = PauseController()
@@ -137,9 +154,10 @@ guard_testing_context = GuardContext(for_training=False)
 # - If controller is paused/resumed externally, update ledger `is_training` to match.
 
 _pause_sync_thread_started = False
-
+checkpoint_manager = get_checkpoint_manager()
 
 def _pause_hp_sync_loop(poll_interval: float = 0.5):
+    firstresume = True
     while True:
         try:
             name = resolve_hp_name()
@@ -176,7 +194,8 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 # Drive controller from ledger when ledger explicitly sets the flag
                 if isinstance(hp_is_training, bool):
                     if controller_paused and hp_is_training:
-                        pause_controller.resume()
+                        resumed = pause_controller.resume()
+                        firstresume = False if resumed else True
                     elif controller_running and not hp_is_training:
                         pause_controller.pause()
 
@@ -184,11 +203,12 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 controller_paused = pause_controller.is_paused()
 
                 # Propagate controller state back to ledger if it differs
-                if controller_paused:
+                if controller_paused and not firstresume:
                     set_hyperparam(name, 'is_training', False)
 
-        except Exception:
+        except Exception as e:
             # swallow to keep thread alive
+            logger.debug(f"Exception in pause-hp sync loop: {e}")
             pass
 
         time.sleep(poll_interval)

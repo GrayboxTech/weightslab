@@ -557,11 +557,16 @@ class DataLoaderInterface:
         return len(self.dataloader)
 
     def __iter__(self) -> Iterator:
-        """Return an iterator over batches (delegates to the wrapped dataloader)."""
+        """Return a self-iterating wrapper that auto-resets on exhaustion.
+
+        Returning ``self`` ensures ``__next__`` is used, which already
+        handles StopIteration by recreating the underlying iterator. This
+        makes ``for batch in dataloader_interface`` loop forever over epochs
+        without the user having to call ``reset_iterator`` manually.
+        """
         self._sync_batch_size_from_ledger()
         self._wait_if_paused()
-        if self._iterator is None:
-            self._reset_iterator()
+        self._reset_iterator()  # Reset
         return self._iterator
 
     def __next__(self) -> Any:

@@ -1274,6 +1274,8 @@ class DataService:
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
+        self._ctx.ensure_components()
+        components = self._ctx.components
 
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
@@ -1285,6 +1287,17 @@ class DataService:
                 )
 
         try:
+            # Pause training if it's currently running
+            trainer = components.get("trainer")
+            hp = components.get("hyperparams")
+            if trainer:
+                logger.info("Pausing training before restore...")
+                trainer.pause()
+                if "is_training" in hp:
+                    hp['is_training'] = False
+                else:
+                    hp["is_training"] = False
+
             # 2) Check if we should bypass the agent (Quick Filters path)
             if not request.is_natural_language:
                 logger.info(
@@ -1492,6 +1505,18 @@ class DataService:
             self._initialize_data_service()
 
         self._ctx.ensure_components()
+        components = self._ctx.components
+
+        # Pause training if it's currently running
+        trainer = components.get("trainer")
+        hp = components.get("hyperparams")
+        if trainer:
+            logger.info("Pausing training before restore...")
+            trainer.pause()
+            if "is_training" in hp:
+                hp['is_training'] = False
+            else:
+                hp["is_training"] = False
 
         if request.stat_name not in [SampleStatsEx.TAGS.value, SampleStatsEx.DENY_LISTED.value]:
             return pb2.DataEditsResponse(

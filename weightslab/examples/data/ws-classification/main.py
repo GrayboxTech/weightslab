@@ -169,7 +169,7 @@ if __name__ == "__main__":
 
     # Data (MNIST train/val/test)
     _full_train_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
+        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
         train=True,
         download=True,
         transform=transforms.Compose(
@@ -179,7 +179,7 @@ if __name__ == "__main__":
         ),
     )
     _test_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
+        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
         train=False,
         download=True,
         transform=transforms.Compose(

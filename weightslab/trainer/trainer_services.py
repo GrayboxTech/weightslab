@@ -78,46 +78,15 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.data_service.CheckAgentHealth(request, context)
 
     # -------------------------------------------------------------------------
+    # Logger data sync for WeightsStudio
+    # -------------------------------------------------------------------------
+    def GetLatestLoggerData(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.GetLatestLoggerData({request})")
+        return self._exp_service.GetLatestLoggerData(request, context)
+
+    # -------------------------------------------------------------------------
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
-    def StreamStatus(self, request_iterator, context):
-        logger.debug(f"ExperimentServiceServicer.StreamStatus({request_iterator})")
-
-        # Retry to ensure components are ready
-        max_retries = 10
-        for attempt in range(max_retries):
-            self._ctx.ensure_components()
-            components = self._ctx.components
-            is_model_interfaced = components.get("model") is not None
-            has_streaming_logger = components.get("signal_logger") is not None
-
-            if is_model_interfaced and has_streaming_logger:
-                logger.info(f"StreamStatus: Components ready on attempt {attempt + 1}")
-                break
-
-            if attempt < max_retries - 1:
-                logger.debug(f"StreamStatus: Waiting for components (attempt {attempt + 1}/{max_retries})")
-                import time
-                time.sleep(0.5)
-
-        if not is_model_interfaced or not has_streaming_logger:
-            logger.warning(
-                f"StreamStatus: Components not ready after {max_retries} attempts. "
-                f"{{'is_model_interfaced': {is_model_interfaced}, 'has_streaming_logger': {has_streaming_logger}}}"
-            )
-            # Yield empty/placeholder status instead of closing stream
-            import weightslab.proto.experiment_service_pb2 as pb2
-            yield pb2.TrainingStatusEx(
-                timestamp="N/A",
-                experiment_name="N/A",
-                model_age=0
-            )
-            return
-
-        # stream status updates to client
-        for status in self._exp_service.StreamingStatus(request_iterator):
-            yield status
-
     def ExperimentCommand(self, request, context):
         logger.debug(f"ExperimentServiceServicer.ExperimentCommand({request})")
         return self._exp_service.ExperimentCommand(request, context)
@@ -128,6 +97,13 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     def ManipulateWeights(self, request, context):
         logger.debug(f"ExperimentServiceServicer.ManipulateWeights({request})")
         return self._exp_service.model_service.ManipulateWeights(request, context)
+
+    # -------------------------------------------------------------------------
+    # Checkpoint restore
+    # -------------------------------------------------------------------------
+    def RestoreCheckpoint(self, request, context):
+        logger.debug(f"ExperimentServiceServicer.RestoreCheckpoint({request})")
+        return self._exp_service.RestoreCheckpoint(request, context)
 
 
 # -----------------------------------------------------------------------------

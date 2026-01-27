@@ -5,20 +5,17 @@ from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoi
 
 class LoggerQueue:
     def __init__(self, name: str = None, register: bool = True) -> None:
-        self.queue = queue.Queue()  # Thread-safe queue for signals communication
         self.graph_names = set()
         self._current_step_buffer = {}  # {metric_name: [values]}
         self._last_step = None
         self._signal_history = []  # Keep all signals in memory for persistence
+        self._pending_queue = []  # Queue for new signals waiting to be sent to WeightsStudio
 
         if register:
-            # # Initialize the proxy before setting the logger
             try:
                 get_logger(name)
             except Exception:
                 pass
-
-            # Register the logger into the ledger. This will update any proxy in-place.
             register_logger(name, self)
 
         self.chkpt_manager = get_checkpoint_manager()
@@ -27,7 +24,7 @@ class LoggerQueue:
         return list(self.graph_names)
 
     def _flush_step_buffer(self):
-        """Flush accumulated metrics for the previous step to queue."""
+        """Flush accumulated metrics for the previous step to history."""
         if self._current_step_buffer and self._last_step is not None:
             for metric_name, values in self._current_step_buffer.items():
                 signal = {
@@ -37,8 +34,9 @@ class LoggerQueue:
                     "metric_value": sum(values) / len(values) if len(values) > 1 else values[0],
                     "experiment_hash": self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None,
                 }
-                self.queue.put(signal)
                 self._signal_history.append(signal)
+                # Also add to pending queue for WeightsStudio
+                self._pending_queue.append(signal)
             self._current_step_buffer.clear()
 
     def add_scalars(self, graph_name, name_2_value, global_step: int):
@@ -50,19 +48,17 @@ class LoggerQueue:
             self._flush_step_buffer()
             self._last_step = global_step
 
-        # Accumulate metrics for the current step
-        for line_name, line_value in name_2_value.items():
-            metric_key = f"{graph_name}:{line_name}"
+        for _, line_value in name_2_value.items():
+            metric_key = f"{graph_name}"
             if metric_key not in self._current_step_buffer:
                 self._current_step_buffer[metric_key] = []
             self._current_step_buffer[metric_key].append(float(line_value))
 
-    def print_queue(self):
-        """Print all items in queue without removing them."""
-        items = list(self.queue.queue)
-        for i, item in enumerate(items):
+    def print_history(self):
+        """Print all items in history."""
+        for i, item in enumerate(self._signal_history):
             print(f"[{i}] {item}")
-        return items
+        return self._signal_history
 
     def print_buffer(self):
         """Print current step buffer contents."""
@@ -74,14 +70,19 @@ class LoggerQueue:
         """Retrieve all accumulated signals from memory."""
         return list(self._signal_history)
 
+    def get_and_clear_queue(self):
+        """Get pending queue and clear it (for incremental updates to WeightsStudio)."""
+        queue_copy = list(self._pending_queue)
+        self._pending_queue.clear()
+        return queue_copy
+
     def load_signal_history(self, signals):
-        """Load a list of signals into history and queue (used for checkpoint restore)."""
+        """Load a list of signals into history (used for checkpoint restore)."""
         if not signals:
             return
         for signal in signals:
             self._signal_history.append(signal)
             try:
-                self.queue.put(signal)  # Set the signals to be sent
                 metric_name = signal.get("metric_name")
                 if metric_name:
                     # Derive a graph name if encoded as 'graph:metric'

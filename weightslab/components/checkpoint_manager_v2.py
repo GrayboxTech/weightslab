@@ -110,6 +110,7 @@ class CheckpointManagerV2:
         self.hash_generator = ExperimentHashGenerator()
         self.current_exp_hash: Optional[str] = None
         self.previous_exp_hash: Optional[str] = None
+        self.hash_by_module: list = [None, None, None]  # HP, MODEL, DATA
 
         # Step tracking
         self._step_counter = 0
@@ -279,6 +280,9 @@ class CheckpointManagerV2:
             old_hash = self.current_exp_hash
             self.current_exp_hash = new_hash
             self.previous_exp_hash = old_hash
+            self.hash_by_module[0] = self.hash_generator.get_component_hashes().get('hp', None)
+            self.hash_by_module[1] = self.hash_generator.get_component_hashes().get('model', None)
+            self.hash_by_module[2] = self.hash_generator.get_component_hashes().get('data', None)
 
             if dump_immediately:
                 # Dump changes immediately
