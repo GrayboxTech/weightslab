@@ -870,7 +870,7 @@ def _create_ledger_manager():
     enable_flush = True
 
     try:
-        hp = get_hyperparams(resolve_hp_name())
+        hp = get_hyperparams()
         if isinstance(hp, dict):
             flush_interval = hp.get('ledger_flush_interval', flush_interval)
             flush_max_rows = hp.get('ledger_flush_max_rows', flush_max_rows)
@@ -892,6 +892,6 @@ def _create_ledger_manager():
 # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
 LM = _create_ledger_manager()
 try:
-    register_dataframe("sample_stats", LM)
+    register_dataframe(LM)
 except Exception as e:
     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

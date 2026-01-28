@@ -1,11 +1,12 @@
 import time
 import types
-import queue
 import logging
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import weightslab_rlock
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
+from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name
+from weightslab.backend import ledgers
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 
@@ -103,19 +104,7 @@ class ExperimentService:
         # Write requests
         if request.HasField("hyper_parameter_change"):
             with weightslab_rlock:
-                # Pause training if it's currently running
-                trainer = components.get("trainer")
-                hp = components.get("hyperparams")
-                if trainer:
-                    logger.info("Pausing training before restore...")
-                    trainer.pause()
-                    if "is_training" in hp:
-                        hp['is_training'] = False
-                    else:
-                        hp["is_training"] = False
-
                 hyper_parameters = request.hyper_parameter_change.hyper_parameters
-                from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name
                 hp_name = None
                 if self._ctx.exp_name:
                     hp_name = self._ctx.exp_name
@@ -131,38 +120,44 @@ class ExperimentService:
                 try:
                     if hyper_parameters.HasField("training_steps_to_do"):
                         set_hyperparam(
-                            hp_name,
-                            "training_steps_to_do",
-                            hyper_parameters.training_steps_to_do,
+                            name=hp_name,
+                            key_path="training_steps_to_do",
+                            value=hyper_parameters.training_steps_to_do
                         )
 
                     if hyper_parameters.HasField("learning_rate"):
-                        set_hyperparam(hp_name, "optimizer.lr", hyper_parameters.learning_rate)
-
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="optimizer.lr",
+                            value=hyper_parameters.learning_rate
+                        )
                     if hyper_parameters.HasField("batch_size"):
                         set_hyperparam(
-                            hp_name,
-                            "data.train_loader.batch_size",
-                            hyper_parameters.batch_size,
+                            name=hp_name,
+                            key_path="data.train_loader.batch_size",
+                            value=hyper_parameters.batch_size
                         )
 
                     if hyper_parameters.HasField("full_eval_frequency"):
                         set_hyperparam(
-                            hp_name,
-                            "eval_full_to_train_steps_ratio",
-                            hyper_parameters.full_eval_frequency,
+                            name=hp_name,
+                            key_path="eval_full_to_train_steps_ratio",
+                            value=hyper_parameters.full_eval_frequency
                         )
 
                     if hyper_parameters.HasField("checkpont_frequency"):
                         set_hyperparam(
-                            hp_name,
-                            "experiment_dump_to_train_steps_ratio",
-                            hyper_parameters.checkpont_frequency,
+                            name=hp_name,
+                            key_path="experiment_dump_to_train_steps_ratio",
+                            value=hyper_parameters.checkpont_frequency
                         )
 
                     if hyper_parameters.HasField("is_training"):
-                        set_hyperparam(hp_name, "is_training", hyper_parameters.is_training)
-
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="is_training",
+                            value=hyper_parameters.is_training
+                        )
                 except Exception as e:
                     return pb2.CommandResponse(
                         success=False,
@@ -469,11 +464,13 @@ class ExperimentService:
 
             # Get checkpoint manager and load state
             checkpoint_manager = components.get("checkpoint_manager")
-            if checkpoint_manager is None:
-                return pb2.RestoreCheckpointResponse(
-                    success=False,
-                    message="Checkpoint manager not initialized"
-                )
+            if checkpoint_manager == None:
+                checkpoint_manager = ledgers.get_checkpoint_manager()
+                if checkpoint_manager == None:
+                    return pb2.RestoreCheckpointResponse(
+                        success=False,
+                        message="Checkpoint manager not initialized"
+                    )
 
             # Load checkpoint by hash
             success = checkpoint_manager.load_state(experiment_hash)

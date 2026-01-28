@@ -4,7 +4,7 @@ from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoi
 
 
 class LoggerQueue:
-    def __init__(self, name: str = None, register: bool = True) -> None:
+    def __init__(self, register: bool = True) -> None:
         self.graph_names = set()
         self._current_step_buffer = {}  # {metric_name: [values]}
         self._last_step = None
@@ -13,10 +13,10 @@ class LoggerQueue:
 
         if register:
             try:
-                get_logger(name)
+                get_logger()
             except Exception:
                 pass
-            register_logger(name, self)
+            register_logger(self)
 
         self.chkpt_manager = get_checkpoint_manager()
 

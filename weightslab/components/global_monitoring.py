@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_optimizers, get_optimizer
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_optimizers, get_optimizer, register_hyperparams
 from weightslab.components.tracking import TrackingMode
 
 
@@ -27,12 +27,16 @@ class PauseController:
         # Get checkpoint manager instance
         self.checkpoint_manager = None
 
+        # Get the proxy that wraps our dict
+        self.hyperparams = get_hyperparams()
+
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
         self._event.wait()   # releases GIL while waiting
 
     def pause(self):
         self._event.clear()
+        self.hyperparams['is_training'] = False
         logger.info('\nTraining paused.')
 
     def resume(self):
@@ -46,6 +50,7 @@ class PauseController:
         # Then resume execution
         if self._is_hash_computed():
             self._event.set()
+            self.hyperparams['is_training'] = True
             logger.info(f'\nTraining resumed as modules hashes have been computed: {self.checkpoint_manager.hash_by_module}.')
             return True
         else:
@@ -156,7 +161,7 @@ guard_testing_context = GuardContext(for_training=False)
 _pause_sync_thread_started = False
 checkpoint_manager = get_checkpoint_manager()
 
-def _pause_hp_sync_loop(poll_interval: float = 0.5):
+def _pause_hp_sync_loop(poll_interval: float = 3):
     firstresume = True
     while True:
         try:
@@ -165,28 +170,25 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 time.sleep(poll_interval)
                 continue
 
-            # lazy-resolve hyperparams handle
+            # lazy-resolve hyperparams proxy
             try:
-                hp_handle = get_hyperparams(name)
+                hp = get_hyperparams(name)
             except Exception:
                 time.sleep(poll_interval)
                 continue
 
-            # unwrap Proxy-like handle if present
-            try:
-                if hasattr(hp_handle, 'get') and not isinstance(hp_handle, dict):
-                    hp = hp_handle.get()
-                else:
-                    hp = hp_handle
-            except Exception:
-                hp = None
-
-            if not isinstance(hp, dict):
+            # Check if hp is dict-like (has required methods) rather than isinstance
+            if not hasattr(hp, '__getitem__') or not hasattr(hp, '__setitem__'):
                 time.sleep(poll_interval)
                 continue
 
             # Training status from ledger
-            hp_is_training = hp.get('is_training')
+            try:
+                # Use .get() if available (dict or Proxy with dict), otherwise use []
+                hp_is_training = hp.get('is_training') if hasattr(hp, 'get') else hp['is_training']
+            except (KeyError, TypeError, AttributeError):
+                time.sleep(poll_interval)
+                continue
             if hp_is_training is not None:
                 controller_paused = pause_controller.is_paused()
                 controller_running = not controller_paused
@@ -204,7 +206,10 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
 
                 # Propagate controller state back to ledger if it differs
                 if controller_paused and not firstresume:
-                    set_hyperparam(name, 'is_training', False)
+                    try:
+                        hp['is_training'] = False
+                    except Exception:
+                        set_hyperparam(name, 'is_training', False)
 
         except Exception as e:
             # swallow to keep thread alive

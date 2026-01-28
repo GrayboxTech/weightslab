@@ -80,7 +80,7 @@ class CheckpointManagerTest(unittest.TestCase):
         self._eval_loader = wl.watch_or_edit(DataLoader(data_eval, batch_size=128, shuffle=False), flag='dataloader', name='exp_eval')
 
         # Register a mock logger as well (keeps compatibility with older code)
-        self._logger = wl.watch_or_edit(self.summary_writer_mock, flag='logger', name='exp_logger')
+        self._logger = wl.watch_or_edit(self.summary_writer_mock, flag='logger')
 
         # Force controller to resume step
         from weightslab.components.global_monitoring import pause_controller

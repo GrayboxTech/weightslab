@@ -640,10 +640,8 @@ class CheckpointManagerV2:
     def save_model_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
-        model_name: Optional[str] = None,
         step: Optional[int] = None,
         save_optimizer: bool = True,
-        optimizer_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         force_dump_pending: bool = False,
         update_manifest: bool = True
@@ -655,10 +653,8 @@ class CheckpointManagerV2:
 
         Args:
             model: PyTorch model (or get from ledger if None)
-            model_name: Name to get model from ledger
             step: Training step number (uses internal counter if None)
             save_optimizer: Whether to also save optimizer state
-            optimizer_name: Name to get optimizer from ledger
             metadata: Additional metadata to save
             force_dump_pending: If True, dump any pending changes before saving checkpoint
 
@@ -677,7 +673,7 @@ class CheckpointManagerV2:
         # Get model from ledger if not provided
         if model is None:
             try:
-                model = get_model(model_name)
+                model = get_model()
                 # Unwrap proxy if needed
                 if hasattr(model, 'get') and callable(model.get):
                     model = model.get()
@@ -719,7 +715,7 @@ class CheckpointManagerV2:
         # Add optimizer state if requested
         if save_optimizer:
             try:
-                optimizer = get_optimizer(optimizer_name)
+                optimizer = get_optimizer()
                 if hasattr(optimizer, 'get') and callable(optimizer.get):
                     optimizer = optimizer.get()
                 if optimizer is not None:
@@ -816,7 +812,6 @@ class CheckpointManagerV2:
     def save_model_architecture(
         self,
         model: th.nn.Module,
-        model_name: Optional[str] = None
     ) -> Optional[Path]:
         """Save full model architecture (structure + code).
 
@@ -825,7 +820,6 @@ class CheckpointManagerV2:
 
         Args:
             model: PyTorch model
-            model_name: Optional name for the model
 
         Returns:
             Path: Path to saved architecture file, or None if failed
@@ -1472,7 +1466,7 @@ class CheckpointManagerV2:
                 model = checkpoint_data['model']
 
                 # Register in ledger
-                ledgers.register_model(ledgers.resolve_hp_name(), model)
+                ledgers.register_model(model)
 
                 # Set Model Training Guard
                 guard_training_context.model = model  # Train
@@ -1501,7 +1495,7 @@ class CheckpointManagerV2:
         if 'config' in checkpoint_data['loaded_components']:
             try:
                 config = checkpoint_data['config']
-                ledgers.register_hyperparams(ledgers.resolve_hp_name(), config)
+                ledgers.register_hyperparams(config)
                 logger.info(f"[OK] Applied hyperparameters config")
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply config: {e}")

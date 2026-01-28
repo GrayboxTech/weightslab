@@ -13,7 +13,7 @@ from typing import Callable
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import get_checkpoint_manager, list_hyperparams, register_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, list_hyperparams, register_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.ui.weightslab_ui import ui_serve
@@ -223,40 +223,24 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         kwargs (Any): Additional keyword arguments to pass.
     """
 
-    # Sanity check
+    # Sanity check on obj name attribute
     if not hasattr(obj, '__name__'):
         if obj_name is None and 'name' not in kwargs:
             try:
                 obj.__name__ = type(obj).__name__
             except Exception:
-                obj.__name__ = str(time.time())
-            logger.warning(
-                "Warning: Watching or editing anonymous object '" +
-                f"{obj.__name__}'."
-            )
-            logger.warning(
-                "Please add a 'name' attribute to the object."
-            )
+                if isinstance(obj, Callable):
+                    obj.__name__ = str(time.time())
+                    logger.warning(
+                        "Warning: Watching or editing anonymous object '" +
+                        f"{obj.__name__}'."
+                    )
         else:
             if hasattr(obj, '__name__'):
                 obj.__name__ = obj_name
 
     # Model
     if 'model' in flag.lower() or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
-        # Derive a sane registration name: prefer explicit `name` kwarg,
-        # then a meaningful __name__ if it is not the generic 'model',
-        # then the class name. This avoids accidental registration under
-        # the literal 'model' which can lead to duplicates.
-        if kwargs.get('name'):
-            reg_name = kwargs.get('name')
-        else:
-            candidate = getattr(obj, '__name__', None)
-            if candidate and candidate.lower() != 'model':
-                reg_name = candidate
-            else:
-                clsname = getattr(obj.__class__, '__name__', None)
-                reg_name = clsname if clsname and clsname.lower() != 'model' else (kwargs.get('name') or 'model')
-
         # First ensure that the model has module input_shape
         if not hasattr(obj, 'input_shape'):
             raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
@@ -265,17 +249,13 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_model` will create a Proxy if
         # the name is not yet present.
-        try:
-            proxy = get_model(reg_name)
-        except Exception:
-            proxy = None
+        proxy = get_model()
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs)
 
-        # Register related logger for model training
-        # # Init the logger
-        LoggerQueue(name=reg_name)
+        # Register logger in backend for model training
+        LoggerQueue()
 
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
@@ -284,15 +264,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
     # DataLoader
     elif 'data' in flag.lower() or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
-        reg_name = kwargs.get('name') or getattr(getattr(obj, 'dataset', obj), '__name__', None) or getattr(getattr(obj, 'dataset', obj), '__class__', type(getattr(obj, 'dataset', obj))).__name__
-        kwargs['name'] = reg_name
-
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_dataloader` will create a Proxy if
         # the name is not yet present.
         try:
-            proxy = get_dataloader(reg_name)
+            proxy = get_dataloader(kwargs.get('loader_name', DEFAULT_NAME))
         except Exception:
             proxy = None
 
@@ -327,14 +304,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
     # Optimizer
     elif 'optimizer' in flag.lower() or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
-        # Determine registration name first
-        reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj, '__class__', type(obj)).__name__ or '_optimizer'
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_optimizer` will create a Proxy if
         # the name is not yet present.
         try:
-            proxy = get_optimizer(reg_name)
+            proxy = get_optimizer()
         except Exception:
             proxy = None
 
@@ -348,19 +323,17 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
     # Logger
     elif 'logger' in flag.lower() or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
-        # Determine registration name for the logger (prefer explicit name)
-        reg_name = kwargs.get('name') or getattr(obj, '__name__', None) or getattr(obj.__class__, '__name__', None) or 'main'
         # Ensure there's a proxy placeholder if callers already requested the logger
         try:
-            proxy = get_logger(reg_name)
+            proxy = get_logger()
         except Exception:
             proxy = None
 
         # Register the logger into the ledger. This will update any proxy in-place.
-        register_logger(reg_name, obj)
+        register_logger(obj)
 
         # Return a stable handle (proxy) when available, otherwise the registered logger
-        return proxy if proxy is not None else get_logger(reg_name)
+        return proxy if proxy is not None else obj
 
     # Signals
     # # Loss
@@ -384,7 +357,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
             # register wrapped signal in ledger
             try:
-                register_signal(reg_name, obj)
+                register_signal(obj, name=reg_name)
             except Exception:
                 pass
 
@@ -424,7 +397,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
             # register wrapped signal in ledger
             try:
-                register_signal(reg_name, obj)
+                register_signal(obj, name=reg_name)
             except Exception:
                 pass
 
@@ -445,8 +418,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         fl = flag.lower()
         if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters'):
-            # obj may be a dict of parameters or a path to a YAML file
-            name = kwargs.get('name') or getattr(obj, '__name__', None) or 'hyperparams'
             # If obj is a string, treat as a file path and start watcher
             try:
                 # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
@@ -464,7 +435,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         # Create new manager and register it
                         _checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
                         try:
-                            ledgers.register_checkpoint_manager('default', _checkpoint_manager)
+                            ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")
                         except Exception:
                             pass
@@ -495,7 +466,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             )
                             if checkpoint_data.get('config'):
                                 config = checkpoint_data['config']
-                                register_hyperparams(name, config)
+                                register_hyperparams(config)
                                 logger.info(f"Loaded hyperparameters from checkpoint {latest_hash[:16]}")
                                 checkpoint_hp_loaded = True
                 except Exception:
@@ -508,26 +479,26 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         # register empty/defaults if provided in kwargs
                         defaults = kwargs.get('defaults', None)
                         if defaults:
-                            register_hyperparams(name, defaults)
+                            register_hyperparams(defaults)
                         # start ledger-managed watcher
-                        watch_hyperparams_file(name, path, poll_interval=kwargs.get('poll_interval', 1.0))
+                        watch_hyperparams_file(path, poll_interval=kwargs.get('poll_interval', 1.0))
 
                         # return the ledger handle (proxy or dict)
-                        return get_hyperparams(name)
+                        return get_hyperparams()
                     elif isinstance(obj, dict):
-                        register_hyperparams(name, obj)
+                        register_hyperparams(obj)
 
-                        return get_hyperparams(name)
+                        return get_hyperparams()
                     else:
                         # unsupported type for hp; attempt best-effort registration
                         try:
-                            register_hyperparams(name, dict(obj))
+                            register_hyperparams(dict(obj))
 
-                            return get_hyperparams(name)
+                            return get_hyperparams()
                         except Exception:
                             raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
 
-                return get_hyperparams(name)
+                return get_hyperparams()
             except Exception:
                 # bubble up original error
                 raise

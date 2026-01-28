@@ -124,7 +124,7 @@ class DataSampleTrackingWrapper(Dataset):
         tags_mapping: Optional[Dict[str, int]] = None,
         stats_store: Optional[H5DataFrameStore] = None,
         enable_h5_persistence: bool = True,
-        name: Optional[str] = 'unknown',
+        loader_name: Optional[str] = 'unknown',
         array_autoload_arrays: bool = False,
         array_return_proxies: bool = True,
         array_use_cache: bool = True,
@@ -132,14 +132,14 @@ class DataSampleTrackingWrapper(Dataset):
         **_,
     ):
         # Set name
-        self.name = name
+        self.loader_name = loader_name
 
         # Init Global Ledger Manager
         ledger_manager = get_dataframe()
         if ledger_manager == None:
             ledger_manager = _create_ledger_manager()
             try:
-                register_dataframe("sample_stats", ledger_manager)
+                register_dataframe(ledger_manager)
             except Exception as e:
                 logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")
 
@@ -202,7 +202,7 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Detect dataset split for H5 storage
         original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
-        split = name or _detect_dataset_split(original_ds)
+        split = self.loader_name or _detect_dataset_split(original_ds)
 
         for idx, uid in enumerate(self.unique_ids):
             uid_int = int(uid)

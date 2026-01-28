@@ -17,17 +17,17 @@ class HyperparamsTests(unittest.TestCase):
             'b': {'c': 2, 'd': 3},
             'e': [4, 5]
         }
-        register_hyperparams('test_exp', params)
-        loaded = get_hyperparams('test_exp')
+        register_hyperparams(params)
+        loaded = get_hyperparams()
         self.assertEqual(loaded['a'], 1)
         self.assertEqual(loaded['b']['c'], 2)
         self.assertEqual(loaded['e'], [4, 5])
 
     def test_set_hyperparam_dot_path(self):
         params = {'x': {'y': {'z': 10}}}
-        register_hyperparams('test_exp2', params)
+        register_hyperparams(params)
         set_hyperparam('test_exp2', 'x.y.z', 42)
-        loaded = get_hyperparams('test_exp2')
+        loaded = get_hyperparams()
         self.assertEqual(loaded['x']['y']['z'], 42)
 
     def test_reload_from_yaml(self):
@@ -40,9 +40,9 @@ class HyperparamsTests(unittest.TestCase):
                 yaml.dump(params, f)
             with open(yaml_path, 'r') as f:
                 loaded = yaml.safe_load(f)
-            register_hyperparams('yaml_exp', loaded)
-            self.assertEqual(get_hyperparams('yaml_exp')['foo'], 123)
-            self.assertEqual(get_hyperparams('yaml_exp')['bar']['baz'], 456)
+            register_hyperparams(loaded)
+            self.assertEqual(get_hyperparams()['foo'], 123)
+            self.assertEqual(get_hyperparams()['bar']['baz'], 456)
         finally:
             td.cleanup()
 

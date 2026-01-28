@@ -396,12 +396,11 @@ if __name__ == "__main__":
 
     # --- 4) Register logger + hyperparameters ---
     logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
+    wl.watch_or_edit(logger, flag="logger", log_dir=log_dir)
 
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
@@ -443,12 +442,10 @@ if __name__ == "__main__":
     train_criterion = wl.watch_or_edit(
         GIoULoss(reduction=None),
         flag="criterion",
-        name="train_metric/GIoULoss",
     )
     test_criterion = wl.watch_or_edit(
         GIoULoss(reduction=None),
         flag="criterion",
-        name="test_metric/GIoULoss",
     )
 
     # --- 6) Model, optimizer, losses, metric ---

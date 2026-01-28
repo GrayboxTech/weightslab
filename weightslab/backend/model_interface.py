@@ -124,7 +124,7 @@ class ModelInterface(NetworkWithOps):
                 # Create new manager and register it
                 self._checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
                 try:
-                    ledgers.register_checkpoint_manager('default', self._checkpoint_manager)
+                    ledgers.register_checkpoint_manager(self._checkpoint_manager)
                     logger.info("Registered new checkpoint manager in ledger")
                 except Exception:
                     pass
@@ -175,8 +175,6 @@ class ModelInterface(NetworkWithOps):
                     # we can set its current step if available in weights
                     if isinstance(self.model, self.__class__):
                         self._registration(
-                            model=self.model,
-                            name=name,
                             weak=weak
                         )
                         return
@@ -213,8 +211,6 @@ class ModelInterface(NetworkWithOps):
         # Optionally register wrapper in global ledger
         if register:
             self._registration(
-                model=self.model,
-                name=name,
                 weak=weak
             )
 
@@ -230,27 +226,8 @@ class ModelInterface(NetworkWithOps):
         self.guard_training_context.model = self
         self.guard_testing_context.model = self
 
-    def _registration(self, model, name, weak: bool = False):
-        try:
-            # Prefer an explicit name. Otherwise prefer a meaningful
-            # candidate (function __name__ when informative, then
-            # the class name). Avoid using the generic literal
-            # 'model' which can be produced by wrappers/patching and
-            # lead to duplicate registrations.
-            if name:
-                reg_name = name
-            else:
-                candidate = getattr(model, '__name__', None)
-                if candidate and candidate.lower() != 'model':
-                    reg_name = candidate
-                else:
-                    clsname = getattr(model.__class__, '__name__', None)
-                    reg_name = clsname if clsname and clsname.lower() != 'model' else (name or 'model')
-
-            register_model(reg_name, self, weak=weak)
-            self._ledger_name = reg_name
-        except Exception:
-            pass
+    def _registration(self, weak: bool = False):
+        register_model(self, weak=weak)
 
     def load_state_dict(self, state_dict, strict: bool = True):
         """
@@ -397,7 +374,7 @@ class ModelInterface(NetworkWithOps):
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
                     # Update hash for current experiment state (marks changes as pending, doesn't dump)
-                    new_hash, is_new, changed_components = self._checkpoint_manager.update_experiment_hash()
+                    _, _, changed_components = self._checkpoint_manager.update_experiment_hash()
                     # If model architecture changed, save it
                     if 'model' in changed_components:
                         try:
@@ -410,9 +387,7 @@ class ModelInterface(NetworkWithOps):
                     # Save model weights checkpoint (no pending dump here)
                     self._checkpoint_manager.save_model_checkpoint(
                         model=self.model,
-                        model_name=getattr(self, '_ledger_name', None),
                         save_optimizer=True,
-                        optimizer_name=getattr(self, '_ledger_name', None),
                         step=batched_age,
                         force_dump_pending=False,
                         update_manifest=False

@@ -155,7 +155,6 @@ if __name__ == "__main__":
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
@@ -249,32 +248,27 @@ if __name__ == "__main__":
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="train_mlt_loss/CE",
         log=True,
     )
     val_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="val_mlt_loss/CE",
         log=True,
     )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="test_mlt_loss/CE",
         log=True,
     )
 
     val_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="val_metric/Accuracy",
         log=True,
     )
     test_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="test_metric/Accuracy",
         log=True,
     )
 

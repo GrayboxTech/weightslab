@@ -191,7 +191,7 @@ class DataLoaderInterface:
         drop_last: bool = False,
         pin_memory: bool = False,
         collate_fn: Optional[Any] = None,
-        name: Optional[str] = None,
+        loader_name: Optional[str] = None,
         register: bool = True,
         weak: bool = False,
         root_log_dir: Optional[str] = None,
@@ -209,7 +209,7 @@ class DataLoaderInterface:
             drop_last: Whether to drop the last incomplete batch.
             pin_memory: Whether to use pinned memory for DataLoader.
             collate_fn: Optional collate function for DataLoader.
-            name: Optional name for registration in the global ledger.
+            loader_name: Optional name for registration in the global ledger.
             register: Whether to register this interface in the global ledger.
             weak: Whether to use weak references when registering.
             root_log_dir: Optional root log directory for tracking wrapper.
@@ -240,7 +240,7 @@ class DataLoaderInterface:
                 compute_hash=compute_hash,
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
-                name=name,
+                loader_name=loader_name,
                 **kwargs
             )
             self.tracked_dataset._map_updates_hook_fns.append(
@@ -254,7 +254,7 @@ class DataLoaderInterface:
                 compute_hash=compute_hash,
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
-                name=name,
+                loader_name=loader_name,
                 **kwargs
             )
 
@@ -362,19 +362,19 @@ class DataLoaderInterface:
         self._skipped = []
 
         # Optionally register in the global ledger for cross-thread access.
-        # If no explicit `name` is provided, try to infer a friendly name from
-        # the wrapped dataset class name; otherwise fall back to '_dataloader'.
+        # If no explicit `loader_name` is provided, try to infer a friendly loader_name from
+        # the wrapped dataset class loader_name; otherwise fall back to '_dataloader'.
         self._ledger_name = None
         if register:
             reg_name = (
-                name
+                loader_name
                 or getattr(self.dataset, "__name__", None)
                 or getattr(self.dataset, "__class__", type(self.dataset)).__name__
                 or "_dataloader"
             )
             self._ledger_name = reg_name
             try:
-                register_dataloader(reg_name, self, weak=weak)
+                register_dataloader(self, weak=weak, name=reg_name)
             except Exception:
                 # Best-effort: ignore registration failures
                 pass
@@ -667,7 +667,7 @@ class DataLoaderInterface:
                     bs = 4 if self._sample_offset - len(self._skipped) >= 4 else self._sample_offset - len(self._skipped)  # Autoscale bs to sample offset
                     self.set_batch_size(bs)
                     self._skipped.extend(next(self._iterator)[1].detach().cpu().tolist())
-                    logger.debug(f"Offset sampler: skipped {len(self._skipped)}/{self._sample_offset} samples: {self._skipped}")
+                    logger.debug(f"Offset sampler: skipped {len(self._skipped)}/{self._sample_offset}")
                 except StopIteration as e:
                     logger.debug(f"Offset sampler: reached end of iterator while skipping: {e}")
                     self._reset_iterator()  # Reset iterator and try again

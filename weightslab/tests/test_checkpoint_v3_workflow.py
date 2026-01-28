@@ -45,14 +45,13 @@ from weightslab.utils.tools import seed_everything
 
 
 # Helper function to register objects in ledger directly
-def register_in_ledger(obj, flag, name, device='cpu', **kwargs):
+def register_in_ledger(obj, flag, device='cpu', **kwargs):
     """Register an object in the ledger."""
     try:
         if flag == "hyperparameters":
             return wl.watch_or_edit(
                 obj,
                 flag="hyperparameters",
-                name=name,
                 defaults=obj,
                 poll_interval=1.0,
                 **kwargs
@@ -61,7 +60,6 @@ def register_in_ledger(obj, flag, name, device='cpu', **kwargs):
             return wl.watch_or_edit(
                 obj,
                 flag="model",
-                name=name,
                 device=device,
                 **kwargs
             )
@@ -69,21 +67,18 @@ def register_in_ledger(obj, flag, name, device='cpu', **kwargs):
            return wl.watch_or_edit(
                 obj,
                 flag="data",
-                name="train_loader",
                 **kwargs
             )
         elif flag == "optimizer":
             return wl.watch_or_edit(
                 obj,
                 flag="optimizer",
-                name=name,
                 **kwargs
             )
         elif flag == "signal":
             return wl.watch_or_edit(
                 obj,
                 flag="signal",
-                name=name,
                 **kwargs
             )
     except Exception as e:
@@ -379,13 +374,13 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # Initialize HP
         # =============
         # Register HP in ledger
-        cls.config = register_in_ledger(cls.config, flag="hyperparameters", name=cls.config.get('experiment_name'))
+        cls.config = register_in_ledger(cls.config, flag="hyperparameters")
 
         # ================
         # Initialize Model
         # ================
         model = SimpleCNN(conv1_out=8, conv2_out=16)
-        model = register_in_ledger(model, flag="model", name=cls.config.get('experiment_name'), device=DEVICE)
+        model = register_in_ledger(model, flag="model", device=DEVICE)
 
         # =====================
         # Initialize DataLoader
@@ -393,7 +388,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         register_in_ledger(
             cls.dataset,
             flag="dataloader",
-            name=cls.config.get('experiment_name'),
+            name='train_loader',
             compute_hash=False,
             is_training=True,
             batch_size=cls.config.get('data', {}).get('train_loader', {}).get('batch_size', 32),
@@ -407,20 +402,17 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # # Create and register optimizer
         register_in_ledger(
             th.optim.Adam(model.parameters(), lr=cls.config.get('optimizer', {}).get('lr', 0.001)),
-            flag="optimizer",
-            name=cls.config.get('experiment_name')
+            flag="optimizer"
         )
         # # Create and register signal (criterion)
         register_in_ledger(
             nn.CrossEntropyLoss(reduction='none'),
             flag="signal",
-            name="train_mlt_loss/CE",
             log=True
         )
         register_in_ledger(
             nn.BCEWithLogitsLoss(reduction='none'),
             flag="signal",
-            name="train_bin_loss/BCE",
             log=True
         )
 
@@ -1196,15 +1188,12 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Reference variables
         target_hash = self.state['exp_hash_d']  # Target is branch_d
-        loss_d_original = self.state['losses_d']
-        originals_uids = self.state.get('uids_d', None)
 
         print(f"Simulating fresh restart: loading everything from config...")
         print(f"Target state: {target_hash[:16]} (branch_d)")
 
         # Simulate fresh Python process: re-register everything from config
         config_reloaded = self.config_cp
-        exp_name = EXP_NAME
 
         # Clear existing ledger entries
         ledgers.clear_all()
@@ -1215,34 +1204,22 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # =================================================
         # First init a checkpoint manager with reloaded config
         self.chkpt_manager = CheckpointManagerV2(root_log_dir=self.config.get('root_log_dir'))
-        ledgers.register_checkpoint_manager(exp_name, self.chkpt_manager)
+        ledgers.register_checkpoint_manager(self.chkpt_manager)
 
         # Re-register HP
-        register_in_ledger(config_reloaded, flag="hyperparameters", name=exp_name)
+        register_in_ledger(config_reloaded, flag="hyperparameters")
         print("[OK] Hyperparameters re-registered")
 
         # Create fresh model
         model_restarted = SimpleCNN(conv1_out=8, conv2_out=16)  # Match branch_d architecture
         # # Model arch. and weights are updated at the init of model interface
-        model_restarted = register_in_ledger(model_restarted, flag="model", name=exp_name, device=DEVICE)
+        model_restarted = register_in_ledger(model_restarted, flag="model", device=DEVICE)
 
         # Re-register dataloader
-        # # Same here, dataloader is created from HP at init of dataloader interface, and data are loaded from chkpt
-        register_in_ledger(
-            self.dataset,
-            flag="dataloader",
-            name=exp_name,
-            compute_hash=False,
-            is_training=True,
-            batch_size=config_reloaded.get('data', {}).get('train_loader', {}).get('batch_size', 32),
-            shuffle=config_reloaded.get('data', {}).get('train_loader', {}).get('shuffle', False)
-        )
-
-        # Create and register dataloader
         dataloader = register_in_ledger(
             self.dataset,
             flag="dataloader",
-            name=exp_name,
+            name='train_loader',
             compute_hash=False,
             is_training=True,
             batch_size=self.config.get('data', {}).get('train_loader', {}).get('batch_size', 32),
@@ -1254,7 +1231,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
             model_restarted.parameters(),
             lr=config_reloaded.get('optimizer', {}).get('lr', 0.001)
         )
-        optimizer_restarted = register_in_ledger(optimizer_restarted, flag="optimizer", name=exp_name)
+        optimizer_restarted = register_in_ledger(optimizer_restarted, flag="optimizer")
         # # Create and register signal (criterion)
         criterion = nn.CrossEntropyLoss(reduction='none')
         criterion = register_in_ledger(
