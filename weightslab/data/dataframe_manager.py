@@ -577,8 +577,8 @@ class LedgeredDataFrameManager:
         # Mark dirty outside lock
         self.mark_dirty_batch(sample_ids)
 
-    def _flush_to_h5_if_needed(self, force: bool = False):
-        """Flush pending records to H5 - optimized for minimal main thread interference."""
+    def _flush_to_h5_if_needed(self, force: bool = False, blocking: bool = False):
+        """Flush pending records to H5 - optimized for minimal main thread interference unless blocking=True."""
         if not self._enable_h5_persistence:
             with self._lock:
                 self._pending.clear()
@@ -593,9 +593,12 @@ class LedgeredDataFrameManager:
                 return
 
         # Extract data with minimal lock time
-        if not self._lock.acquire(timeout=0.005):
-            # Can't get lock quickly, defer to next cycle
-            return
+        if blocking:
+             self._lock.acquire()
+        else:
+             if not self._lock.acquire(timeout=0.005):
+                 # Can't get lock quickly, defer to next cycle
+                 return
 
         try:
             if self._store is None or self._df.empty or not self._pending:
@@ -858,6 +861,23 @@ class LedgeredDataFrameManager:
 
         # Flush to H5 if needed
         self._flush_to_h5_if_needed(force=force)
+
+    def flush(self):
+        """Blocking flush to ensure all data is persisted to H5 immediately."""
+        # 1. Drain buffer fully (blocking)
+        with self._buffer_lock:
+            if not self._buffer:
+                buffered = []
+            else:
+                buffered = list(self._buffer.values())
+                self._buffer = {}
+        
+        # 2. Apply records (blocking)
+        if buffered:
+            self._apply_buffer_records(buffered)
+            
+        # 3. Force flush to H5 (blocking)
+        self._flush_to_h5_if_needed(force=True, blocking=True)
 
 
 # Create global instance with config-driven parameters
