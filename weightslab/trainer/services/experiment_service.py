@@ -153,6 +153,12 @@ class ExperimentService:
                         )
 
                     if hyper_parameters.HasField("is_training"):
+                        trainer = components.get("trainer")
+                        if trainer is not None:
+                            if hyper_parameters.is_training:
+                                trainer.resume()
+                            else:
+                                trainer.pause()
                         set_hyperparam(
                             name=hp_name,
                             key_path="is_training",
@@ -474,6 +480,9 @@ class ExperimentService:
 
             # Load checkpoint by hash
             success = checkpoint_manager.load_state(experiment_hash)
+            if not success:
+                logger.warning(f"Checkpoint load_state returned False for hash: {experiment_hash}. Try now force reload.")
+                success = checkpoint_manager.load_state(experiment_hash, force=True)  # Force reloading everything here
 
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
