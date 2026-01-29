@@ -407,16 +407,21 @@ class H5DataFrameStore:
 
                         # Merge data
                         if not existing.empty:
-                            if 'tags' in existing.columns and 'tags' in df_norm.columns and len(df_norm.columns) == 1:
-                                idx = df_norm.index.intersection(existing.index)
-                                if len(idx) > 0:
-                                    curr = existing.loc[idx, 'tags'].fillna('').astype(str)
-                                    new = df_norm.loc[idx, 'tags'].fillna('').astype(str)
-                                    sep = np.where((curr.str.len() > 0) & (new.str.len() > 0), ', ', '')
-                                    combined = curr + sep + new
-                                    existing.loc[idx, 'tags'] = combined
-                            else:
-                                existing = pd.concat([existing, df_norm])
+                            # Perform safe merge that supports partial updates
+                            # 1. Update matching rows for columns present in df_norm
+                            common_idx = existing.index.intersection(df_norm.index)
+                            if not common_idx.empty:
+                                for col in df_norm.columns:
+                                    # If column is new, add it to existing
+                                    if col not in existing.columns:
+                                        existing[col] = np.nan
+                                    # Update values for common rows
+                                    existing.loc[common_idx, col] = df_norm.loc[common_idx, col]
+
+                            # 2. Append strictly new rows
+                            new_idx = df_norm.index.difference(existing.index)
+                            if not new_idx.empty:
+                                existing = pd.concat([existing, df_norm.loc[new_idx]])
                         else:
                             existing = df_norm.copy()
 

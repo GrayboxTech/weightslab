@@ -119,7 +119,7 @@ def log_signal(scalar: float, reg_name: str, **_) -> None:
                         from weightslab.backend.ledgers import list_models, get_model as _gm
                         full_list = list_models()
                         if full_list:
-                             # Prefer "experiment" or "main" or the first one
+                                # Prefer "experiment" or "main" or the first one
                             if 'experiment' in full_list:
                                 m = _gm('experiment')
                             elif 'main' in full_list:
@@ -140,6 +140,8 @@ def log_signal(scalar: float, reg_name: str, **_) -> None:
                                 step = 0
                 except Exception:
                     step = 0
+
+                # Add to logger
                 logger.add_scalars(
                     reg_name,
                     {reg_name: scalar},
