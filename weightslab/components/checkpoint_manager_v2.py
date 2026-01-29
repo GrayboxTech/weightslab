@@ -1196,7 +1196,6 @@ class CheckpointManagerV2:
                         load_weights: bool = True,
                         load_config: bool = True,
                         load_data: bool = True,
-                        load_last_weights: bool = False,
                         force: bool = False
     ) -> Dict[str, Any]:
         """Load a complete checkpoint state by experiment hash.
@@ -1210,7 +1209,6 @@ class CheckpointManagerV2:
             load_weights: Whether to load model weights
             load_config: Whether to load hyperparameters if different
             load_data: Whether to load data state if different
-            load_last_weights: If True, always load the latest weights regardless of model change
             force: If True, force reload of all components regardless of hash comparison
 
         Returns:
@@ -1284,6 +1282,7 @@ class CheckpointManagerV2:
                     logger.error(f"  [ERROR] Failed to load model architecture: {e}")
             else:
                 logger.warning(f"  [WARNING] Model architecture file not found: {actual_arch_file}")
+
         elif load_model and (target_model_hash == current_model_hash and not force):
             # Try to load only the RNG state from the latest model checkpoint for reproducibility
             model_dir = self.models_dir / exp_hash[8:-8]
@@ -1424,7 +1423,7 @@ class CheckpointManagerV2:
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
 
-    def load_state(self, exp_hash: str, load_last_weights: bool = False) -> bool:
+    def load_state(self, exp_hash: str, force: bool = False) -> bool:
         """Load and apply a complete checkpoint state by experiment hash.
 
         This method loads all components and updates the system state in-place:
@@ -1435,7 +1434,7 @@ class CheckpointManagerV2:
 
         Args:
             exp_hash: The 24-byte experiment hash to load and apply
-            load_last_weights: If True, always load the latest weights regardless of model change
+            force: If True, force reload of all components regardless of hash comparison
 
         Returns:
             bool: True if state was successfully loaded and applied
@@ -1451,7 +1450,7 @@ class CheckpointManagerV2:
             load_weights=True,
             load_config=True,
             load_data=True,
-            load_last_weights=load_last_weights
+            force=force
         )
 
         if not checkpoint_data['loaded_components']:
