@@ -193,6 +193,21 @@ User: "Add tag 'FOUR' to target 4"
 }}
 
 
+**Ex12: Sampling (Fraction)**
+User: "Remove 50% of the samples with tags 'delete'"
+{{
+  "reasoning": "Target: Randomly drop half of the rows matching the tag condition. Strategy: Kind=Drop with drop_frac=0.5.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "drop",
+      "conditions": [{{ "column": "tags", "op": "contains", "value": "delete" }}],
+      "drop_frac": 0.5
+    }}
+  ]
+}}
+
+
 </examples>
 
 ---
