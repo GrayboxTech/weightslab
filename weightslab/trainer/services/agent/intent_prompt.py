@@ -208,6 +208,34 @@ User: "Remove 50% of the samples with tags 'delete'"
 }}
 
 
+**Ex13: Out of Scope / General Question**
+User: "What is the capital of France?"
+{{
+  "reasoning": "User is asking a general knowledge question unrelated to the dataset.",
+  "primary_goal": "out_of_scope",
+  "steps": []
+}}
+
+
+**Ex14: Top Percent**
+User: "Keep the top 10% with highest loss"
+{{
+  "reasoning": "Top 10% means sorting by loss descending and keeping the first 10%.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "sort",
+      "sort_by": ["loss"],
+      "ascending": [false]
+    }},
+    {{
+      "kind": "head",
+      "n": "10%"
+    }}
+  ]
+}}
+
+
 </examples>
 
 ---

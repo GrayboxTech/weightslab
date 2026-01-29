@@ -900,13 +900,31 @@ class DataService:
                     return "Applied operation: sort_index"
 
                 if func_name == "head":
-                    n = int(params.get("n", 5))
+                    n_raw = params.get("n", 5)
+                    # Handle "%" strings
+                    if isinstance(n_raw, str) and "%" in n_raw:
+                        try:
+                            n = int(len(df) * float(n_raw.replace("%", "")) / 100.0)
+                        except:
+                            n = 5
+                    else:
+                        n = int(n_raw)
+                        
                     if n < len(df):
                         df.drop(index=df.index.difference(df.index[:n]), inplace=True)
                     return f"Applied operation: head({n})"
 
                 if func_name == "tail":
-                    n = int(params.get("n", 5))
+                    n_raw = params.get("n", 5)
+                    # Handle "%" strings
+                    if isinstance(n_raw, str) and "%" in n_raw:
+                        try:
+                            n = int(len(df) * float(n_raw.replace("%", "")) / 100.0)
+                        except:
+                            n = 5
+                    else:
+                        n = int(n_raw)
+
                     if n < len(df):
                         df.drop(index=df.index.difference(df.index[-n:]), inplace=True)
                     return f"Applied operation: tail({n})"

@@ -44,7 +44,8 @@ class AtomicIntent(BaseModel):
     sort_by: Optional[List[str]] = Field(default=None, description="Exact column names to sort by")
     # Robustness: Accepts bool OR list of bools for multi-column sorting
     ascending: Optional[Union[bool, List[bool]]] = Field(default=None, description="True for ASC, False for DESC")
-    n: Optional[int] = Field(default=None, description="Number of rows for head/tail")
+    # Robustness: Accepts (int) count OR (str) expression like "10%"
+    n: Optional[Union[int, str]] = Field(default=None, description="Number of rows for head/tail (int or '10%')")
     drop_frac: Optional[float] = Field(default=None, description="Fraction of rows to drop (0.0 to 1.0)")
     keep_frac: Optional[float] = Field(default=None, description="Fraction of rows to keep (0.0 to 1.0)")
     analysis_expression: Optional[str] = Field(default=None, description="Pandas expression string for analysis queries")
@@ -763,7 +764,13 @@ class DataManipulationAgent:
                     self.history.append(f"User: {instruction}")
                     self.history.append(f"Action: {len(result)} ops executed")
                     return result
-            except Exception:
+            except Exception as e:
+                _LOGGER.error(f"Provider {provider} failed: {e}")
                 continue
 
-        return []
+        # If we get here, all providers failed
+        error_msg = "Internal Agent Error: Failed to generate a plan."
+        if not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+            error_msg = "No LLM providers configured. Please check your API keys or Ollama status."
+            
+        return [{"function": "out_of_scope", "params": {"reason": error_msg}}]
