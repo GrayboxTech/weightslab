@@ -88,7 +88,7 @@ def _handle_command(cmd: str) -> Any:
     try:
         # Any CLI interaction other than help/? should pause training to
         # avoid race conditions while a user inspects or edits state.
-        if verb in ('help', '?'):
+        if verb in ('help', 'h', '?'):
             # Provide a structured, machine-friendly help payload so the client
             # can pretty-print it and users can discover hyperparam commands.
             return {
@@ -184,8 +184,24 @@ def _handle_command(cmd: str) -> Any:
                 pass
 
             try:
-                # Simplified plot: return only the model's printed representatio
-                return {'ok': True, 'model': model_name, 'plot': repr(m)}
+                # Return pretty-printed model with proper line breaks
+                # Try str() first (which typically has nice formatting), fallback to repr()
+                try:
+                    model_str = str(m)
+                except Exception:
+                    model_str = repr(m)
+
+                # Ensure the string preserves line breaks for console output
+                # Split into lines and rejoin to normalize line endings
+                lines = model_str.split('\n')
+                formatted_plot = '\n'.join(lines)
+
+                return {
+                    'ok': True,
+                    'model_name': model_name or 'default',
+                    'plot': formatted_plot,
+                    'line_count': len(lines)
+                }
             except Exception as e:
                 return {'ok': False, 'error': str(e)}
 
