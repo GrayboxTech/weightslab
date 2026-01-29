@@ -33,7 +33,8 @@ def save_signals(
     signals: dict,
     preds_raw: th.Tensor,
     targets: th.Tensor,
-    preds: th.Tensor = None
+    preds: th.Tensor = None,
+    log: bool = True
 ):
     """
         Save data statistics to the tracked dataset.
@@ -45,6 +46,15 @@ def save_signals(
     global DATAFRAME_M
     if DATAFRAME_M is None:
         DATAFRAME_M = get_dataframe()
+
+    # Log if requested
+    if log:
+        for reg_name, batch_scalar in signals.items():
+            # Extract scalar from tensor
+            scalar, batch_scalar = extract_scalar_from_tensor(batch_scalar)
+
+            # Log if requested
+            log_signal(scalar, reg_name)
 
     # Convert tensors to numpy for lightweight buffering
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(int)
@@ -83,70 +93,9 @@ def save_signals(
             losses=losses_data,
         )
 
-def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
-    """
-        Wrapper for forward methods to log and save statistics.
-        Args:
-            original_forward (Callable): The original forward method.
-            kwargs (dict): The keyword arguments passed to the forward method.
-            reg_name (str): The registration name of the signal.
-        Returns:
-            The output of the original forward method.
-    """
-
-    # Remove parameters
-    _ = kw.pop('flag', None)
-    ids = kw.pop('batch_ids', None)
-    preds = kw.pop('preds', None)
-    manual_signals_batch = kw.pop('signals', None)
-    preds_raw = a[0]
-    targets = a[1]
-
-    # Original forward of the signal
-    out = original_forward(*a, **kw)
-
-    if kwargs.get('per_sample', False):
-        if out.ndim > 1:
-            out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]
-
-    # extract scalar
-    batch_scalar = manual_signals_batch
-    scalar = None
-    try:
-        # 1. Use manual batch scalar if provided (preferred for complex loss outputs)
-        if batch_scalar is not None:
-            if isinstance(batch_scalar, th.Tensor):
-                batch_scalar = batch_scalar.detach().cpu()
-                if batch_scalar.ndim == 0:
-                    scalar = float(batch_scalar.item())
-                else:
-                    scalar = float(batch_scalar.mean().item())
-            else:
-                try:
-                    import numpy as _np
-                    batch_scalar = _np.array(batch_scalar)
-                    scalar = float(batch_scalar.mean())
-                except Exception:
-                    pass
-        # 2. Otherwise fall back to extracting from 'out'
-        elif isinstance(out, th.Tensor):
-            batch_scalar = out.detach().cpu()
-            if batch_scalar.ndim == 0:
-                scalar = float(batch_scalar.item())
-            else:
-                scalar = float(batch_scalar.mean().item())
-        else:
-            try:
-                import numpy as _np
-                batch_scalar = _np.array(out)
-                scalar = float(batch_scalar.mean())
-            except Exception:
-                pass
-    except Exception:
-        pass
-
+def log_signal(scalar: float, reg_name: str, **_) -> None:
     # log if requested and logger present
-    if kwargs.get('log', False) and scalar is not None:
+    if scalar is not None:
         try:
             # try to get a ledger-registered logger
             logger = None
@@ -199,6 +148,76 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         except Exception:
             pass
 
+def extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Tensor | np.ndarray = None) -> tuple[float | None, th.Tensor | np.ndarray | None]:
+    # extract scalar
+    scalar = None
+    try:
+        # 1. Use manual batch scalar if provided (preferred for complex loss outputs)
+        if batch_scalar is not None:
+            if isinstance(batch_scalar, th.Tensor):
+                batch_scalar = batch_scalar.detach().cpu()
+                if batch_scalar.ndim == 0:
+                    scalar = float(batch_scalar.item())
+                else:
+                    scalar = float(batch_scalar.mean().item())
+            else:
+                try:
+                    import numpy as _np
+                    batch_scalar = _np.array(batch_scalar)
+                    scalar = float(batch_scalar.mean())
+                except Exception:
+                    pass
+        # 2. Otherwise fall back to extracting from 'out'
+        elif out is not None:
+            if isinstance(out, th.Tensor):
+                batch_scalar = out.detach().cpu()
+                if batch_scalar.ndim == 0:
+                    scalar = float(batch_scalar.item())
+                else:
+                    scalar = float(batch_scalar.mean().item())
+            else:
+                try:
+                    import numpy as _np
+                    batch_scalar = _np.array(out)
+                    scalar = float(batch_scalar.mean())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return scalar, batch_scalar
+
+def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
+    """
+        Wrapper for forward methods to log and save statistics.
+        Args:
+            original_forward (Callable): The original forward method.
+            kwargs (dict): The keyword arguments passed to the forward method.
+            reg_name (str): The registration name of the signal.
+        Returns:
+            The output of the original forward method.
+    """
+
+    # Remove parameters
+    _ = kw.pop('flag', None)
+    ids = kw.pop('batch_ids', None)
+    preds = kw.pop('preds', None)
+    batch_scalar = kw.pop('signals', None)
+    preds_raw = a[0]
+    targets = a[1]
+
+    # Original forward of the signal
+    out = original_forward(*a, **kw)
+    if kwargs.get('per_sample', False):
+        if out.ndim > 1:
+            out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]
+
+    # Extract scalar from tensor
+    scalar, batch_scalar = extract_scalar_from_tensor(batch_scalar, out)
+
+    # Log if requested
+    log_signal(scalar, reg_name, **kwargs)
+
     # Save statistics if requested and applicable
     if batch_scalar is not None and ids is not None:
         signals = {reg_name: batch_scalar}
@@ -207,7 +226,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             preds=preds,
             preds_raw=preds_raw,
             signals=signals,
-            targets=targets
+            targets=targets,
+            log=False
         )
     return out
 

@@ -40,7 +40,6 @@ class LoggerQueue:
             self._current_step_buffer.clear()
 
     def add_scalars(self, graph_name, name_2_value, global_step: int):
-        global_step -= 1  # adjust for 0-based step indexing
         self.graph_names.add(graph_name)
 
         # If step changed, flush the previous step's buffer
@@ -53,6 +52,7 @@ class LoggerQueue:
             if metric_key not in self._current_step_buffer:
                 self._current_step_buffer[metric_key] = []
             self._current_step_buffer[metric_key].append(float(line_value))
+        global_step -= 1  # adjust for 0-based step indexing
 
     def print_history(self):
         """Print all items in history."""
