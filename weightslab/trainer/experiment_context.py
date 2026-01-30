@@ -1,5 +1,9 @@
 import logging
 
+from weightslab.components.global_monitoring import pause_controller
+
+
+# Init global logger
 logger = logging.getLogger(__name__)
 
 
@@ -36,6 +40,8 @@ class ExperimentContext:
         logger). Raises RuntimeError when mandatory components are missing.
         """
         from weightslab.backend.ledgers import (
+            get_checkpoint_manager,
+            list_checkpoint_managers,
             get_hyperparams,
             list_hyperparams,
             get_model,
@@ -107,11 +113,24 @@ class ExperimentContext:
         except Exception:
             signal_logger = None
 
+        # resolve checkpoint manager
+        checkpoint_manager = None
+        try:
+            lnames = list_checkpoint_managers()
+            if len(lnames) == 1:
+                checkpoint_manager = get_checkpoint_manager()
+            elif "main" in lnames:
+                checkpoint_manager = get_checkpoint_manager("main")
+        except Exception:
+            checkpoint_manager = None
+
         self._components = {
             "model": model,
             "optimizer": optimizer,
             "hyperparams": hyperparams,
             "signal_logger": signal_logger,
+            "trainer": pause_controller,
+            "checkpoint_manager": checkpoint_manager
         }
         self._components.update(data_loaders)  # add all dataloaders found
 
@@ -148,15 +167,15 @@ class ExperimentContext:
                         current = int(model.current_step)
                     elif hasattr(model, 'get_age'):
                         current = int(model.get_age())
-                
+
                 # Get remaining from hyperparams
                 remaining = _hp_getter("training_steps_to_do", 999)()
-                
+
                 # If explicit total is set, use it. Otherwise calculate.
                 explicit_total = _hp_getter("total_training_steps", None)()
                 if explicit_total is not None:
                     return explicit_total
-                
+
                 return current + int(remaining)
             except Exception:
                 return 1000

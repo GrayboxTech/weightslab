@@ -2,7 +2,7 @@ syntax = "proto3";
 
 
 service ExperimentService {
-  rpc StreamStatus (Empty) returns (stream TrainingStatusEx);
+  rpc GetLatestLoggerData (GetLatestLoggerDataRequest) returns (GetLatestLoggerDataResponse);
 
   rpc ExperimentCommand (TrainerCommand) returns (CommandResponse);
 
@@ -17,11 +17,31 @@ service ExperimentService {
   // Data Service (for weights_studio UI)
   rpc ApplyDataQuery (DataQueryRequest) returns (DataQueryResponse);
   rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
-  rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
+  rpc EditDataSample (DataEditsRequest) returns (DataEditsRequest);
   rpc GetDataSplits (Empty) returns (DataSplitsResponse);
   rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
+
+  // Checkpoint restore
+  rpc RestoreCheckpoint (RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
 }
 
+// --- Logger Data Sync ---
+message GetLatestLoggerDataRequest {
+  bool request_full_history = 1;  // true = full history, false = only queue (new data)
+  int32 max_points = 2;            // max points per signal (only used for full history)
+}
+
+message LoggerDataPoint {
+  string metric_name = 1;          // The metric/signal name (e.g., "train/loss", "eval/accuracy")
+  int32 model_age = 2;
+  float metric_value = 3;
+  string experiment_hash = 4;
+  int64 timestamp = 5;
+}
+
+message GetLatestLoggerDataResponse {
+  repeated LoggerDataPoint points = 1;  // All points from all metrics
+}
 
 message Empty {}
 
@@ -345,5 +365,15 @@ message DataSplitsResponse {
 message AgentHealthResponse {
   bool available = 1;
   string message = 2;
+}
+
+// --- Checkpoint Restore ---
+message RestoreCheckpointRequest {
+  string experiment_hash = 1;  // Hash code of checkpoint to restore
+}
+
+message RestoreCheckpointResponse {
+  bool success = 1;            // Whether restore was successful
+  string message = 2;          // Details/error message
 }
 

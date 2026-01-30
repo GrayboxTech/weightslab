@@ -378,7 +378,7 @@ class CheckpointManager(object):
 
                                 if target_name is not None:
                                     try:
-                                        register_model(target_name, full_obj)
+                                        register_model(full_obj)
                                         _logger.info("Replaced ledger model '%s' with full-model from checkpoint", target_name)
                                     except Exception:
                                         _logger.exception("Failed to register full-model into ledger")

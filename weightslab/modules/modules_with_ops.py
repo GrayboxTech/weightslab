@@ -46,6 +46,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         self.module_name = module_name
         self.device = device
         self.tracking_mode = TrackingMode.DISABLED
+        self.operation_age = {op.name: 0 for op in ArchitectureNeuronsOpType}  # keep track of all operations performed
 
         # IN/OUT neurons indexing & mapping dictionary
         self.src_to_dst_mapping_tnsrs = {}
@@ -115,14 +116,14 @@ class LayerWiseOperations(NeuronWiseOperations):
                 f"Accessing '{attr_name}' before calling " +
                 "_initialize_neuron_attributes."
             )
-        
+
         val = getattr(self, attr_name)
         if val is None and getattr(self, 'wl_same_flag', False):
             # For pass-through layers, falling back to the other dimension if one is None
             other_attr = 'out_neurons' if attr_name == 'in_neurons' else 'in_neurons'
             if hasattr(self, other_attr):
                 val = getattr(self, other_attr)
-                
+
         return self.get_neurons_value(val)
 
     def set_neurons(
@@ -667,6 +668,9 @@ class LayerWiseOperations(NeuronWiseOperations):
                 skip_initialization=skip_initialization,
                 **kwargs
             )
+
+        # Set Operation flag
+        self.operation_age[op_type.name] += 1
 
     # ------------------
     # Neurons Operations

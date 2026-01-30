@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_optimizers, get_optimizer, register_hyperparams
 from weightslab.components.tracking import TrackingMode
 
 
@@ -23,23 +23,54 @@ class PauseController:
     def __init__(self):
         self._event = Event()
         self._event.clear()
-        # self._event.set() # Set by default so training starts running
+
+        # Get checkpoint manager instance
+        self.checkpoint_manager = None
+
+        # Get the proxy that wraps our dict
+        self.hyperparams = get_hyperparams()
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
         self._event.wait()   # releases GIL while waiting
 
     def pause(self):
-        logger.info('\nTraining paused.')
         self._event.clear()
+        self.hyperparams['is_training'] = False
+        logger.info('\nTraining paused.')
 
     def resume(self):
-        logger.info('\nTraining resumed.')
-        self._event.set()
+        # On resume, first dump any pending changes to checkpoint manager
+        if self.checkpoint_manager is None:
+            self.checkpoint_manager = get_checkpoint_manager()
+        if self.checkpoint_manager is not None:
+            self.checkpoint_manager.update_experiment_hash(firsttime=True)
+            self.checkpoint_manager.dump_pending_changes()
+
+        # Then resume execution
+        if self._is_hash_computed():
+            self._event.set()
+            self.hyperparams['is_training'] = True
+            logger.info(f'\nTraining resumed as modules hashes have been computed: {self.checkpoint_manager.hash_by_module}.')
+            return True
+        else:
+            logger.warning(f'Cannot resume training: experiment hash not computed yet for every modules {self.checkpoint_manager.hash_by_module}.')
+            return False
 
     def is_paused(self):
         return not self._event.is_set()
 
+    def _get_checkpoint_manager(self):
+        if self.checkpoint_manager is None:
+            self.checkpoint_manager = get_checkpoint_manager()
+
+    def _is_hash_computed(self):
+        self._get_checkpoint_manager()
+        if self.checkpoint_manager is None:
+            return False
+        fl = self.checkpoint_manager.hash_by_module[0] != "00000000" and self.checkpoint_manager.hash_by_module[1] != "00000000" and self.checkpoint_manager.hash_by_module[2] != "00000000"
+
+        return fl
 
 # Global pause controller instance
 pause_controller = PauseController()
@@ -113,59 +144,6 @@ class GuardContext:
 
         self.architecture_guard.__exit__(exc_type, exc_value, traceback)
 
-        # Use provided op_context if present, otherwise fall back to module-level
-        ctx = op_context if getattr(self, 'op_context', None) is not None else op_context
-        with ctx:
-            # decrement training steps and store result in ledgered hyperparams
-            try:
-                # resolve a sensible hyperparam set name (reuse helper in this module)
-                name = resolve_hp_name()
-                if name is not None:
-                    try:
-                        hp_handle = get_hyperparams(name)
-                    except Exception:
-                        hp_handle = None
-
-                    try:
-                        if hp_handle is None:
-                            raise RuntimeError('no hyperparams')
-                        # unwrap proxy if present
-                        if hasattr(hp_handle, 'get') and not isinstance(hp_handle, dict):
-                            hp = hp_handle.get()
-                        else:
-                            hp = hp_handle
-
-                        if not isinstance(hp, dict):
-                            raise RuntimeError('hyperparams not a dict')
-
-                        cur = hp.get('training_steps_to_do', 0)
-                        try:
-                            cur_int = int(cur)
-                        except Exception:
-                            cur_int = 0
-                        new = max(0, cur_int - 1)
-
-                        # try ledger API first
-                        try:
-                            set_hyperparam(name, 'training_steps_to_do', new)
-                        except Exception:
-                            # best-effort fallback: update dict directly
-                            try:
-                                hp['training_steps_to_do'] = new
-                            except Exception:
-                                pass
-                    except Exception:
-                        # swallow errors - don't let monitoring break training
-                        pass
-            except Exception:
-                pass
-
-        # Auto-increment step count for UI progress
-        if self.for_training and self.model is not None:
-            if not hasattr(self.model, 'current_step'):
-                self.model.current_step = 0
-            self.model.current_step += 1
-
         return False
 
 
@@ -181,9 +159,10 @@ guard_testing_context = GuardContext(for_training=False)
 # - If controller is paused/resumed externally, update ledger `is_training` to match.
 
 _pause_sync_thread_started = False
+checkpoint_manager = get_checkpoint_manager()
 
-
-def _pause_hp_sync_loop(poll_interval: float = 0.5):
+def _pause_hp_sync_loop(poll_interval: float = 3):
+    firstresume = True
     while True:
         try:
             name = resolve_hp_name()
@@ -191,28 +170,25 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 time.sleep(poll_interval)
                 continue
 
-            # lazy-resolve hyperparams handle
+            # lazy-resolve hyperparams proxy
             try:
-                hp_handle = get_hyperparams(name)
+                hp = get_hyperparams(name)
             except Exception:
                 time.sleep(poll_interval)
                 continue
 
-            # unwrap Proxy-like handle if present
-            try:
-                if hasattr(hp_handle, 'get') and not isinstance(hp_handle, dict):
-                    hp = hp_handle.get()
-                else:
-                    hp = hp_handle
-            except Exception:
-                hp = None
-
-            if not isinstance(hp, dict):
+            # Check if hp is dict-like (has required methods) rather than isinstance
+            if not hasattr(hp, '__getitem__') or not hasattr(hp, '__setitem__'):
                 time.sleep(poll_interval)
                 continue
 
             # Training status from ledger
-            hp_is_training = hp.get('is_training')
+            try:
+                # Use .get() if available (dict or Proxy with dict), otherwise use []
+                hp_is_training = hp.get('is_training') if hasattr(hp, 'get') else hp['is_training']
+            except (KeyError, TypeError, AttributeError):
+                time.sleep(poll_interval)
+                continue
             if hp_is_training is not None:
                 controller_paused = pause_controller.is_paused()
                 controller_running = not controller_paused
@@ -220,7 +196,8 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 # Drive controller from ledger when ledger explicitly sets the flag
                 if isinstance(hp_is_training, bool):
                     if controller_paused and hp_is_training:
-                        pause_controller.resume()
+                        resumed = pause_controller.resume()
+                        firstresume = False if resumed else True
                     elif controller_running and not hp_is_training:
                         pause_controller.pause()
 
@@ -228,11 +205,15 @@ def _pause_hp_sync_loop(poll_interval: float = 0.5):
                 controller_paused = pause_controller.is_paused()
 
                 # Propagate controller state back to ledger if it differs
-                if controller_paused:
-                    set_hyperparam(name, 'is_training', False)
+                if controller_paused and not firstresume:
+                    try:
+                        hp['is_training'] = False
+                    except Exception:
+                        set_hyperparam(name, 'is_training', False)
 
-        except Exception:
+        except Exception as e:
             # swallow to keep thread alive
+            logger.debug(f"Exception in pause-hp sync loop: {e}")
             pass
 
         time.sleep(poll_interval)

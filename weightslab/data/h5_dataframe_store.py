@@ -99,6 +99,8 @@ class H5DataFrameStore:
     - Keeps a stable schema by treating `sample_id` as the index and always
       tagging rows with `origin`.
     - Provides small helpers for slice-based reads used by the DataService.
+
+    TODO (GP): Refactor both h5 functions into common utility module first.
     """
 
     def __init__(self, path: Union[str, Path], key_prefix: str = "stats", lock_timeout: float = 10.0, poll_interval: float = 0.1):

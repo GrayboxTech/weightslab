@@ -6,7 +6,7 @@ import weightslab as wl
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
 
-from weightslab.components.checkpoint import CheckpointManager
+from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 from weightslab.components.tracking import TrackingMode
 from weightslab.models.model_with_ops import NetworkWithOps
 from weightslab.modules.neuron_ops import NeuronWiseOperations
@@ -19,6 +19,8 @@ from weightslab.utils.computational_graph import \
     generate_index_maps
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
+from weightslab.backend import ledgers
+from weightslab.utils.tools import restore_rng_state
 
 
 # Global logger
@@ -76,10 +78,114 @@ class ModelInterface(NetworkWithOps):
             self.dummy_input = dummy_input.to(device)
         else:
             self.dummy_input = th.randn(model.input_shape).to(device)
+
+        # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
+        self._checkpoint_manager = None
+        _checkpoint_auto_every_steps = 0
+        _root_log_dir = None
+        try:
+            from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
+            names = list_hyperparams()
+            chosen = None
+            if 'main' in names:
+                chosen = 'main'
+            elif 'experiment' in names:
+                chosen = 'experiment'
+            elif len(names) > 1:
+                chosen = names[-1]
+
+            if chosen:
+                hp = get_hyperparams(chosen)
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    try:
+                        hp = hp.get()
+                    except Exception:
+                        hp = None
+                if isinstance(hp, dict):
+                    _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
+                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
+        except Exception:
+            _root_log_dir = None
+            _checkpoint_auto_every_steps = 0
+        self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
+
+        # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
+        root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
+        try:
+            # Check if a checkpoint manager is already registered in ledger
+            try:
+                existing_manager = ledgers.get_checkpoint_manager()
+                if existing_manager is not None and not isinstance(existing_manager, ledgers.Proxy):
+                    self._checkpoint_manager = existing_manager
+                    logger.info("Using checkpoint manager from ledger")
+                else:
+                    raise KeyError("No manager in ledger")
+            except (KeyError, AttributeError):
+                # Create new manager and register it
+                self._checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
+                try:
+                    ledgers.register_checkpoint_manager(self._checkpoint_manager)
+                    logger.info("Registered new checkpoint manager in ledger")
+                except Exception:
+                    pass
+        except Exception:
+            self._checkpoint_manager = None
+
+        # Early auto-load latest model architecture and weights if checkpoints exist
+        if self._checkpoint_manager is not None:
+            try:
+                # Try to get the latest experiment hash
+                latest_hash = None
+                if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
+                    latest_hash = self._checkpoint_manager.current_exp_hash
+                elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
+                    manifest = self._checkpoint_manager.manifest
+                    latest_hash = getattr(manifest, 'latest_hash', None)
+
+                if latest_hash:
+                    # Use checkpoint manager's load_checkpoint to get architecture and weights
+                    checkpoint_data = self._checkpoint_manager.load_checkpoint(
+                        exp_hash=latest_hash,
+                        load_model=True,
+                        load_weights=True,
+                        load_config=False,
+                        load_data=False,
+                        force=True
+                    )
+
+                    # Apply loaded model if architecture was loaded
+                    if checkpoint_data.get('model'):
+                        self = checkpoint_data['model']
+                        weights = checkpoint_data.get('weights')
+                        checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
+
+                        # Restore RNG state if available
+                        restore_rng_state(checkpoint_rng_state)
+                        logger.debug(f"Restored RNG state from checkpoint")
+
+                    elif checkpoint_data.get('weights'):
+                        # Only weights available, load into existing model
+                        weights = checkpoint_data['weights']
+                        if 'model_state_dict' in weights:
+                            self.load_state_dict(weights['model_state_dict'], strict=True)
+                            self.current_step = weights.get('step', -1)
+                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
+
+                    # As model architecture as has been loaded, and it's an instance of the ModelInterface,
+                    # we can set its current step if available in weights
+                    if isinstance(self.model, self.__class__):
+                        self._registration(
+                            weak=weak
+                        )
+                        return
+
+            except Exception as e:
+                logger.debug(f"Could not auto-load model checkpoint: {e}")
+
         if not use_onnx:
             self.print_graph = print_graph
             self.print_graph_filename = print_graph_filename
-            self.traced_model = symbolic_trace(model)
+            self.traced_model = symbolic_trace(self.model)
             self.traced_model.name = "N.A."
         self.guard_training_context = guard_training_context
         self.guard_testing_context = guard_testing_context
@@ -104,26 +210,10 @@ class ModelInterface(NetworkWithOps):
         # Clean
         # Optionally register wrapper in global ledger
         if register:
-            try:
-                # Prefer an explicit name. Otherwise prefer a meaningful
-                # candidate (function __name__ when informative, then
-                # the class name). Avoid using the generic literal
-                # 'model' which can be produced by wrappers/patching and
-                # lead to duplicate registrations.
-                if name:
-                    reg_name = name
-                else:
-                    candidate = getattr(model, '__name__', None)
-                    if candidate and candidate.lower() != 'model':
-                        reg_name = candidate
-                    else:
-                        clsname = getattr(model.__class__, '__name__', None)
-                        reg_name = clsname if clsname and clsname.lower() != 'model' else (name or 'model')
+            self._registration(
+                weak=weak
+            )
 
-                register_model(reg_name, self, weak=weak)
-                self._ledger_name = reg_name
-            except Exception:
-                pass
         if not use_onnx:
             del self.traced_model
 
@@ -136,62 +226,29 @@ class ModelInterface(NetworkWithOps):
         self.guard_training_context.model = self
         self.guard_testing_context.model = self
 
-        # Checkpoint manager (optional)
-        # skip_checkpoint_load: bool = False,
-        # auto_dump_every_steps: int = 0
-        self._checkpoint_manager = None
-        # self._checkpoint_auto_every_steps = int(auto_dump_every_steps or 0)
-        _checkpoint_auto_every_steps = 0
-        _checkpoint_dir = None
-        _skip_checkpoint_load = False
-        # If checkpoint_dir not provided, try to read `root_log_dir` from
-        # ledger hyperparams, otherwise fallback to './root_log_dir/checkpoints'
-        try:
-            from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
-            names = list_hyperparams()
-            chosen = None
-            if 'main' in names:
-                chosen = 'main'
-            elif 'experiment' in names:
-                chosen = 'experiment'
-            elif len(names) == 1:
-                chosen = names[0]
+    def _registration(self, weak: bool = False):
+        register_model(self, weak=weak)
 
-            if chosen:
-                hp = get_hyperparams(chosen)
-                if hasattr(hp, 'get') and not isinstance(hp, dict):
-                    try:
-                        hp = hp.get()
-                    except Exception:
-                        hp = None
-                if isinstance(hp, dict):
-                    # Root dir for checkpoints
-                    root = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
-                    _checkpoint_dir = os.path.join(str(root), 'checkpoints') if root else None
-                    # Auto dump every N steps
-                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
-                    # Skip loading at init
-                    _skip_checkpoint_load = hp.get('skip_checkpoint_load') or hp.get('skip-checkpoint-load') or False
-        except Exception:
-            _checkpoint_dir = None
-            _checkpoint_auto_every_steps = 0
-            _skip_checkpoint_load = False
-        self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """
+        Loads the state dictionary into the wrapped model.
 
-        if _checkpoint_dir:
-            try:
-                self._checkpoint_manager = CheckpointManager(_checkpoint_dir)
-                # attempt to load latest checkpoint unless skipped
-                if not _skip_checkpoint_load:
-                    try:
-                        latest = self._checkpoint_manager.get_latest_checkpoint_path()
-                        if latest:
-                            # best-effort load into ledger-registered objects
-                            self._checkpoint_manager.load(str(latest), model_name=(getattr(self, '_ledger_name', None)))
-                    except Exception:
-                        pass
-            except Exception:
-                self._checkpoint_manager = None
+        This method forwards the provided `state_dict` to the underlying
+        model's `load_state_dict` method, allowing for the restoration
+        of model parameters and buffers from a saved state.
+
+        Args:
+            state_dict (dict): A state dictionary containing model parameters
+                and buffers to be loaded.
+            strict (bool, optional): Whether to strictly enforce that the keys
+                in `state_dict` match the keys returned by the model's
+                `state_dict()` function. Defaults to True.
+
+        Returns:
+            None: This method does not return any value; it modifies the
+            state of the wrapped model in-place.
+        """
+        super().load_state_dict(state_dict, strict=strict)
 
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
@@ -309,14 +366,32 @@ class ModelInterface(NetworkWithOps):
 
     def _maybe_auto_dump(self):
         # Called from base class hook after seen_samples updates.
+        # Auto-dump: save model weights only (and architecture if changed).
         try:
             if not self.is_training() or self._checkpoint_manager is None or self._checkpoint_auto_every_steps <= 0:
                 return
             batched_age = int(self.get_batched_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
-                    # best-effort managed dump using ledger names
-                    self._checkpoint_manager.dump(model_name=getattr(self, '_ledger_name', None))
+                    # Update hash for current experiment state (marks changes as pending, doesn't dump)
+                    _, _, changed_components = self._checkpoint_manager.update_experiment_hash()
+                    # If model architecture changed, save it
+                    if 'model' in changed_components:
+                        try:
+                            self._checkpoint_manager.save_model_architecture(self.model)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    # Save model weights checkpoint (no pending dump here)
+                    self._checkpoint_manager.save_model_checkpoint(
+                        model=self.model,
+                        save_optimizer=True,
+                        step=batched_age,
+                        force_dump_pending=False,
+                        update_manifest=False
+                    )
                 except Exception:
                     pass
         except Exception:
@@ -460,7 +535,7 @@ class ModelInterface(NetworkWithOps):
 
         # Generate the graph dependencies
         if not use_onnx:
-            self.shape_propagation()
+            # self.shape_propagation()
             self.dependencies_with_ops = generate_graph_dependencies_from_torchfx(
                 self.model,
                 self.traced_model.graph

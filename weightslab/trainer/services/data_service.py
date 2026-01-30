@@ -269,9 +269,10 @@ class DataService:
                 if val:
                     # Normalize to list
                     if isinstance(val, str):
-                        origins = [val]
+                        origins = [val] if val.strip() else []  # Filter empty strings
                     else:
-                        origins = list(val)
+                        # Filter out empty strings from list
+                        origins = [o for o in list(val) if o and str(o).strip()]
                     break
             except Exception:
                 continue
@@ -526,8 +527,6 @@ class DataService:
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
 
-
-
             # ====== Step 9: Generate raw data bytes and thumbnail ======
             if request.include_raw_data:
                 raw_img = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
@@ -742,7 +741,7 @@ class DataService:
         # --- 2. ACTIONS (New Capability) ---
         if func.startswith("action."):
             action_name = func.replace("action.", "")
-            
+
             # Example: "Save Dataset" Action
             if action_name == "save_dataset":
                 filename = params.get("filename", "dataset_export")
@@ -750,7 +749,7 @@ class DataService:
                 # e.g., self._stats_store.save_snapshot(df, filename)
                 logger.info(f"Action triggered: Saving dataset as {filename}")
                 return f"Action: Dataset saved as '{filename}'"
-            
+
             # Example: "Plot" Action
             elif action_name == "plot_distribution":
                 col = params.get("column")
@@ -760,7 +759,7 @@ class DataService:
             return f"Action triggered: {action_name} (Not implemented)"
 
         # --- 3. DATAFRAME MANIPULATION ---
-        
+
         # A) Agent-driven df.apply_mask (for complex filters)
         if func == "df.apply_mask":
             code = params.get("code", "")
@@ -771,7 +770,7 @@ class DataService:
                          kept = df.loc[mask]
                     else:
                          kept = df[mask]
-                    
+
                     df.drop(index=df.index.difference(kept.index), inplace=True)
                     return f"Applied mask: {code}"
                 else:
@@ -928,7 +927,7 @@ class DataService:
                     if n < len(df):
                         df.drop(index=df.index.difference(df.index[-n:]), inplace=True)
                     return f"Applied operation: tail({n})"
-                
+
                 # ... existing sample logic ...
 
             except Exception as e:
@@ -954,7 +953,7 @@ class DataService:
             return
 
         updated_df = self._pull_into_all_data_view_df()
-        
+
         # Guard against init race conditions
         if updated_df is None:
             return
@@ -967,7 +966,7 @@ class DataService:
             # Check if the current view's index is compatible with the raw source (Sample IDs)
             # If there is overlap, it's likely a Filter/Subset operation -> Update values, keep rows.
             # If no overlap, it's likely an Aggregation (Index changed) -> Freeze view (can't update from raw).
-            
+
             try:
                 # Use intersection to detect compatibility
                 # We need to handle MultiIndex vs Index comparisons carefully, generally simplistic check is enough
@@ -980,10 +979,10 @@ class DataService:
                      updated_df = updated_df.reindex(self._all_datasets_df.index)
                 else:
                      # Case B: Aggregation/Transformation. Indices don't match.
-                     # We cannot update an aggregated view (e.g. "Mean Loss by Class") from raw samples 
+                     # We cannot update an aggregated view (e.g. "Mean Loss by Class") from raw samples
                      # without re-running the aggregation query.
                      # Best behavior: Freeze the view (keep current df) so the user doesn't lose their chart.
-                     return 
+                     return
             except Exception as e:
                 logger.debug(f"[_slowUpdateInternals] Error matching indices for filtered view: {e}")
                 return
@@ -991,7 +990,7 @@ class DataService:
         elif hasattr(self, "_all_datasets_df") and self._all_datasets_df is not None and not self._all_datasets_df.empty:
             # Case C: Standard/Unfiltered View.
             # Preserves Sticky Sort if user manually sorted the full list.
-            
+
             # Simple heuristic: if the index has changed (reordered), re-apply it.
 
             # 1. Update the new DF with the new data
@@ -1105,6 +1104,8 @@ class DataService:
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
+        self._ctx.ensure_components()
+        components = self._ctx.components
 
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
@@ -1116,10 +1117,21 @@ class DataService:
                 )
 
         try:
+            # Pause training if it's currently running
+            trainer = components.get("trainer")
+            hp = components.get("hyperparams")
+            if trainer:
+                logger.info("Pausing training before restore...")
+                trainer.pause()
+                if "is_training" in hp:
+                    hp['is_training'] = False
+                else:
+                    hp["is_training"] = False
+
             # 2) Check if we should bypass the agent (Quick Filters path)
             if not request.is_natural_language:
                 logger.info(
-                    "[ApplyDataQuery] ⚡ BYPASSING AGENT - Direct query execution: %r",
+                    "[ApplyDataQuery] BYPASSING AGENT - Direct query execution: %r",
                     request.query,
                 )
 
@@ -1140,7 +1152,7 @@ class DataService:
 
                     final_message = " | ".join(messages) if messages else "No operation performed"
                     self._all_datasets_df = df
-                    
+
                     # Direct queries are manipulations -> Freeze the view
                     if operations:
                          self._is_filtered = True
@@ -1209,17 +1221,17 @@ class DataService:
                     if "Clarification needed" in msg or "I need more information" in msg:
                         intent_type = pb2.INTENT_ANALYSIS  # Usually presented as a message/analysis
                         analysis_result = msg
-                    
+
                     # Check for Action Triggers (e.g. "Action: Dataset saved...")
                     elif msg.startswith("Action:"):
-                        intent_type = pb2.INTENT_ANALYSIS 
+                        intent_type = pb2.INTENT_ANALYSIS
                         analysis_result = msg
-                    
+
                     # Check for Analysis Results
                     elif msg.startswith("Analysis Result:"):
                         intent_type = pb2.INTENT_ANALYSIS
                         analysis_result = msg.replace("Analysis Result:", "").strip()
-                    
+
                     # Check for Errors
                     elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
                         intent_type = pb2.INTENT_ANALYSIS
@@ -1232,7 +1244,7 @@ class DataService:
                 if intent_type == pb2.INTENT_FILTER:
                     self._all_datasets_df = df
                     # If we modified the DF, we should freeze it (unless it was a Reset which handled above)
-                    # We check if *any* operation was effectively applied. 
+                    # We check if *any* operation was effectively applied.
                     # For simplicity, if intent is FILTER, we assume manipulation happened.
                     self._is_filtered = True
 
@@ -1323,6 +1335,18 @@ class DataService:
             self._initialize_data_service()
 
         self._ctx.ensure_components()
+        components = self._ctx.components
+
+        # Pause training if it's currently running
+        trainer = components.get("trainer")
+        hp = components.get("hyperparams")
+        if trainer:
+            logger.info("Pausing training before restore...")
+            trainer.pause()
+            if "is_training" in hp:
+                hp['is_training'] = False
+            else:
+                hp["is_training"] = False
 
         if request.stat_name not in [SampleStatsEx.TAGS.value, SampleStatsEx.DENY_LISTED.value]:
             return pb2.DataEditsResponse(
@@ -1399,12 +1423,9 @@ class DataService:
                     for sid, origin in zip(request.samples_ids, request.sample_origins):
                         # Tags
                         if request.stat_name == SampleStatsEx.TAGS.value:
-                            value = request.string_value  #if request.stat_name == SampleStatsEx.TAGS.value else request.bool_value
-
                             # Logic to calculate new tags based on edit type
                             # use self._all_datasets_df (which was just updated above) as source of truth
                             # instead of pulling from _df_manager again, to ensure consistency inside the lock.
-
                             uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
                             current_val = ""
                             try:

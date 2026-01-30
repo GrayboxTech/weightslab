@@ -108,7 +108,20 @@ def load_label(dataset, sample_id):
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
 
-    # Try common dataset patterns
+    # Try direct attribute first with torch dataset architecture
+    if hasattr(wrapped, "dataset") and hasattr(wrapped.dataset, "targets"):
+        label = wrapped.dataset.targets[index]
+        if hasattr(label, 'numpy'):
+            label = label.numpy()
+        if hasattr(label, 'item') and hasattr(label, 'shape') and label.shape == ():
+            label = label.item()
+        if isinstance(label, np.ndarray) and (label.ndim == 0 or label.ndim == 1):
+            label = label.flatten()
+        elif isinstance(label, np.ndarray):
+            label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=wrapped[index])
+        return label
+
+    # Try common dataset patterns first
     if hasattr(wrapped, '__getitem__'):
         data = wrapped[index]
         if isinstance(data, (list, tuple)) and len(data) > 2:
@@ -123,17 +136,15 @@ def load_label(dataset, sample_id):
         else:
             label = _to_numpy_safe(data[1])  # Second element is typically the label
         label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
-        return label
+        return label[0] if label.ndim == 1 else label
 
-    # Try targets/labels attribute
     if hasattr(wrapped, "targets"):
         label = wrapped.targets[index]
         if hasattr(label, 'numpy'):
             label = label.numpy()
         if hasattr(label, 'item') and hasattr(label, 'shape') and label.shape == ():
             label = label.item()
-        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
-
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=wrapped[index])
         return label
 
     if hasattr(wrapped, "labels"):
@@ -142,18 +153,18 @@ def load_label(dataset, sample_id):
             label = label.numpy()
         if hasattr(label, 'item') and hasattr(label, 'shape') and label.shape == ():
             label = label.item()
-        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=wrapped[index])
         return label
 
     # Try samples/imgs pattern (returns tuple of path, label)
     if hasattr(wrapped, "samples"):
         _, label = wrapped.samples[index]
-        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=wrapped[index])
         return label
 
     if hasattr(wrapped, "imgs"):
         _, label = wrapped.imgs[index]
-        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+        label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=wrapped[index])
         return label
 
     return None

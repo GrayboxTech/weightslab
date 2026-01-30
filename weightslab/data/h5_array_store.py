@@ -277,6 +277,9 @@ def normalize_array_to_uint8(arr: np.ndarray, preserve_original: bool = False) -
     if arr_max == arr_min:
         # Constant array
         return np.full(arr.shape, 128, dtype=np.uint8), metadata
+    elif arr_min >= 0 and arr_max <= 255:
+        # Already in uint8 range
+        return arr.astype(np.uint8), metadata
 
     # Scale to 0-255
     normalized = ((arr - arr_min) / (arr_max - arr_min) * 255).astype(np.uint8)

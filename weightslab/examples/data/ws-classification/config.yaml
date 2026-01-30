@@ -16,8 +16,8 @@ ledger_flush_max_rows: 750
 ledger_flush_interval: 30.0
 
 # Configure clients
-serving_grpc: false
-serving_cli: false
+serving_grpc: true
+serving_cli: true
 
 # DataLoader parameters
 data:

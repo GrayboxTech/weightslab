@@ -310,12 +310,11 @@ if __name__ == "__main__":
 
     # --- 4) Register logger + hyperparameters ---
     logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
+    wl.watch_or_edit(logger, flag="logger", log_dir=log_dir)
 
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
@@ -442,7 +441,6 @@ if __name__ == "__main__":
             weight=class_weights  # ← Class weights applied!
         ),
         flag="loss",
-        name="train_mlt_loss/CE",
         per_sample=True,
         log=True,
     )
@@ -453,7 +451,6 @@ if __name__ == "__main__":
             weight=class_weights  # ← Class weights applied!
         ),
         flag="loss",
-        name="test_mlt_loss/CE",
         per_sample=True,
         log=True,
     )
@@ -464,7 +461,6 @@ if __name__ == "__main__":
             ignore_index=ignore_index,
         ).to(device),
         flag="metric",
-        name="test_metric/JaccardIndex",
         log=True,
     )
 

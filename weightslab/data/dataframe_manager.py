@@ -1,3 +1,4 @@
+import os
 import threading
 import logging
 import traceback
@@ -11,6 +12,8 @@ from typing import Dict, Sequence, Any, List
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
+from weightslab.backend import ledgers
+from weightslab.components import CheckpointManagerV2
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
 from weightslab.data.data_utils import _filter_columns_by_patterns
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
@@ -71,8 +74,9 @@ class LedgeredDataFrameManager:
         with self._lock:
             if self._store is None and self._enable_h5_persistence:
                 self._store = store
-                # Auto-create array store in same directory
+                # Auto-create array store in SAME directory (shared, both in parent)
                 if self._array_store is None:
+                    # data.h5 is already in checkpoints/data/, so arrays.h5 goes there too
                     array_path = store.get_path().parent / "arrays.h5"
                     self._array_store = H5ArrayStore(array_path)
 
@@ -141,7 +145,6 @@ class LedgeredDataFrameManager:
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
-
     def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
             return
@@ -167,18 +170,16 @@ class LedgeredDataFrameManager:
 
         with self._lock:
             # Align columns
-            all_cols = self._df.columns.union(df_norm.columns)
+            all_cols = df_norm.columns
             if self._df.empty:
                 self._df = df_norm.reindex(columns=all_cols)
                 return
-            if len(all_cols) != len(self._df.columns):
-                self._df = self._df.reindex(columns=all_cols)
-            if len(all_cols) != len(df_norm.columns):
-                df_norm = df_norm.reindex(columns=all_cols)
 
             # Right-preferred upsert: df_norm overrides existing, adds new rows
-            # Override existing rows where sample_id matches
-            self._df.update(df_norm)
+            # Only update columns present in df_norm, keep other columns/values from self._df
+            existing_idx = df_norm.index.intersection(self._df.index)
+            if len(existing_idx) > 0:
+                self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
             # Append rows that do not exist yet
             missing_idx = df_norm.index.difference(self._df.index)
@@ -280,6 +281,29 @@ class LedgeredDataFrameManager:
                 out[name] = None
         return out
 
+    def _normalize_preds_raw_uint16(self, preds_raw: np.ndarray) -> np.ndarray:
+        """Normalize raw predictions to uint16 per sample and class.
+
+        Expected shape: (B, C, H, W). Normalization is performed per (B, C)
+        across spatial dimensions (H, W), then scaled to [0, 65535].
+        """
+        try:
+            arr = np.asanyarray(preds_raw)
+            if arr.ndim != 4:
+                return arr
+
+            arr = arr.astype(np.float32, copy=False)
+            min_vals = np.nanmin(arr, axis=(2, 3), keepdims=True)
+            max_vals = np.nanmax(arr, axis=(2, 3), keepdims=True)
+            denom = max_vals - min_vals
+            denom = np.where(denom == 0, 1.0, denom)
+            norm = (arr - min_vals) / denom
+            norm = np.nan_to_num(norm, nan=0.0, posinf=1.0, neginf=0.0)
+            scaled = np.round(norm * 65535.0).clip(0, 65535)
+            return scaled.astype(np.uint16)
+        except Exception:
+            return preds_raw
+
     def enqueue_batch(
         self,
         sample_ids: Sequence[int],
@@ -307,8 +331,9 @@ class LedgeredDataFrameManager:
 
         # Build all records BEFORE acquiring lock (faster)
         records_to_add = []
+        normalized_preds_raw = self._normalize_preds_raw_uint16(preds_raw) if preds_raw is not None else None
         for i, sid in enumerate(sample_ids):
-            sample_id = int(sid)
+            sample_id = int(sid) if not isinstance(sid, np.ndarray) else int(sid[0])
 
             # Build record incrementally - keep numpy arrays as-is for speed
             rec: Dict[str, Any] = {
@@ -324,7 +349,7 @@ class LedgeredDataFrameManager:
 
             if preds_raw is not None:
                 try:
-                    rec[SampleStats.Ex.PREDICTION_RAW.value] = preds_raw[i]
+                    rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i] if normalized_preds_raw is not None else preds_raw[i]
                 except Exception:
                     pass
 
@@ -349,6 +374,7 @@ class LedgeredDataFrameManager:
                     self._buffer[sample_id].update(updates)
                 else:
                     self._buffer[sample_id] = rec
+            logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
 
             # Check buffer size and trigger flush if needed
             should_flush = len(self._buffer) >= self._flush_max_rows
@@ -424,10 +450,8 @@ class LedgeredDataFrameManager:
         with self._lock:
             if self._df.empty:
                 return pd.DataFrame()
-            if column is not None and column in self._df.columns:
-                mask = self._df[column] == column
-                # Return view of matching rows
-                subset = self._df.loc[mask]
+            if column is not None and ((not isinstance(column, (list, set, tuple)) and column in self._df.columns) or (isinstance(column, (list, set, tuple)))):
+                subset = self._df[column]
             else:
                 subset = self._df
         if limit > 0:
@@ -839,28 +863,25 @@ class LedgeredDataFrameManager:
             self._flush_queue_count += 1
         self._flush_event.set()  # Wake thread immediately
 
-    def flush_if_needed_nonblocking(self, force: bool = False):
+    def flush_if_needed_nonblocking(self, force: bool = False, force_flush_h5: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
-        # Try to acquire buffer lock with timeout
-        if not self._buffer_lock.acquire(blocking=False):
-            # Buffer is being written to by main thread, skip this cycle
-            return
-
-        try:
+        # Acquire buffer lock to flush data to DF or h5
+        with self._buffer_lock:
             if not self._buffer:
                 return
             # Drain buffer quickly
             buffered = list(self._buffer.values())
             self._buffer = {}
-        finally:
-            self._buffer_lock.release()
 
-        # Apply records outside buffer lock
-        if buffered:
-            self._apply_buffer_records_nonblocking(buffered)
+            if force_flush_h5:
+                self._flush_to_h5_if_needed(force=force)
 
-        # Flush to H5 if needed
-        self._flush_to_h5_if_needed(force=force)
+                # Apply records outside buffer lock
+                if buffered:
+                    self._apply_buffer_records_nonblocking(buffered)
+
+                # Flush to H5 if needed
+                self._flush_to_h5_if_needed(force=force)
 
     def flush(self):
         """Blocking flush to ensure all data is persisted to H5 immediately."""
@@ -889,7 +910,7 @@ def _create_ledger_manager():
     enable_flush = True
 
     try:
-        hp = get_hyperparams(resolve_hp_name())
+        hp = get_hyperparams()
         if isinstance(hp, dict):
             flush_interval = hp.get('ledger_flush_interval', flush_interval)
             flush_max_rows = hp.get('ledger_flush_max_rows', flush_max_rows)
@@ -911,6 +932,6 @@ def _create_ledger_manager():
 # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
 LM = _create_ledger_manager()
 try:
-    register_dataframe("sample_stats", LM)
+    register_dataframe(LM)
 except Exception as e:
     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

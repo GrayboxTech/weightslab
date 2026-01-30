@@ -104,7 +104,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
                 preds=preds,
             )
 
-
     loss = losses / test_loader_len
     metric = metric_mlt.compute() * 100
 
@@ -156,7 +155,6 @@ if __name__ == "__main__":
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
@@ -170,7 +168,7 @@ if __name__ == "__main__":
 
     # Data (MNIST train/val/test)
     _full_train_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
+        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
         train=True,
         download=True,
         transform=transforms.Compose(
@@ -180,7 +178,7 @@ if __name__ == "__main__":
         ),
     )
     _test_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
+        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
         train=False,
         download=True,
         transform=transforms.Compose(
@@ -250,32 +248,27 @@ if __name__ == "__main__":
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="train_mlt_loss/CE",
         log=True,
     )
     val_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="val_mlt_loss/CE",
         log=True,
     )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="test_mlt_loss/CE",
         log=True,
     )
 
     val_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="val_metric/Accuracy",
         log=True,
     )
     test_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="test_metric/Accuracy",
         log=True,
     )
 

@@ -6,7 +6,7 @@ from weightslab.backend.ledgers import register_optimizer
 
 
 class OptimizerInterface:
-    def __init__(self, optimizer_or_cls, params=None, name: str = None, register: bool = True, weak: bool = False, **kwargs):
+    def __init__(self, optimizer_or_cls, params=None, register: bool = True, weak: bool = False, **kwargs):
         """Wrap a torch optimizer instance or instantiate one from a class.
 
         If `optimizer_or_cls` is an instance of `torch.optim.Optimizer` it is
@@ -29,14 +29,8 @@ class OptimizerInterface:
         # Optionally register this wrapper into the global ledger so other
         # threads / modules can access it by name. Prefer explicit `name`,
         # else infer from the optimizer class or fall back to '_optimizer'.
-        self._ledger_name = name
         if register:
-            reg_name = name or getattr(optimizer_or_cls, "__name__", None) or "_optimizer"
-            try:
-                register_optimizer(reg_name, self, weak=weak)
-            except Exception:
-                # avoid failing construction due to ledger issues
-                pass
+            register_optimizer(self, weak=weak)
 
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
@@ -58,7 +52,7 @@ class OptimizerInterface:
 
         # 1) Expose model instance attributes as properties on the wrapper class
         optimizer_vars = getattr(obj, '__dict__', {})
-        for name, value in optimizer_vars.items():
+        for name, _ in optimizer_vars.items():
             if name.startswith('_'):
                 continue
             if name in existing_instance_names or name in existing_class_names:

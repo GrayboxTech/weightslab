@@ -12,6 +12,7 @@ from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
+from weightslab.backend import ledgers
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.trainer.services.service_utils import load_label
@@ -27,6 +28,8 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_TO_SAVE_TO_H5,
     SAMPLE_STATS_ALL,
 )
+
+from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 
 
 # Global logger
@@ -121,22 +124,22 @@ class DataSampleTrackingWrapper(Dataset):
         tags_mapping: Optional[Dict[str, int]] = None,
         stats_store: Optional[H5DataFrameStore] = None,
         enable_h5_persistence: bool = True,
-        name: Optional[str] = 'unknown',
+        loader_name: Optional[str] = 'unknown',
         array_autoload_arrays: bool = False,
         array_return_proxies: bool = True,
         array_use_cache: bool = True,
-        preload_labels: bool = False,
+        preload_labels: bool = True,
         **_,
     ):
         # Set name
-        self.name = name
+        self.loader_name = loader_name
 
         # Init Global Ledger Manager
         ledger_manager = get_dataframe()
         if ledger_manager == None:
             ledger_manager = _create_ledger_manager()
             try:
-                register_dataframe("sample_stats", ledger_manager)
+                register_dataframe(ledger_manager)
             except Exception as e:
                 logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")
 
@@ -166,9 +169,13 @@ class DataSampleTrackingWrapper(Dataset):
             logger.info(f"[DataSampleTrackingWrapper] Using temporary directory {self._root_log_dir} for H5 persistence. Please copy final results in a safe location after training.")
 
         if self._enable_h5_persistence and self._root_log_dir:
+            # Store H5 files in PARENT directory (shared across all experiment hashes)
+            # Only checkpoint-specific JSON files go in hash directories
             data_dir = self._root_log_dir / "checkpoints" / "data"
             data_dir.mkdir(parents=True, exist_ok=True)
-            self._h5_path = data_dir / "data_with_ops.h5"
+
+            # Use shared data.h5 file (not hash-specific)
+            self._h5_path = data_dir / "data.h5"
             logger.info(f"[DataSampleTrackingWrapper] H5 persistence enabled at {self._h5_path}")
 
             # If no shared store provided, create one pointing to the same path
@@ -195,8 +202,7 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Detect dataset split for H5 storage
         original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
-        split = name or _detect_dataset_split(original_ds)
-
+        split = self.loader_name or _detect_dataset_split(original_ds)
         for idx, uid in enumerate(self.unique_ids):
             uid_int = int(uid)
             if uid_int not in seen_uid:
@@ -253,10 +259,26 @@ class DataSampleTrackingWrapper(Dataset):
         # Start with defaults for all UIDs (single dict build per row to trim overhead)
         sample_ids = [int(uid) for uid in self.unique_ids]
         defaults = SampleStats.DEFAULTS
-        default_data = [
-            dict(defaults, sample_id=sid, origin=self._dataset_split)
-            for sid in sample_ids
-        ]
+
+        if not preload_labels:
+            default_data = [
+                dict(
+                    defaults,
+                    sample_id=sid,
+                    origin=self._dataset_split
+                )
+                for sid in sample_ids
+            ]
+        else:
+            default_data = [
+                dict(
+                    defaults,
+                    sample_id=sid,
+                    origin=self._dataset_split,
+                    target=load_label(self, sample_id=sid)
+                )
+                for sid in sample_ids
+            ]
 
         # Register this split with the global ledger manager (shared across loaders) and load existing data
         ledger_manager.register_split(
