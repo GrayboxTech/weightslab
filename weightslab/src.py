@@ -282,7 +282,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
-        return proxy if proxy is not None else wrapper
+        return proxy if proxy != None else wrapper
 
     # DataLoader
     elif 'data' in flag.lower() or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
@@ -291,7 +291,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # real wrapper is registered. `get_dataloader` will create a Proxy if
         # the name is not yet present.
         try:
-            proxy = get_dataloader(kwargs.get('loader_name', DEFAULT_NAME))
+            proxy = get_dataloader(kwargs.get('loader_name', kwargs.get('name', DEFAULT_NAME)))
         except Exception:
             proxy = None
 
@@ -322,7 +322,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
-        return proxy if proxy is not None else wrapper
+        return proxy if proxy != None else wrapper
 
     # Optimizer
     elif 'optimizer' in flag.lower() or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
@@ -341,7 +341,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
-        return proxy if proxy is not None else wrapper
+        return proxy if proxy != None else wrapper
 
     # Logger
     elif 'logger' in flag.lower() or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
@@ -355,7 +355,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         register_logger(obj)
 
         # Return a stable handle (proxy) when available, otherwise the registered logger
-        return proxy if proxy is not None else obj
+        return proxy if proxy != None else obj
 
     # Signals
     # # Loss

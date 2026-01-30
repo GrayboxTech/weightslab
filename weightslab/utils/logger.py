@@ -1,5 +1,3 @@
-import queue
-
 from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoint_manager
 
 
@@ -13,10 +11,10 @@ class LoggerQueue:
 
         if register:
             try:
-                get_logger()
+                lg = get_logger()
             except Exception:
                 pass
-            register_logger(self)
+            register_logger(self) if lg == None else None
 
         self.chkpt_manager = get_checkpoint_manager()
 
@@ -45,7 +43,7 @@ class LoggerQueue:
         # If step changed, flush the previous step's buffer
         if global_step != self._last_step:
             self._flush_step_buffer()
-            self._last_step = global_step
+            self._last_step = global_step-1  # adjust for 0-based step indexing
 
         for _, line_value in name_2_value.items():
             metric_key = f"{graph_name}"

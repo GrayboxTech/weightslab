@@ -32,7 +32,7 @@ load_dotenv()
 
 class Condition(BaseModel):
     column: str = Field(description="The column name to filter/check")
-    op: Literal["==", "=", "equals", "!=", ">", "<", ">=", "<=", "between", "contains", "in", "not in", "is null", "is not null", "max", "min"] = Field(description="The operator")    
+    op: Literal["==", "=", "equals", "!=", ">", "<", ">=", "<=", "between", "contains", "in", "not in", "is null", "is not null", "max", "min"] = Field(description="The operator")
     value: Optional[Union[float, int, str, List[Union[int, float, str]]]] = Field(default=None, description="The primary value")
     value2: Optional[Union[float, int]] = Field(default=None, description="The secondary value for 'between'")
 
@@ -48,7 +48,7 @@ class AtomicIntent(BaseModel):
     drop_frac: Optional[float] = Field(default=None, description="Fraction of rows to drop (0.0 to 1.0)")
     keep_frac: Optional[float] = Field(default=None, description="Fraction of rows to keep (0.0 to 1.0)")
     analysis_expression: Optional[str] = Field(default=None, description="Pandas expression string for analysis queries")
-    
+
     # Future-proofing for Actions
     action_name: Optional[str] = Field(default=None, description="Name of the action (e.g. 'save_dataset')")
     action_params: Optional[Dict[str, Any]] = Field(default=None, description="Parameters for the action")
@@ -91,14 +91,14 @@ class SortHandler(IntentHandler):
         if ascending is True:
             reasoning = context.reasoning.lower()
             desc_triggers = {"desc", "highest", "largest", "decreasing", "down", "worst"}
-            
+
             # Force DESC for 'group' unless 'asc' is explicitly requested
             if step.kind == "group" and "asc" not in reasoning:
                 ascending = False
             # Force DESC if reasoning contains trigger words
             elif any(t in reasoning for t in desc_triggers):
                 ascending = False
-        
+
         # 4. Broadcast boolean to match number of columns (Pandas requirement)
         if isinstance(ascending, bool):
             ascending = [ascending] * len(resolved_cols)
@@ -114,7 +114,7 @@ class FilterHandler(IntentHandler):
     """Handles keep/drop logic and query construction."""
     def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
         kind = step.kind
-        
+
         # Case A: Structured Conditions
         if step.conditions:
             # Sequential Filtering Strategy: Apply filters before extrema (for "Highest X in subset Y")
@@ -127,7 +127,7 @@ class FilterHandler(IntentHandler):
                 expr_f = self.agent._build_python_mask(filters, n=None)
                 if expr_f:
                     ops.append({"function": "df.apply_mask", "params": {"code": expr_f}})
-                
+
                 # 2. Apply extrema on the subset
                 expr_e = self.agent._build_python_mask(extremes, n=step.n)
                 if expr_e:
@@ -140,22 +140,22 @@ class FilterHandler(IntentHandler):
             # Standard Logic (Single Step)
             expr = self.agent._build_python_mask(step.conditions, n=step.n)
             if not expr: return None
-            
+
             if kind == "keep":
                 # Handle sampling on keep result
                 if step.keep_frac:
                     return {"function": "df.drop", "params": {"index": f"df.index.difference(df[{expr}].sample(frac={step.keep_frac}).index)"}}
-                
+
                 return {"function": "df.apply_mask", "params": {"code": expr}}
-            
+
             else: # drop
                 # If frac provided: Drop frac of matches.
                 if step.drop_frac:
                      return {"function": "df.drop", "params": {"index": f"df[{expr}].sample(frac={step.drop_frac}).index"}}
-                
+
                 # Standard drop
                 return {"function": "df.drop", "params": {"index": f"df[{expr}].index"}}
-        
+
         # Case B: Free-form Expression (Top N, etc)
         elif step.analysis_expression:
             expr = self.agent._clean_code(step.analysis_expression)
@@ -169,26 +169,26 @@ class AnalysisHandler(IntentHandler):
     """Handles read-only analysis requests with robust column auto-correction."""
     def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
         if not step.analysis_expression: return None
-        
+
         raw_code = self.agent._clean_code(step.analysis_expression)
-        
+
         # 1. Broad Regex: Matches any ['string'] or ["string"] pattern. This catches df['col'], df.loc['col'], and df[...]['col']
         pattern = r"(\[\s*['\"])(.*?)(['\"]\s*\])"
-        
+
         def replace_col(match):
             prefix = match.group(1)  # e.g. ['
             content = match.group(2) # e.g. signals//train_loss
             suffix = match.group(3)  # e.g. ']
-            
+
             resolved = self.agent._resolve_column(content) # Try to resolve the content to a real column
-            
+
             if resolved:
                 return f"{prefix}{resolved}{suffix}" # If we found a better match in the schema, use it
-            
+
             return match.group(0) # If it's a value (e.g., 'bug' in tags), leave it alone
 
         fixed_code = re.sub(pattern, replace_col, raw_code)
-        
+
         return {
             "function": "df.analyze",
             "params": {"code": fixed_code}
@@ -207,7 +207,7 @@ class ClarifyHandler(IntentHandler):
     """Handles ambiguity by returning the reasoning as a question."""
     def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
         return {
-            "function": "clarify", 
+            "function": "clarify",
             "params": {"reason": context.reasoning}
         }
 
@@ -216,7 +216,7 @@ class ActionHandler(IntentHandler):
     def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
         if not step.action_name: return None
         return {
-            "function": f"action.{step.action_name}", 
+            "function": f"action.{step.action_name}",
             "params": step.action_params or {}
         }
 
@@ -235,7 +235,7 @@ class DataManipulationAgent:
         self._build_column_index()
         self._load_config()
         self._setup_providers()
-        self.history = [] 
+        self.history = []
 
         # --- HANDLER REGISTRY ---
         self.handlers = {
@@ -276,11 +276,11 @@ class DataManipulationAgent:
                 s = None
                 if col in df.columns: s = df[col]
                 elif col in index_columns: s = df.index.get_level_values(col)
-                
+
                 if s is not None:
                     dtype = str(s.dtype)
                     meta = {"dtype": dtype}
-                    
+
                     if "float" in dtype or "int" in dtype:
                         meta["range"] = [float(s.min()), float(s.max())]
                         meta["mean"] = float(s.mean()) if len(s) > 0 else 0
@@ -289,7 +289,7 @@ class DataManipulationAgent:
                         unique_vals = s.dropna().unique().tolist()
                         meta["samples"] = unique_vals[:10]
                         meta["unique_count"] = len(unique_vals)
-                    
+
                     column_metadata[col] = meta
             except:
                 column_metadata[col] = {"dtype": "unknown"}
@@ -358,7 +358,7 @@ class DataManipulationAgent:
             except Exception as e: _LOGGER.error(f"OpenAI error: {e}")
 
         # GOOGLE
-        if os.environ.get("GOOGLE_API_KEY"):
+        elif os.environ.get("GOOGLE_API_KEY"):
             try:
                 llm = ChatOpenAI(
                     model="gemini-1.5-flash",
@@ -372,7 +372,7 @@ class DataManipulationAgent:
             except Exception as e: _LOGGER.error(f"Google error: {e}")
 
         # OPEN ROUTER
-        if os.environ.get("OPENROUTER_API_KEY"):
+        elif os.environ.get("OPENROUTER_API_KEY"):
             try:
                 llm = ChatOpenAI(
                     model=self.openrouter_model, temperature=0,
@@ -385,13 +385,14 @@ class DataManipulationAgent:
             except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
 
         # LOCAL
-        try:
-            host = self.ollama_host.split(':')[0]
-            port = self.ollama_port
-            llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
-            self.chain_ollama = llm
-            _LOGGER.info(f"Ollama active ({self.ollama_model})")
-        except Exception as e: _LOGGER.error(f"Ollama error: {e}")
+        else:
+            try:
+                host = self.ollama_host.split(':')[0]
+                port = self.ollama_port
+                llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
+                self.chain_ollama = llm
+                _LOGGER.info(f"Ollama active ({self.ollama_model})")
+            except Exception as e: _LOGGER.error(f"Ollama error: {e}")
 
     def is_ollama_available(self) -> bool:
         return self.chain_ollama is not None
@@ -409,7 +410,7 @@ class DataManipulationAgent:
     def _resolve_column(self, user_name: str) -> Optional[str]:
         """Robust column resolution handling synonyms and nested signals (//)."""
         if not user_name: return None
-        
+
         # Normalize Input: lowercase, replace spaces AND SLASHES with underscores
         user_lower = user_name.strip().lower()
         user_clean = re.sub(r"[ /_]+", "_", user_lower)  # "signals//train_loss" -> "signals_train_loss"
@@ -421,14 +422,14 @@ class DataManipulationAgent:
         for c in self._cols:
             c_lower = c.lower()
             c_clean = re.sub(r"[ /_]+", "_", c_lower) # Normalize candidate: "signals//train_loss/mlt_loss" -> "signals_train_loss_mlt_loss"
-            
+
             # Check if input is a subset of the column (e.g. "train_loss" in "signals_train_loss_mlt_loss") OR if input is the start of the column (more precise)
             if user_clean in c_clean:
                 return c
 
         # 3. Token Set Ratio (Synonyms)
         # Use a more aggressive split that eats slashes
-        user_tokens = set(re.split(r"[ _/]+", user_lower)) 
+        user_tokens = set(re.split(r"[ _/]+", user_lower))
         for t in list(user_tokens):
             for base, syns in self._column_synonyms.items():
                 if t == base or t in syns:
@@ -450,7 +451,7 @@ class DataManipulationAgent:
         for cond in conditions:
             resolved_col = self._resolve_column(cond.column)
             if not resolved_col: continue
-            
+
             # 1. Determine Accessor
             if resolved_col in self.df_schema['index_columns']:
                 col_ref = f"df.index.get_level_values('{resolved_col}')"
@@ -460,7 +461,7 @@ class DataManipulationAgent:
             # 2. Normalize Operator
             op = cond.op.lower()
             if op == "=" or op == "equals": op = "=="  # Fix "equals"
-            
+
             val = cond.value
 
             # 3. Special "Max/Min" Logic (Self-referential filtering)
@@ -495,12 +496,12 @@ class DataManipulationAgent:
                     else:
                          val = f"df['{possible_col}']"
                     is_col_ref = True
-            
+
             if not is_col_ref:
                 # It's a literal. Apply type correction to fix Index mismatches.
                 meta = self.df_schema['metadata'].get(resolved_col, {})
                 dtype = str(meta.get('dtype', '')).lower()
-                
+
                 def cast_v(v):
                     try:
                         if 'int' in dtype: return int(v)
@@ -513,12 +514,12 @@ class DataManipulationAgent:
                     val = [cast_v(v) for v in val]
                 else:
                     val = cast_v(val)
-                
+
                 # Prepare val2 if needed for 'between'
                 val2 = getattr(cond, 'value2', None)
                 if val2 is not None:
                     val2 = repr(cast_v(val2))
-                
+
                 val = repr(val)
 
             # 5. Build Expression
@@ -528,19 +529,19 @@ class DataManipulationAgent:
             elif op == "<": parts.append(f"({col_ref} < {val})")
             elif op == ">=": parts.append(f"({col_ref} >= {val})")
             elif op == "<=": parts.append(f"({col_ref} <= {val})")
-            elif op == "between": 
+            elif op == "between":
                 # Ensure we have a val2
                 if 'val2' in locals() and val2 is not None:
                     parts.append(f"({col_ref}.between({val}, {val2}))")
                 else:
                     parts.append(f"({col_ref} >= {val})") # Fallback to >= if between used improperly
             elif op == "contains": parts.append(f"({col_ref}.astype(str).str.contains({val}, na=False, regex=False))")
-            elif op == "in": 
+            elif op == "in":
                 # Ensure val is a list for .isin()
                 if not val.startswith('['):
                     val = f"[{val}]"
                 parts.append(f"({col_ref}.isin({val}))")
-            elif op == "not in": 
+            elif op == "not in":
                 if not val.startswith('['):
                     val = f"[{val}]"
                 parts.append(f"(~{col_ref}.isin({val}))")
@@ -562,11 +563,11 @@ class DataManipulationAgent:
             """Dispatches structured intent steps to registered handlers."""
             if intent.primary_goal == "out_of_scope":
                 return [{"function": "out_of_scope", "params": {"reason": intent.reasoning}}]
-                
+
             ops = []
             for step in intent.steps:
                 handler = self.handlers.get(step.kind)
-                
+
                 # 1. Handle missing handler
                 if not handler:
                     if step.kind != "noop":
@@ -579,14 +580,14 @@ class DataManipulationAgent:
                     result = handler.build_op(step, intent)
                     if not result:
                         continue
-                    
+
                     # 3. Normalize result to a list (removes the list vs dict indentation)
                     new_ops = result if isinstance(result, list) else [result]
-                    
+
                     # 4. Log and Store
                     for op in new_ops:
                         _LOGGER.info(f"[Agent] Generated Op: {op['function']} with params {op.get('params')}")
-                    
+
                     ops.extend(new_ops)
 
                 except Exception as e:
@@ -596,11 +597,11 @@ class DataManipulationAgent:
 
     def _parse_intent_from_response(self, name: str, intent) -> Optional[Intent]:
         text = intent.content if hasattr(intent, 'content') else str(intent)
-        
+
         # 1. Isolate JSON block
         start = text.find('{')
         end = text.rfind('}')
-        if start == -1 or end == -1: 
+        if start == -1 or end == -1:
             # If no JSON found, check if it's a short text (likely a refusal or out-of-scope reply)
             if len(text) < 500:
                 _LOGGER.info(f"[{name}] No JSON found, but text is short. Wrapping as out_of_scope.")
@@ -611,34 +612,34 @@ class DataManipulationAgent:
                 )
             _LOGGER.error(f"[{name}] No JSON braces found in response: {text[:200]}...")
             return None
-        
+
         # 2. Extract and pre-clean (avoid breaking valid escaped newlines)
         json_str = text[start:end+1]
-        
+
         # 3. Robust clean: replace actual newlines with spaces only if they aren't escaped
         # (Very basic heuristic for malformed LLM outputs)
         json_str = json_str.replace('\n', ' ').replace('\r', ' ')
         # Collapse multiple spaces
         json_str = re.sub(r'\s+', ' ', json_str).strip()
-        
+
         try:
             # Try parsing with standard json
             data = json.loads(json_str)
             return Intent(**data)
         except Exception as e:
             _LOGGER.error(f"[{name}] JSON decode failed: {e}. String: {json_str[:200]}...")
-            
+
             # 4. Emergency fallback: try to fix missing quotes around keys/values or trailing commas
             try:
                 fixed_json = re.sub(r'("\s*:\s*"[^"]*")\s*(")', r'\1, \2', json_str) # Add missing comma between "key":"val" "key"
                 fixed_json = re.sub(r'(false|true|null|\d+)\s*(")', r'\1, \2', fixed_json) # Add missing comma after primitives
-                
+
                 # Try parsing again
                 data = json.loads(fixed_json)
                 return Intent(**data)
             except:
                 pass
-                
+
             return None
 
     def _query_langchain(self, name: str, chain, instruction: str, system_prompt: str) -> Optional[dict]:
@@ -646,27 +647,27 @@ class DataManipulationAgent:
             _LOGGER.info(f"[{name}] Invoking chain: '{instruction[:50]}...'")
             # Using double braces for prompt formatting
             escaped_sys = system_prompt.replace("{", "{{").replace("}", "}}").replace("{{instruction}}", "{instruction}")
-            
+
             # NOTE: If using RAG, add {{examples}} replacement here
-            
+
             prompt = ChatPromptTemplate.from_messages([("system", escaped_sys), ("human", "{instruction}")])
             response = (prompt | chain).invoke({"instruction": instruction})
-            
+
             _LOGGER.info(f"[{name}] Response received")
-            
+
             parsed_intent = None
             if isinstance(response, Intent):
                 parsed_intent = response
             else:
                 parsed_intent = self._parse_intent_from_response(name, response)
-            
+
             if parsed_intent:
                 _LOGGER.info(f"[{name}] Reasoning: {parsed_intent.reasoning}")
                 ops = self._intent_to_pandas_op(parsed_intent)
                 _LOGGER.info(f"[{name}] Converted to {len(ops)} operations")
                 return ops
             return None
-            
+
         except Exception as e:
             _LOGGER.warning(f"[{name}] Failed: {e}")
             return None
@@ -674,11 +675,11 @@ class DataManipulationAgent:
     def _try_query_provider(self, provider: str, instruction: str, system_prompt: str) -> Optional[List[dict]]:
             # 1. Dynamically find the chain (chain_openai, chain_google, chain_ollama)
             chain = getattr(self, f"chain_{provider}", None)
-            
+
             # 2. If it exists, use the standard LangChain method
             if chain:
                 return self._query_langchain(provider, chain, instruction, system_prompt)
-                
+
             return None
 
     def query(self, instruction: str, abort_event: Optional[threading.Event] = None, status_callback: Optional[Callable[[str], None]] = None) -> List[dict]:
@@ -686,7 +687,7 @@ class DataManipulationAgent:
         if abort_event and abort_event.is_set(): return []
 
         self._setup_schema()
-        
+
         # 1. Format metadata for the prompt
         schema_lines = []
         for col, meta in self.df_schema['metadata'].items():
@@ -694,7 +695,7 @@ class DataManipulationAgent:
                 tag = "[INDEX]"
             else:
                 tag = "[COL]"
-            
+
             line = f"- {tag} `{col}` ({meta['dtype']})"
             if "range" in meta:
                 line += f" | Range: {meta['range'][0]:.3f} to {meta['range'][1]:.3f} | Mean: {meta['mean']:.3f}"

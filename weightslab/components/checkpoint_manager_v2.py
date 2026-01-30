@@ -32,6 +32,7 @@ import yaml
 import logging
 import shutil
 import random
+import time
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -435,8 +436,23 @@ class CheckpointManagerV2:
 
             path = self._get_logger_snapshot_path(exp)
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w") as f:
+
+            # Merge with existing snapshot if present to avoid losing data
+            if path.exists():
+                try:
+                    with open(path, "r") as f:
+                        existing = json.load(f) or {}
+                    existing_loggers = existing.get("loggers", {})
+                    existing_loggers.update(snapshot.get("loggers", {}))
+                    snapshot["loggers"] = existing_loggers
+                    snapshot["exp_hash"] = existing.get("exp_hash", exp)
+                except Exception as e:
+                    logger.warning(f"Failed to merge existing logger snapshot: {e}")
+
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp_path, "w") as f:
                 json.dump(snapshot, f, indent=2)
+            os.replace(tmp_path, path)
             logger.info(f"Saved logger snapshot: {path}")
             return path
         except Exception as e:
@@ -460,7 +476,8 @@ class CheckpointManagerV2:
                     lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else None
                     # If no real logger (or only a proxy) exists, create a fresh LoggerQueue so we can enqueue history
                     if lg is None or not hasattr(lg, "load_snapshot"):
-                        lg = LoggerQueue(name=lname, register=True)
+                        lg = LoggerQueue(register=True)
+                        ledgers.register_logger(lg)
                     lg.load_snapshot(payload)
                 except Exception as inner_e:
                     logger.warning(f"Failed to restore logger '{lname}': {inner_e}")
@@ -837,15 +854,29 @@ class CheckpointManagerV2:
             logger.debug(f"Architecture already saved for {self.current_exp_hash[8:-8]}")
             return arch_file
 
+        # Remove links to lock objects in the model
+        if hasattr(model, 'guard_training_context'):
+            del model.guard_training_context
+        if hasattr(model, 'guard_testing_context'):
+            del model.guard_testing_context
+
+        # Save
         try:
+            tmp_arch_file = arch_file.with_suffix(arch_file.suffix + ".tmp")
+
             # Try dill first (better for custom classes)
             if dill is not None:
-                with open(arch_file, 'wb') as f:
+                with open(tmp_arch_file, 'wb') as f:
                     dill.dump(model, f)
+                    f.flush()
+                    os.fsync(f.fileno())
             else:
-                with open(arch_file, 'wb') as f:
+                with open(tmp_arch_file, 'wb') as f:
                     pickle.dump(model, f)
+                    f.flush()
+                    os.fsync(f.fileno())
 
+            os.replace(tmp_arch_file, arch_file)
             logger.info(f"Saved model architecture: {arch_file.name}")
 
             # Also save a text representation
@@ -901,7 +932,7 @@ class CheckpointManagerV2:
 
         try:
             # Get dataframe manager
-            dfm = ledgers.get_dataframe('sample_stats')
+            dfm = ledgers.get_dataframe()
             if dfm is None:
                 return None
 
@@ -964,6 +995,54 @@ class CheckpointManagerV2:
         except Exception as e:
             logger.error(f"Failed to save data snapshot: {e}")
         return None
+
+    def _load_architecture_with_retry(self, arch_file: Path, max_retries: int = 5, base_delay: float = 0.2):
+        """Load a model architecture file with retry/backoff for transient file locks."""
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                if not arch_file.exists() or arch_file.stat().st_size == 0:
+                    raise EOFError("Architecture file is empty or missing")
+
+                with open(arch_file, 'rb') as f:
+                    if dill is not None:
+                        try:
+                            return dill.load(f)
+                        except Exception as e:
+                            if 'cannot acquire lock' in str(e).lower():
+                                pass
+                            else:
+                                raise
+
+                # Retry with a fresh handle using dill ignore=True when lock was hit
+                with open(arch_file, 'rb') as f:
+                    if dill is not None:
+                        return dill.load(f, ignore=True)
+                    return pickle.load(f)
+            except (PermissionError, OSError) as e:
+                last_error = e
+                msg = str(e).lower()
+                if 'lock' not in msg and 'permission' not in msg:
+                    break
+                sleep_time = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    f"  [WARN] Architecture load locked (attempt {attempt}/{max_retries}). "
+                    f"Retrying in {sleep_time:.2f}s..."
+                )
+                time.sleep(sleep_time)
+            except Exception as e:
+                last_error = e
+                if isinstance(e, EOFError):
+                    sleep_time = base_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"  [WARN] Architecture load incomplete (attempt {attempt}/{max_retries}). "
+                        f"Retrying in {sleep_time:.2f}s..."
+                    )
+                    time.sleep(sleep_time)
+                    continue
+                break
+        if last_error:
+            raise last_error
 
     # =================
     # LOADING FUNCTIONS
@@ -1274,8 +1353,13 @@ class CheckpointManagerV2:
 
             if actual_arch_file.exists():
                 try:
-                    with open(actual_arch_file, 'rb') as f:
-                        result['model'] = dill.load(f)
+                    result['model'] = self._load_architecture_with_retry(actual_arch_file)
+                    # Remove links to lock objects in the model
+                    if not hasattr(result['model'], 'guard_training_context'):
+                        result['model'].guard_training_context = guard_training_context
+                    if not hasattr(result['model'], 'guard_testing_context'):
+                        result['model'].guard_testing_context = guard_testing_context
+
                     result['loaded_components'].add('model')
                     logger.info(f"  [OK] Loaded model architecture from hash {actual_arch_hash[:16]}")
                 except Exception as e:
@@ -1473,6 +1557,7 @@ class CheckpointManagerV2:
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply model: {e}")
                 success = False
+
         elif 'weights' in checkpoint_data['loaded_components']:
             # Only weights changed, apply to existing model
             try:
@@ -1487,8 +1572,36 @@ class CheckpointManagerV2:
                 guard_training_context.model = model  # Train
                 guard_testing_context.model = model  # Eval
             except Exception as e:
-                logger.error(f"[ERROR] Failed to apply weights: {e}")
-                success = False
+                if 'model' not in checkpoint_data['loaded_components']:
+                    logger.info("Attempting to reload full checkpoint to recover...")
+                    # Load checkpoint data
+                    model_data = self.load_checkpoint(
+                        exp_hash=exp_hash,
+                        load_model=True,
+                        load_weights=True,
+                        load_config=False,
+                        load_data=False,
+                        force=True
+                    )
+
+                    if not model_data['loaded_components']:
+                        logger.warning("No components were loaded")
+                        return False
+                try:
+                    model = model_data['model']
+                    ledgers.register_model(model)
+                    weights = checkpoint_data['weights']
+                    if model and weights and 'model_state_dict' in weights:
+                        model.load_state_dict(weights['model_state_dict'])
+                        step = weights.get('step', -1)
+                        logger.info(f"[OK] Applied weights to reloaded model (step {step})")
+
+                    # Set Model Training Guard
+                    guard_training_context.model = model  # Train
+                    guard_testing_context.model = model  # Eval
+                except Exception as e:
+                    logger.error(f"[ERROR] Failed to apply weights: {e}")
+                    success = False
 
         # Apply config
         if 'config' in checkpoint_data['loaded_components']:
@@ -1507,7 +1620,7 @@ class CheckpointManagerV2:
                 snapshot_df = data_state.get('snapshot')
 
                 if snapshot_df is not None and not snapshot_df.empty:
-                    dfm = ledgers.get_dataframe('sample_stats')
+                    dfm = ledgers.get_dataframe()
                     if dfm is not None:
                         # Set index if needed
                         if 'sample_id' in snapshot_df.columns:

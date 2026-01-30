@@ -46,7 +46,7 @@ class ExperimentService:
         self._ctx.ensure_components()
         components = self._ctx.components
         signal_logger = components.get("signal_logger")
-        if signal_logger is None:
+        if signal_logger ==  None:
             return pb2.GetLatestLoggerDataResponse(points=[])
 
         points = []
@@ -480,10 +480,8 @@ class ExperimentService:
 
             # Load checkpoint by hash
             success = checkpoint_manager.load_state(experiment_hash)
-            if not success:
-                logger.warning(f"Checkpoint load_state returned False for hash: {experiment_hash}. Try now force reload.")
-                success = checkpoint_manager.load_state(experiment_hash, force=True)  # Force reloading everything here
 
+            # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
                 return pb2.RestoreCheckpointResponse(

@@ -128,7 +128,7 @@ class DataSampleTrackingWrapper(Dataset):
         array_autoload_arrays: bool = False,
         array_return_proxies: bool = True,
         array_use_cache: bool = True,
-        preload_labels: bool = False,
+        preload_labels: bool = True,
         **_,
     ):
         # Set name
@@ -203,7 +203,6 @@ class DataSampleTrackingWrapper(Dataset):
         # Detect dataset split for H5 storage
         original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
         split = self.loader_name or _detect_dataset_split(original_ds)
-
         for idx, uid in enumerate(self.unique_ids):
             uid_int = int(uid)
             if uid_int not in seen_uid:
@@ -260,10 +259,26 @@ class DataSampleTrackingWrapper(Dataset):
         # Start with defaults for all UIDs (single dict build per row to trim overhead)
         sample_ids = [int(uid) for uid in self.unique_ids]
         defaults = SampleStats.DEFAULTS
-        default_data = [
-            dict(defaults, sample_id=sid, origin=self._dataset_split)
-            for sid in sample_ids
-        ]
+
+        if not preload_labels:
+            default_data = [
+                dict(
+                    defaults,
+                    sample_id=sid,
+                    origin=self._dataset_split
+                )
+                for sid in sample_ids
+            ]
+        else:
+            default_data = [
+                dict(
+                    defaults,
+                    sample_id=sid,
+                    origin=self._dataset_split,
+                    target=load_label(self, sample_id=sid)
+                )
+                for sid in sample_ids
+            ]
 
         # Register this split with the global ledger manager (shared across loaders) and load existing data
         ledger_manager.register_split(

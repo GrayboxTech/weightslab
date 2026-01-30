@@ -281,6 +281,29 @@ class LedgeredDataFrameManager:
                 out[name] = None
         return out
 
+    def _normalize_preds_raw_uint16(self, preds_raw: np.ndarray) -> np.ndarray:
+        """Normalize raw predictions to uint16 per sample and class.
+
+        Expected shape: (B, C, H, W). Normalization is performed per (B, C)
+        across spatial dimensions (H, W), then scaled to [0, 65535].
+        """
+        try:
+            arr = np.asanyarray(preds_raw)
+            if arr.ndim != 4:
+                return arr
+
+            arr = arr.astype(np.float32, copy=False)
+            min_vals = np.nanmin(arr, axis=(2, 3), keepdims=True)
+            max_vals = np.nanmax(arr, axis=(2, 3), keepdims=True)
+            denom = max_vals - min_vals
+            denom = np.where(denom == 0, 1.0, denom)
+            norm = (arr - min_vals) / denom
+            norm = np.nan_to_num(norm, nan=0.0, posinf=1.0, neginf=0.0)
+            scaled = np.round(norm * 65535.0).clip(0, 65535)
+            return scaled.astype(np.uint16)
+        except Exception:
+            return preds_raw
+
     def enqueue_batch(
         self,
         sample_ids: Sequence[int],
@@ -308,6 +331,7 @@ class LedgeredDataFrameManager:
 
         # Build all records BEFORE acquiring lock (faster)
         records_to_add = []
+        normalized_preds_raw = self._normalize_preds_raw_uint16(preds_raw) if preds_raw is not None else None
         for i, sid in enumerate(sample_ids):
             sample_id = int(sid) if not isinstance(sid, np.ndarray) else int(sid[0])
 
@@ -325,7 +349,7 @@ class LedgeredDataFrameManager:
 
             if preds_raw is not None:
                 try:
-                    rec[SampleStats.Ex.PREDICTION_RAW.value] = preds_raw[i]
+                    rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i] if normalized_preds_raw is not None else preds_raw[i]
                 except Exception:
                     pass
 
@@ -350,6 +374,7 @@ class LedgeredDataFrameManager:
                     self._buffer[sample_id].update(updates)
                 else:
                     self._buffer[sample_id] = rec
+            logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
 
             # Check buffer size and trigger flush if needed
             should_flush = len(self._buffer) >= self._flush_max_rows
@@ -837,28 +862,23 @@ class LedgeredDataFrameManager:
 
     def flush_if_needed_nonblocking(self, force: bool = False, force_flush_h5: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
-        # Try to acquire buffer lock with timeout
-        if not self._buffer_lock.acquire(blocking=False):
-            # Buffer is being written to by main thread, skip this cycle
-            return
-
-        try:
+        # Acquire buffer lock to flush data to DF or h5
+        with self._buffer_lock:
             if not self._buffer:
                 return
             # Drain buffer quickly
             buffered = list(self._buffer.values())
             self._buffer = {}
-        finally:
+
             if force_flush_h5:
                 self._flush_to_h5_if_needed(force=force)
-            self._buffer_lock.release()
 
-        # Apply records outside buffer lock
-        if buffered:
-            self._apply_buffer_records_nonblocking(buffered)
+                # Apply records outside buffer lock
+                if buffered:
+                    self._apply_buffer_records_nonblocking(buffered)
 
-        # Flush to H5 if needed
-        self._flush_to_h5_if_needed(force=force)
+                # Flush to H5 if needed
+                self._flush_to_h5_if_needed(force=force)
 
 
 # Create global instance with config-driven parameters

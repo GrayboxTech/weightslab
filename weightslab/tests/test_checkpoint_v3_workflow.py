@@ -659,7 +659,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Data
         dataloader = ledgers.get_dataloader()  # Get dataloader
-        dfm = ledgers.get_dataframe('sample_stats')  # Get dataframe manager
+        dfm = ledgers.get_dataframe()  # Get dataframe manager
 
         # Optimizer and criterion
         optimizer = ledgers.get_optimizer()
@@ -948,7 +948,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Discard additional 15 samples (total 25% discarded)
         print("\nDiscarding additional 15 samples (25% total)...")
-        dfm = ledgers.get_dataframe('sample_stats')
+        dfm = ledgers.get_dataframe()
         tagged_samples = random.sample(range(10), 2)
         rows = []
         for idx in tagged_samples:
@@ -1103,7 +1103,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         model.operate(0, {-3}, 1)  # Further modify conv1
 
         # Fix data - discard 5 samples
-        dfm = ledgers.get_dataframe('sample_stats')
+        dfm = ledgers.get_dataframe()
         tagged_samples = random.sample(range(10), 2)
         rows = []
         for idx in tagged_samples:

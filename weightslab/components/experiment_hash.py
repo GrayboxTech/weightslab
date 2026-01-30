@@ -198,6 +198,7 @@ class ExperimentHashGenerator:
         config_cp = config.copy()
         config_cp.pop('root_log_dir', None)
         config_cp.pop('is_training', None)
+
         try:
             # Sort keys for deterministic hashing
             # Convert to JSON string for stable representation

@@ -3,13 +3,13 @@ agent:
   # Select the model provider.
   # Local: 'ollama'
   # Remote: 'openrouter', 'google', 'openai' (requires API tokens in .env)
-  provider: ollama
+  provider: openrouter
 
-  # Local Settings
-  ollama_model: qwen2.5:3b-instruct
-  fallback_to_local: true
+  # # Local Settings
+  # ollama_model: qwen2.5:3b-instruct
+  # fallback_to_local: true
 
   # Remote Model Selection
-  openrouter_model: meta-llama/llama-3.1-8b-instruct:nitro #google/gemini-2.0-flash-lite-001 #google/gemini-2.0-flash-001 #mistralai/mistral-small-3.1-24b-instruct:free
+  openrouter_model: meta-llama/llama-3.1-8b-instruct:nitro
   google_model: gemini-1.5-flash
   openai_model: gpt-4o-mini

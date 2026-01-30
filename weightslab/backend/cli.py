@@ -891,7 +891,7 @@ if __name__ == '__main__':
 
     pserve = sub.add_parser('serve', help='Start CLI server')
     pserve.add_argument('--host', default='localhost')
-    pserve.add_argument('--port', type=int, default=0)
+    pserve.add_argument('--port', type=int, default=60000)
     pserve.add_argument('--no-spawn-client', action='store_true', help='Do not spawn client console')
 
     pclient = sub.add_parser('client', help='Start CLI client')
