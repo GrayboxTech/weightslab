@@ -23,6 +23,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Ordering** | "Sort by...", "Show highest first", "Rank by..." | `sort` |
 | **Grouping**| "Group by...", "Aggregate...", "Break down by..." | `group` (primary) + `sort` (secondary) |
 | **Calculation**| "What is the average X?", "Sum of Y", "Average of top 10" | `analysis` (or `keep` + `analysis` for subsets) |
+| **Modification**| "Create column...", "Set X to...", "Add 1 to loss", "Calculate error_sq" | `transform` |
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
 
 ---
@@ -37,12 +38,17 @@ Choose the `kind` based on the user's VERB and INTENT:
 ## 4. SCHEMA RULES (STRICT)
 - **Primary Goal**: `ui_manipulation` (grid changes), `data_analysis` (answers), `action` (external), `out_of_scope`.
 - **Atomic Operations**:
-  - `conditions`: List of `{{column, op, value}}`. Operators: `==, !=, >, <, >=, <=, contains, in, max, min`.
+  - `conditions`: List of dicts with keys "column", "op", "value". Operators: `==, !=, >, <, >=, <=, contains, in, max, min`.
   - `sort_by`: List of exact column strings found in the **DATA CONTEXT**.
   - `analysis_expression`: A valid Python/Pandas string (e.g., `df['col'].mean()`).
+  - `transform_code`: Logic for the new value (e.g. `df['col'] * 2`) for `transform` kind.
+  - `target_column`: Name of the column to set for `transform` kind.
 
 ---
-## 5. EXAMPLES
+---
+## 5. EXAMPLES (Reference Only)
+
+<examples>
 
 **Ex1: Strategic Filtering (Extreme)**
 User: "Keep only the sample with the highest error"
@@ -57,15 +63,7 @@ User: "Keep only the sample with the highest error"
   ]
 }}
 
-**Ex2: Semantic Ambiguity**
-User: "Sort by performance"
-{{
-  "reasoning": "The user said 'performance' but I see 'accuracy_A' and 'accuracy_B'. I need to clarify.",
-  "primary_goal": "ui_manipulation",
-  "steps": [{{ "kind": "clarify" }}]
-}}
-
-**Ex3: Analysis & Calculation**
+**Ex2: Analysis & Calculation**
 User: "What is the ratio of metric A to metric B?"
 {{
   "reasoning": "Arithmetic between two column means.",
@@ -76,6 +74,14 @@ User: "What is the ratio of metric A to metric B?"
       "analysis_expression": "df['metric_A'].mean() / df['metric_B'].mean()"
     }}
   ]
+}}
+
+**Ex3: Semantic Ambiguity (Clarification)**
+User: "Sort by performance"
+{{
+  "reasoning": "The user said 'performance' but I see 'accuracy_A' and 'accuracy_B'. I need to clarify.",
+  "primary_goal": "ui_manipulation",
+  "steps": [{{ "kind": "clarify" }}]
 }}
 
 **Ex4: Grouping (Categorical Order)**
@@ -122,6 +128,7 @@ User: "What is the average score of the 10 samples with the lowest score?"
     }}
   ]
 }}
+
 **Ex7: Out of Scope**
 User: "How old is Barack Obama?"
 {{
@@ -130,15 +137,119 @@ User: "How old is Barack Obama?"
   "steps": []
 }}
 
----
-## 6. FINAL OUTPUT FORMAT
-Return ONLY valid JSON. No markdown.
-
+**Ex8: Column Creation (Transform)**
+User: "Create a new column 'high_loss' that is True if loss > 0.5"
 {{
-  "reasoning": "...",
-  "primary_goal": "...",
-  "steps": [...]
+  "reasoning": "User wants to create a boolean flag based on loss.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "high_loss",
+      "transform_code": "df['loss'] > 0.5"
+    }}
+  ]
 }}
 
-**User Request**: {instruction}
+**Ex9: Conditional Update (Using np.where)**
+User: "Set 'status' to 'urgent' where loss > 5"
+{{
+  "reasoning": "Conditional update. Must use np.where to preserve values where condition is False.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "status",
+      "transform_code": "np.where(df['loss'] > 5, 'urgent', df['status'])"
+    }}
+  ]
+}}
+
+**Ex10: Reset View**
+User: "Reset all filters"
+{{
+  "reasoning": "User wants to clear all filters and sorting to see original state.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "reset"
+    }}
+  ]
+}}
+
+
+**Ex11: Smart Tagging (Conditionals)**
+User: "Add tag 'FOUR' to target 4"
+{{
+  "reasoning": "Vectorized update. Nested np.where handles the semicolon delimiter logic safely.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tags",
+      "transform_code": "np.where(df['target'] == 4, np.where(df['tags'] == '', 'FOUR', df['tags'] + ';FOUR'), df['tags'])"
+    }}
+  ]
+}}
+
+
+**Ex12: Sampling (Fraction)**
+User: "Remove 50% of the samples with tags 'delete'"
+{{
+  "reasoning": "Target: Randomly drop half of the rows matching the tag condition. Strategy: Kind=Drop with drop_frac=0.5.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "drop",
+      "conditions": [{{ "column": "tags", "op": "contains", "value": "delete" }}],
+      "drop_frac": 0.5
+    }}
+  ]
+}}
+
+
+**Ex13: Out of Scope / General Question**
+User: "What is the capital of France?"
+{{
+  "reasoning": "User is asking a general knowledge question unrelated to the dataset.",
+  "primary_goal": "out_of_scope",
+  "steps": []
+}}
+
+
+**Ex14: Top Percent**
+User: "Keep the top 10% with highest loss"
+{{
+  "reasoning": "Top 10% means sorting by loss descending and keeping the first 10%.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "sort",
+      "sort_by": ["loss"],
+      "ascending": [false]
+    }},
+    {{
+      "kind": "head",
+      "n": "10%"
+    }}
+  ]
+}}
+
+
+</examples>
+
+---
+
+### INSTRUCTION
+Receive the User's request below and generate ONLY the valid JSON response describing the plan.
+Do not repeat the examples.
+
+**Required JSON Structure:**
+{{
+  "reasoning": "Brief explanation of the strategy",
+  "primary_goal": "One of: ui_manipulation, data_analysis, action, out_of_scope",
+  "steps": [ ... list of atomic operations ... ]
+}}
+
+
 """

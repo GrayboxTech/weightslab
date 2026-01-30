@@ -797,6 +797,80 @@ class DataService:
                     logger.error(f"Query failed: {e} | Eval failed: {eval_e}")
                     return f"Failed to filter: {expr}"
 
+        # C) Column Modification (Transform)
+        if func == "df.modify":
+            col = params.get("col")
+            code = params.get("code")
+            try:
+                # 0. Safety Check: If target column exists, check compatibility
+                if col in df.columns:
+                     # Heuristic: If existing column is not numeric, but code implies math (contains +,-,*,/), warn/block
+                     # This prevents accidental string concatenation (e.g. 1.0 + "tag" -> "tag1.0")
+                     if not pd.api.types.is_numeric_dtype(df[col]):
+                         # Reliance on try-except to catch invalid math is safer than heuristic string checking
+                         # because heuristics fail on column names like 'signals//loss'
+                         pass
+
+                # 1. Evaluate the expression with safe context
+                new_values = eval(code, {"df": df, "np": np, "pd": pd})
+                
+                # 2. Check for scalar vs series compatibility
+                # (Pandas handles most of this, but we ensure robustness)
+                if isinstance(new_values, (pd.Series, np.ndarray, list)):
+                    if len(new_values) != len(df):
+                        # Attempt alignment if it's a Series
+                        # ... (existing code)
+                        if isinstance(new_values, pd.Series):
+                            # Auto-align to df index
+                            df[col] = new_values
+                        else:
+                            return f"Error: Length mismatch. Result has {len(new_values)}, df has {len(df)}"
+                    else:
+                         df[col] = new_values
+                else:
+                    # Scalar assignment
+                    df[col] = new_values
+
+                # 3. CRITICAL: Persist to Ledger (H5/Disk)
+                # We must split the updates by origin and upsert them to the manager
+                if self._df_manager is not None:
+                    # Create a minimal update dataframe with just the modified column
+                    update_payload = df[[col]].copy()
+                    
+                    # Ensure origin is available for grouping
+                    if isinstance(df.index, pd.MultiIndex) and "origin" in df.index.names:
+                        # Index is (origin, sample_id) - ideal for grouping
+                        for origin, group in update_payload.groupby(level="origin"):
+                            # Reset index to just sample_id for upsert
+                            # group.index is (origin, sample_id), droplevel(0) gives sample_id
+                            clean_group = group.droplevel("origin")
+                            clean_group[SampleStatsEx.ORIGIN.value] = origin
+                            self._df_manager.upsert_df(clean_group, origin=origin, force_flush=True)
+                            
+                    elif SampleStatsEx.ORIGIN.value in df.columns:
+                        # Origin is a column
+                        update_payload[SampleStatsEx.ORIGIN.value] = df[SampleStatsEx.ORIGIN.value]
+                        for origin, group in update_payload.groupby(SampleStatsEx.ORIGIN.value):
+                            # Ensure index is sample_id
+                            if group.index.name != SampleStatsEx.SAMPLE_ID.value:
+                                # Try to find sample_id
+                                if SampleStatsEx.SAMPLE_ID.value in group.columns:
+                                    group = group.set_index(SampleStatsEx.SAMPLE_ID.value)
+                            
+                            self._df_manager.upsert_df(group, origin=origin, force_flush=True)
+                
+                # Explicitly flush to disk to avoid race conditions with _slowUpdateInternals
+                if self._df_manager:
+                    try:
+                        self._df_manager.flush()
+                    except Exception as e:
+                        logger.warning(f"Flush after modify failed: {e}")
+
+                return f"Modified column '{col}' using: {code}"
+            except Exception as e:
+                logger.error(f"Modify failed: {e}")
+                return f"Failed to modify column {col}: {e}"
+
         # C) Standard Pandas Ops (drop, sort, head, tail, sample)
         if func in {"df.drop", "df.sort_values", "df.sort_index", "df.head", "df.tail", "df.sample"}:
             func_name = func.replace("df.", "")
@@ -808,7 +882,16 @@ class DataService:
 
                 if func_name == "sort_values":
                     # Params are already cleaned by the Agent's SortHandler
-                    df.sort_values(inplace=True, **params)
+                    try:
+                        df.sort_values(inplace=True, **params)
+                    except TypeError as e:
+                        # Fallback for mixed types (e.g. lists vs strings/floats): sort by string representation
+                        logger.warning(f"Sort failed due to type mismatch ({e}). Retrying with string conversion...")
+                        if "key" not in params:
+                            params["key"] = lambda x: x.astype(str)
+                            df.sort_values(inplace=True, **params)
+                        else:
+                            raise e
                     return "Applied operation: sort_values"
 
                 if func_name == "sort_index":
@@ -816,13 +899,31 @@ class DataService:
                     return "Applied operation: sort_index"
 
                 if func_name == "head":
-                    n = int(params.get("n", 5))
+                    n_raw = params.get("n", 5)
+                    # Handle "%" strings
+                    if isinstance(n_raw, str) and "%" in n_raw:
+                        try:
+                            n = int(len(df) * float(n_raw.replace("%", "")) / 100.0)
+                        except:
+                            n = 5
+                    else:
+                        n = int(n_raw)
+                        
                     if n < len(df):
                         df.drop(index=df.index.difference(df.index[:n]), inplace=True)
                     return f"Applied operation: head({n})"
 
                 if func_name == "tail":
-                    n = int(params.get("n", 5))
+                    n_raw = params.get("n", 5)
+                    # Handle "%" strings
+                    if isinstance(n_raw, str) and "%" in n_raw:
+                        try:
+                            n = int(len(df) * float(n_raw.replace("%", "")) / 100.0)
+                        except:
+                            n = 5
+                    else:
+                        n = int(n_raw)
+
                     if n < len(df):
                         df.drop(index=df.index.difference(df.index[-n:]), inplace=True)
                     return f"Applied operation: tail({n})"
