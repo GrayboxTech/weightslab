@@ -37,17 +37,22 @@ class Condition(BaseModel):
     value2: Optional[Union[float, int]] = Field(default=None, description="The secondary value for 'between'")
 
 class AtomicIntent(BaseModel):
-    kind: Literal["keep", "drop", "sort", "group", "head", "tail", "reset", "analysis", "action", "noop", "clarify"] = Field(
+    kind: Literal["keep", "drop", "sort", "group", "head", "tail", "reset", "analysis", "transform", "action", "noop", "clarify"] = Field(
         description="The type of operation. Use 'action' for external tasks like saving or plotting."
     )
     conditions: Optional[List[Condition]] = Field(default=None, description="Conditions for keep/drop")
     sort_by: Optional[List[str]] = Field(default=None, description="Exact column names to sort by")
     # Robustness: Accepts bool OR list of bools for multi-column sorting
     ascending: Optional[Union[bool, List[bool]]] = Field(default=None, description="True for ASC, False for DESC")
-    n: Optional[int] = Field(default=None, description="Number of rows for head/tail")
+    # Robustness: Accepts (int) count OR (str) expression like "10%"
+    n: Optional[Union[int, str]] = Field(default=None, description="Number of rows for head/tail (int or '10%')")
     drop_frac: Optional[float] = Field(default=None, description="Fraction of rows to drop (0.0 to 1.0)")
     keep_frac: Optional[float] = Field(default=None, description="Fraction of rows to keep (0.0 to 1.0)")
     analysis_expression: Optional[str] = Field(default=None, description="Pandas expression string for analysis queries")
+    
+    # Transformation (Column Modification)
+    transform_code: Optional[str] = Field(default=None, description="Pandas expression for the new value (e.g. df['col'] * 2)")
+    target_column: Optional[str] = Field(default=None, description="The column to create or modify")
     
     # Future-proofing for Actions
     action_name: Optional[str] = Field(default=None, description="Name of the action (e.g. 'save_dataset')")
@@ -194,6 +199,35 @@ class AnalysisHandler(IntentHandler):
             "params": {"code": fixed_code}
         }
 
+class TransformHandler(IntentHandler):
+    """Handles column creation and modification with column resolution."""
+    def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
+        if not step.target_column or not step.transform_code: return None
+        
+        raw_code = self.agent._clean_code(step.transform_code)
+        
+        # Reuse robust column resolution logic (similar to AnalysisHandler)
+        pattern = r"(\[\s*['\"])(.*?)(['\"]\s*\])"
+        
+        def replace_col(match):
+            prefix = match.group(1)
+            content = match.group(2)
+            suffix = match.group(3)
+            resolved = self.agent._resolve_column(content)
+            if resolved:
+                return f"{prefix}{resolved}{suffix}"
+            return match.group(0)
+
+        fixed_code = re.sub(pattern, replace_col, raw_code)
+        
+        return {
+            "function": "df.modify",
+            "params": {
+                "col": step.target_column, 
+                "code": fixed_code
+            }
+        }
+
 class ViewHandler(IntentHandler):
     """Handles view resets and head/tail slicing."""
     def build_op(self, step: AtomicIntent, context: Intent) -> Optional[dict]:
@@ -243,6 +277,7 @@ class DataManipulationAgent:
             "group": SortHandler(self),
             "keep": FilterHandler(self),
             "drop": FilterHandler(self),
+            "transform": TransformHandler(self),
             "analysis": AnalysisHandler(self),
             "head": ViewHandler(self),
             "tail": ViewHandler(self),
@@ -349,30 +384,35 @@ class DataManipulationAgent:
         self.chain_ollama = None
         self.chain_openrouter = None
 
+        # Determine which providers to initialize
+        active_providers = {self.preferred_provider}
+        if self.fallback_to_local:
+            active_providers.add("ollama")
+
         # OPEN AI
-        if os.environ.get("OPENAI_API_KEY"):
+        if "openai" in active_providers and os.environ.get("OPENAI_API_KEY"):
             try:
                 llm = ChatOpenAI(model=self.openai_model, temperature=0)
                 self.chain_openai = llm.with_structured_output(Intent)
-                _LOGGER.info(f"OpenAI active ({self.openai_model})")
+                _LOGGER.info(f"[Agent] OpenAI enabled: {self.openai_model}")
             except Exception as e: _LOGGER.error(f"OpenAI error: {e}")
 
         # GOOGLE
-        if os.environ.get("GOOGLE_API_KEY"):
+        if "google" in active_providers and os.environ.get("GOOGLE_API_KEY"):
             try:
                 llm = ChatOpenAI(
-                    model="gemini-1.5-flash",
+                    model=self.google_model,
                     temperature=0,
                     api_key=os.environ.get("GOOGLE_API_KEY"),
                     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                     max_retries=1
                 )
                 self.chain_google = llm
-                _LOGGER.info("Google Gemini (via OpenAI Compat) active")
+                _LOGGER.info(f"[Agent] Google Gemini enabled: {self.google_model}")
             except Exception as e: _LOGGER.error(f"Google error: {e}")
 
         # OPEN ROUTER
-        if os.environ.get("OPENROUTER_API_KEY"):
+        if "openrouter" in active_providers and os.environ.get("OPENROUTER_API_KEY"):
             try:
                 llm = ChatOpenAI(
                     model=self.openrouter_model, temperature=0,
@@ -381,18 +421,19 @@ class DataManipulationAgent:
                     streaming=False, max_retries=1, request_timeout=15.0,
                 )
                 self.chain_openrouter = llm
-                _LOGGER.info(f"OpenRouter active ({self.openrouter_model})")
+                _LOGGER.info(f"[Agent] OpenRouter enabled: {self.openrouter_model}")
             except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
 
         # LOCAL
-        try:
-            host = self.ollama_host.split(':')[0]
-            port = self.ollama_port
-            llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
-            self.chain_ollama = llm
-            _LOGGER.info(f"Ollama active ({self.ollama_model})")
-        except Exception as e: _LOGGER.error(f"Ollama error: {e}")
-
+        if "ollama" in active_providers:
+            try:
+                host = self.ollama_host.split(':')[0]
+                port = self.ollama_port
+                llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
+                self.chain_ollama = llm
+                _LOGGER.info(f"[Agent] Ollama enabled: {self.ollama_model}")
+            except Exception as e: _LOGGER.error(f"Ollama error: {e}")
+            
     def is_ollama_available(self) -> bool:
         return self.chain_ollama is not None
 
@@ -707,8 +748,7 @@ class DataManipulationAgent:
         system_prompt = INTENT_PROMPT.format(
             schema=formatted_schema,
             row_count=self.df_schema['row_count'],
-            history="\\n".join(self.history[-5:]) if self.history else "None",
-            instruction="{instruction}"
+            history="\\n".join(self.history[-5:]) if self.history else "None"
         )
 
         order = [self.preferred_provider]
@@ -724,7 +764,13 @@ class DataManipulationAgent:
                     self.history.append(f"User: {instruction}")
                     self.history.append(f"Action: {len(result)} ops executed")
                     return result
-            except Exception:
+            except Exception as e:
+                _LOGGER.error(f"Provider {provider} failed: {e}")
                 continue
 
-        return []
+        # If we get here, all providers failed
+        error_msg = "Internal Agent Error: Failed to generate a plan."
+        if not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+            error_msg = "No LLM providers configured. Please check your API keys or Ollama status."
+            
+        return [{"function": "out_of_scope", "params": {"reason": error_msg}}]
