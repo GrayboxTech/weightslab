@@ -93,7 +93,11 @@ def save_signals(
             losses=losses_data,
         )
 
-def log_signal(scalar: float, reg_name: str, **_) -> None:
+def log_signal(scalar: float, reg_name: str, **kwargs) -> None:
+    # Check if logging is enabled
+    if not kwargs.get('log', True):
+        return
+    
     # log if requested and logger present
     if scalar is not None:
         try:
