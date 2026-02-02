@@ -39,6 +39,10 @@ class PauseController:
         self.hyperparams['is_training'] = False
         logger.info('\nTraining paused.')
 
+    def _resume(self):
+        self._event.set()
+        self.hyperparams['is_training'] = True
+        
     def resume(self):
         # On resume, first dump any pending changes to checkpoint manager
         if self.checkpoint_manager is None:
@@ -49,8 +53,7 @@ class PauseController:
 
         # Then resume execution
         if self._is_hash_computed():
-            self._event.set()
-            self.hyperparams['is_training'] = True
+            self._resume()
             logger.info(f'\nTraining resumed as modules hashes have been computed: {self.checkpoint_manager.hash_by_module}.')
             return True
         else:

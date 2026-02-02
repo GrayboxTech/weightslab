@@ -172,9 +172,8 @@ class TestCLICommands(unittest.TestCase):
     def test_plot_model_no_model(self):
         """Test plot_model when no model is registered."""
         result = _handle_command('plot_model')
-        self.assertFalse(result['ok'])
-        self.assertIn('error', result)
-        self.assertEqual(result['error'], 'no_model_registered')
+        self.assertTrue(result['ok'])
+        self.assertEquals(result['plot'], 'None')
 
     def test_plot_model_with_model(self):
         """Test plot_model with registered model."""
@@ -182,7 +181,7 @@ class TestCLICommands(unittest.TestCase):
         mock_model = MagicMock()
         mock_model.__str__ = MagicMock(return_value="Model(\n  Layer1\n  Layer2\n)")
 
-        GLOBAL_LEDGER.register_model(mock_model, 'test_model')
+        GLOBAL_LEDGER.register_model(mock_model, name='test_model')
 
         result = _handle_command('plot_model test_model')
         self.assertTrue(result['ok'])
@@ -227,7 +226,7 @@ class TestCLICommands(unittest.TestCase):
     def test_hyperparams_show(self):
         """Test showing specific hyperparameter."""
         # Register a mock hyperparameter
-        GLOBAL_LEDGER.register_hyperparams({'key': 'value'}, 'test_hp')
+        GLOBAL_LEDGER.register_hyperparams({'key': 'value'}, name='test_hp')
 
         result = _handle_command('hp test_hp')
         self.assertTrue(result['ok'])

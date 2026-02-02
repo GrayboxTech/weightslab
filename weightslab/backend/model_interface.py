@@ -39,6 +39,7 @@ class ModelInterface(NetworkWithOps):
             register: bool = True,
             use_onnx: bool = False,
             weak: bool = False,
+            skip_previous_auto_load: bool = False,
             **_
     ):
         """
@@ -59,6 +60,16 @@ class ModelInterface(NetworkWithOps):
             print_graph_filename (str, optional): The filename for saving the
                 generated graph visualization. Required if `print_graph` is True.
                 Defaults to None.
+            name (str, optional): The name to assign to this model interface.
+                Defaults to None.
+            register (bool, optional): If True, the model interface will be
+                registered in the global ledger. Defaults to True.
+            use_onnx (bool, optional): If True, ONNX export will be used for
+                dependency extraction instead of torch.fx tracing. Defaults to False.
+            weak (bool, optional): If True, registers the model with a weak
+                reference in the ledger. Defaults to False.
+            skip_previous_auto_load (bool, optional): If True, skips the automatic loading
+                of previous checkpoints during initialization. Defaults to False.
 
         Returns:
             None: This method initializes the object and does not return any value.
@@ -74,6 +85,7 @@ class ModelInterface(NetworkWithOps):
         self.name = "Default Name" if name is None else name
         self.device = device
         self.model = model.to(device)
+        self.skip_previous_auto_load = skip_previous_auto_load
         if dummy_input is not None:
             self.dummy_input = dummy_input.to(device)
         else:
@@ -115,7 +127,7 @@ class ModelInterface(NetworkWithOps):
             # Check if a checkpoint manager is already registered in ledger
             try:
                 existing_manager = ledgers.get_checkpoint_manager()
-                if existing_manager is not None and not isinstance(existing_manager, ledgers.Proxy):
+                if existing_manager != None and not isinstance(existing_manager, ledgers.Proxy):
                     self._checkpoint_manager = existing_manager
                     logger.info("Using checkpoint manager from ledger")
                 else:
@@ -131,56 +143,56 @@ class ModelInterface(NetworkWithOps):
         except Exception:
             self._checkpoint_manager = None
 
-        # Early auto-load latest model architecture and weights if checkpoints exist
-        if self._checkpoint_manager is not None:
-            try:
-                # Try to get the latest experiment hash
-                latest_hash = None
-                if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
-                    latest_hash = self._checkpoint_manager.current_exp_hash
-                elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
-                    manifest = self._checkpoint_manager.manifest
-                    latest_hash = getattr(manifest, 'latest_hash', None)
+            # Early auto-load latest model architecture and weights if checkpoints exist
+            if self._checkpoint_manager != None and not self.skip_previous_auto_load:
+                try:
+                    # Try to get the latest experiment hash
+                    latest_hash = None
+                    if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
+                        latest_hash = self._checkpoint_manager.current_exp_hash
+                    elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
+                        manifest = self._checkpoint_manager.manifest
+                        latest_hash = getattr(manifest, 'latest_hash', None)
 
-                if latest_hash:
-                    # Use checkpoint manager's load_checkpoint to get architecture and weights
-                    checkpoint_data = self._checkpoint_manager.load_checkpoint(
-                        exp_hash=latest_hash,
-                        load_model=True,
-                        load_weights=True,
-                        load_config=False,
-                        load_data=False,
-                        force=True
-                    )
-
-                    # Apply loaded model if architecture was loaded
-                    if checkpoint_data.get('model'):
-                        self = checkpoint_data['model']
-                        weights = checkpoint_data.get('weights')
-                        checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
-
-                        # Restore RNG state if available
-                        restore_rng_state(checkpoint_rng_state)
-                        logger.debug(f"Restored RNG state from checkpoint")
-
-                    elif checkpoint_data.get('weights'):
-                        # Only weights available, load into existing model
-                        weights = checkpoint_data['weights']
-                        if 'model_state_dict' in weights:
-                            self.load_state_dict(weights['model_state_dict'], strict=True)
-                            self.current_step = weights.get('step', -1)
-                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
-
-                    # As model architecture as has been loaded, and it's an instance of the ModelInterface,
-                    # we can set its current step if available in weights
-                    if isinstance(self.model, self.__class__):
-                        self._registration(
-                            weak=weak
+                    if latest_hash:
+                        # Use checkpoint manager's load_checkpoint to get architecture and weights
+                        checkpoint_data = self._checkpoint_manager.load_checkpoint(
+                            exp_hash=latest_hash,
+                            load_model=True,
+                            load_weights=True,
+                            load_config=False,
+                            load_data=False,
+                            force=True
                         )
-                        return
 
-            except Exception as e:
-                logger.debug(f"Could not auto-load model checkpoint: {e}")
+                        # Apply loaded model if architecture was loaded
+                        if checkpoint_data.get('model'):
+                            self = checkpoint_data['model']
+                            weights = checkpoint_data.get('weights')
+                            checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
+
+                            # Restore RNG state if available
+                            restore_rng_state(checkpoint_rng_state)
+                            logger.debug(f"Restored RNG state from checkpoint")
+
+                        elif checkpoint_data.get('weights'):
+                            # Only weights available, load into existing model
+                            weights = checkpoint_data['weights']
+                            if 'model_state_dict' in weights:
+                                self.load_state_dict(weights['model_state_dict'], strict=True)
+                                self.current_step = weights.get('step', -1)
+                                logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
+
+                        # As model architecture as has been loaded, and it's an instance of the ModelInterface,
+                        # we can set its current step if available in weights
+                        if isinstance(self.model, self.__class__):
+                            self._registration(
+                                weak=weak
+                            )
+                            return
+
+                except Exception as e:
+                    logger.debug(f"Could not auto-load model checkpoint: {e}")
 
         if not use_onnx:
             self.print_graph = print_graph
@@ -368,7 +380,7 @@ class ModelInterface(NetworkWithOps):
         # Called from base class hook after seen_samples updates.
         # Auto-dump: save model weights only (and architecture if changed).
         try:
-            if not self.is_training() or self._checkpoint_manager is None or self._checkpoint_auto_every_steps <= 0:
+            if not self.is_training() or self._checkpoint_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
             batched_age = int(self.get_batched_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:

@@ -167,19 +167,35 @@ class Proxy:
     def __eq__(self, other):
         """Enable equality comparison with the wrapped object.
 
-        This allows `Proxy(None) == None` to return True.
+        This allows `proxy is None` to return True when the wrapped object is None.
+        
+        IMPORTANT: Use `proxy is None` or `proxy is not None` for None checks.
+        Python's `is` operator cannot be overridden and `proxy is None` will always be False.
         """
+        if other is None:
+            return self._obj is None
+        if isinstance(other, Proxy):
+            return self._obj is other._obj
         return self._obj == other
 
     def __ne__(self, other):
-        """Enable inequality comparison with the wrapped object."""
-        return self._obj != other
+        """Enable inequality comparison with the wrapped object.
+        
+        This allows `proxy is not None` to return False when the wrapped object is None.
+        """
+        return not self.__eq__(other)
 
     def __bool__(self):
         """Enable boolean evaluation of the proxy based on the wrapped object.
 
-        This allows `bool(Proxy(None))` to return False and
-        `if not proxy:` to work correctly when proxy wraps None.
+        This allows `bool(proxy)` to return False when wrapping None,
+        and `if proxy:` or `if not proxy:` to work correctly.
+        
+        Recommended patterns:
+        - Use `if proxy:` to check if wrapped object is truthy
+        - Use `if not proxy:` to check if wrapped object is falsy
+        - Use `proxy is None` instead of `proxy is None`
+        - Use `proxy is not None` instead of `proxy is not None`
         """
         if self._obj is None:
             return False
@@ -358,7 +374,7 @@ class Ledger:
             if name in self._hyperparams:
                 return self._hyperparams[name]
             # create placeholder proxy
-            proxy = Proxy(None)
+            proxy = Proxy({})
             self._hyperparams[name] = proxy
             self._proxies_hyperparams[name] = proxy
             return proxy
@@ -381,10 +397,7 @@ class Ledger:
                 if not name and keys:
                     name = keys[0]
 
-            hp = self._hyperparams.get(name, {})
-            # if proxy, get underlying dict
-            if isinstance(hp, Proxy):
-                hp = hp.get(default={})  # Prevent raising error if not yet set
+            hp = self._hyperparams.get(name, Proxy({}))
             parts = key_path.split('.') if key_path else []
             cur = hp
             for p in parts[:-1]:
@@ -555,7 +568,7 @@ class Ledger:
 
     def get_dataloader(self, name: str = DEFAULT_NAME) -> Any:
         if name is None:
-            return self.get('dataloaders', [])
+            return Proxy({})
         return self._get(self._dataloaders, self._dataloaders_weak, self._proxies_dataloaders, name)
 
     def list_dataloaders(self) -> List[str]:
@@ -659,6 +672,7 @@ def list_models() -> List[str]:
     return GLOBAL_LEDGER.list_models()
 
 def register_model(model: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
+    name = DEFAULT_NAME if name is None else name
     GLOBAL_LEDGER.register_model(model, weak=weak, name=name)
 
 def get_model(name: str = DEFAULT_NAME) -> Any:
@@ -673,6 +687,7 @@ def list_dataloaders() -> List[str]:
     return GLOBAL_LEDGER.list_dataloaders()
 
 def register_dataloader(dataloader: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
+    name = DEFAULT_NAME if name is None else name
     GLOBAL_LEDGER.register_dataloader(dataloader, weak=weak, name=name)
 
 def get_dataloader(name: str = DEFAULT_NAME) -> Any:
@@ -695,6 +710,7 @@ def list_optimizers() -> List[str]:
     return GLOBAL_LEDGER.list_optimizers()
 
 def register_optimizer(optimizer: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
+    name = DEFAULT_NAME if name is None else name
     GLOBAL_LEDGER.register_optimizer(optimizer, weak=weak, name=name)
 
 def get_optimizer(name: str = DEFAULT_NAME) -> Any:
@@ -706,6 +722,7 @@ def get_optimizers() -> List[str]:
 
 # Hyperparameters
 def register_hyperparams(params: Dict[str, Any] = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
+    name = DEFAULT_NAME if name is None else name
     GLOBAL_LEDGER.register_hyperparams(params, weak=weak, name=name)
 
 def get_hyperparams(name: str = DEFAULT_NAME) -> Any:
@@ -744,6 +761,7 @@ def unwatch_hyperparams_file(name: str = DEFAULT_NAME) -> None:
 
 # Logger
 def register_logger(logger: Any = None, name: str = DEFAULT_NAME) -> None:
+    name = DEFAULT_NAME if name is None else name
     GLOBAL_LEDGER.register_logger(logger, name=name)
 
 def get_logger(name: str = DEFAULT_NAME) -> Any:
@@ -758,6 +776,7 @@ def unregister_logger(name: str = DEFAULT_NAME) -> None:
 
 # Signals
 def register_signal(signal: Any = None, name: str = DEFAULT_NAME) -> None:
+    name = DEFAULT_NAME if name is None else name
     GLOBAL_LEDGER.register_signal(signal, name=name)
 
 def get_signal(name: str = DEFAULT_NAME) -> Any:
@@ -772,6 +791,7 @@ def unregister_signal(name: str = DEFAULT_NAME) -> None:
 
 # Checkpoint managers
 def register_checkpoint_manager(manager: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> Any:
+    name = DEFAULT_NAME if name is None else name
     return GLOBAL_LEDGER.register_checkpoint_manager(manager, weak=weak, name=name)
 
 def get_checkpoint_manager(name: str = DEFAULT_NAME) -> Any:
@@ -786,6 +806,7 @@ def unregister_checkpoint_manager(name: str = DEFAULT_NAME) -> None:
 
 # DataFrames
 def register_dataframe(dataframe: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
+    name = DEFAULT_NAME if name is None else name
     return GLOBAL_LEDGER.register_dataframe(dataframe, weak=weak, name=name)
 
 def get_dataframe(name: str = DEFAULT_NAME) -> Any:

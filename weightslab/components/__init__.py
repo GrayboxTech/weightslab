@@ -5,9 +5,6 @@ This module contains core components for experiment tracking, checkpointing,
 and monitoring in Weightslab.
 """
 
-# Legacy checkpoint manager (deprecated)
-from weightslab.components.checkpoint import CheckpointManager
-
 # New structured checkpoint system
 from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 from weightslab.components.experiment_hash import ExperimentHashGenerator
@@ -29,7 +26,6 @@ from weightslab.components.tracking import Tracker, TrackingMode
 
 __all__ = [
     # Checkpoint management
-    'CheckpointManager',  # Legacy - deprecated
     'CheckpointManagerV2',  # Manual checkpoint system
     'ExperimentHashGenerator',
 

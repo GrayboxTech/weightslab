@@ -66,7 +66,7 @@ def _sanitize_for_json(obj):
         json.dumps(obj)
         return obj
     except Exception:
-        return str(obj)
+        return {str(obj): obj}
 
 
 # Globals for the running server
@@ -732,7 +732,7 @@ def _server_loop_sock(srv: socket.socket):
             pass
 
 
-def cli_serve(cli_host: str = 'localhost', cli_port: int = 60000, *, spawn_client: bool = True, **_):
+def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: bool = True, **_):
     """
         Start the CLI server and optionally open a client in a new console.
         This CLI now operates on objects registered in the global ledger only.
@@ -761,15 +761,47 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 60000, *, spawn_clien
         return {'ok': False, 'error': 'server_already_running'}
 
     # start server thread on a pre-bound socket to avoid races
-    try:
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((cli_host, cli_port))
-        srv.listen(5)
-        actual_port = srv.getsockname()[1]
-    except Exception as e:
-        logger.exception("cli_bind_failed")
-        return {'ok': False, 'error': f'bind_failed: {e}'}
+    # Try binding to the requested port, and if it fails (port in use),
+    # automatically try up to 10 alternative ports
+    srv = None
+    last_error = None
+    max_attempts = 10
+    
+    for attempt in range(max_attempts):
+        try_port = cli_port + attempt
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # On Windows, try SO_EXCLUSIVEADDRUSE but don't fail if it's not supported
+            if os.name == 'nt':
+                try:
+                    srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                except (OSError, AttributeError):
+                    # SO_EXCLUSIVEADDRUSE not supported or not available on this system
+                    pass
+            srv.bind((cli_host, try_port))
+            srv.listen(5)
+            actual_port = srv.getsockname()[1]
+            if attempt > 0:
+                logger.warning(f"cli_port_changed: Original port {cli_port} unavailable, using port {actual_port}")
+            break
+        except (OSError, PermissionError) as e:
+            last_error = e
+            if srv is not None:
+                try:
+                    srv.close()
+                except Exception:
+                    pass
+                srv = None
+            if attempt < max_attempts - 1:
+                continue  # Try next port
+            else:
+                # All attempts failed
+                logger.exception("cli_bind_failed_all_attempts")
+                return {'ok': False, 'error': f'bind_failed after {max_attempts} attempts. Last error: {e}. Port {cli_port} may be in use or require admin privileges.'}
+    
+    if srv is None:
+        return {'ok': False, 'error': f'bind_failed: {last_error}'}
 
     _server_thread = threading.Thread(
         target=_server_loop_sock,
@@ -891,7 +923,7 @@ if __name__ == '__main__':
 
     pserve = sub.add_parser('serve', help='Start CLI server')
     pserve.add_argument('--host', default='localhost')
-    pserve.add_argument('--port', type=int, default=60000)
+    pserve.add_argument('--port', type=int, default=0)
     pserve.add_argument('--no-spawn-client', action='store_true', help='Do not spawn client console')
 
     pclient = sub.add_parser('client', help='Start CLI client')

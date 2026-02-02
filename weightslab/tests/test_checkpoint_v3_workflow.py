@@ -380,7 +380,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # Initialize Model
         # ================
         model = SimpleCNN(conv1_out=8, conv2_out=16)
-        model = register_in_ledger(model, flag="model", device=DEVICE)
+        model = register_in_ledger(model, flag="model", device=DEVICE, skip_previous_auto_load=True)
 
         # =====================
         # Initialize DataLoader
@@ -388,7 +388,6 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         register_in_ledger(
             cls.dataset,
             flag="dataloader",
-            name='train_loader',
             compute_hash=False,
             is_training=True,
             batch_size=cls.config.get('data', {}).get('train_loader', {}).get('batch_size', 32),
@@ -401,19 +400,22 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # Optimizer and criterion
         # # Create and register optimizer
         register_in_ledger(
-            th.optim.Adam(model.parameters(), lr=cls.config.get('optimizer', {}).get('lr', 0.001)),
+            th.optim.Adam(model.parameters(),
+            lr=cls.config.get('optimizer', {}).get('lr', 0.001)),
             flag="optimizer"
         )
         # # Create and register signal (criterion)
         register_in_ledger(
             nn.CrossEntropyLoss(reduction='none'),
             flag="signal",
-            log=True
+            log=True,
+            name="train_mlt_loss/CE"
         )
         register_in_ledger(
             nn.BCEWithLogitsLoss(reduction='none'),
             flag="signal",
-            log=True
+            log=True,
+            name="train_bin_loss/BCE"
         )
 
         # =================================
@@ -743,7 +745,6 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Get hp from original training
         hp_original = self.config
-        exp_name = hp_original['experiment_name']
 
         print("Experiment paused. Analyzing experiment history...")
 
@@ -764,7 +765,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
 
         # Get components from ledger (they were updated in-place)
         model_reloaded = ledgers.get_model()
-        hp_reloaded = ledgers.get_hyperparams(exp_name)
+        hp_reloaded = ledgers.get_hyperparams()
 
         print(f"[OK] State applied successfully")
         print(f"[OK] Loaded HP: {hp_reloaded}")
@@ -848,7 +849,6 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print("TEST 06: Reload Before Model Change - Fix Conv Size with RNG State")
         print(f"{'='*80}\n")
 
-        exp_name = self.config['experiment_name']
         hash_A_original = self.state['exp_hash_a']  # Before model change
         loss_A_original = self.state['losses_a']  # Before model change
         uids_A_original = self.state['uids_a']  # Before model change
@@ -858,7 +858,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         self.assertTrue(success, "State A should load successfully")
 
         # Verify HP and data are from checkpoint A
-        hp_reloaded = ledgers.get_hyperparams(exp_name)
+        hp_reloaded = ledgers.get_hyperparams()
 
         print(f"[OK] HP batch_size: {hp_reloaded.get('data', {}).get('train_loader', {}).get('batch_size', 'N/A')}")
         self.assertEqual(hp_reloaded.get('data', {}).get('train_loader', {}).get('batch_size'), 2,
@@ -941,7 +941,6 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print("TEST 07: Change Data from Test 06 - Discard More Data")
         print(f"{'='*80}\n")
 
-        exp_name = self.config['experiment_name']
         hash_H = self.state['exp_hash_h']  # From test 06
 
         print(f"Starting from state H: {hash_H[:16]}...")
@@ -996,10 +995,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print("TEST 08: Reload Before Data Change - Verify and Modify Model")
         print(f"{'='*80}\n")
 
-        exp_name = self.config['experiment_name']
         hash_c = self.state['exp_hash_c']  # Before data change (after HP change)
-        loss_c = self.state['losses_c']
-        uids_c = self.state.get('uids_c')
 
         print(f"Part A: Reloading state C and verifying training reproducibility...")
         print(f"Reloading state C: {hash_c[:16]}...")
@@ -1063,7 +1059,6 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print("TEST 09: Reload Before HP Change - Verify and Fix Everything")
         print(f"{'='*80}\n")
 
-        exp_name = self.config['experiment_name']
         hash_b = self.state['exp_hash_b']  # Before HP change (after model change)
         loss_b = self.state['losses_b']
 
@@ -1150,9 +1145,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         print("TEST 10: Reload Branch J - Verify Training Reproducibility")
         print(f"{'='*80}\n")
 
-        exp_name = self.config['experiment_name']
         hash_j = self.state['exp_hash_j']  # From test 08.b
-        loss_j = self.state['losses_j']
 
         print(f"Reloading branch J: {hash_j[:16]}...")
 
@@ -1295,8 +1288,8 @@ class CheckpointSystemV3Tests(unittest.TestCase):
             snapshot = json.load(f)
 
         loggers = snapshot.get("loggers", {})
-        self.assertIn(self.config.get("experiment_name"), loggers, "Logger entry should be present")
-        signals = loggers[self.config.get("experiment_name")].get("signal_history", [])
+        self.assertIn('main', loggers, "Logger entry should be present")
+        signals = loggers['main'].get("signal_history", [])
         self.assertGreaterEqual(len(signals), 1, "Signal history should contain logged signals")
 
 

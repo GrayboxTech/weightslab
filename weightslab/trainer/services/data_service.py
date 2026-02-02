@@ -371,7 +371,7 @@ class DataService:
                     SampleStatsEx.ORIGIN.value,
                     SampleStatsEx.TARGET.value,
                     SampleStatsEx.PREDICTION.value,
-                    SampleStatsEx.PREDICTION_RAW.value,
+                    # SampleStatsEx.PREDICTION_RAW.value,
                     SampleStatsEx.TASK_TYPE.value,
                 }
                 stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
@@ -379,6 +379,9 @@ class DataService:
             # Optimized bulk processing of stats
             for stat_name in stats_to_retrieve:
                 value = row.get(stat_name)
+                # Skip prediction raw array
+                if isinstance(value, np.ndarray) and value.ndim > 1:
+                    continue
                 if isinstance(value, float):
                     value = round(value, 7)
                 if isinstance(value, bool):
@@ -441,7 +444,6 @@ class DataService:
                     )
                 )
 
-
             elif label is not None:
                 # Classification / other scalar-like labels
                 # Check if label is NaN (handle both scalars and arrays)
@@ -474,8 +476,6 @@ class DataService:
                         )
                     except (ValueError, TypeError) as e:
                         logger.warning(f"Could not convert label to array: {label}, error: {e}")
-
-
 
             # ====== Step 8: Process predictions ======
             pred = row.get(SampleStatsEx.PREDICTION.value)

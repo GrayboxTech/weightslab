@@ -25,9 +25,9 @@ class HyperparamsTests(unittest.TestCase):
 
     def test_set_hyperparam_dot_path(self):
         params = {'x': {'y': {'z': 10}}}
-        register_hyperparams(params)
-        set_hyperparam('test_exp2', 'x.y.z', 42)
-        loaded = get_hyperparams()
+        register_hyperparams(params, name='test_exp2')
+        set_hyperparam(name='test_exp2', key_path='x.y.z', value=42)
+        loaded = get_hyperparams(name='test_exp2')
         self.assertEqual(loaded['x']['y']['z'], 42)
 
     def test_reload_from_yaml(self):

@@ -1,19 +1,15 @@
-import os
+import time
 import threading
 import logging
 import traceback
-
-from datetime import datetime
-
 import numpy as np
 import pandas as pd
 
+from datetime import datetime
 from typing import Dict, Sequence, Any, List
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
-from weightslab.backend import ledgers
-from weightslab.components import CheckpointManagerV2
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
 from weightslab.data.data_utils import _filter_columns_by_patterns
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
@@ -23,9 +19,8 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_DEFAULTS_TYPES,
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
-from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe
+from weightslab.backend.ledgers import get_hyperparams, register_dataframe
 from weightslab.trainer.services.service_utils import get_mask
-from weightslab.utils.tools import _NoOpLock
 
 
 # Set up logger
@@ -55,6 +50,7 @@ class LedgeredDataFrameManager:
         self._buffer: Dict[int, Dict[str, Any]] = {}  # {sample_id: {col: value}}
         self._enable_flushing_threads = enable_flushing_threads
         self._enable_h5_persistence = enable_h5_persistence
+        self.first_init = True
 
         # TODO (GP): Remove multi-threads lock madness, let s see if it brokes anywhere
         # TODO (GP): Review locking strategy to minimize contention and opt. perfs.
@@ -377,10 +373,11 @@ class LedgeredDataFrameManager:
             logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
 
             # Check buffer size and trigger flush if needed
-            should_flush = len(self._buffer) >= self._flush_max_rows
+            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init
 
         # Trigger flush outside lock
         if should_flush:
+            self.first_init = False
             self.flush_async()
 
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
@@ -715,6 +712,7 @@ class LedgeredDataFrameManager:
             return
 
         def _worker():
+            st = time.time()
             while not self._flush_stop.is_set():
                 try:
                     force_requested = False
@@ -728,15 +726,19 @@ class LedgeredDataFrameManager:
                         self.flush_if_needed_nonblocking(force=True)
 
                     # Wait for flush event (force) or timeout (periodic)
-                    self._flush_event.wait(timeout=self._flush_interval)
+                    # self._flush_event.wait(timeout=self._flush_interval)
+                    if time.time() - st < self._flush_interval:
+                        time.sleep(0.1)
+                        continue
                     self._flush_event.clear()
 
                     if not self._flush_stop.is_set():
-                        self.flush_if_needed_nonblocking()
+                        self.flush_if_needed_nonblocking(force=True)
                         self._flush_queue_count = 0  # Reset queue count after periodic flush
                 except Exception as e:
                     traceback_str = traceback.format_exc()
                     logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}\n{traceback_str}")
+                st = time.time()  # Reset start time after each loop
 
         self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush")
         self._flush_thread.start()
@@ -863,7 +865,7 @@ class LedgeredDataFrameManager:
             self._flush_queue_count += 1
         self._flush_event.set()  # Wake thread immediately
 
-    def flush_if_needed_nonblocking(self, force: bool = False, force_flush_h5: bool = False):
+    def flush_if_needed_nonblocking(self, force: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
         # Acquire buffer lock to flush data to DF or h5
         with self._buffer_lock:
@@ -873,15 +875,12 @@ class LedgeredDataFrameManager:
             buffered = list(self._buffer.values())
             self._buffer = {}
 
-            if force_flush_h5:
-                self._flush_to_h5_if_needed(force=force)
+            # Apply records outside buffer lock
+            if buffered:
+                self._apply_buffer_records_nonblocking(buffered)
 
-                # Apply records outside buffer lock
-                if buffered:
-                    self._apply_buffer_records_nonblocking(buffered)
-
-                # Flush to H5 if needed
-                self._flush_to_h5_if_needed(force=force)
+            # Flush to H5 if needed
+            self._flush_to_h5_if_needed(force=force)
 
     def flush(self):
         """Blocking flush to ensure all data is persisted to H5 immediately."""
@@ -911,7 +910,7 @@ def _create_ledger_manager():
 
     try:
         hp = get_hyperparams()
-        if isinstance(hp, dict):
+        if isinstance(hp, dict) and hp:
             flush_interval = hp.get('ledger_flush_interval', flush_interval)
             flush_max_rows = hp.get('ledger_flush_max_rows', flush_max_rows)
             enable_h5 = hp.get('ledger_enable_h5_persistence', enable_h5)

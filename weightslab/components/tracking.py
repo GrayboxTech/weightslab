@@ -156,7 +156,8 @@ class TriggersTracker(Tracker):
         )
 
     def __eq__(self, other: "TriggersTracker") -> bool:
-        are_equals = self.number_of_neurons.item() == other.number_of_neurons.item() and \
+        are_equals = other is not None and \
+            self.number_of_neurons.item() == other.number_of_neurons.item() and \
             th.equal(self.triggrs_by_neuron, other.triggrs_by_neuron) and \
             th.equal(self.updates_by_neuron, other.updates_by_neuron)
         return are_equals

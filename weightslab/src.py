@@ -13,7 +13,7 @@ from typing import Callable
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, list_hyperparams, register_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
 from weightslab.backend.cli import cli_serve
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.ui.weightslab_ui import ui_serve
@@ -33,7 +33,7 @@ def save_signals(
     signals: dict,
     preds_raw: th.Tensor,
     targets: th.Tensor,
-    preds: th.Tensor = None,
+    preds: th.Tensor = None, 
     log: bool = True
 ):
     """

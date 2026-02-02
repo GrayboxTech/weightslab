@@ -162,7 +162,8 @@ class H5DataFrameStore:
             return val
 
         for col in cols_to_serialize:
-            df[col] = df[col].apply(serialize_value)
+            if col in df.columns:
+                df[col] = df[col].apply(serialize_value)
 
         return df
 
