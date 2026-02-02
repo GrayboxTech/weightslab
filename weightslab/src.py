@@ -289,9 +289,9 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_dataloader` will create a Proxy if
-        # the name is not yet present.
+        # the name is not yet present.\[]
         try:
-            proxy = get_dataloader(kwargs.get('loader_name', kwargs.get('name', DEFAULT_NAME)))
+            proxy = get_dataloader(kwargs.get('loader_name', DEFAULT_NAME))
         except Exception:
             proxy = None
 
@@ -361,7 +361,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
     # # Loss
     elif 'loss' in flag.lower() or flag.lower() in ('criterion', 'signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
-        reg_name = kwargs.get('name') or flag
+        reg_name = kwargs.get('signal_name')
         if 'log' not in kwargs:
             kwargs['log'] = True
 
@@ -394,7 +394,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
     # # Metric
     elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
-        reg_name = kwargs.get('name') or flag
+        reg_name = kwargs.get('signal_name')
 
         # decide how to wrap: loss-like (forward) or metric-like (compute)
         # wrap forward
