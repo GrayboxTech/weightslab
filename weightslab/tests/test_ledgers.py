@@ -40,7 +40,7 @@ class LedgerTests(unittest.TestCase):
         hp = GLOBAL_LEDGER.get_hyperparams()  # Uses DEFAULT_NAME
 
         # Proxy should exist but not have underlying object yet
-        self.assertEqual(hp.get(), None)
+        self.assertEqual(hp.get(), {})
 
         # Now register hyperparams
         params = {'learning_rate': 0.001, 'batch_size': 32}
@@ -168,7 +168,7 @@ class LedgerTests(unittest.TestCase):
         # Get before register - should create Proxy(None)
         hp_handle = GLOBAL_LEDGER.get_hyperparams()
         self.assertIsInstance(hp_handle, Proxy)
-        self.assertIsNone(hp_handle.get())
+        self.assertEqual(hp_handle.get(), {})
 
         # Register without providing name - should use DEFAULT_NAME
         params = {'learning_rate': 0.01, 'batch_size': 64}

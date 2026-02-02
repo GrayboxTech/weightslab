@@ -1249,7 +1249,7 @@ def generate_index_maps(
         recursive_dep = edge_label == DepType.REC  # A recursive dependency ?
 
         # 1.1. Determine the number of neurons in each direction
-        # # Src - First will always be != None and int
+        # # Src - First will always be is not None and int
         src_nb_neurons = src_mod.get_neurons(attr_name='out_neurons') if \
             not hasattr(src_mod, 'wl_transposed') \
             else src_mod.get_neurons(attr_name='in_neurons')

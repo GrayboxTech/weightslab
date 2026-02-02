@@ -366,15 +366,9 @@ class DataLoaderInterface:
         # the wrapped dataset class loader_name; otherwise fall back to '_dataloader'.
         self._ledger_name = None
         if register:
-            reg_name = (
-                loader_name
-                or getattr(self.dataset, "__name__", None)
-                or getattr(self.dataset, "__class__", type(self.dataset)).__name__
-                or "_dataloader"
-            )
-            self._ledger_name = reg_name
+            self._ledger_name = loader_name
             try:
-                register_dataloader(self, weak=weak, name=reg_name)
+                register_dataloader(self, weak=weak, name=loader_name)
             except Exception:
                 # Best-effort: ignore registration failures
                 pass

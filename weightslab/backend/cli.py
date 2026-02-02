@@ -66,7 +66,7 @@ def _sanitize_for_json(obj):
         json.dumps(obj)
         return obj
     except Exception:
-        return str(obj)
+        return {str(obj): obj}
 
 
 # Globals for the running server
