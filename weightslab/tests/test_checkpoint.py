@@ -41,7 +41,6 @@ class CheckpointManagerTest(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -71,13 +70,13 @@ class CheckpointManagerTest(unittest.TestCase):
         self.summary_writer_mock.add_scalars = mock.MagicMock()
 
         # Register model, optimizer and dataloaders in the ledger
-        self._model = wl.watch_or_edit(model, flag='model', name='exp_model')
+        self._model = wl.watch_or_edit(model, flag='model')
         optimizer = th.optim.Adam(model.parameters(), lr=1e-3)
-        self._optimizer = wl.watch_or_edit(optimizer, flag='optimizer', name='exp_optimizer')
+        self._optimizer = wl.watch_or_edit(optimizer, flag='optimizer')
 
         # Wrap datasets in DataLoaders so checkpoint manager can access .dataset
-        self._train_loader = wl.watch_or_edit(DataLoader(data_train, batch_size=128, shuffle=True), flag='dataloader', name='exp_train')
-        self._eval_loader = wl.watch_or_edit(DataLoader(data_eval, batch_size=128, shuffle=False), flag='dataloader', name='exp_eval')
+        self._train_loader = wl.watch_or_edit(DataLoader(data_train, batch_size=128, shuffle=True), flag='dataloader', loader_name='exp_train')
+        self._eval_loader = wl.watch_or_edit(DataLoader(data_eval, batch_size=128, shuffle=False), flag='dataloader', loader_name='exp_eval')
 
         # Register a mock logger as well (keeps compatibility with older code)
         self._logger = wl.watch_or_edit(self.summary_writer_mock, flag='logger')

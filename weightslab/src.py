@@ -313,6 +313,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             u:v for u,v in hp_dict.get('data', {}).get(reg_name, {}).items() if u not in kwargs
                         }
                     )
+
+                    # Legacy support: set loader_name from name if not provided
+                    if 'loader_name' not in kwargs and 'name' in kwargs:
+                        kwargs['loader_name'] = kwargs['name']
             except Exception:
                 pass  # If we can't get hyperparameters, continue without root_log_dir
 
@@ -361,7 +365,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
     # # Loss
     elif 'loss' in flag.lower() or flag.lower() in ('criterion', 'signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
-        reg_name = kwargs.get('signal_name')
+        reg_name = kwargs.get('signal_name', kwargs.get('name'))
         if 'log' not in kwargs:
             kwargs['log'] = True
 
@@ -394,7 +398,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
     # # Metric
     elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
-        reg_name = kwargs.get('signal_name')
+        reg_name = kwargs.get('signal_name', kwargs.get('name'))
 
         # decide how to wrap: loss-like (forward) or metric-like (compute)
         # wrap forward
