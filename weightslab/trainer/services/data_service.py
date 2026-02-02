@@ -380,7 +380,7 @@ class DataService:
             for stat_name in stats_to_retrieve:
                 value = row.get(stat_name)
                 # Skip prediction raw array
-                if isinstance(value, np.ndarray) and value.ndim > 1:
+                if (isinstance(value, np.ndarray) and value.ndim > 1) or (isinstance(value, (list, tuple, np.ndarray)) and len(value) == 0):
                     continue
                 if isinstance(value, float):
                     value = round(value, 7)

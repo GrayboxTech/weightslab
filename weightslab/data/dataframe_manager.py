@@ -345,7 +345,7 @@ class LedgeredDataFrameManager:
 
             if preds_raw is not None:
                 try:
-                    rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i] if normalized_preds_raw is not None else preds_raw[i]
+                    rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i]
                 except Exception:
                     pass
 
