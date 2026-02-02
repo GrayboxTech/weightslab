@@ -368,7 +368,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # =================
         # Initialize Logger
         # =================
-        cls.logger = LoggerQueue(name=EXP_NAME, register=True)
+        cls.logger = LoggerQueue(register=True)
 
         # =============
         # Initialize HP
@@ -1219,7 +1219,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         dataloader = register_in_ledger(
             self.dataset,
             flag="dataloader",
-            name='train_loader',
+            loader_name='train_loader',
             compute_hash=False,
             is_training=True,
             batch_size=self.config.get('data', {}).get('train_loader', {}).get('batch_size', 32),

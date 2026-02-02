@@ -131,7 +131,7 @@ class TestCLICommands(unittest.TestCase):
         """Test list_models with registered model."""
         # Register a mock model
         mock_model = MagicMock()
-        GLOBAL_LEDGER.register_model(mock_model, 'test_model')
+        GLOBAL_LEDGER.register_model(mock_model, False, 'test_model')
 
         result = _handle_command('list_models')
         self.assertTrue(result['ok'])

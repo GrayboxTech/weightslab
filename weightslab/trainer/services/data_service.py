@@ -813,7 +813,7 @@ class DataService:
 
                 # 1. Evaluate the expression with safe context
                 new_values = eval(code, {"df": df, "np": np, "pd": pd})
-                
+
                 # 2. Check for scalar vs series compatibility
                 # (Pandas handles most of this, but we ensure robustness)
                 if isinstance(new_values, (pd.Series, np.ndarray, list)):
@@ -836,7 +836,7 @@ class DataService:
                 if self._df_manager is not None:
                     # Create a minimal update dataframe with just the modified column
                     update_payload = df[[col]].copy()
-                    
+
                     # Ensure origin is available for grouping
                     if isinstance(df.index, pd.MultiIndex) and "origin" in df.index.names:
                         # Index is (origin, sample_id) - ideal for grouping
@@ -846,7 +846,7 @@ class DataService:
                             clean_group = group.droplevel("origin")
                             clean_group[SampleStatsEx.ORIGIN.value] = origin
                             self._df_manager.upsert_df(clean_group, origin=origin, force_flush=True)
-                            
+
                     elif SampleStatsEx.ORIGIN.value in df.columns:
                         # Origin is a column
                         update_payload[SampleStatsEx.ORIGIN.value] = df[SampleStatsEx.ORIGIN.value]
@@ -856,9 +856,9 @@ class DataService:
                                 # Try to find sample_id
                                 if SampleStatsEx.SAMPLE_ID.value in group.columns:
                                     group = group.set_index(SampleStatsEx.SAMPLE_ID.value)
-                            
+
                             self._df_manager.upsert_df(group, origin=origin, force_flush=True)
-                
+
                 # Explicitly flush to disk to avoid race conditions with _slowUpdateInternals
                 if self._df_manager:
                     try:
@@ -908,7 +908,7 @@ class DataService:
                             n = 5
                     else:
                         n = int(n_raw)
-                        
+
                     if n < len(df):
                         df.drop(index=df.index.difference(df.index[:n]), inplace=True)
                     return f"Applied operation: head({n})"
