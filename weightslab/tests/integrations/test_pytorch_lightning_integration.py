@@ -295,7 +295,7 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
                     context = get_current_context()
                     context_log.append(("val", context))
                     x, y = batch
-                    logits = self(x)
+                    self(x)
             
             def configure_optimizers(self):
                 return torch.optim.Adam(self.parameters(), lr=0.001)
