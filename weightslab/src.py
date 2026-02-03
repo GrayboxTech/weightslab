@@ -114,36 +114,25 @@ def log_signal(scalar: float, reg_name: str, **kwargs) -> None:
             if logger is not None and hasattr(logger, 'add_scalars'):
                 # attempt to get a sensible global_step
                 step = 0
-                try:
-                    m = None
-                    try:
-                        m = get_model()
-                    except Exception:
-                        # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
-                        from weightslab.backend.ledgers import list_models, get_model as _gm
-                        full_list = list_models()
-                        if full_list:
-                                # Prefer "experiment" or "main" or the first one
-                            if 'experiment' in full_list:
-                                m = _gm('experiment')
-                            elif 'main' in full_list:
-                                m = _gm('main')
-                            else:
-                                m = _gm(full_list[0])
+                # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
+                from weightslab.backend.ledgers import list_models, get_model as _gm
+                full_list = list_models()
+                if full_list:
+                        # Prefer "experiment" or "main" or the first one
+                    if 'experiment' in full_list:
+                        m = _gm('experiment')
+                    elif 'main' in full_list:
+                        m = _gm('main')
+                    else:
+                        m = _gm(full_list[0])
 
-                    if m is not None:
-                        # Safe attribute access (handle Proxy returning None for missing attr)
-                        val = getattr(m, 'current_step', None)
-                        if val is not None:
-                            step = int(val)
-                        else:
-                            val_age = getattr(m, 'get_age', None)
-                            if callable(val_age):
-                                step = int(val_age())
-                            else:
-                                step = 0
-                except Exception:
-                    step = 0
+                if m is not None:
+                    # Safe attribute access (handle Proxy returning None for missing attr)
+                    val = getattr(m, 'current_step', None)
+                    if val is not None:
+                        step = int(val)
+                    else:
+                        step = 0
 
                 # Add to logger
                 logger.add_scalars(
