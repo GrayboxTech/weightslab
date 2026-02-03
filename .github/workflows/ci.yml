@@ -154,4 +154,5 @@ jobs:
         run: |
           export WEIGHTSLAB_TORCH_VARIANT="cpu"
           export WL_ENABLE_HP_SYNC="1"
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m unittest discover -s ./weightslab/tests -v
