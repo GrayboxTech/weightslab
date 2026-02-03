@@ -1,6 +1,5 @@
 import os
 import logging
-import difflib
 import re
 import pandas as pd
 import threading

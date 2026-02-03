@@ -30,10 +30,7 @@ import os
 import json
 import yaml
 import logging
-import shutil
-import random
 import time
-import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from datetime import datetime
@@ -1571,7 +1568,7 @@ class CheckpointManagerV2:
                 # Set Model Training Guard
                 guard_training_context.model = model  # Train
                 guard_testing_context.model = model  # Eval
-            except Exception as e:
+            except Exception:
                 if 'model' not in checkpoint_data['loaded_components']:
                     logger.info("Attempting to reload full checkpoint to recover...")
                     # Load checkpoint data

@@ -7,8 +7,7 @@ import unittest
 import json
 import socket
 import time
-import threading
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock
 
 import sys
 import os
@@ -20,7 +19,6 @@ from weightslab.backend.cli import (
     _handle_command,
     _sanitize_for_json,
     cli_serve,
-    _server_thread,
     _server_sock
 )
 from weightslab.backend.ledgers import GLOBAL_LEDGER, Proxy
@@ -347,9 +345,6 @@ class TestCLIIntegration(unittest.TestCase):
         )
         f = sock.makefile('rwb')
 
-        # Read greeting
-        greeting = f.readline()
-
         # Send command
         f.write((cmd + '\n').encode('utf8'))
         f.flush()
@@ -394,9 +389,6 @@ class TestCLIIntegration(unittest.TestCase):
             timeout=5
         )
         f = sock.makefile('rwb')
-
-        # Read greeting
-        greeting = f.readline()
 
         # Send quit
         f.write(b'quit\n')

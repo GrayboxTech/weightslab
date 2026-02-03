@@ -18,7 +18,6 @@ import tempfile
 import warnings
 import json
 import pandas as pd
-import shutil
 from pathlib import Path
 warnings.filterwarnings("ignore")
 
@@ -27,13 +26,11 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import Subset
 from torchvision import datasets, transforms
-from pyexpat import model
 from tqdm import trange
 
 # Import components directly to avoid full weightslab initialization
-from weightslab.utils.tools import capture_rng_state, restore_rng_state
 from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
@@ -81,7 +78,7 @@ def register_in_ledger(obj, flag, device='cpu', **kwargs):
                 flag="signal",
                 **kwargs
             )
-    except Exception as e:
+    except Exception:
         # If direct registration fails, silently continue
         pass
 

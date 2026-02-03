@@ -12,7 +12,6 @@ from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
-from weightslab.backend import ledgers
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.trainer.services.service_utils import load_label
@@ -29,7 +28,6 @@ from weightslab.data.sample_stats import (
     SAMPLE_STATS_ALL,
 )
 
-from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
 
 
 # Global logger

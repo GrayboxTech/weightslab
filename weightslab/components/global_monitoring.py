@@ -5,7 +5,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_optimizers, get_optimizer, register_hyperparams
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager
 from weightslab.components.tracking import TrackingMode
 
 

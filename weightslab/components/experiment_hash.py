@@ -13,8 +13,7 @@ Combined into a 24-byte hash that allows tracking what changed between versions.
 import hashlib
 import json
 import logging
-from typing import Any, Dict, List, Optional, Set
-from pathlib import Path
+from typing import Any, Dict, Optional, Set
 
 import torch as th
 
