@@ -260,8 +260,11 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
 
         time.sleep(poll_interval)
 
+def start_hp_sync_thread_event():
+    t = threading.Thread(target=_pause_hp_sync_loop, name='WL-HP_Sync_Loop', daemon=True)
+    t.start()
+
 # Start sync thread once at module import
 if _pause_sync_thread_started:
     _pause_sync_thread_started = False  # already activated
-    t = threading.Thread(target=_pause_hp_sync_loop, name='WL-HP_Sync_Loop', daemon=True)
-    t.start()
+    start_hp_sync_thread_event()
