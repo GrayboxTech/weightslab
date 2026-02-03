@@ -1,3 +1,4 @@
+import os
 from typing import Any
 from enum import Enum
 import contextvars
@@ -198,7 +199,8 @@ guard_testing_context = GuardContext(for_training=False)
 # - If ledger `is_training` == False and controller is running -> pause controller.
 # - If controller is paused/resumed externally, update ledger `is_training` to match.
 
-_pause_sync_thread_started = False
+_enable_pause_sync_thread = os.environ.get('WL_ENABLE_HP_SYNC', True)
+_pause_sync_thread_started = bool(_enable_pause_sync_thread) and _enable_pause_sync_thread != '0'
 checkpoint_manager = get_checkpoint_manager()
 
 def _pause_hp_sync_loop(poll_interval: float = 3):
@@ -259,7 +261,7 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
         time.sleep(poll_interval)
 
 # Start sync thread once at module import
-if not _pause_sync_thread_started:
-    _pause_sync_thread_started = True
+if _pause_sync_thread_started:
+    _pause_sync_thread_started = False  # already activated
     t = threading.Thread(target=_pause_hp_sync_loop, name='WL-HP_Sync_Loop', daemon=True)
     t.start()
