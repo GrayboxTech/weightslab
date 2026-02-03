@@ -292,14 +292,12 @@ class TestCLIServer(unittest.TestCase):
     def test_cli_serve_starts(self):
         """Test that CLI server starts successfully."""
         result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
+        time.sleep(1)  # Give server time to start
 
         self.assertTrue(result['ok'])
         self.assertIn('host', result)
         self.assertIn('port', result)
         self.assertGreater(result['port'], 0)
-
-        # Give server time to start
-        time.sleep(0.1)
 
         # Test connection
         try:
@@ -325,7 +323,7 @@ class TestCLIIntegration(unittest.TestCase):
         cls.server_info = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
         if not cls.server_info['ok']:
             raise RuntimeError("Failed to start CLI server for integration tests")
-        time.sleep(0.2)  # Give server time to fully start
+        time.sleep(10)  # Give server time to fully start
 
     @classmethod
     def tearDownClass(cls):
@@ -343,11 +341,13 @@ class TestCLIIntegration(unittest.TestCase):
             (self.server_info['host'], self.server_info['port']),
             timeout=5
         )
+        time.sleep(5)  # Give server time to start
         f = sock.makefile('rwb')
 
         # Send command
         f.write((cmd + '\n').encode('utf8'))
         f.flush()
+        time.sleep(3)  # Give server time to start
 
         # Read response
         response_line = f.readline()
@@ -393,6 +393,7 @@ class TestCLIIntegration(unittest.TestCase):
         # Send quit
         f.write(b'quit\n')
         f.flush()
+        time.sleep(1)  # Give server time to start
 
         # Read goodbye
         response = json.loads(f.readline().decode('utf8'))

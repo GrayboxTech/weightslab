@@ -1,4 +1,6 @@
 from typing import Any
+from enum import Enum
+import contextvars
 
 from threading import Event, RLock, Lock
 import threading
@@ -14,6 +16,30 @@ logger = logging.getLogger(__name__)
 # Global locks
 weightslab_rlock = RLock()
 weightslab_lock = Lock()
+
+
+# Context management for training vs testing
+class Context(Enum):
+    """Enum for current execution context (training or testing)."""
+    TRAINING = "training"
+    TESTING = "testing"
+    UNKNOWN = "unknown"
+
+
+# Thread-local context variable to track current context
+_current_context: contextvars.ContextVar[Context] = contextvars.ContextVar(
+    'weightslab_context', default=Context.UNKNOWN
+)
+
+
+def get_current_context() -> Context:
+    """Get the current WeightsLab execution context (training or testing)."""
+    return _current_context.get()
+
+
+def set_current_context(context: Context) -> contextvars.Token[Context]:
+    """Set the current WeightsLab execution context and return a token for restoration."""
+    return _current_context.set(context)
 
 
 class PauseController:
@@ -44,20 +70,22 @@ class PauseController:
         self.hyperparams['is_training'] = True
         
     def resume(self):
+        hash_by_module = None
         # On resume, first dump any pending changes to checkpoint manager
-        if self.checkpoint_manager is None:
+        if self.checkpoint_manager == None:
             self.checkpoint_manager = get_checkpoint_manager()
-        if self.checkpoint_manager is not None:
+        if self.checkpoint_manager != None:
             self.checkpoint_manager.update_experiment_hash(firsttime=True)
             self.checkpoint_manager.dump_pending_changes()
+            hash_by_module = self.checkpoint_manager.hash_by_module
 
         # Then resume execution
-        if self._is_hash_computed():
+        if self.checkpoint_manager == None or self._is_hash_computed():
             self._resume()
-            logger.info(f'\nTraining resumed as modules hashes have been computed: {self.checkpoint_manager.hash_by_module}.')
+            logger.info(f'\nTraining resumed as modules hashes have been computed: {hash_by_module}.')
             return True
         else:
-            logger.warning(f'Cannot resume training: experiment hash not computed yet for every modules {self.checkpoint_manager.hash_by_module}.')
+            logger.warning(f'Cannot resume training: experiment hash not computed yet for every modules {hash_by_module}.')
             return False
 
     def is_paused(self):
@@ -69,7 +97,7 @@ class PauseController:
 
     def _is_hash_computed(self):
         self._get_checkpoint_manager()
-        if self.checkpoint_manager is None:
+        if self.checkpoint_manager == None:
             return False
         fl = self.checkpoint_manager.hash_by_module[0] != "00000000" and self.checkpoint_manager.hash_by_module[1] != "00000000" and self.checkpoint_manager.hash_by_module[2] != "00000000"
 
@@ -119,6 +147,7 @@ class GuardContext:
         self.for_training = for_training
         self.architecture_guard = weightslab_rlock
         self.model = None
+        self._context_token = None
 
     def __enter__(self):
         """
@@ -126,6 +155,10 @@ class GuardContext:
         """
         pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
+
+        # Set the current context for this execution
+        context = Context.TRAINING if self.for_training else Context.TESTING
+        self._context_token = set_current_context(context)
 
         # The exact logic requested by the user:
         if self.model is not None:
@@ -139,6 +172,10 @@ class GuardContext:
         Executed upon exiting the 'with' block (after user code runs).
         Reverts the model state.
         """
+        # Reset context to unknown
+        if self._context_token is not None:
+            _current_context.reset(self._context_token)
+            self._context_token = None
 
         if exc_type is RuntimeError:
             logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__")

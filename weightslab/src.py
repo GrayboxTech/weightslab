@@ -257,8 +257,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
     # Model
     if 'model' in flag.lower() or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
         # First ensure that the model has module input_shape
-        if not hasattr(obj, 'input_shape'):
+        if not hasattr(obj, 'input_shape') and not (hasattr(obj, 'model') and hasattr(obj.model, 'input_shape')):
             raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
+        elif not hasattr(obj, 'input_shape') and (hasattr(obj, 'model') and hasattr(obj.model, 'input_shape')):
+            obj.input_shape = obj.model.input_shape  # Set model input shape
 
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
@@ -315,7 +317,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
-
+        proxy.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
+        
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
