@@ -31,7 +31,7 @@ from torchvision import datasets, transforms
 from tqdm import trange
 
 # Import components directly to avoid full weightslab initialization
-from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
+from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.global_monitoring import (
@@ -172,8 +172,8 @@ class TaggableDataset:
         }
 
 
-class CheckpointSystemV3Tests(unittest.TestCase):
-    """Comprehensive tests for checkpoint system V3 with separated test methods"""
+class CheckpointSystemTests(unittest.TestCase):
+    """Comprehensive tests for checkpoint system with separated test methods"""
 
     # Class variables to preserve state across tests
     temp_dir = None
@@ -1193,7 +1193,7 @@ class CheckpointSystemV3Tests(unittest.TestCase):
         # Automotically load components from existing chkpt
         # =================================================
         # First init a checkpoint manager with reloaded config
-        self.chkpt_manager = CheckpointManagerV2(root_log_dir=self.config.get('root_log_dir'))
+        self.chkpt_manager = CheckpointManager(root_log_dir=self.config.get('root_log_dir'))
         ledgers.register_checkpoint_manager(self.chkpt_manager)
 
         # Re-register HP
@@ -1296,23 +1296,23 @@ if __name__ == '__main__':
 
     # Add tests in specific order
     # # Initialize experiment
-    suite.addTest(CheckpointSystemV3Tests('test_00_initialize_experiment'))
+    suite.addTest(CheckpointSystemTests('test_00_initialize_experiment'))
     # # User Adventures training workflow
-    suite.addTest(CheckpointSystemV3Tests('test_01_train_A'))
-    suite.addTest(CheckpointSystemV3Tests('test_02_train_B_model_change'))
-    suite.addTest(CheckpointSystemV3Tests('test_03_train_C_hyperparams_change'))
-    suite.addTest(CheckpointSystemV3Tests('test_04_train_D_data_change'))
+    suite.addTest(CheckpointSystemTests('test_01_train_A'))
+    suite.addTest(CheckpointSystemTests('test_02_train_B_model_change'))
+    suite.addTest(CheckpointSystemTests('test_03_train_C_hyperparams_change'))
+    suite.addTest(CheckpointSystemTests('test_04_train_D_data_change'))
     # # Reload and branching tests
-    suite.addTest(CheckpointSystemV3Tests('test_05_train_E_reload_and_branch'))
-    suite.addTest(CheckpointSystemV3Tests('test_06_reload_before_model_change'))
-    suite.addTest(CheckpointSystemV3Tests('test_07_change_data_from_test06'))
+    suite.addTest(CheckpointSystemTests('test_05_train_E_reload_and_branch'))
+    suite.addTest(CheckpointSystemTests('test_06_reload_before_model_change'))
+    suite.addTest(CheckpointSystemTests('test_07_change_data_from_test06'))
     # # Reload and check full reproducibility - Loss and UIDs
-    suite.addTest(CheckpointSystemV3Tests('test_08_reload_before_data_change_verify_and_modify'))
-    suite.addTest(CheckpointSystemV3Tests('test_09_reload_before_hp_change_verify_and_modify'))
-    suite.addTest(CheckpointSystemV3Tests('test_10_reload_branch_j_verify_reproducibility'))
-    suite.addTest(CheckpointSystemV3Tests('test_11_restart_from_scratch_to_hash_d_and_verify_reproducibility'))
+    suite.addTest(CheckpointSystemTests('test_08_reload_before_data_change_verify_and_modify'))
+    suite.addTest(CheckpointSystemTests('test_09_reload_before_hp_change_verify_and_modify'))
+    suite.addTest(CheckpointSystemTests('test_10_reload_branch_j_verify_reproducibility'))
+    suite.addTest(CheckpointSystemTests('test_11_restart_from_scratch_to_hash_d_and_verify_reproducibility'))
     # # Check that logger queue is saved and loaded
-    suite.addTest(CheckpointSystemV3Tests('test_logger_queue_saved_with_weights'))
+    suite.addTest(CheckpointSystemTests('test_logger_queue_saved_with_weights'))
 
     # Run the suite
     runner = unittest.TextTestRunner(verbosity=2)

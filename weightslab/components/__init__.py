@@ -6,7 +6,7 @@ and monitoring in Weightslab.
 """
 
 # New structured checkpoint system
-from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
+from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.components.experiment_hash import ExperimentHashGenerator
 
 # Other components
@@ -16,7 +16,7 @@ from weightslab.components.tracking import Tracker, TrackingMode
 
 __all__ = [
     # Checkpoint management
-    'CheckpointManagerV2',  # Manual checkpoint system
+    'CheckpointManager',  # Manual checkpoint system
     'ExperimentHashGenerator',
 
     # Tracking

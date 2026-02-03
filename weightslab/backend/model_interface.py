@@ -6,7 +6,7 @@ import weightslab as wl
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
 
-from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
+from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.components.tracking import TrackingMode
 from weightslab.models.model_with_ops import NetworkWithOps
 from weightslab.modules.neuron_ops import NeuronWiseOperations
@@ -121,7 +121,7 @@ class ModelInterface(NetworkWithOps):
             _checkpoint_auto_every_steps = 0
         self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
 
-        # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
+        # Initialize CheckpointManager if we have a root dir (fallback to default root)
         root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
         try:
             # Check if a checkpoint manager is already registered in ledger
@@ -134,7 +134,7 @@ class ModelInterface(NetworkWithOps):
                     raise KeyError("No manager in ledger")
             except (KeyError, AttributeError):
                 # Create new manager and register it
-                self._checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
+                self._checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir)
                 try:
                     ledgers.register_checkpoint_manager(self._checkpoint_manager)
                     logger.info("Registered new checkpoint manager in ledger")

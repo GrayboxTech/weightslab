@@ -19,7 +19,7 @@ from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.ui.weightslab_ui import ui_serve
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
-from weightslab.components.checkpoint_manager_v2 import CheckpointManagerV2
+from weightslab.components.checkpoint_manager import CheckpointManager
 
 
 # Get global logger
@@ -439,7 +439,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters'):
             # If obj is a string, treat as a file path and start watcher
             try:
-                # Initialize CheckpointManagerV2 if we have a root dir (fallback to default root)
+                # Initialize CheckpointManager if we have a root dir (fallback to default root)
                 root_log_dir = obj.get('root_log_dir') or os.path.join('.', 'root_log_dir')
                 try:
                     # Check if a checkpoint manager is already registered in ledger
@@ -452,7 +452,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             raise KeyError("No manager in ledger")
                     except (KeyError, AttributeError):
                         # Create new manager and register it
-                        _checkpoint_manager = CheckpointManagerV2(root_log_dir=root_log_dir)
+                        _checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir)
                         try:
                             ledgers.register_checkpoint_manager(_checkpoint_manager)
                             logger.info("Registered new checkpoint manager in ledger")

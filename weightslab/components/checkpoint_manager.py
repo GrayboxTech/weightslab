@@ -57,7 +57,7 @@ from weightslab.components.global_monitoring import pause_controller as pause_ct
 logger = logging.getLogger(__name__)
 
 
-class CheckpointManagerV2:
+class CheckpointManager:
     """Structured checkpoint manager with experiment hash-based organization.
 
     This manager creates a well-organized checkpoint structure where each
@@ -132,11 +132,11 @@ class CheckpointManagerV2:
         # Automatically resume latest state when an existing root_log_dir is provided
         self._bootstrap_latest_state()
 
-        logger.info(f"CheckpointManagerV2 initialized at {self.root_log_dir}")
+        logger.info(f"CheckpointManager initialized at {self.root_log_dir}")
 
     def __repr__(self) -> str:
         return (
-            f"CheckpointManagerV2(\n"
+            f"CheckpointManager(\n"
             f"  root_log_dir={self.root_log_dir}\n"
             f"  current_exp_hash={self.current_exp_hash}\n"
             f"  step_counter={self._step_counter}\n"
