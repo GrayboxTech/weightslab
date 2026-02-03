@@ -37,7 +37,7 @@ class NetworkWithOps(nn.Module):
         return self.linearized_layers
 
     def __eq__(self, other: "NetworkWithOps") -> bool:
-        return self.seen_samples == other.seen_samples and \
+        return other is not None and self.seen_samples == other.seen_samples and \
             self.tracking_mode == other.tracking_mode and \
             self.layers == other.layers
 
@@ -124,6 +124,7 @@ class NetworkWithOps(nn.Module):
         super().to(device, dtype, non_blocking, **kwargs)
         for layer in self.layers:
             layer.to(device, dtype, non_blocking, **kwargs)
+        return self
 
     def maybe_update_age(self, tracked_input: th.Tensor):
         if self.tracking_mode != TrackingMode.TRAIN:
@@ -477,19 +478,38 @@ class NetworkWithOps(nn.Module):
                     )
 
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
-        state = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
-        state[prefix + 'seen_samples'] = self.seen_samples
-        state[prefix + 'current_step'] = self.current_step
-        state[prefix + 'tracking_mode'] = self.tracking_mode
-        return state
+        state_dict = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
+        state_dict[prefix + 'seen_samples'] = self.seen_samples
+        state_dict[prefix + 'current_step'] = self.current_step
+        state_dict[prefix + 'tracking_mode'] = self.tracking_mode
+        return state_dict
 
     def load_state_dict(
-            self, state_dict, strict, assign=True, **kwargs):
-        self.seen_samples = state_dict['seen_samples']
-        self.current_step = state_dict.get('current_step', 0)
-        self.tracking_mode = state_dict['tracking_mode']
-        super().load_state_dict(
-            state_dict, strict=strict, assign=assign, **kwargs)
+            self, state_dict, strict=True, assign=True, **kwargs):
+        self.seen_samples = state_dict.pop('seen_samples', 0)
+        self.current_step = state_dict.pop('current_step', 0)
+        self.tracking_mode = state_dict.pop('tracking_mode', 0)
+
+        # Preprocess trackers
+        # TODO (GP): better way to handle this? Maybe load the trackers
+        state_dict = {
+            k: v for k, v in state_dict.items()
+            if not '_dataset_tracker' in k
+        }
+        try:
+            super().load_state_dict(
+                state_dict, strict=strict, assign=assign, **kwargs)
+        except Exception:
+            # If the state dict comes from a wrapper (e.g., ModelInterface) it may
+            # include a leading "model." prefix. Strip that prefix for matching.
+            remapped = {}
+            for k, v in state_dict.items():
+                if k.startswith('model.'):
+                    remapped[k[len('model.'):]] = v
+                else:
+                    remapped[k] = v
+            super().load_state_dict(
+                remapped, strict=strict, assign=assign, **kwargs)
 
     def forward(self,
                 tensor: th.Tensor,

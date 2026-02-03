@@ -87,7 +87,7 @@ class LayerWiseOperationsTest(unittest.TestCase):
         layer_instance = self.all_layers.get(layer_key)
         layer_instance.to(device)  # Update tracker device
 
-        if layer_instance is None:
+        if layer_instance == None:
             self.fail(f"Layer key '{layer_key}' not found in setup.")
 
         # Check if layer has module id

@@ -17,7 +17,7 @@ from PIL import Image
 
 import weightslab as wl
 
-from weightslab.utils.board import Dash as Logger
+from weightslab.utils.logger import LoggerQueue as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context,
@@ -310,12 +310,11 @@ if __name__ == "__main__":
 
     # --- 4) Register logger + hyperparameters ---
     logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
+    wl.watch_or_edit(logger, flag="logger", log_dir=log_dir)
 
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
@@ -347,7 +346,7 @@ if __name__ == "__main__":
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
-        name="train_loader",
+        loader_name="train_loader",
         batch_size=train_cfg.get("batch_size", 2),
         shuffle=train_cfg.get("shuffle", True),
         compute_hash=False,
@@ -360,7 +359,7 @@ if __name__ == "__main__":
     test_loader = wl.watch_or_edit(
         _val_dataset,
         flag="data",
-        name="test_loader",
+        loader_name="test_loader",
         batch_size=test_cfg.get("batch_size", 2),
         shuffle=test_cfg.get("shuffle", False),
         compute_hash=False,
@@ -375,6 +374,11 @@ if __name__ == "__main__":
     model = SmallUNet(
         in_channels=3, num_classes=num_classes, image_size=image_size
     ).to(device)
+    model = wl.watch_or_edit(
+        model,
+        flag="model",
+        device=device
+    )
 
     lr = parameters.get("optimizer", {}).get("lr", 1e-3)
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -442,9 +446,9 @@ if __name__ == "__main__":
             weight=class_weights  # ← Class weights applied!
         ),
         flag="loss",
-        name="train_mlt_loss/CE",
         per_sample=True,
         log=True,
+        name="train_loss/CE",
     )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(
@@ -452,8 +456,8 @@ if __name__ == "__main__":
             ignore_index=ignore_index,
             weight=class_weights  # ← Class weights applied!
         ),
+        name="test_loss/CE",
         flag="loss",
-        name="test_mlt_loss/CE",
         per_sample=True,
         log=True,
     )
@@ -463,8 +467,8 @@ if __name__ == "__main__":
             num_classes=num_classes,
             ignore_index=ignore_index,
         ).to(device),
+        name="test_metric/Jaccard",
         flag="metric",
-        name="test_metric/JaccardIndex",
         log=True,
     )
 

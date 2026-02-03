@@ -32,12 +32,111 @@ class _NoOpLock:
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
-def seed_everything(seed):
+def seed_everything(seed=42):
     """Seed everything for reproducibility."""
     np.random.seed(seed)
     th.manual_seed(seed)
     random.seed(seed)
     th.backends.cudnn.deterministic = True
+
+    # Reproducibility
+    rng = capture_rng_state()
+    print(rng)
+    restore_rng_state(rng)
+
+
+def capture_rng_state():
+    """
+    Capture all RNG states in a JSON-serializable format.
+
+    Returns:
+        dict: Dictionary with python_random, numpy_random, torch_rng, torch_cuda_rng
+              in serializable formats (lists/tuples)
+    """
+    rng_state = {
+        'python_random': random.getstate(),
+        'torch_rng': th.get_rng_state().cpu().tolist() if hasattr(th.get_rng_state(), 'tolist') else str(th.get_rng_state()),
+    }
+
+    # NumPy random state: (version, internal_state_array, gauss_next)
+    np_state = np.random.get_state()
+    rng_state['numpy_random'] = (np_state[0], np_state[1].tolist(), np_state[2])
+
+    # Add CUDA RNG if available
+    if th.cuda.is_available():
+        try:
+            rng_state['torch_cuda_rng'] = th.cuda.get_rng_state().cpu().tolist() if hasattr(th.cuda.get_rng_state(), 'tolist') else str(th.cuda.get_rng_state())
+        except Exception as e:
+            logger.warning(f"Failed to capture CUDA RNG state: {e}")
+
+    return rng_state
+
+def restore_rng_state(rng_state):
+    """
+    Restore RNG states from captured state dictionary.
+
+    Args:
+        rng_state (dict): Dictionary with RNG states (python_random, numpy_random, torch_rng, torch_cuda_rng)
+    """
+    if not rng_state:
+        logger.warning("RNG state is None or empty, skipping restoration")
+        return
+
+    try:
+        # Restore Python random state
+        if 'python_random' in rng_state:
+            try:
+                random.setstate(tuple(tuple(i) if i is not None and not isinstance(i, (int, float)) else i for i in rng_state['python_random']))  # Conver to tuple of tuples
+                logger.debug("Restored Python random state")
+            except Exception as e:
+                logger.warning(f"Failed to restore Python random state: {e}")
+
+        # Restore NumPy random state
+        if 'numpy_random' in rng_state:
+            try:
+                state_data = rng_state['numpy_random']
+                if isinstance(state_data, (list, tuple)) and len(state_data) == 3:
+                    version, internal, gauss = state_data
+                    if isinstance(internal, list):
+                        internal = np.array(internal, dtype=np.uint32)
+                    np.random.set_state((version, internal, gauss))
+                    logger.debug("Restored NumPy random state")
+                else:
+                    logger.warning("NumPy RNG state format invalid")
+            except Exception as e:
+                logger.warning(f"Failed to restore NumPy random state: {e}")
+
+        # Restore PyTorch RNG state
+        if 'torch_rng' in rng_state:
+            try:
+                torch_state = rng_state['torch_rng']
+                if isinstance(torch_state, list):
+                    torch_state = th.tensor(torch_state, dtype=th.uint8)
+                elif isinstance(torch_state, str):
+                    logger.warning("Torch RNG state is a string representation, cannot restore")
+                    return
+                th.set_rng_state(torch_state)
+                logger.debug("Restored PyTorch RNG state")
+            except Exception as e:
+                logger.warning(f"Failed to restore PyTorch RNG state: {e}")
+
+        # Restore CUDA RNG state if available
+        if 'torch_cuda_rng' in rng_state and th.cuda.is_available():
+            try:
+                cuda_state = rng_state['torch_cuda_rng']
+                if isinstance(cuda_state, list):
+                    cuda_state = th.tensor(cuda_state, dtype=th.uint8)
+                elif isinstance(cuda_state, str):
+                    logger.debug("CUDA RNG state is a string representation, skipping")
+                    return
+                th.cuda.set_rng_state(cuda_state)
+                logger.debug("Restored CUDA RNG state")
+            except Exception as e:
+                logger.warning(f"Failed to restore CUDA RNG state: {e}")
+
+        logger.debug("Successfully restored RNG states")
+    except Exception as e:
+        logger.error(f"Error restoring RNG state: {e}")
 
 def extract_in_out_params(module: nn.Module) -> List[int | str]:
     """
@@ -80,7 +179,7 @@ def extract_in_out_params(module: nn.Module) -> List[int | str]:
     # 4. Pass-through layers (Pooling, Upsampling, Dropout, Activations)
     # These layers maintain the same number of channels/neurons.
     pass_through_types = [
-        'Pool', 'Upsample', 'Dropout', 'ReLU', 'PReLU', 'LeakyReLU', 
+        'Pool', 'Upsample', 'Dropout', 'ReLU', 'PReLU', 'LeakyReLU',
         'Sigmoid', 'Tanh', 'ELU', 'Softmax', 'Identity'
     ]
     module_name = module._get_name()

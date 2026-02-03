@@ -104,7 +104,6 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
                 preds=preds,
             )
 
-
     loss = losses / test_loader_len
     metric = metric_mlt.compute() * 100
 
@@ -156,13 +155,17 @@ if __name__ == "__main__":
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
 
     # Model
     model = CNN().to(device)
+    model = wl.watch_or_edit(
+        model,
+        flag="model",
+        device=device
+    )
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)
@@ -170,7 +173,7 @@ if __name__ == "__main__":
 
     # Data (MNIST train/val/test)
     _full_train_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
+        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
         train=True,
         download=True,
         transform=transforms.Compose(
@@ -180,7 +183,7 @@ if __name__ == "__main__":
         ),
     )
     _test_dataset = datasets.MNIST(
-        root=os.path.join(parameters["root_log_dir"], "data"),
+        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
         train=False,
         download=True,
         transform=transforms.Compose(
@@ -218,7 +221,7 @@ if __name__ == "__main__":
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
-        name="train_loader",
+        loader_name="train_loader",
         batch_size=train_bs,
         shuffle=train_shuffle,
         is_training=True,
@@ -228,7 +231,7 @@ if __name__ == "__main__":
     val_loader = wl.watch_or_edit(
         _val_dataset,
         flag="data",
-        name="val_loader",
+        loader_name="val_loader",
         batch_size=val_bs,
         shuffle=val_shuffle,
         is_training=False,
@@ -238,7 +241,7 @@ if __name__ == "__main__":
     test_loader = wl.watch_or_edit(
         _test_dataset,
         flag="data",
-        name="test_loader",
+        loader_name="test_loader",
         batch_size=test_bs,
         shuffle=test_shuffle,
         is_training=False,
@@ -250,33 +253,33 @@ if __name__ == "__main__":
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="train_mlt_loss/CE",
         log=True,
+        name="train_loss/CE",
     )
     val_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="val_mlt_loss/CE",
         log=True,
+        name="val_loss/CE",
     )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
         flag="loss",
-        name="test_mlt_loss/CE",
         log=True,
+        name="test_loss/CE",
     )
 
     val_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="val_metric/Accuracy",
         log=True,
+        name="val_metric/Accuracy",
     )
     test_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
-        name="test_metric/Accuracy",
         log=True,
+        name="test_metric/Accuracy",
     )
 
     # Start WeightsLab services (gRPC only, no CLI)
