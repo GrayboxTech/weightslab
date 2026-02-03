@@ -5,7 +5,6 @@ import tempfile
 import yaml
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision import datasets, transforms
 
 import pytorch_lightning as pl
