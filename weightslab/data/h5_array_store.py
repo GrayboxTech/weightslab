@@ -448,9 +448,9 @@ class H5ArrayStore:
         # Normalize array if requested
         should_normalize = self._auto_normalize and not preserve_original
         if should_normalize:
-            array, metadata = normalize_array_to_uint8(array, preserve_original=False)
+            array, metadata = normalize_array_to_uint16(array, preserve_original=False)
         else:
-            _, metadata = normalize_array_to_uint8(array, preserve_original=True)
+            _, metadata = normalize_array_to_uint16(array, preserve_original=True)
 
         self._ensure_parent()
 
@@ -533,9 +533,9 @@ class H5ArrayStore:
 
                                 should_normalize = self._auto_normalize and not preserve_original
                                 if should_normalize:
-                                    array, metadata = normalize_array_to_uint8(array, preserve_original=False)
+                                    array, metadata = normalize_array_to_uint16(array, preserve_original=False)
                                 else:
-                                    _, metadata = normalize_array_to_uint8(array, preserve_original=True)
+                                    _, metadata = normalize_array_to_uint16(array, preserve_original=True)
 
                                 # Remove existing
                                 if key_name in sample_group:
