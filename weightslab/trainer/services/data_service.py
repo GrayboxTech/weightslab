@@ -119,10 +119,6 @@ class DataService:
 
         self._last_internals_update_time = 0.0
 
-        # Request deduplication for concurrent GetDataSamples requests
-        self._pending_requests = {}  # Maps request hash to Future
-        self._request_lock = threading.Lock()
-
         # Shared thread pool for data processing (avoid thread explosion)
         # Size: min(CPU cores * 2, 16) to balance concurrency without excessive threading
         self._data_executor = futures.ThreadPoolExecutor(
@@ -133,20 +129,6 @@ class DataService:
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         logger.info("DataService initialized.")
-
-    def _get_request_hash(self, request) -> str:
-        """Create a unique hash for a GetDataSamples request to detect duplicates."""
-        key_parts = [
-            str(request.start_index),
-            str(request.records_cnt),
-            str(request.include_transformed_data),
-            str(request.include_raw_data),
-            str(sorted(request.stats_to_retrieve)) if hasattr(request, 'stats_to_retrieve') else 'all',
-            str(request.resizeWidth) if hasattr(request, 'resizeWidth') else '0',
-            str(request.resizeHeight) if hasattr(request, 'resizeHeight') else '0',
-        ]
-        key = "|".join(key_parts)
-        return md5(key.encode()).hexdigest()
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -1269,62 +1251,17 @@ class DataService:
         Implements request deduplication to prevent duplicate concurrent requests.
         """
 
-        request_hash = self._get_request_hash(request)
-        is_first_request = False
-
-        # Check if this exact request is already being processed
-        with self._request_lock:
-            if request_hash in self._pending_requests:
-                logger.debug(f"Duplicate GetDataSamples request detected (hash={request_hash[:8]}...), waiting for existing request")
-                pending_future = self._pending_requests[request_hash]
-            else:
-                # Mark this request as being processed
-                pending_future = futures.Future()
-                self._pending_requests[request_hash] = pending_future
-                is_first_request = True
-
         try:
-            # If this is not the first request with this hash, wait for the result
-            if not is_first_request:
-                result = pending_future.result(timeout=300)
-                logger.debug(f"Duplicate request returned cached result (hash={request_hash[:8]}...)")
-                return result
-
-            # Otherwise, process the request normally
-            result = self._process_get_data_samples(request, context)
-
-            # Store result for any duplicate requests waiting
-            with self._request_lock:
-                if request_hash in self._pending_requests:
-                    self._pending_requests[request_hash].set_result(result)
-
-            return result
+            # Process the request directly without deduplication logic
+            return self._process_get_data_samples(request, context)
 
         except Exception as e:
             logger.error("Error in GetDataSamples: %s", str(e), exc_info=True)
-            error_response = pb2.DataSamplesResponse(
+            return pb2.DataSamplesResponse(
                 success=False,
                 message=f"Failed to retrieve samples: {str(e)}",
                 data_records=[]
             )
-
-            with self._request_lock:
-                if request_hash in self._pending_requests and not self._pending_requests[request_hash].done():
-                    try:
-                        self._pending_requests[request_hash].set_exception(e)
-                    except Exception:
-                        pass
-
-            return error_response
-
-        finally:
-            # Clean up the pending request entry
-            with self._request_lock:
-                if request_hash in self._pending_requests:
-                    try:
-                        del self._pending_requests[request_hash]
-                    except KeyError:
-                        pass
 
     def EditDataSample(self, request, context):
         """
