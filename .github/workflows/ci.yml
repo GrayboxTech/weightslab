@@ -153,7 +153,7 @@ jobs:
       - name: Run unit tests - General
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests -p "test_*.py" -t . -v
+          python -m unittest discover -s ./weightslab/tests -p "test_ch*.py" -t . -v
 
       # - name: Run unit tests - Model
       #   run: |

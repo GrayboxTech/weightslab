@@ -72,6 +72,7 @@ class PauseController:
         
     def resume(self):
         hash_by_module = None
+        print('\nAttempting to resume training...')
         # On resume, first dump any pending changes to checkpoint manager
         if self.checkpoint_manager == None:
             self.checkpoint_manager = get_checkpoint_manager()
@@ -81,13 +82,17 @@ class PauseController:
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:
             logger.warning('Cannot access checkpoint manager on resume.')
+        print(f'Hashes by module: {hash_by_module}')
 
         # Then resume execution
         if self.checkpoint_manager == None or self._is_hash_computed():
+            print('Resuming training now...')
             self._resume()
+            print(f'Hashes by module on resume: {hash_by_module}')
             logger.info(f'\nTraining resumed as modules hashes have been computed: {hash_by_module}.')
             return True
         else:
+            print('Cannot resume training: experiment hash not computed yet for every modules.')
             logger.warning(f'Cannot resume training: experiment hash not computed yet for every modules {hash_by_module}.')
             return False
 

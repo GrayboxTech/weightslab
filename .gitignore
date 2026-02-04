@@ -1,6 +1,7 @@
 weightslab.egg-info/*
 build/*
 dist/*
+root_log_dir/*
 weightslab/__pycache__/*
 tests/__pycache__/*
 __pycache__/*

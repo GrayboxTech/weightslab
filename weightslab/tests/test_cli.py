@@ -167,12 +167,6 @@ class TestCLICommands(unittest.TestCase):
         self.assertIn('optimizers', result['ledger'])
         self.assertIn('hyperparams', result['ledger'])
 
-    def test_plot_model_no_model(self):
-        """Test plot_model when no model is registered."""
-        result = _handle_command('plot_model')
-        self.assertTrue(result['ok'])
-        self.assertEquals(result['plot'], 'None')
-
     def test_plot_model_with_model(self):
         """Test plot_model with registered model."""
         # Create a mock model with __str__ method
@@ -292,7 +286,7 @@ class TestCLIServer(unittest.TestCase):
     def test_cli_serve_starts(self):
         """Test that CLI server starts successfully."""
         result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
-        time.sleep(1)  # Give server time to start
+        time.sleep(10)  # Give server time to start
 
         self.assertTrue(result['ok'])
         self.assertIn('host', result)

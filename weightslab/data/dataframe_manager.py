@@ -740,7 +740,7 @@ class LedgeredDataFrameManager:
                     logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}\n{traceback_str}")
                 st = time.time()  # Reset start time after each loop
 
-        self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush")
+        self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush", daemon=True)
         self._flush_thread.start()
 
     def stop(self):
