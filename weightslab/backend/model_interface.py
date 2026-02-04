@@ -419,9 +419,9 @@ class ModelInterface(NetworkWithOps):
             )
             return self
 
-    def train(self):
+    def train(self, mode: bool = True):
         try:
-            return super().train()
+            return super().train(mode=mode)
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during train(): {Exception}. \
