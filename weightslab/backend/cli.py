@@ -372,7 +372,7 @@ def _handle_command(cmd: str) -> Any:
                 for name in snap.get(k, []):
                     try:
                         getter = {
-                            'models': GLOBAL_LEDGER.get_model,
+                            # 'models': GLOBAL_LEDGER.get_model,  # don't print the model out
                             'dataloaders': GLOBAL_LEDGER.get_dataloader,
                             'optimizers': GLOBAL_LEDGER.get_optimizer,
                         }[k]
@@ -674,8 +674,8 @@ def _handle_command(cmd: str) -> Any:
                 return {'ok': False, 'error': str(e)}
 
         # Editing hyperparameters via CLI is intentionally disabled.
-
         return {'ok': False, 'error': f'unknown_command: {verb}'}
+    
     except Exception as e:
         return {'ok': False, 'error': str(e)}
 
