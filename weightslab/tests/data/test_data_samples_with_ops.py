@@ -116,7 +116,6 @@ class TestDataSampleTrackingWrapperInit(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -134,13 +133,13 @@ class TestDataSampleTrackingWrapperInit(unittest.TestCase):
             wrapped_dataset=self.dataset,
             root_log_dir=self.temp_dir,
             is_training=True,
-            name="train",
+            loader_name="train",
             enable_h5_persistence=False,
             compute_hash=False,
         )
 
         self.assertEqual(len(wrapper), len(self.dataset))
-        self.assertEqual(wrapper.name, "train")
+        self.assertEqual(wrapper.loader_name, "train")
         self.assertTrue(wrapper.is_training)
         self.assertIsNotNone(wrapper.unique_ids)
 
@@ -177,7 +176,6 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -249,7 +247,6 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -315,7 +312,6 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -403,7 +399,6 @@ class TestDataSampleTrackingWrapperStateDict(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -451,7 +446,6 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -541,7 +535,6 @@ class TestDataSampleTrackingWrapperDuplicateDetection(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -595,7 +588,6 @@ class TestDataSampleTrackingWrapperEquality(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )
@@ -659,7 +651,6 @@ class TestDataSampleTrackingWrapperAsRecords(unittest.TestCase):
         wl.watch_or_edit(
             parameters,
             flag="hyperparameters",
-            name='TestCheckpointManagerHP',
             defaults=parameters,
             poll_interval=1.0,
         )

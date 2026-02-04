@@ -245,9 +245,9 @@ class _InterProcessFileLock:
                 self._fh = None
 
 
-def normalize_array_to_uint8(arr: np.ndarray, preserve_original: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
+def normalize_array_to_uint16(arr: np.ndarray, preserve_original: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
-    Normalize array to uint8 for efficient storage.
+    Normalize array to uint16 for efficient storage.
 
     Args:
         arr: Input array to normalize
@@ -263,10 +263,10 @@ def normalize_array_to_uint8(arr: np.ndarray, preserve_original: bool = False) -
         'normalized': False
     }
 
-    if preserve_original or arr.dtype == np.uint8:
-        return arr.astype(np.uint8) if arr.dtype != np.uint8 else arr, metadata
+    if preserve_original or arr.dtype == np.uint16 or arr.dtype == np.uint8:
+        return arr, metadata
 
-    # Normalize to uint8 range [0, 255]
+    # Normalize to uint16 range [0, 65535]
     arr_min = arr.min()
     arr_max = arr.max()
 
@@ -276,19 +276,22 @@ def normalize_array_to_uint8(arr: np.ndarray, preserve_original: bool = False) -
 
     if arr_max == arr_min:
         # Constant array
-        return np.full(arr.shape, 128, dtype=np.uint8), metadata
+        return np.full(arr.shape, 32768, dtype=np.uint16), metadata
+    elif arr_min >= 0 and arr_max <= 65535:
+        # Already in uint16 range
+        return arr.astype(np.uint16), metadata
 
-    # Scale to 0-255
-    normalized = ((arr - arr_min) / (arr_max - arr_min) * 255).astype(np.uint8)
+    # Scale to 0-65535
+    normalized = ((arr - arr_min) / (arr_max - arr_min) * 65535).astype(np.uint16)
     return normalized, metadata
 
 
 def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any]) -> np.ndarray:
     """
-    Reconstruct original array from normalized uint8 version using metadata.
+    Reconstruct original array from normalized uint16 version using metadata.
 
     Args:
-        arr: Normalized uint8 array
+        arr: Normalized uint16 array
         metadata: Metadata dict containing normalization parameters
 
     Returns:
@@ -304,8 +307,8 @@ def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any]) -> np.ndarray:
     arr_max = metadata['max']
     original_dtype = np.dtype(metadata['original_dtype'])
 
-    # Scale back from 0-255 to original range
-    denormalized = (arr.astype(np.float32) / 255.0) * (arr_max - arr_min) + arr_min
+    # Scale back from 0-65535 to original range
+    denormalized = (arr.astype(np.float32) / 65535.0) * (arr_max - arr_min) + arr_min
     return denormalized.astype(original_dtype)
 
 
@@ -445,9 +448,9 @@ class H5ArrayStore:
         # Normalize array if requested
         should_normalize = self._auto_normalize and not preserve_original
         if should_normalize:
-            array, metadata = normalize_array_to_uint8(array, preserve_original=False)
+            array, metadata = normalize_array_to_uint16(array, preserve_original=False)
         else:
-            _, metadata = normalize_array_to_uint8(array, preserve_original=True)
+            _, metadata = normalize_array_to_uint16(array, preserve_original=True)
 
         self._ensure_parent()
 
@@ -530,9 +533,9 @@ class H5ArrayStore:
 
                                 should_normalize = self._auto_normalize and not preserve_original
                                 if should_normalize:
-                                    array, metadata = normalize_array_to_uint8(array, preserve_original=False)
+                                    array, metadata = normalize_array_to_uint16(array, preserve_original=False)
                                 else:
-                                    _, metadata = normalize_array_to_uint8(array, preserve_original=True)
+                                    _, metadata = normalize_array_to_uint16(array, preserve_original=True)
 
                                 # Remove existing
                                 if key_name in sample_group:

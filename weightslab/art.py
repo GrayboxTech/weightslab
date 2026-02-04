@@ -1,21 +1,38 @@
 import subprocess
+import os
 
 
 # --- Git Information Retrieval ---
 def get_git_info():
     try:
+        # Find git repository root by traversing up from current file location
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        git_root = current_dir
+
+        # Traverse up to find .git directory
+        for _ in range(10):  # Limit search depth
+            if os.path.isdir(os.path.join(git_root, '.git')):
+                break
+            parent = os.path.dirname(git_root)
+            if parent == git_root:  # Reached filesystem root
+                git_root = None
+                break
+            git_root = parent
+
+        if git_root is None:
+            return None, None, None
+
         # Get current git branch
-        branch = subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd='../').strip().decode('utf-8')
+        branch = subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=git_root, stderr=subprocess.DEVNULL).strip().decode('utf-8')
 
         # Get current git commit hash
-        commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd='../').strip().decode('utf-8')
+        commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=git_root, stderr=subprocess.DEVNULL).strip().decode('utf-8')
 
         # Get version (you can modify this if you want a different versioning scheme)
-        version = subprocess.check_output(['git', 'describe', '--tags', '--always'], cwd='../').strip().decode('utf-8')
+        version = subprocess.check_output(['git', 'describe', '--tags', '--always'], cwd=git_root, stderr=subprocess.DEVNULL).strip().decode('utf-8')
 
         return branch, version, commit_hash
-    except subprocess.CalledProcessError as e:
-        print(f'Git Not Found or not a git repository: {e}')
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None, None, None
 
 

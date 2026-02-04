@@ -64,7 +64,6 @@ class SampleStats:
 
     MODEL_INOUT_LIST = [
         Ex.PREDICTION.value,
-        Ex.TARGET.value,
         Ex.PREDICTION_RAW.value,
     ]
 

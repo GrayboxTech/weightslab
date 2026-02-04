@@ -66,7 +66,7 @@ def _sanitize_for_json(obj):
         json.dumps(obj)
         return obj
     except Exception:
-        return str(obj)
+        return {str(obj): obj}
 
 
 # Globals for the running server
@@ -88,7 +88,7 @@ def _handle_command(cmd: str) -> Any:
     try:
         # Any CLI interaction other than help/? should pause training to
         # avoid race conditions while a user inspects or edits state.
-        if verb in ('help', '?'):
+        if verb in ('help', 'h', '?'):
             # Provide a structured, machine-friendly help payload so the client
             # can pretty-print it and users can discover hyperparam commands.
             return {
@@ -100,17 +100,29 @@ def _handle_command(cmd: str) -> Any:
                     'status': 'Show basic status: registered models and optimizers',
                     'list_models': 'List registered model names in the ledger',
                     'list_optimizers': 'List registered optimizer names in the ledger',
-                                    'dump': 'Return a sanitized dump of the ledger contents',
+                    'list_loaders': 'List registered dataloader names in the ledger',
+                    'list_uids': 'List data sample UIDs. Syntax: list_uids [loader_name] [--discarded] [--limit N]',
+                    'dump': 'Return a sanitized dump of the ledger contents',
                     'operate': 'Edit model architecture. Syntax: operate [<model_name>] <op_type:int> <layer_id:int> <nb|[list]>',
-                            'plot_model': 'Show ASCII tree of model architecture. Syntax: plot_model [<model_name>]',
+                    'plot_model': 'Show ASCII tree of model architecture. Syntax: plot_model [<model_name>]',
+                    'discard': 'Discard data samples. Syntax: discard <uid> [uid2 ...] [--loader loader_name]',
+                    'undiscard': 'Un-discard data samples. Syntax: undiscard <uid> [uid2 ...] [--loader loader_name]',
+                    'add_tag': 'Add tag to data sample. Syntax: add_tag <uid> <tag> [--loader loader_name]',
                     'hp / hyperparams': 'List or show hyperparameters. Syntax: hp -> list, hp <name> -> show',
-                    # editing hyperparameters is disabled in the CLI (read-only)
                     'quit / exit': 'Close the client connection'
                 },
                 'hyperparams_examples': {
                     'list': 'hp',
                     'show': 'hp fashion_mnist',
                     'set': "set_hp <hp_name?> <key.path> <value>  # e.g. set_hp fashion_mnist data.train_loader.batch_size 32",
+                },
+                'data_examples': {
+                    'list all UIDs': 'list_uids',
+                    'list specific loader': 'list_uids train_loader',
+                    'list discarded only': 'list_uids --discarded',
+                    'discard samples': 'discard sample_001 sample_002',
+                    'undiscard samples': 'undiscard sample_001',
+                    'add tag': 'add_tag sample_001 difficult',
                 }
             }
 
@@ -172,16 +184,143 @@ def _handle_command(cmd: str) -> Any:
                 pass
 
             try:
-                # Simplified plot: return only the model's printed representatio
-                return {'ok': True, 'model': model_name, 'plot': repr(m)}
+                # Return pretty-printed model with proper line breaks
+                # Try str() first (which typically has nice formatting), fallback to repr()
+                try:
+                    model_str = str(m)
+                except Exception:
+                    model_str = repr(m)
+
+                # Ensure the string preserves line breaks for console output
+                # Split into lines and rejoin to normalize line endings
+                lines = model_str.split('\n')
+                formatted_plot = '\n'.join(lines)
+
+                return {
+                    'ok': True,
+                    'model_name': model_name or 'default',
+                    'plot': formatted_plot,
+                    'line_count': len(lines)
+                }
             except Exception as e:
                 return {'ok': False, 'error': str(e)}
 
         if verb == 'list_dataloaders':
             return {'ok': True, 'dataloaders': GLOBAL_LEDGER.list_dataloaders()}
 
+        if verb in ('list_loaders', 'loaders'):
+            return {'ok': True, 'loaders': GLOBAL_LEDGER.list_dataloaders()}
+
         if verb == 'list_optimizers':
             return {'ok': True, 'optimizers': GLOBAL_LEDGER.list_optimizers()}
+
+        if verb in ('list_uids', 'uids', 'samples'):
+            # Syntax: list_uids [loader_name] [--discarded] [--limit N]
+            loader_name = None
+            show_discarded_only = False
+            limit = None
+
+            # Parse arguments
+            i = 1
+            while i < len(parts):
+                if parts[i] == '--discarded':
+                    show_discarded_only = True
+                elif parts[i] == '--limit' and i + 1 < len(parts):
+                    try:
+                        limit = int(parts[i + 1])
+                        i += 1
+                    except ValueError:
+                        return {'ok': False, 'error': 'Invalid limit value'}
+                elif not parts[i].startswith('--'):
+                    loader_name = parts[i]
+                i += 1
+
+            try:
+                loaders_to_check = [loader_name] if loader_name else GLOBAL_LEDGER.list_dataloaders()
+
+                result = {'ok': True, 'uids': {}}
+
+                for lname in loaders_to_check:
+                    try:
+                        loader = GLOBAL_LEDGER.get_dataloader(lname)
+                        # Unwrap proxy
+                        if hasattr(loader, 'get') and callable(loader.get):
+                            loader = loader.get()
+
+                        if loader is None:
+                            continue
+
+                        # Try to get dataset from loader
+                        dataset = None
+                        if hasattr(loader, 'dataset'):
+                            dataset = loader.dataset
+
+                        if dataset is None:
+                            continue
+
+                        # Get UIDs and discard status
+                        uids_list = []
+
+                        # Try different methods to get UIDs
+                        if hasattr(dataset, 'get_sample_uids'):
+                            # Method to get all UIDs
+                            all_uids = dataset.get_sample_uids()
+                        elif hasattr(dataset, 'sample_ids'):
+                            all_uids = dataset.sample_ids
+                        elif hasattr(dataset, 'uids'):
+                            all_uids = dataset.uids
+                        elif hasattr(dataset, '__len__'):
+                            # Fallback: generate UIDs from indices
+                            all_uids = [f"sample_{i:06d}" for i in range(len(dataset))]
+                        else:
+                            all_uids = []
+
+                        # Check discard status for each UID
+                        for uid in all_uids:
+                            is_discarded = False
+
+                            # Try to get discard status
+                            if hasattr(dataset, 'is_discarded'):
+                                try:
+                                    is_discarded = dataset.is_discarded(uid)
+                                except Exception:
+                                    pass
+                            elif hasattr(dataset, 'discarded_samples'):
+                                is_discarded = uid in dataset.discarded_samples
+
+                            # Filter based on --discarded flag
+                            if show_discarded_only and not is_discarded:
+                                continue
+
+                            # Get tags if available
+                            tags = []
+                            if hasattr(dataset, 'get_tags'):
+                                try:
+                                    tags = dataset.get_tags(uid)
+                                except Exception:
+                                    pass
+                            elif hasattr(dataset, 'sample_tags') and hasattr(dataset.sample_tags, 'get'):
+                                tags = dataset.sample_tags.get(uid, [])
+
+                            uids_list.append({
+                                'uid': uid,
+                                'discarded': is_discarded,
+                                'tags': tags
+                            })
+
+                            # Apply limit
+                            if limit and len(uids_list) >= limit:
+                                break
+
+                        result['uids'][lname] = uids_list
+
+                    except Exception as e:
+                        result['uids'][lname] = {'error': str(e)}
+
+                return result
+
+            except Exception as e:
+                return {'ok': False, 'error': str(e)}
 
         # Return a lightweight snapshot of all ledger registries
         if verb in ('ledgers', 'ledger', 'snapshot'):
@@ -314,6 +453,156 @@ def _handle_command(cmd: str) -> Any:
 
                     return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': model_name}
 
+        if verb in ('discard', 'undiscard'):
+            # Syntax: discard <uid> [uid2 ...] [--loader loader_name]
+            # Syntax: undiscard <uid> [uid2 ...] [--loader loader_name]
+
+            if len(parts) < 2:
+                return {'ok': False, 'error': f'usage: {verb} <uid> [uid2 ...] [--loader loader_name]'}
+
+            loader_name = None
+            uids = []
+
+            # Parse arguments
+            i = 1
+            while i < len(parts):
+                if parts[i] == '--loader' and i + 1 < len(parts):
+                    loader_name = parts[i + 1]
+                    i += 2
+                else:
+                    uids.append(parts[i])
+                    i += 1
+
+            if not uids:
+                return {'ok': False, 'error': 'No UIDs specified'}
+
+            discard_status = 1 if verb == 'discard' else 0
+
+            try:
+                # Get loader(s)
+                if loader_name:
+                    loaders_to_update = {loader_name: GLOBAL_LEDGER.get_dataloader(loader_name)}
+                else:
+                    # Try all loaders
+                    loader_names = GLOBAL_LEDGER.list_dataloaders()
+                    loaders_to_update = {name: GLOBAL_LEDGER.get_dataloader(name) for name in loader_names}
+
+                results = {'ok': True, 'updated': {}, 'errors': {}}
+
+                for lname, loader in loaders_to_update.items():
+                    # Unwrap proxy
+                    if hasattr(loader, 'get') and callable(loader.get):
+                        loader = loader.get()
+
+                    if loader is None:
+                        continue
+
+                    # Get dataset
+                    dataset = getattr(loader, 'dataset', None) if loader else None
+
+                    if dataset is None:
+                        continue
+
+                    updated_uids = []
+
+                    for uid in uids:
+                        try:
+                            # Try different methods to set discard status
+                            if hasattr(dataset, 'set_discard'):
+                                dataset.set_discard(uid, discard_status)
+                                updated_uids.append(uid)
+                            elif hasattr(dataset, 'discard_sample'):
+                                if discard_status == 1:
+                                    dataset.discard_sample(uid)
+                                else:
+                                    # undiscard
+                                    if hasattr(dataset, 'undiscard_sample'):
+                                        dataset.undiscard_sample(uid)
+                                updated_uids.append(uid)
+                            elif hasattr(dataset, 'discarded_samples'):
+                                # Direct set manipulation
+                                if discard_status == 1:
+                                    dataset.discarded_samples.add(uid)
+                                else:
+                                    dataset.discarded_samples.discard(uid)
+                                updated_uids.append(uid)
+                            else:
+                                results['errors'][uid] = f'No discard method available in {lname}'
+                        except Exception as e:
+                            results['errors'][uid] = str(e)
+
+                    if updated_uids:
+                        results['updated'][lname] = updated_uids
+
+                return results
+
+            except Exception as e:
+                return {'ok': False, 'error': str(e)}
+
+        if verb in ('add_tag', 'tag'):
+            # Syntax: add_tag <uid> <tag> [--loader loader_name]
+
+            if len(parts) < 3:
+                return {'ok': False, 'error': 'usage: add_tag <uid> <tag> [--loader loader_name]'}
+
+            uid = parts[1]
+            tag = parts[2]
+            loader_name = None
+
+            # Parse optional --loader argument
+            if len(parts) >= 5 and parts[3] == '--loader':
+                loader_name = parts[4]
+
+            try:
+                # Get loader(s)
+                if loader_name:
+                    loaders_to_update = {loader_name: GLOBAL_LEDGER.get_dataloader(loader_name)}
+                else:
+                    # Try all loaders
+                    loader_names = GLOBAL_LEDGER.list_dataloaders()
+                    loaders_to_update = {name: GLOBAL_LEDGER.get_dataloader(name) for name in loader_names}
+
+                results = {'ok': True, 'updated': {}, 'errors': {}}
+
+                for lname, loader in loaders_to_update.items():
+                    # Unwrap proxy
+                    if hasattr(loader, 'get') and callable(loader.get):
+                        loader = loader.get()
+
+                    if loader is None:
+                        continue
+
+                    # Get dataset
+                    dataset = getattr(loader, 'dataset', None) if loader else None
+
+                    if dataset is None:
+                        continue
+
+                    try:
+                        # Try different methods to add tags
+                        if hasattr(dataset, 'add_tag'):
+                            dataset.add_tag(uid, tag)
+                            results['updated'][lname] = f'Added tag "{tag}" to {uid}'
+                        elif hasattr(dataset, 'sample_tags'):
+                            # Direct dict manipulation
+                            if uid not in dataset.sample_tags:
+                                dataset.sample_tags[uid] = []
+                            if tag not in dataset.sample_tags[uid]:
+                                dataset.sample_tags[uid].append(tag)
+                            results['updated'][lname] = f'Added tag "{tag}" to {uid}'
+                        else:
+                            results['errors'][lname] = 'No tag method available'
+                    except Exception as e:
+                        results['errors'][lname] = str(e)
+
+                if not results['updated']:
+                    return {'ok': False, 'error': 'Could not add tag to any loader'}
+
+                return results
+
+            except Exception as e:
+                return {'ok': False, 'error': str(e)}
+
         # Hyperparameters: list / show details and set
         if verb in ('hp', 'hyperparams'):
             # hp -> list
@@ -443,7 +732,7 @@ def _server_loop_sock(srv: socket.socket):
             pass
 
 
-def cli_serve(cli_host: str = 'localhost', cli_port: int = 60000, *, spawn_client: bool = True, **_):
+def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: bool = True, **_):
     """
         Start the CLI server and optionally open a client in a new console.
         This CLI now operates on objects registered in the global ledger only.
@@ -472,15 +761,47 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 60000, *, spawn_clien
         return {'ok': False, 'error': 'server_already_running'}
 
     # start server thread on a pre-bound socket to avoid races
-    try:
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((cli_host, cli_port))
-        srv.listen(5)
-        actual_port = srv.getsockname()[1]
-    except Exception as e:
-        logger.exception("cli_bind_failed")
-        return {'ok': False, 'error': f'bind_failed: {e}'}
+    # Try binding to the requested port, and if it fails (port in use),
+    # automatically try up to 10 alternative ports
+    srv = None
+    last_error = None
+    max_attempts = 10
+    
+    for attempt in range(max_attempts):
+        try_port = cli_port + attempt
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # On Windows, try SO_EXCLUSIVEADDRUSE but don't fail if it's not supported
+            if os.name == 'nt':
+                try:
+                    srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                except (OSError, AttributeError):
+                    # SO_EXCLUSIVEADDRUSE not supported or not available on this system
+                    pass
+            srv.bind((cli_host, try_port))
+            srv.listen(5)
+            actual_port = srv.getsockname()[1]
+            if attempt > 0:
+                logger.warning(f"cli_port_changed: Original port {cli_port} unavailable, using port {actual_port}")
+            break
+        except (OSError, PermissionError) as e:
+            last_error = e
+            if srv is not None:
+                try:
+                    srv.close()
+                except Exception:
+                    pass
+                srv = None
+            if attempt < max_attempts - 1:
+                continue  # Try next port
+            else:
+                # All attempts failed
+                logger.exception("cli_bind_failed_all_attempts")
+                return {'ok': False, 'error': f'bind_failed after {max_attempts} attempts. Last error: {e}. Port {cli_port} may be in use or require admin privileges.'}
+    
+    if srv is None:
+        return {'ok': False, 'error': f'bind_failed: {last_error}'}
 
     _server_thread = threading.Thread(
         target=_server_loop_sock,

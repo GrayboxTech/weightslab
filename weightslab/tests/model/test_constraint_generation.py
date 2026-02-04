@@ -23,7 +23,7 @@ from weightslab.backend.model_interface import ModelInterface
 def get_dependencies_onnx(model: nn.Module, dummy_input: torch.Tensor) -> List[Tuple[nn.Module, nn.Module, DepType]]:
     """Extract dependencies using ONNX export"""
     try:
-        m = ModelInterface(model, dummy_input=dummy_input, use_onnx=True)
+        m = ModelInterface(model, dummy_input=dummy_input, use_onnx=True, skip_previous_auto_load=True)
         return m
     except Exception as e:
         raise RuntimeError(f"ONNX dependency extraction failed: {e}")

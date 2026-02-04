@@ -15,7 +15,7 @@ from pathlib import Path
 
 import weightslab as wl
 
-from weightslab.utils.board import Dash as Logger
+from weightslab.utils.logger import LoggerQueue as Logger
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context
@@ -396,12 +396,11 @@ if __name__ == "__main__":
 
     # --- 4) Register logger + hyperparameters ---
     logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
+    wl.watch_or_edit(logger, flag="logger", log_dir=log_dir)
 
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
-        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
@@ -432,7 +431,7 @@ if __name__ == "__main__":
     test_loader = wl.watch_or_edit(
         _test_dataset,
         flag="data",
-        name="test_loader",
+        loader_name="test_loader",
         batch_size=test_cfg.get("batch_size", 2),
         shuffle=test_cfg.get("shuffle", False),
         compute_hash=True,
@@ -443,17 +442,22 @@ if __name__ == "__main__":
     train_criterion = wl.watch_or_edit(
         GIoULoss(reduction=None),
         flag="criterion",
-        name="train_metric/GIoULoss",
+        name="train_criterion/GIoU",
     )
     test_criterion = wl.watch_or_edit(
         GIoULoss(reduction=None),
         flag="criterion",
-        name="test_metric/GIoULoss",
+        name="test_criterion/GIoU",
     )
 
     # --- 6) Model, optimizer, losses, metric ---
     model = Yolov11(img_size=parameters.get("img_size", 128)).to(device)
-
+    model = wl.watch_or_edit(
+        model,
+        flag="model",
+        device=device
+    )
+    
     # --- Compute class weights to handle class imbalance ---
     print("\n" + "=" * 60)
     print("Computing class weights to address class imbalance...")

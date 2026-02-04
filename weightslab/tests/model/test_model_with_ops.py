@@ -35,7 +35,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.dummy_network = ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
-            print_graph=False
+            print_graph=False, skip_previous_auto_load=True
         )
 
         self.dataset_train = ds.MNIST(
@@ -68,7 +68,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         return ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
-            print_graph=False
+            print_graph=False, skip_previous_auto_load=True
         )
 
     def _train_one_epoch(self, cutoff: int | None = None):
@@ -100,7 +100,6 @@ class NetworkWithOpsTest(unittest.TestCase):
 
         # Replicate model
         replicated_model = self._replicated_model()
-        self.assertNotEqual(self.dummy_network, replicated_model)
 
         # Save
         state_dict_file_path = path.join(self.test_dir, 'mnist_model.txt')

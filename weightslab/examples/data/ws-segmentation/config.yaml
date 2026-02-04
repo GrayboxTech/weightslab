@@ -19,8 +19,8 @@ serving_cli: false
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
 ledger_enable_h5_persistence: true
-ledger_flush_max_rows: 250
-ledger_flush_interval: 10.0
+ledger_flush_max_rows: 500
+ledger_flush_interval: 30.0
 
 data:
   train_loader:

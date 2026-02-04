@@ -1,13 +1,17 @@
 import time
-import logging
 import types
+import logging
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import weightslab_rlock
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
+from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name
+from weightslab.backend import ledgers
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 
+
+# Logger
 logger = logging.getLogger(__name__)
 
 
@@ -31,68 +35,66 @@ class ExperimentService:
         return self.data_service.get_root_log_dir()
 
     # -------------------------------------------------------------------------
-    # Training status stream
+    # Logger queue sync for WeightsStudio
     # -------------------------------------------------------------------------
-    def stream_status(self, request_iterator):
-        import queue
-
+    def GetLatestLoggerData(self, request, context):
+        """
+        Returns logger data for WeightsStudio polling.
+        - If request_full_history is True: returns full history (limited by max_points per signal)
+        - If request_full_history is False: returns only new data from the queue since last request
+        """
         self._ctx.ensure_components()
         components = self._ctx.components
-        signal_logger = components.get("signal_logger") if getattr(self._ctx, "_components", None) else None
+        signal_logger = components.get("signal_logger")
+        if signal_logger ==  None:
+            return pb2.GetLatestLoggerDataResponse(points=[])
 
-        while True:
-            try:
-                if signal_logger == None:
-                    # No signal logger available, wait briefly and continue
-                    time.sleep(0.01)
-                    continue
+        points = []
 
-                # Use timeout to avoid blocking indefinitely
-                try:
-                    signal_log = signal_logger.queue.get(timeout=0.5)
-                except queue.Empty:
-                    # No signals available, continue waiting
-                    continue
+        if request.request_full_history:
+            # Return full history
+            max_points = request.max_points or 10000
+            history = signal_logger.get_signal_history()
 
-                if "metric_name" in signal_log and "acc" in signal_log["metric_name"]:
-                    logger.debug(f"[signal_log] {signal_log['metric_name']} = {signal_log['metric_value']:.2f}")
+            # Group by metric_name and limit each
+            signal_groups = {}
+            for s in history:
+                metric_name = s.get("metric_name", "")
+                if metric_name not in signal_groups:
+                    signal_groups[metric_name] = []
+                signal_groups[metric_name].append(s)
 
-                metrics_status, annotat_status = None, None
-                if "metric_name" in signal_log:
-                    metrics_status = pb2.MetricsStatus(
-                        name=signal_log["metric_name"],
-                        value=signal_log["metric_value"],
-                    )
-                elif "annotation" in signal_log:
-                    annotat_status = pb2.AnnotatStatus(name=signal_log["annotation"])
-                    for key, value in signal_log["metadata"].items():
-                        annotat_status.metadata[key] = value
+            # Take last max_points_per_signal for each signal and downsample if needed
+            for metric_name, signal_history in signal_groups.items():
 
-                training_status = pb2.TrainingStatusEx(
-                    timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
-                    experiment_name=signal_log["experiment_name"],
-                    model_age=signal_log["model_age"],
-                )
+                # Downsample if we have more than 1000 points
+                if len(signal_history) > max_points:
+                    # Calculate step to downsample (e.g., if 5000 points, step=5 to get ~1000)
+                    step = max(1, len(signal_history) // max_points)
+                    signal_history = signal_history[::step]
 
-                if metrics_status:
-                    training_status.metrics_status.CopyFrom(metrics_status)
-                if annotat_status:
-                    training_status.annotat_status.CopyFrom(annotat_status)
+                for s in signal_history:
+                    points.append(pb2.LoggerDataPoint(
+                        metric_name=metric_name,
+                        model_age=s.get("model_age", 0),
+                        metric_value=s.get("metric_value", 0.0),
+                        experiment_hash=s.get("experiment_hash", ""),
+                        timestamp=int(s.get("timestamp", time.time())),
+                    ))
+        else:
+            # Return only queue (new data since last poll)
+            queue_data = signal_logger.get_and_clear_queue()
+            for s in queue_data:
+                points.append(pb2.LoggerDataPoint(
+                    metric_name=s.get("metric_name", ""),
+                    model_age=s.get("model_age", 0),
+                    metric_value=s.get("metric_value", 0.0),
+                    experiment_hash=s.get("experiment_hash", ""),
+                    timestamp=int(s.get("timestamp", time.time())),
+                ))
 
-                # mark task done on ledger logger queue
-                try:
-                    signal_logger.queue.task_done()
-                except Exception:
-                    pass
+        return pb2.GetLatestLoggerDataResponse(points=points)
 
-                yield training_status
-
-            except GeneratorExit:
-                # Client disconnected, exit gracefully
-                logger.debug("Stream status client disconnected")
-                break
-
-    # -------------------------------------------------------------------------
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
     def ExperimentCommand(self, request, context):
@@ -103,7 +105,6 @@ class ExperimentService:
         if request.HasField("hyper_parameter_change"):
             with weightslab_rlock:
                 hyper_parameters = request.hyper_parameter_change.hyper_parameters
-                from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name
                 hp_name = None
                 if self._ctx.exp_name:
                     hp_name = self._ctx.exp_name
@@ -119,38 +120,50 @@ class ExperimentService:
                 try:
                     if hyper_parameters.HasField("training_steps_to_do"):
                         set_hyperparam(
-                            hp_name,
-                            "training_steps_to_do",
-                            hyper_parameters.training_steps_to_do,
+                            name=hp_name,
+                            key_path="training_steps_to_do",
+                            value=hyper_parameters.training_steps_to_do
                         )
 
                     if hyper_parameters.HasField("learning_rate"):
-                        set_hyperparam(hp_name, "optimizer.lr", hyper_parameters.learning_rate)
-
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="optimizer.lr",
+                            value=hyper_parameters.learning_rate
+                        )
                     if hyper_parameters.HasField("batch_size"):
                         set_hyperparam(
-                            hp_name,
-                            "data.train_loader.batch_size",
-                            hyper_parameters.batch_size,
+                            name=hp_name,
+                            key_path="data.train_loader.batch_size",
+                            value=hyper_parameters.batch_size
                         )
 
                     if hyper_parameters.HasField("full_eval_frequency"):
                         set_hyperparam(
-                            hp_name,
-                            "eval_full_to_train_steps_ratio",
-                            hyper_parameters.full_eval_frequency,
+                            name=hp_name,
+                            key_path="eval_full_to_train_steps_ratio",
+                            value=hyper_parameters.full_eval_frequency
                         )
 
                     if hyper_parameters.HasField("checkpont_frequency"):
                         set_hyperparam(
-                            hp_name,
-                            "experiment_dump_to_train_steps_ratio",
-                            hyper_parameters.checkpont_frequency,
+                            name=hp_name,
+                            key_path="experiment_dump_to_train_steps_ratio",
+                            value=hyper_parameters.checkpont_frequency
                         )
 
                     if hyper_parameters.HasField("is_training"):
-                        set_hyperparam(hp_name, "is_training", hyper_parameters.is_training)
-
+                        trainer = components.get("trainer")
+                        if trainer is not None:
+                            if hyper_parameters.is_training:
+                                trainer.resume()
+                            else:
+                                trainer.pause()
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="is_training",
+                            value=hyper_parameters.is_training
+                        )
                 except Exception as e:
                     return pb2.CommandResponse(
                         success=False,
@@ -162,6 +175,17 @@ class ExperimentService:
         if request.HasField("deny_samples_operation"):
             with weightslab_rlock:
                 from weightslab.backend.ledgers import get_dataloaders
+
+                # Pause training if it's currently running
+                trainer = components.get("trainer")
+                hp = components.get("hyperparams")
+                if trainer:
+                    logger.info("Pausing training before restore...")
+                    trainer.pause()
+                    if "is_training" in hp:
+                        hp['is_training'] = False
+                    else:
+                        hp["is_training"] = False
 
                 denied_cnt = len(request.deny_samples_operation.sample_ids)
                 origin = request.deny_samples_operation.origin if hasattr(request.deny_samples_operation, 'origin') else 'train'
@@ -198,6 +222,17 @@ class ExperimentService:
             with weightslab_rlock:
                 from weightslab.backend.ledgers import get_dataloaders
 
+                # Pause training if it's currently running
+                trainer = components.get("trainer")
+                hp = components.get("hyperparams")
+                if trainer:
+                    logger.info("Pausing training before restore...")
+                    trainer.pause()
+                    if "is_training" in hp:
+                        hp['is_training'] = False
+                    else:
+                        hp["is_training"] = False
+
                 denied_cnt = len(request.deny_eval_samples_operation.sample_ids)
                 origin = request.deny_eval_samples_operation.origin if hasattr(request.deny_eval_samples_operation, 'origin') else 'eval'
 
@@ -233,6 +268,17 @@ class ExperimentService:
             with weightslab_rlock:
                 from weightslab.backend.ledgers import get_dataloaders
 
+                # Pause training if it's currently running
+                trainer = components.get("trainer")
+                hp = components.get("hyperparams")
+                if trainer:
+                    logger.info("Pausing training before restore...")
+                    trainer.pause()
+                    if "is_training" in hp:
+                        hp['is_training'] = False
+                    else:
+                        hp["is_training"] = False
+
                 allowed = set(request.remove_from_denylist_operation.sample_ids)
                 origin = request.remove_from_denylist_operation.origin if hasattr(request.remove_from_denylist_operation, 'origin') else 'train'
 
@@ -265,6 +311,17 @@ class ExperimentService:
             with weightslab_rlock:
                 from weightslab.backend.ledgers import get_dataloaders
 
+                # Pause training if it's currently running
+                trainer = components.get("trainer")
+                hp = components.get("hyperparams")
+                if trainer:
+                    logger.info("Pausing training before restore...")
+                    trainer.pause()
+                    if "is_training" in hp:
+                        hp['is_training'] = False
+                    else:
+                        hp["is_training"] = False
+
                 allowed = set(request.remove_eval_from_denylist_operation.sample_ids)
                 origin = request.remove_eval_from_denylist_operation.origin if hasattr(request.remove_eval_from_denylist_operation, 'origin') else 'eval'
 
@@ -295,6 +352,18 @@ class ExperimentService:
 
         if request.HasField("load_checkpoint_operation"):
             with weightslab_rlock:
+
+                # Pause training if it's currently running
+                trainer = components.get("trainer")
+                hp = components.get("hyperparams")
+                if trainer:
+                    logger.info("Pausing training before restore...")
+                    trainer.pause()
+                    if "is_training" in hp:
+                        hp['is_training'] = False
+                    else:
+                        hp["is_training"] = False
+
                 checkpoint_id = request.load_checkpoint_operation.checkpoint_id
                 model = components.get("model")
                 if model is None:
@@ -373,3 +442,61 @@ class ExperimentService:
                 response.sample_statistics.origin = request.get_data_records
 
         return response
+
+    def RestoreCheckpoint(self, request, context):
+        """
+        Restore a checkpoint from a given experiment hash.
+        - Pauses training if not already paused
+        - Calls checkpoint manager to load the state
+        - Returns success flag and message
+        """
+        try:
+            experiment_hash = request.experiment_hash
+            logger.info(f"Restoring checkpoint from hash: {experiment_hash}")
+
+            self._ctx.ensure_components()
+            components = self._ctx.components
+
+            # Pause training if it's currently running
+            trainer = components.get("trainer")
+            hp = components.get("hyperparams")
+            if trainer:
+                logger.info("Pausing training before restore...")
+                trainer.pause()
+                if "is_training" in hp:
+                    hp['is_training'] = False
+                else:
+                    hp["is_training"] = False
+
+            # Get checkpoint manager and load state
+            checkpoint_manager = components.get("checkpoint_manager")
+            if checkpoint_manager == None:
+                checkpoint_manager = ledgers.get_checkpoint_manager()
+                if checkpoint_manager == None:
+                    return pb2.RestoreCheckpointResponse(
+                        success=False,
+                        message="Checkpoint manager not initialized"
+                    )
+
+            # Load checkpoint by hash
+            success = checkpoint_manager.load_state(experiment_hash)
+
+            # Reply
+            if success:
+                logger.info(f"Successfully restored checkpoint: {experiment_hash}")
+                return pb2.RestoreCheckpointResponse(
+                    success=True,
+                    message=f"Checkpoint {experiment_hash} restored successfully"
+                )
+            else:
+                logger.warning(f"Failed to restore checkpoint: {experiment_hash}")
+                return pb2.RestoreCheckpointResponse(
+                    success=False,
+                    message=f"Failed to restore checkpoint {experiment_hash}"
+                )
+        except Exception as e:
+            logger.error(f"Error during checkpoint restore: {str(e)}")
+            return pb2.RestoreCheckpointResponse(
+                success=False,
+                message=f"Error: {str(e)}"
+            )
