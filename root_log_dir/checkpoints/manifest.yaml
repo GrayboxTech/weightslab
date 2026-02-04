@@ -1,0 +1,67 @@
+experiments:
+  44136fa30000000000000000:
+    hp_hash: 44136fa3
+    model_hash: '00000000'
+    data_hash: '00000000'
+    created: '2026-02-03T17:49:42.264843'
+    last_used: '2026-02-03T17:49:42.264843'
+    latest_weight_checkpoint: null
+    latest_weight_step: null
+  5bd5b757d5aa3479718fde31:
+    hp_hash: 5bd5b757
+    model_hash: d5aa3479
+    data_hash: 718fde31
+    created: '2026-02-03T17:50:01.274910'
+    last_used: '2026-02-03T17:50:03.748615'
+    latest_weight_checkpoint: 5bd5b757d5aa3479718fde31_step_000005.pt
+    latest_weight_step: 5
+  5bd5b757fdbf12f7718fde31:
+    hp_hash: 5bd5b757
+    model_hash: fdbf12f7
+    data_hash: 718fde31
+    created: '2026-02-03T17:50:01.813016'
+    last_used: '2026-02-03T17:50:02.016033'
+    latest_weight_checkpoint: 5bd5b757fdbf12f7718fde31_step_000001.pt
+    latest_weight_step: 1
+  400fc234fdbf12f7718fde31:
+    hp_hash: 400fc234
+    model_hash: fdbf12f7
+    data_hash: 718fde31
+    created: '2026-02-03T17:50:02.334409'
+    last_used: '2026-02-03T17:50:02.379923'
+    latest_weight_checkpoint: 400fc234fdbf12f7718fde31_step_000002.pt
+    latest_weight_step: 2
+  400fc234fdbf12f747d9891c:
+    hp_hash: 400fc234
+    model_hash: fdbf12f7
+    data_hash: 47d9891c
+    created: '2026-02-03T17:50:02.659635'
+    last_used: '2026-02-03T17:50:02.724228'
+    latest_weight_checkpoint: 400fc234fdbf12f747d9891c_step_000003.pt
+    latest_weight_step: 3
+  ea4d348bd5aa3479a37a6ca6:
+    hp_hash: ea4d348b
+    model_hash: d5aa3479
+    data_hash: a37a6ca6
+    created: '2026-02-03T17:50:03.080847'
+    last_used: '2026-02-03T17:50:03.137161'
+    latest_weight_checkpoint: ea4d348bd5aa3479a37a6ca6_step_000004.pt
+    latest_weight_step: 4
+  5bd5b757a0af0484718fde31:
+    hp_hash: 5bd5b757
+    model_hash: a0af0484
+    data_hash: 718fde31
+    created: '2026-02-03T17:50:04.129024'
+    last_used: '2026-02-03T17:50:04.298204'
+    latest_weight_checkpoint: 5bd5b757a0af0484718fde31_step_000006.pt
+    latest_weight_step: 6
+  5bd5b757a0af048425b3e9c1:
+    hp_hash: 5bd5b757
+    model_hash: a0af0484
+    data_hash: 25b3e9c1
+    created: '2026-02-03T17:50:04.714142'
+    last_used: '2026-02-03T17:50:04.764657'
+    latest_weight_checkpoint: 5bd5b757a0af048425b3e9c1_step_000007.pt
+    latest_weight_step: 7
+latest_hash: 5bd5b757a0af048425b3e9c1
+last_updated: '2026-02-03T17:50:04.714142'

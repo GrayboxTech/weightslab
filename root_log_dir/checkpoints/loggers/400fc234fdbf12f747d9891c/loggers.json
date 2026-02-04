@@ -1,0 +1,469 @@
+{
+  "exp_hash": "400fc234fdbf12f747d9891c",
+  "timestamp": "2026-02-03T17:50:02.736541",
+  "loggers": {
+    "main": {
+      "signal_history": [
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 0,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.699744462966919,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 0,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.2693166732788086,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 1,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7254446148872375,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 1,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.353433132171631,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 2,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7329238653182983,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 2,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.3958542346954346,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 3,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7281529307365417,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 3,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.2906203269958496,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 4,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7093912363052368,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 4,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.187746286392212,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 5,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.699744462966919,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 5,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.2693166732788086,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 6,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7254446148872375,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 6,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.353433132171631,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 7,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7329238653182983,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 7,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.3958542346954346,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 8,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7281529307365417,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 8,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.2906203269958496,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 9,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7093912363052368,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 9,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.187746286392212,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 10,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.699744462966919,
+          "experiment_hash": "5bd5b757d5aa3479718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 10,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.2693166732788086,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 11,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7254446148872375,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 11,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.267529010772705,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 12,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7233800292015076,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 12,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.1754066944122314,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 13,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7052662372589111,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 13,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.3861136436462402,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 14,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.692976713180542,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 14,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.3579750061035156,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 15,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6858080625534058,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 15,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.406407356262207,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 16,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7093955874443054,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 16,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.8017044067382812,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 17,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7111631035804749,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 17,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.8183939456939697,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 18,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.7201237082481384,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 18,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.1234793663024902,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 19,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.704407274723053,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 19,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.210566997528076,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 20,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6659228801727295,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 20,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.332705020904541,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 21,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6920125484466553,
+          "experiment_hash": "5bd5b757fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 21,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.5076446533203125,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 22,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6844966411590576,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 22,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.4725667238235474,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 23,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6982375383377075,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 23,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.9045435190200806,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 24,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6865986585617065,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 24,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.0882716178894043,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 25,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6316791772842407,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 25,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.294283151626587,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 26,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6502008438110352,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 26,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.1397576332092285,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 27,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6486526727676392,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 27,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.1025201082229614,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 28,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6631518602371216,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 28,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.6433279514312744,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 29,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6454685926437378,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 29,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 1.9632266759872437,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 30,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.586758017539978,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 30,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 2.2507948875427246,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 31,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.5961731672286987,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_mlt_loss/CE",
+          "model_age": 31,
+          "metric_name": "train_mlt_loss/CE",
+          "metric_value": 0.8287394046783447,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        },
+        {
+          "experiment_name": "train_bin_loss/BCE",
+          "model_age": 32,
+          "metric_name": "train_bin_loss/BCE",
+          "metric_value": 0.6113629341125488,
+          "experiment_hash": "400fc234fdbf12f7718fde31"
+        }
+      ],
+      "graph_names": [
+        "train_bin_loss/BCE",
+        "train_mlt_loss/CE"
+      ]
+    }
+  }
+}

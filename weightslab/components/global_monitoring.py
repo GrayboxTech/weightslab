@@ -79,6 +79,8 @@ class PauseController:
             self.checkpoint_manager.update_experiment_hash(firsttime=True)
             self.checkpoint_manager.dump_pending_changes()
             hash_by_module = self.checkpoint_manager.hash_by_module
+        else:
+            logger.warning('Cannot access checkpoint manager on resume.')
 
         # Then resume execution
         if self.checkpoint_manager == None or self._is_hash_computed():

@@ -152,24 +152,20 @@ jobs:
 
       - name: Run unit tests - General
         run: |
-          export WEIGHTSLAB_TORCH_VARIANT="cpu"
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m unittest discover -s ./weightslab/tests -p "test_*.py" -t . -v
 
-      - name: Run unit tests - Model
-        run: |
-          export WEIGHTSLAB_TORCH_VARIANT="cpu"
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/model -v
+      # - name: Run unit tests - Model
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/model -v
 
-      - name: Run unit tests - Data
-        run: |
-          export WEIGHTSLAB_TORCH_VARIANT="cpu"
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/data -v
+      # - name: Run unit tests - Data
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/data -v
 
-      - name: Run unit tests - Integrations
-        run: |
-          export WEIGHTSLAB_TORCH_VARIANT="cpu"
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/integrations -v
+      # - name: Run unit tests - Integrations
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/integrations -v

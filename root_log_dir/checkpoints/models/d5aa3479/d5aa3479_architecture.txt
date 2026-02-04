@@ -1,0 +1,24 @@
+ModelInterface(
+  (conv1): ID=0 | CustomConvWithNeuronOps(
+    1, 8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+    (train_dataset_tracker): TriggersTracker[#8]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+    (eval_dataset_tracker): TriggersTracker[#8]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+  )
+  (pool1): ID=1 | MaxPool2dWithNeuronOps(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
+  (conv2): ID=2 | CustomConvWithNeuronOps(
+    8, 16, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)
+    (train_dataset_tracker): TriggersTracker[#16]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+    (eval_dataset_tracker): TriggersTracker[#16]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+  )
+  (pool2): ID=3 | MaxPool2dWithNeuronOps(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
+  (fc1): ID=4 | LinearWithNeuronOps(
+    in_features=784, out_features=64, bias=True
+    (train_dataset_tracker): TriggersTracker[#64]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+    (eval_dataset_tracker): TriggersTracker[#64]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+  )
+  (fc2): ID=5 | LinearWithNeuronOps(
+    in_features=64, out_features=10, bias=True
+    (train_dataset_tracker): TriggersTracker[#10]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+    (eval_dataset_tracker): TriggersTracker[#10]: [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')] & [tensor([0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')]
+  )
+)
