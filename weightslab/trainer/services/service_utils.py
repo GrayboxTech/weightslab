@@ -4,7 +4,7 @@ import numpy as np
 
 from PIL import Image
 
-from .lidar_utils import render_lidar, load_point_cloud_data
+from .lidar_utils import render_lidar, load_point_cloud_data, render_bev_mask
 
 # Init global logger
 logger = logging.getLogger(__name__)
@@ -135,9 +135,50 @@ def load_label(dataset, sample_id):
             else:
                 label = _to_numpy_safe(data[2])  # Second element is typically the label
         else:
-            label = _to_numpy_safe(data[1])  # Second element is typically the label
+            raw_label = data[1]
+            if isinstance(raw_label, dict):
+                # Check for Lidar Config to render BEV mask
+                lidar_config = getattr(wrapped, "viz_config", getattr(dataset, "viz_config", {}))
+
+                # If we have lidar config and boxes, render them as a mask for the UI
+                if lidar_config and 'boxes' in raw_label:
+                    boxes = _to_numpy_safe(raw_label['boxes'])
+                    labels = _to_numpy_safe(raw_label['labels'])
+
+                    # Convert to list-of-dicts format for render_bev_mask
+                    # We map class IDs to typical Kitti strings or generic names
+                    id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
+
+                    fmt_labels = []
+                    if boxes is not None and labels is not None:
+                        for i in range(len(boxes)):
+                            c_id = int(labels[i])
+                            cls_name = id_to_cls.get(c_id, "Car")
+                            fmt_labels.append({
+                                'cls': cls_name,
+                                'box': boxes[i]
+                            })
+
+                    # Get config params
+                    bev_conf = lidar_config.get("bev", {})
+                    return render_bev_mask(
+                        fmt_labels,
+                        res=bev_conf.get("resolution", 0.1),
+                        size=bev_conf.get("image_size", 800),
+                        cx=bev_conf.get("center_x", 400),
+                        cy=bev_conf.get("center_y", 400)
+                    )
+                return raw_label
+            label = _to_numpy_safe(raw_label)  # Second element is typically the label
         label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
-        return label[0] if label.ndim == 1 else label
+        
+        if label is None:
+            return None
+            
+        # Check if it has ndim before accessing
+        if hasattr(label, 'ndim'):
+            return label[0] if label.ndim == 1 else label
+        return label
 
     if hasattr(wrapped, "targets"):
         label = wrapped.targets[index]

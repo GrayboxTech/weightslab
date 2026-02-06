@@ -148,7 +148,8 @@ def mask_to_png_bytes(mask, num_classes=21):
     if mask.ndim != 2:
         raise ValueError(f"Expected mask 2D, got shape {mask.shape}")
 
-    mask = (mask.astype(np.float32) * (255.0 / (num_classes - 1))).astype(np.uint8)
+    # mask = (mask.astype(np.float32) * (255.0 / (num_classes - 1))).astype(np.uint8)
+    mask = mask.astype(np.uint8)
 
     im = Image.fromarray(mask)
     buf = io.BytesIO()

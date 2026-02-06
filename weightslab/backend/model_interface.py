@@ -459,6 +459,7 @@ class ModelInterface(NetworkWithOps):
         """
 
         # Monkey patch every nn.Module of the model
+        # MPS FIX: Re-enabling for attributes; relying on patcher to SKIP forward wrap.
         self.model.apply(monkey_patch_modules)
 
     def shape_propagation(self):
@@ -566,7 +567,7 @@ class ModelInterface(NetworkWithOps):
         # Register the dependencies
         self.register_dependencies(self.mapped_dependencies_with_ops)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, *args, **kwargs) -> th.Tensor:
         """
         Performs a forward pass through the wrapped model, optionally updating its age.
 
@@ -576,18 +577,27 @@ class ModelInterface(NetworkWithOps):
         provided input tensor `x`.
 
         Args:
-            x (th.Tensor): The input tensor to the model.
+            *args: Variable length argument list.
+            **kwargs: Arbitrary keyword arguments.
 
         Returns:
             th.Tensor: The output tensor from the model's forward pass.
         """
+        
+        # Try to identify the primary input tensor 'x' for tracking purposes
+        x = args[0] if args else None
 
-        # Check device
-        if x.device != self.device:
-            x = x.to(self.device)
+        # Check device if x is a tensor
+        if x is not None and isinstance(x, th.Tensor) and x.device != self.device:
+            # We cannot easily move *args[0] in place for the model call if it's a tuple
+            # So we assume the user handles device placement or the model handles it via hooks
+            # But for `maybe_update_age`, we just use x
+            pass
 
-        self.maybe_update_age(x)
-        out = self.model(x)
+        if x is not None and isinstance(x, th.Tensor):
+            self.maybe_update_age(x)
+            
+        out = self.model(*args, **kwargs)
 
         return out
 

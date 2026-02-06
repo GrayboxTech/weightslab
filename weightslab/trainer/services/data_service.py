@@ -24,6 +24,26 @@ from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image, load_label
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe
+from weightslab.trainer.services.lidar_utils import render_bev_mask
+import torch as th
+
+def _to_numpy_safe(x):
+    if isinstance(x, (int, float)):
+        return np.array([x])
+    if isinstance(x, np.ndarray):
+        return x
+    if isinstance(x, (list, tuple)):
+        try:
+            return np.asarray(x)
+        except Exception:
+            return None
+    try:
+        # Check for torch tensor
+        if hasattr(x, 'detach'):
+             return x.detach().cpu().numpy()
+    except Exception:
+        pass
+    return None
 
 
 # Get global logger
@@ -323,9 +343,31 @@ class DataService:
             dataset = self._get_dataset(origin)
 
             # ====== Step 2: Determine task type ======
+            # ====== Step 2: Determine task type ======
             label = row.get(SampleStatsEx.TARGET.value)
-            if (label is None or (isinstance(label, list) and label == [])) and dataset:
-                label = load_label(dataset, sample_id)
+            
+            # Force reload label if dataset has viz_config (fixes issue where H5 has stringified dict)
+            force_reload = False
+            if dataset:
+                curr_ds = dataset
+                # Unwrap to find config
+                while True:
+                    if hasattr(curr_ds, "viz_config"):
+                        force_reload = True
+                        break
+                    if hasattr(curr_ds, "dataset"):
+                        curr_ds = curr_ds.dataset
+                    elif hasattr(curr_ds, "wrapped_dataset"):
+                        curr_ds = curr_ds.wrapped_dataset
+                    else:
+                        break
+            
+            if (label is None or (isinstance(label, list) and label == []) or force_reload) and dataset:
+                try:
+                    label = load_label(dataset, sample_id)
+                except Exception as e:
+                    logger.warning(f"Failed to load label for sample {sample_id}: {e}")
+                    label = None
 
             # Scalar / single element -> treat as classification
             label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
@@ -428,53 +470,153 @@ class DataService:
 
             elif label is not None:
                 # Classification / other scalar-like labels
-                # Check if label is NaN (handle both scalars and arrays)
-                if self._is_nan_value(label):
-                    pass  # Skip NaN labels
-
-                # Handle scalar labels
-                try:
-                    data_stats.append(
-                        create_data_stat(
-                            name='label',
-                            stat_type='scalar',
-                            shape=[1],
-                            value=[float(label)],
-                            thumbnail=b""
+                
+                # Handle dictionary labels (e.g. detection targets)
+                if isinstance(label, dict):
+                    # Check for Lidar Config to render BEV mask
+                    # Need to unwrap dataset to find config
+                    curr_ds = dataset
+                    lidar_config = {}
+                    while True:
+                         if hasattr(curr_ds, "viz_config"):
+                             lidar_config = curr_ds.viz_config
+                             break
+                         if hasattr(curr_ds, "dataset"):
+                             curr_ds = curr_ds.dataset
+                         elif hasattr(curr_ds, "wrapped_dataset"):
+                             curr_ds = curr_ds.wrapped_dataset
+                         else:
+                             break
+                    
+                    if lidar_config and 'boxes' in label:
+                        logger.info(f"[DataService] Rendering BEV mask. Boxes: {len(label['boxes'])}")
+                        boxes = _to_numpy_safe(label['boxes'])
+                        labels_ = _to_numpy_safe(label['labels'])
+                        
+                        id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
+                        fmt_labels = []
+                        if boxes is not None and labels_ is not None:
+                            for i in range(len(boxes)):
+                                c_id = int(labels_[i])
+                                cls_name = id_to_cls.get(c_id, "Car")
+                                fmt_labels.append({
+                                    'cls': cls_name,
+                                    'box': boxes[i]
+                                })
+                        
+                        bev_conf = lidar_config.get("bev", {})
+                        mask = render_bev_mask(
+                            fmt_labels,
+                            res=bev_conf.get("resolution", 0.1),
+                            size=bev_conf.get("image_size", 800),
+                            cx=bev_conf.get("center_x", 400),
+                            cy=bev_conf.get("center_y", 400)
                         )
-                    )
-                except (ValueError, TypeError):
-                    # Fallback for non-scalar labels in non-segmentation tasks
-                    try:
-                        label_arr = np.asanyarray(label)
                         data_stats.append(
                             create_data_stat(
-                                name='label',
+                                name='label_mask', # Use label_mask convention for segmentation overlay
                                 stat_type='array',
-                                shape=list(label_arr.shape),
-                                value=label_arr.astype(float).ravel().tolist(),
+                                shape=list(mask.shape),
+                                value=mask.astype(float).ravel().tolist(),
                                 thumbnail=b""
                             )
                         )
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"Could not convert label to array: {label}, error: {e}")
+                    else:
+                        data_stats.append(
+                            create_data_stat(
+                                name='label',
+                                stat_type='string',
+                                shape=[1],
+                                value_string=str(label), # Simplified visualization
+                                thumbnail=b""
+                            )
+                        )
+                else:
+                    # Check if label is NaN (handle both scalars and arrays)
+                    if self._is_nan_value(label):
+                        pass  # Skip NaN labels
+
+                    # Handle scalar labels
+                    try:
+                        data_stats.append(
+                            create_data_stat(
+                                name='label',
+                                stat_type='scalar',
+                                shape=[1],
+                                value=[float(label)],
+                                thumbnail=b""
+                            )
+                        )
+                    except (ValueError, TypeError):
+                        # Fallback for non-scalar labels in non-segmentation tasks
+                        try:
+                            label_arr = np.asanyarray(label)
+                            data_stats.append(
+                                create_data_stat(
+                                    name='label',
+                                    stat_type='array',
+                                    shape=list(label_arr.shape),
+                                    value=label_arr.astype(float).ravel().tolist(),
+                                    thumbnail=b""
+                                )
+                            )
+                        except (ValueError, TypeError) as e:
+                            # Use logger.debug to avoid spamming console
+                            logger.debug(f"Could not convert label to array: {label}, error: {e}")
 
             # ====== Step 8: Process predictions ======
             pred = row.get(SampleStatsEx.PREDICTION.value)
             if task_type != "classification":
-                if pred is not None:
-                    pred_arr = np.asarray(pred)
-
-                    # Add predicted mask stat
-                    data_stats.append(
-                        create_data_stat(
-                            name='pred_mask',
-                            stat_type='array',
-                            shape=list(pred_arr.shape),
-                            value=pred_arr.astype(float).ravel().tolist(),
-                            thumbnail=b""
+                # Handle Dict Prediction (Detection -> BEV Mask)
+                if isinstance(pred, dict) and lidar_config and 'boxes' in pred:
+                     # Render Prediction Mask similar to Ground Truth
+                     boxes = _to_numpy_safe(pred['boxes'])
+                     labels_ = _to_numpy_safe(pred['labels'])
+                     
+                     # Map IDs
+                     id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
+                     fmt_labels = []
+                     if boxes is not None and labels_ is not None:
+                         for i in range(len(boxes)):
+                             c_id = int(labels_[i])
+                             cls_name = id_to_cls.get(c_id, "Car")
+                             fmt_labels.append({
+                                 'cls': cls_name,
+                                 'box': boxes[i]
+                             })
+                             
+                     bev_conf = lidar_config.get("bev", {})
+                     mask = render_bev_mask(
+                         fmt_labels,
+                         res=bev_conf.get("resolution", 0.1),
+                         size=bev_conf.get("image_size", 800),
+                         cx=bev_conf.get("center_x", 400),
+                         cy=bev_conf.get("center_y", 400)
+                     )
+                     data_stats.append(
+                         create_data_stat(
+                             name='pred_mask',
+                             stat_type='array',
+                             shape=list(mask.shape),
+                             value=mask.astype(float).ravel().tolist(),
+                             thumbnail=b""
+                         )
+                     )
+                elif pred is not None:
+                    try:
+                        pred_arr = np.asarray(pred)
+                        # Add predicted mask stat
+                        data_stats.append(
+                            create_data_stat(
+                                name='pred_mask',
+                                stat_type='array',
+                                shape=list(pred_arr.shape),
+                                value=pred_arr.astype(float).ravel().tolist(),
+                                thumbnail=b""
+                            )
                         )
-                    )
+                    except Exception:
+                         pass
             else:
                 # Classification: get prediction from row or dataset
                 if pred is None:

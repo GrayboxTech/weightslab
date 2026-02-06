@@ -209,8 +209,11 @@ def render_bev(points, res=0.1, size=800, cx=400, cy=400, max_dist=50.0, cmap_na
             # Project to pixels
             poly_pts = []
             for cp in corners:
-                cu = int(cx + cp[0] / res)
-                cv = int(cy - cp[1] / res)
+                # FIX: Match point projection (y->u, x->v)
+                # u = cx - y / res
+                # v = cy - x / res
+                cu = int(cx - cp[1] / res)
+                cv = int(cy - cp[0] / res)
                 poly_pts.append((cu, cv))
             
             # Color based on class?
@@ -220,19 +223,20 @@ def render_bev(points, res=0.1, size=800, cx=400, cy=400, max_dist=50.0, cmap_na
             elif cls == "Cyclist": color = "yellow"
             
             # Draw Polygon
-            draw.polygon(poly_pts, outline=color, width=3) # Increased width from default 1 to 3
+            draw.polygon(poly_pts, outline=color, width=3) 
             
             # Draw Heading Line (Front of box)
-            # Front is traditionally +X in Kitti Label/Box convention here
-            # Corners are: FR, FL, BL, BR?
-            # get_corners_bev: [dx, dy] is Front-Left? No.
-            # 0: [dx, dy], 1: [-dx, dy]...
-            # dx is forward (l/2).
-            # So 0-3 is front face? No. 0 is (+,+). 3 is (+,-)
-            # Midpoint of 0 and 3
-            front_u = (poly_pts[0][0] + poly_pts[3][0]) / 2
-            front_v = (poly_pts[0][1] + poly_pts[3][1]) / 2
-            draw.line([poly_pts[0], poly_pts[3]], fill="white", width=3) # Increased heading line width too
+            # Box local x is forward/front.
+            # get_corners_bev returns corners in order:
+            # 0: (+dx, +dy) -> Front-Left
+            # 1: (-dx, +dy) -> Back-Left
+            # 2: (-dx, -dy) -> Back-Right
+            # 3: (+dx, -dy) -> Front-Right
+            # So Front face is between 0 and 3.
+            # Note: We just replicate the polygon order from corners_global iteration.
+            # corners_global comes from (R @ corners_local.T).T + center
+            # So order is preserved: 0, 1, 2, 3.
+            draw.line([poly_pts[0], poly_pts[3]], fill="white", width=3)
             
     return img
 

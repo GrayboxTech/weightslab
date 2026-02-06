@@ -1250,14 +1250,20 @@ def generate_index_maps(
 
         # 1.1. Determine the number of neurons in each direction
         # # Src - First will always be is not None and int
-        src_nb_neurons = src_mod.get_neurons(attr_name='out_neurons') if \
-            not hasattr(src_mod, 'wl_transposed') \
-            else src_mod.get_neurons(attr_name='in_neurons')
+        if hasattr(src_mod, 'get_neurons'):
+            src_nb_neurons = src_mod.get_neurons(attr_name='out_neurons') if \
+                not hasattr(src_mod, 'wl_transposed') \
+                else src_mod.get_neurons(attr_name='in_neurons')
+        else:
+            src_nb_neurons = None
 
         # # Sanity check on dst
-        dst_nb_neurons = dst_mod.get_neurons(attr_name='in_neurons') if not recursive_dep \
-            and not hasattr(dst_mod, 'wl_transposed') \
-            else dst_mod.get_neurons(attr_name='out_neurons')
+        if hasattr(dst_mod, 'get_neurons'):
+            dst_nb_neurons = dst_mod.get_neurons(attr_name='in_neurons') if not recursive_dep \
+                and not hasattr(dst_mod, 'wl_transposed') \
+                else dst_mod.get_neurons(attr_name='out_neurons')
+        else:
+            dst_nb_neurons = None
         if dst_nb_neurons is None and src_nb_neurons is not None:
             dst_nb_neurons = src_nb_neurons
             dst_mod.set_neurons(

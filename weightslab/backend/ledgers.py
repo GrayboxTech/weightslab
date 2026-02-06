@@ -402,11 +402,23 @@ class Ledger:
                 if not name and keys:
                     name = keys[0]
 
-            hp = self._hyperparams.get(name, Proxy({}))
+            hp = self._hyperparams.get(name)
+            if hp is None:
+                # Create a new Proxy wrapping an empty dict if not found
+                hp = Proxy({})
+                self._hyperparams[name] = hp
+                self._proxies_hyperparams[name] = hp
+            
+            # If hp is a proxy wrapping None, initialize it
+            if isinstance(hp, Proxy) and hp._obj is None:
+                 hp.set({})
+
             parts = key_path.split('.') if key_path else []
             cur = hp
             for p in parts[:-1]:
-                if p not in cur or not isinstance(cur[p], dict):
+                # If cur is a Proxy, ensure we are working on the underlying object or compatible interface
+                # Note: Proxy forwards get/setitem, so cur[p] works if wrapped object is dict
+                if p not in cur or not isinstance(cur[p], (dict, MutableMapping)):
                     cur[p] = {}
                 cur = cur[p]
             cur[parts[-1]] = value

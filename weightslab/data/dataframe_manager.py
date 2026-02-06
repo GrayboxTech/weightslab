@@ -932,7 +932,12 @@ def _create_ledger_manager():
     except Exception:
         pass  # Use defaults if hyperparams not available
 
-    return None
+    return LedgeredDataFrameManager(
+        flush_interval=flush_interval,
+        flush_max_rows=flush_max_rows,
+        enable_h5_persistence=enable_h5,
+        enable_flushing_threads=enable_flush
+    )
 
 # Global LedgeredDataFrameManager instance
 # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
