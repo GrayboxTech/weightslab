@@ -11,7 +11,7 @@ from typing import Dict, Sequence, Any, List
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
-from weightslab.data.data_utils import _filter_columns_by_patterns
+from weightslab.data.data_utils import _filter_columns_by_patterns, get_mask
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -20,7 +20,6 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
 from weightslab.backend.ledgers import get_hyperparams, register_dataframe
-from weightslab.trainer.services.service_utils import get_mask
 
 
 # Set up logger
@@ -509,8 +508,11 @@ class LedgeredDataFrameManager:
                 if dataset is None:
                     loader = self._get_loader_by_origin(row.get("origin"))
                     dataset = getattr(loader, "wrapped_dataset", None)
-                dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
-                row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
+                try:
+                    dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
+                    row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
+                except Exception as e:
+                    logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={row.name}: {e}")
         return row
 
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
@@ -740,7 +742,7 @@ class LedgeredDataFrameManager:
                     logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}\n{traceback_str}")
                 st = time.time()  # Reset start time after each loop
 
-        self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush")
+        self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush", daemon=True)
         self._flush_thread.start()
 
     def stop(self):
