@@ -59,6 +59,9 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
     tensor_name = 'weight'
     layer_id = layer.get_module_id()
     neuron_representations = []
+    if not layer:
+        return None
+    
     for neuron_idx in range(layer.out_neurons):
         # SAFEGUARD: Ensure trackers are available
         if layer.train_dataset_tracker is None:

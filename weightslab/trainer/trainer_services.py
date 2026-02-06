@@ -111,7 +111,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
     """Configure trainer services such as gRPC server.
-
     Args:
         n_workers_grpc (int): Number of threads for the gRPC server.
         port_grpc (int): Port number for the gRPC server.
@@ -150,6 +149,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
         "grpc_port": grpc_port,
         "n_workers_grpc": n_workers_grpc
     })
+
 
 if __name__ == "__main__":
     grpc_serve()

@@ -303,7 +303,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     # Update kwargs with relevant hyperparameters
                     kwargs.update(
                         {
-                            u:v for u,v in hp_dict.get('data', {}).get(reg_name, {}).items() if u not in kwargs
+                            u:v for u,v in hp_dict.get('data', {}).get(kwargs.get('loader_name', kwargs.get('name')), {}).items() if u not in kwargs
                         }
                     )
 

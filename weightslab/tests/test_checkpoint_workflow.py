@@ -261,7 +261,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
     def check_reproducibility(self, original_loss, reloaded_loss, original_uids=None, reloaded_uids=None, loss_tol=0.1, uids_msg=None):
         """Common reproducibility check for losses and UIDs"""
-        return
+        return 
         # #   Check reproducibility of losses and UIDs
         # if isinstance(original_loss, (list, tuple)):
         #     original_loss_sum = sum(original_loss)/len(original_loss)

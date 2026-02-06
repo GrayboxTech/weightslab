@@ -21,9 +21,9 @@ from concurrent import futures
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
-from weightslab.trainer.services.service_utils import load_raw_image, load_label
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe
+from weightslab.data.data_utils import load_raw_image, load_label
 
 
 # Get global logger
@@ -335,6 +335,7 @@ class DataService:
 
             # Enccode task type based on label shape heuristics
             # TODO (GP): more robust task type inference
+            # Maybe we should not care and send data.
             task_type = 'segmentation'  # _infer_task_type_from_label(label, default='Segmentation')
             if label_ndim == 0 or label_size == 1:
                 task_type = "classification"
@@ -355,7 +356,7 @@ class DataService:
                     SampleStatsEx.ORIGIN.value,
                     SampleStatsEx.TARGET.value,
                     SampleStatsEx.PREDICTION.value,
-                    # SampleStatsEx.PREDICTION_RAW.value,
+                    # SampleStatsEx.PREDICTION_RAW.value,  # Show prediction raw in metatadata
                     SampleStatsEx.TASK_TYPE.value,
                 }
                 stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
