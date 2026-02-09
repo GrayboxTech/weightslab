@@ -13,6 +13,8 @@ import pandas as pd
 import weightslab.proto.experiment_service_pb2 as pb2
 
 from PIL import Image
+from tqdm import tqdm
+from typing import List
 from typing import List
 from pathlib import Path
 from datetime import datetime
@@ -127,6 +129,10 @@ class DataService:
         )
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
+
+        # Auto-compute natural sort stats in background if dataset is small
+        if len(self._all_datasets_df) < 50000:
+             self._data_executor.submit(self._compute_natural_sort_stats)
 
         logger.info("DataService initialized.")
 
@@ -275,13 +281,20 @@ class DataService:
         return df
 
     def _load_existing_tags(self):
-        """Ensure tags column is present on the streamed dataframe."""
+        """Ensure tags and natural sort columns are present on the streamed dataframe."""
         if self._all_datasets_df is None or self._all_datasets_df.empty:
             return
 
         if SampleStatsEx.TAGS.value not in self._all_datasets_df.columns:
             try:
                 self._all_datasets_df[SampleStatsEx.TAGS.value] = ""
+            except Exception:
+                pass
+        
+        # Ensure natural_sort_score exists (init with NaN if missing)
+        if "natural_sort_score" not in self._all_datasets_df.columns:
+            try:
+                self._all_datasets_df["natural_sort_score"] = np.nan
             except Exception:
                 pass
 
@@ -307,6 +320,160 @@ class DataService:
                 return False
 
 
+    def _compute_natural_sort_stats(self):
+        """
+        Compute natural sort statistics (brightness, hue, saturation) for all samples
+        and update the dataframe. Includes a single scalar 'natural_sort_score' for sorting.
+        """
+        logger.info("[DataService] Starting natural sort statistics computation...")
+
+        try:
+            import cv2
+        except ImportError:
+            logger.warning("[DataService] OpenCV not found. Skipping natural sort computation.")
+            return "OpenCV not installed"
+
+        if self._all_datasets_df is None or self._all_datasets_df.empty:
+             return "No data to process"
+
+        # helper to process a single image
+        def process_sample(args):
+            idx, row = args
+            try:
+                origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
+                
+                # Sample ID is likely the index if not in columns
+                if SampleStatsEx.SAMPLE_ID.value in row:
+                     sample_id = int(row[SampleStatsEx.SAMPLE_ID.value])
+                else:
+                     sample_id = int(idx)
+
+                # Skip if already computed (optional optimization)
+                # if "natural_sort_score" in row and not pd.isna(row["natural_sort_score"]):
+                #    return None
+
+                dataset = self._get_dataset(origin)
+                if not dataset:
+                    logger.warning(f"[Natural Sort] Dataset not found for origin: {origin}")
+                    return None
+
+                # Use dataset index, not dataframe index
+                ds_idx = dataset.get_index_from_sample_id(sample_id)
+                if ds_idx is None:
+                     logger.warning(f"[Natural Sort] Could not map sample_id {sample_id} to dataset index")
+                     return None
+
+                pil_img = load_raw_image(dataset, ds_idx)
+
+                if pil_img is None:
+                    # silenced to avoid spam if images are genuinely missing for many
+                    # logger.warning(f"[Natural Sort] Failed to load image for sample {sample_id} at index {ds_idx}")
+                    return None
+
+                # Convert to numpy (RGB)
+                img_np = np.array(pil_img)
+
+                # Brightness (mean pixel intensity)
+                # If RGB, convert to Gray, else just mean
+                if img_np.ndim == 3:
+                    # OpenCV expects BGR usually, but PIL gives RGB.
+                    # cvtColor RGB2GRAY is correct.
+                    try:
+                        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+                    except Exception:
+                         gray = img_np
+                else:
+                    gray = img_np
+
+                brightness = np.mean(gray)
+
+                # HSV Stats
+                if img_np.ndim == 3:
+                    try:
+                        hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+                        hue = np.mean(hsv[:, :, 0])
+                        saturation = np.mean(hsv[:, :, 1])
+                    except Exception:
+                        hue = 0.0
+                        saturation = 0.0
+                else:
+                    hue = 0.0
+                    saturation = 0.0
+
+                return {
+                    "sample_id": sample_id,
+                    "origin": origin,
+                    "brightness": brightness,
+                    "hue": hue,
+                    "saturation": saturation,
+                    "natural_sort_score": brightness  # Use brightness as the scalar score
+                }
+                return {
+                    "sample_id": sample_id,
+                    "origin": origin,
+                    "brightness": brightness,
+                    "hue": hue,
+                    "saturation": saturation,
+                    "natural_sort_score": brightness  # Use brightness as the scalar score
+                }
+            except Exception as e:
+                # Log only the first few errors globally (using a simple counter if we could, but here we can't share state easily)
+                # Fallback: Just log warning. To avoid spam, we can check if it's one of the first few tasks?
+                # No, standard logger is fine, just use debug for spammy ones or INFO for specific tracking.
+                logger.warning(f"Failed to compute stats for sample {idx} (id={row.get(SampleStatsEx.SAMPLE_ID.value, 'unknown')}): {e}")
+                return None
+
+        # Prepare tasks
+        tasks = []
+        for idx, row in self._all_datasets_df.iterrows():
+             tasks.append((idx, row))
+
+        logger.info(f"[DataService] Computing sort stats for {len(tasks)} samples...")
+
+        # Run in parallel
+        # Use a smaller executor if needed, but self._data_executor is shared
+        results = self._data_executor.map(process_sample, tasks)
+
+        # Collect results
+        updates_by_origin = {}
+        processed_count = 0
+        failure_count = 0
+
+        # Wrap results with tqdm for progress bar
+        for res in tqdm(results, total=len(tasks), desc="Computing Natural Sort Stats", unit="samples"):
+            if res:
+                processed_count += 1
+                origin = res["origin"]
+                updates_by_origin.setdefault(origin, []).append(res)
+            else:
+                failure_count += 1
+                if failure_count <= 5:
+                     # We can't easily get the specific error detail here because it was swallowed in process_sample
+                     # But we rely on process_sample to log it.
+                     pass
+
+        if failure_count > 0:
+             logger.warning(f"[DataService] Failed to compute stats for {failure_count} samples. Check logs for details.")
+
+        # Upsert to storage
+        if self._df_manager:
+            for origin, rows in updates_by_origin.items():
+                df_update = pd.DataFrame(rows).set_index("sample_id")
+                # Drop origin column from update if it's in the index or redundant
+                if "origin" in df_update.columns:
+                     del df_update["origin"]
+
+                self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+
+        # Force refresh internal view
+        self._slowUpdateInternals(force=True)
+
+        logger.info(f"[DataService] Completed stats computation for {processed_count} samples")
+        print(f"\n\n============================================================")
+        print(f"NATURAL SORT COMPUTATION FINISHED for {processed_count} samples")
+        print(f"============================================================\n")
+        return f"Computed stats for {processed_count} samples"
+
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
         row, request, df_columns = args
@@ -323,9 +490,31 @@ class DataService:
             dataset = self._get_dataset(origin)
 
             # ====== Step 2: Determine task type ======
+            # ====== Step 2: Determine task type ======
             label = row.get(SampleStatsEx.TARGET.value)
-            if (label is None or (isinstance(label, list) and label == [])) and dataset:
-                label = load_label(dataset, sample_id)
+            
+            # Force reload label if dataset has viz_config (fixes issue where H5 has stringified dict)
+            force_reload = False
+            if dataset:
+                curr_ds = dataset
+                # Unwrap to find config
+                while True:
+                    if hasattr(curr_ds, "viz_config"):
+                        force_reload = True
+                        break
+                    if hasattr(curr_ds, "dataset"):
+                        curr_ds = curr_ds.dataset
+                    elif hasattr(curr_ds, "wrapped_dataset"):
+                        curr_ds = curr_ds.wrapped_dataset
+                    else:
+                        break
+            
+            if (label is None or (isinstance(label, list) and label == []) or force_reload) and dataset:
+                try:
+                    label = load_label(dataset, sample_id)
+                except Exception as e:
+                    logger.warning(f"Failed to load label for sample {sample_id}: {e}")
+                    label = None
 
             # Scalar / single element -> treat as classification
             label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
@@ -428,53 +617,153 @@ class DataService:
 
             elif label is not None:
                 # Classification / other scalar-like labels
-                # Check if label is NaN (handle both scalars and arrays)
-                if self._is_nan_value(label):
-                    pass  # Skip NaN labels
-
-                # Handle scalar labels
-                try:
-                    data_stats.append(
-                        create_data_stat(
-                            name='label',
-                            stat_type='scalar',
-                            shape=[1],
-                            value=[float(label)],
-                            thumbnail=b""
+                
+                # Handle dictionary labels (e.g. detection targets)
+                if isinstance(label, dict):
+                    # Check for Lidar Config to render BEV mask
+                    # Need to unwrap dataset to find config
+                    curr_ds = dataset
+                    lidar_config = {}
+                    while True:
+                         if hasattr(curr_ds, "viz_config"):
+                             lidar_config = curr_ds.viz_config
+                             break
+                         if hasattr(curr_ds, "dataset"):
+                             curr_ds = curr_ds.dataset
+                         elif hasattr(curr_ds, "wrapped_dataset"):
+                             curr_ds = curr_ds.wrapped_dataset
+                         else:
+                             break
+                    
+                    if lidar_config and 'boxes' in label:
+                        logger.info(f"[DataService] Rendering BEV mask. Boxes: {len(label['boxes'])}")
+                        boxes = _to_numpy_safe(label['boxes'])
+                        labels_ = _to_numpy_safe(label['labels'])
+                        
+                        id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
+                        fmt_labels = []
+                        if boxes is not None and labels_ is not None:
+                            for i in range(len(boxes)):
+                                c_id = int(labels_[i])
+                                cls_name = id_to_cls.get(c_id, "Car")
+                                fmt_labels.append({
+                                    'cls': cls_name,
+                                    'box': boxes[i]
+                                })
+                        
+                        bev_conf = lidar_config.get("bev", {})
+                        mask = render_bev_mask(
+                            fmt_labels,
+                            res=bev_conf.get("resolution", 0.1),
+                            size=bev_conf.get("image_size", 800),
+                            cx=bev_conf.get("center_x", 400),
+                            cy=bev_conf.get("center_y", 400)
                         )
-                    )
-                except (ValueError, TypeError):
-                    # Fallback for non-scalar labels in non-segmentation tasks
-                    try:
-                        label_arr = np.asanyarray(label)
                         data_stats.append(
                             create_data_stat(
-                                name='label',
+                                name='label_mask', # Use label_mask convention for segmentation overlay
                                 stat_type='array',
-                                shape=list(label_arr.shape),
-                                value=label_arr.astype(float).ravel().tolist(),
+                                shape=list(mask.shape),
+                                value=mask.astype(float).ravel().tolist(),
                                 thumbnail=b""
                             )
                         )
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"Could not convert label to array: {label}, error: {e}")
+                    else:
+                        data_stats.append(
+                            create_data_stat(
+                                name='label',
+                                stat_type='string',
+                                shape=[1],
+                                value_string=str(label), # Simplified visualization
+                                thumbnail=b""
+                            )
+                        )
+                else:
+                    # Check if label is NaN (handle both scalars and arrays)
+                    if self._is_nan_value(label):
+                        pass  # Skip NaN labels
+
+                    # Handle scalar labels
+                    try:
+                        data_stats.append(
+                            create_data_stat(
+                                name='label',
+                                stat_type='scalar',
+                                shape=[1],
+                                value=[float(label)],
+                                thumbnail=b""
+                            )
+                        )
+                    except (ValueError, TypeError):
+                        # Fallback for non-scalar labels in non-segmentation tasks
+                        try:
+                            label_arr = np.asanyarray(label)
+                            data_stats.append(
+                                create_data_stat(
+                                    name='label',
+                                    stat_type='array',
+                                    shape=list(label_arr.shape),
+                                    value=label_arr.astype(float).ravel().tolist(),
+                                    thumbnail=b""
+                                )
+                            )
+                        except (ValueError, TypeError) as e:
+                            # Use logger.debug to avoid spamming console
+                            logger.debug(f"Could not convert label to array: {label}, error: {e}")
 
             # ====== Step 8: Process predictions ======
             pred = row.get(SampleStatsEx.PREDICTION.value)
             if task_type != "classification":
-                if pred is not None:
-                    pred_arr = np.asarray(pred)
-
-                    # Add predicted mask stat
-                    data_stats.append(
-                        create_data_stat(
-                            name='pred_mask',
-                            stat_type='array',
-                            shape=list(pred_arr.shape),
-                            value=pred_arr.astype(float).ravel().tolist(),
-                            thumbnail=b""
+                # Handle Dict Prediction (Detection -> BEV Mask)
+                if isinstance(pred, dict) and lidar_config and 'boxes' in pred:
+                     # Render Prediction Mask similar to Ground Truth
+                     boxes = _to_numpy_safe(pred['boxes'])
+                     labels_ = _to_numpy_safe(pred['labels'])
+                     
+                     # Map IDs
+                     id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
+                     fmt_labels = []
+                     if boxes is not None and labels_ is not None:
+                         for i in range(len(boxes)):
+                             c_id = int(labels_[i])
+                             cls_name = id_to_cls.get(c_id, "Car")
+                             fmt_labels.append({
+                                 'cls': cls_name,
+                                 'box': boxes[i]
+                             })
+                             
+                     bev_conf = lidar_config.get("bev", {})
+                     mask = render_bev_mask(
+                         fmt_labels,
+                         res=bev_conf.get("resolution", 0.1),
+                         size=bev_conf.get("image_size", 800),
+                         cx=bev_conf.get("center_x", 400),
+                         cy=bev_conf.get("center_y", 400)
+                     )
+                     data_stats.append(
+                         create_data_stat(
+                             name='pred_mask',
+                             stat_type='array',
+                             shape=list(mask.shape),
+                             value=mask.astype(float).ravel().tolist(),
+                             thumbnail=b""
+                         )
+                     )
+                elif pred is not None:
+                    try:
+                        pred_arr = np.asarray(pred)
+                        # Add predicted mask stat
+                        data_stats.append(
+                            create_data_stat(
+                                name='pred_mask',
+                                stat_type='array',
+                                shape=list(pred_arr.shape),
+                                value=pred_arr.astype(float).ravel().tolist(),
+                                thumbnail=b""
+                            )
                         )
-                    )
+                    except Exception:
+                         pass
             else:
                 # Classification: get prediction from row or dataset
                 if pred is None:
@@ -517,7 +806,8 @@ class DataService:
                 # Handle resize request
                 target_width = original_size[0]
                 target_height = original_size[1]
-                aspect_ratio = original_size[0] / original_size[1]
+                aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
+
                 if request.resize_width < 0 and request.resize_height < 0:
                     percent = abs(request.resize_width) / 100.0
                     target_width = int(original_size[0] * percent)
@@ -536,11 +826,14 @@ class DataService:
                         target_width = w_limit
                         target_height = int(target_width / aspect_ratio)
 
-                else:
-                    # Default to 360p (height=360) maintaining aspect ratio if no resize requested
-                    if request.resize_width == 0 and request.resize_height == 0:
-                        target_height = 360
-                        target_width = int(target_height * aspect_ratio)
+                elif request.resize_width == 0 and request.resize_height == 0:
+                     # Default to 360p (height=360) maintaining aspect ratio if no resize requested
+                     target_height = 360
+                     target_width = int(target_height * aspect_ratio)
+
+                # Ensure dimensions are at least 1x1
+                target_width = max(1, target_width)
+                target_height = max(1, target_height)
 
                 # Resize image if needed
                 if target_width != original_size[0] or target_height != original_size[1]:
@@ -738,6 +1031,11 @@ class DataService:
                 # TODO: Implement plot logic
                 return f"Action: Plotted distribution for {col}"
 
+            # Example: "Compute Natural Sort" Action
+            elif action_name == "compute_natural_sort":
+                msg = self._compute_natural_sort_stats()
+                return f"Action: {msg}"
+
             return f"Action triggered: {action_name} (Not implemented)"
 
         # --- 3. DATAFRAME MANIPULATION ---
@@ -929,9 +1227,9 @@ class DataService:
 
         return "No operation applied"
 
-    def _slowUpdateInternals(self):
+    def _slowUpdateInternals(self, force=False):
         current_time = time.time()
-        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+        if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
 
         updated_df = self._pull_into_all_data_view_df()
@@ -939,6 +1237,12 @@ class DataService:
         # Guard against init race conditions
         if updated_df is None:
             return
+
+        # Ensure default columns exist (persists them across updates even if not in H5 yet)
+        if SampleStatsEx.TAGS.value not in updated_df.columns:
+             updated_df[SampleStatsEx.TAGS.value] = ""
+        if "natural_sort_score" not in updated_df.columns:
+             updated_df["natural_sort_score"] = np.nan
 
         if self._is_filtered and self._all_datasets_df is not None:
             # The user has applied a custom view (Filter, Sort, or Aggregation).
