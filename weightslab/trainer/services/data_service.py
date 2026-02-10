@@ -331,15 +331,10 @@ class DataService:
             if (label is None or (isinstance(label, list) and label == [])) and dataset:
                 label = load_label(dataset, sample_id)
 
-            # Scalar / single element -> treat as classification
-            label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
-            label_size = label.size if hasattr(label, 'size') else (1 if label_ndim == 0 else None)
-
             # Enccode task type based on label shape heuristics
-            # TODO (GP): more robust task type inference
             # Maybe we should not care and send data.
-            task_type = 'segmentation'  # _infer_task_type_from_label(label, default='Segmentation')
-            if label_ndim >= 3:
+            label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
+            if label_ndim >= 3:  # if label ndim superior to 3, it should be segmentation, otherwise classification or other scalar-like task (interpreted as cls)
                 task_type = 'segmentation'
             else:
                 task_type = "classification"
