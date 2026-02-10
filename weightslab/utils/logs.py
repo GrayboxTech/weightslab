@@ -12,6 +12,7 @@ FORMAT = '%(levelname)s:%(name)s:%(funcName)s: %(message)s'
 
 # Global variables to track the log file path and handler
 _LOG_FILE_PATH = None
+_TMP_DIR_PATH = None
 _FILE_HANDLER = None
 
 
@@ -30,7 +31,7 @@ def setup_logging(level, log_to_file=True):
         level (str): The minimum level to process (e.g., 'DEBUG', 'INFO').
         log_to_file (bool): If True, logs are written to a temp file (default: True).
     """
-    global _LOG_FILE_PATH, _FILE_HANDLER
+    global _TMP_DIR_PATH, _LOG_FILE_PATH, _FILE_HANDLER
 
     # Reset logger handlers to ensure previous configurations don't interfere
     logging.getLogger().handlers = []
@@ -66,6 +67,7 @@ def setup_logging(level, log_to_file=True):
 
         # Create log file with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        _TMP_DIR_PATH = log_dir
         _LOG_FILE_PATH = os.path.join(log_dir, f'weightslab_{timestamp}.log')
 
         _FILE_HANDLER = logging.FileHandler(_LOG_FILE_PATH, mode='w', encoding='utf-8')
@@ -103,7 +105,7 @@ def set_log_directory(new_log_dir):
         - All subsequent logs are written to the new location
         - The old temp directory log is moved (not copied)
     """
-    global _LOG_FILE_PATH, _FILE_HANDLER
+    global _TMP_DIR_PATH, _LOG_FILE_PATH, _FILE_HANDLER
     
     if not _LOG_FILE_PATH or not _FILE_HANDLER:
         logging.warning("No log file to relocate. Call setup_logging() first.")
@@ -134,6 +136,7 @@ def set_log_directory(new_log_dir):
     
     # Update global path
     _LOG_FILE_PATH = new_log_path
+    _TMP_DIR_PATH = new_log_dir
     
     # Create new file handler at new location
     formatter = logging.Formatter(FORMAT)

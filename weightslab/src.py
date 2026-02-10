@@ -234,6 +234,24 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     return out
 
 
+def _update_log_directory(new_log_dir: str):
+    """
+        Move the current log file to a new directory and update the file handler.
+
+        This is useful for setting a user-specified log directory after initial
+        setup with a temporary file. The function will:
+        - Move the existing log file to the new directory (if it exists)
+        - Update the logging FileHandler to point to the new location
+    """
+
+    # Update logging directory to use root_log_dir after parameters registration
+    hp = get_hyperparams()
+    try:
+        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
+    except Exception as e:
+        logger.debug(f"Could not update log directory: {e}")
+    
+
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
     """
     Watch or edit the given object.
@@ -498,21 +516,40 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 except Exception:
                     pass  # If checkpoint loading fails, proceed with normal registration
 
+                defaults = kwargs.get('defaults', None)
                 if not checkpoint_hp_loaded:
                     # Normal registration if no checkpoint hyperparameters were loaded
                     if isinstance(obj, str):
                         path = obj
                         # register empty/defaults if provided in kwargs
-                        defaults = kwargs.get('defaults', None)
                         if defaults:
                             register_hyperparams(defaults)
                         # start ledger-managed watcher
                         watch_hyperparams_file(path, poll_interval=kwargs.get('poll_interval', 1.0))
 
+                        # Update log directory if root_log_dir provided in hyperparameters or defaults
+                        new_log_dir = None
+                        if defaults and 'root_log_dir' in defaults:
+                            new_log_dir = defaults['root_log_dir']
+                        elif 'root_log_dir' in kwargs:
+                            new_log_dir = kwargs['root_log_dir']
+                        if new_log_dir:
+                            _update_log_directory(new_log_dir)
+
                         # return the ledger handle (proxy or dict)
                         return get_hyperparams()
+                    
                     elif isinstance(obj, dict):
                         register_hyperparams(obj)
+                        
+                        # Update log directory if root_log_dir provided in hyperparameters or defaults
+                        new_log_dir = None
+                        if defaults and 'root_log_dir' in defaults:
+                            new_log_dir = defaults['root_log_dir']
+                        elif 'root_log_dir' in kwargs:
+                            new_log_dir = kwargs['root_log_dir']
+                        if new_log_dir:
+                            _update_log_directory(new_log_dir)
 
                         return get_hyperparams()
                     else:
@@ -520,18 +557,20 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         try:
                             register_hyperparams(dict(obj))
 
+                            # Update log directory if root_log_dir provided in hyperparameters or defaults
+                            new_log_dir = None
+                            if defaults and 'root_log_dir' in defaults:
+                                new_log_dir = defaults['root_log_dir']
+                            elif 'root_log_dir' in kwargs:
+                                new_log_dir = kwargs['root_log_dir']
+                            if new_log_dir:
+                                _update_log_directory(new_log_dir)
+
                             return get_hyperparams()
                         except Exception:
                             raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
 
-                # Update logging directory to use root_log_dir after parameters registration
-                hp = get_hyperparams()
-                try:
-                    set_log_directory(str(hp.get('root_log_dir', root_log_dir)))
-                except Exception as e:
-                    logger.debug(f"Could not update log directory: {e}")
-                
-                return 
+                return get_hyperparams()
             except Exception:
                 # bubble up original error
                 raise
