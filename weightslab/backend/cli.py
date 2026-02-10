@@ -741,18 +741,6 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
             cli_host: Host to bind the server to (default: localhost).
     """
 
-    # Lazy import of banner to avoid importing the top-level
-    # package (and thus torch) when CUDA DLLs are unavailable.
-    # On some Windows setups, importing torch can fail with
-    # WinError 1455; the CLI should still be able to start.
-    _BANNER = None
-    try:
-        from weightslab import _BANNER as _WB
-        _BANNER = _WB
-    except Exception:
-        # Skip banner if importing the package fails
-        _BANNER = None
-
     global _server_thread, _server_port, _server_host
     cli_host = os.environ.get('CLI_HOST', cli_host)
     cli_port = int(os.environ.get('CLI_PORT', cli_port))
@@ -819,12 +807,6 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
     })
     # wait briefly for server to come up
     time.sleep(0.05)
-
-    if _BANNER:
-        try:
-            print(_BANNER)
-        except Exception:
-            pass
 
     # optionally spawn a new console running the client REPL
     if spawn_client:
