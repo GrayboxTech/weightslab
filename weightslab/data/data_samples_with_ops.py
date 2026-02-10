@@ -443,6 +443,21 @@ class DataSampleTrackingWrapper(Dataset):
         return (wrapped_equal and
                 self.denied_sample_cnt == other.denied_sample_cnt)
 
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        # Drop non-picklable objects for multiprocessing on Windows (spawn).
+        state["_df_lock"] = None
+        state["_stats_store"] = None
+        state["_map_updates_hook_fns"] = []
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Recreate thread-local locks and stores inside worker processes.
+        self._df_lock = threading.RLock()
+        if self._stats_store is None and self._enable_h5_persistence and self._h5_path is not None:
+            self._stats_store = H5DataFrameStore(self._h5_path, lock_timeout=10.0)
+
     def _generate_uids(self, wrapped_dataset: Dataset, compute_hash: bool = True):
         """
         Generate unique IDs for all samples in parallel using array_id_2bytes.
