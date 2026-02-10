@@ -339,15 +339,10 @@ class DataService:
             # TODO (GP): more robust task type inference
             # Maybe we should not care and send data.
             task_type = 'segmentation'  # _infer_task_type_from_label(label, default='Segmentation')
-            if label_ndim == 0 or label_size == 1:
+            if label_ndim >= 3:
+                task_type = 'segmentation'
+            else:
                 task_type = "classification"
-            elif label_ndim >= 2:
-                # Cache shape to avoid multiple H5 accesses
-                shape = label.shape
-                if shape[-2] > 28 or shape[-1] > 28:
-                    task_type = 'segmentation'
-                else:
-                    task_type = "unknown"
 
             # ====== Step 5a: Process stats ======
             stats_to_retrieve = list(request.stats_to_retrieve)
