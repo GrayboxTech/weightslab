@@ -284,15 +284,15 @@ class DataSampleTrackingWrapper(Dataset):
             data = SampleStats.DEFAULTS.copy()  # Start with default stats for this sample
             data.update(
                 {
-                        'sample_id': sid,
-                        'origin': self._dataset_split
+                        SampleStatsEx.SAMPLE_ID.value: sid,
+                        SampleStatsEx.ORIGIN.value: self._dataset_split
                 }
             )
             if preload_labels:
                 # Attempt to load label for this sample and store in defaults (will be None if not available)
                 try:
                     label = load_label(self, sid)
-                    data['label'] = label
+                    data[SampleStatsEx.TARGET.value] = label
                 except Exception as e:
                     logger.debug(f"Could not preload label for sample {sid}: {e}")
             
@@ -308,7 +308,7 @@ class DataSampleTrackingWrapper(Dataset):
                 # Attempt to load metadata for this sample and store in defaults (will be None if not available)
                 try:
                     uid = load_uid(self, sid)
-                    data['sample_id'] = uid
+                    data[SampleStatsEx.SAMPLE_ID.value] = uid
                     uids[sid] = uid
                 except Exception as e:
                     logger.debug(f"Could not preload sample_id for sample {sid}: {e}")

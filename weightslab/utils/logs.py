@@ -1,4 +1,5 @@
 import logging
+import sys
 import tempfile
 import atexit
 import os
@@ -32,11 +33,20 @@ def setup_logging(level, log_to_file=True):
     # Reset logger handlers to ensure previous configurations don't interfere
     logging.getLogger().handlers = []
 
+    # Best-effort: reconfigure stdio to UTF-8 (Windows-safe)
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
     # Create formatters
     formatter = logging.Formatter(FORMAT)
 
     # Console handler
-    console_handler = logging.StreamHandler()
+    console_handler = logging.StreamHandler(stream=sys.stdout)
     console_handler.setLevel(level.upper())
     console_handler.setFormatter(formatter)
 

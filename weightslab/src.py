@@ -66,12 +66,18 @@ def save_signals(
     # # Process signals
     if isinstance(signals, dict):
         losses_data = {\
-            # Convert losses map of shape (B, ...) to (B,) by averaging spatial dimensions if needed
-            'signals//' + k: (v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v)).mean((1, 2)) if v.ndim > 2 else (v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v))
+            # Convert losses map of shape (B, ...) to (B,) by averaging all axes except batch (axis 0)
+            'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
+                v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v)
+            )
             for k, v in signals.items()
         }
-    elif signals is not None:
-        losses_data = {"signals//default": signals.detach().cpu().numpy() if hasattr(signals, 'detach') else np.asarray(signals)}
+    elif signals is not None and isinstance(signals, (th.Tensor, np.ndarray, list)):
+        losses_data = {
+            "signals//default": (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
+                signals.detach().cpu().numpy() if hasattr(signals, 'detach') else np.asarray(signals)
+            )
+        }
     else:
         losses_data = None
     # # Process targets

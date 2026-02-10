@@ -458,7 +458,7 @@ class DataService:
                                 value=label_arr.astype(float).ravel().tolist(),
                                 thumbnail=b""
                             )
-                        )
+                        )  
                     except (ValueError, TypeError) as e:
                         logger.warning(f"Could not convert label to array: {label}, error: {e}")
 
@@ -512,57 +512,81 @@ class DataService:
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
 
-            # ====== Step 9: Generate raw data bytes and thumbnail ======
+            # ====== Step 9: Generate raw data bytes and thumbnail (handles 4D volumetric) ======
             if request.include_raw_data:
-                raw_img = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
-                original_size = raw_img.size
-
-                # Handle resize request
-                target_width = original_size[0]
-                target_height = original_size[1]
-                aspect_ratio = original_size[0] / original_size[1]
-                if request.resize_width < 0 and request.resize_height < 0:
-                    percent = abs(request.resize_width) / 100.0
-                    target_width = int(original_size[0] * percent)
-                    target_height = int(original_size[1] * percent)
-
-                elif request.resize_width > 0 and request.resize_height > 0:
-                    # Bounding box resize preserving aspect ratio.
-                    # Fit the image inside (resize_width x resize_height).
-                    w_limit, h_limit = request.resize_width, request.resize_height
-                    if w_limit / h_limit > aspect_ratio:
-                        # Box is wider than image relative to height, height is the constraint
-                        target_height = h_limit
-                        target_width = int(target_height * aspect_ratio)
-                    else:
-                        # Image is wider than box relative to height, width is the constraint
-                        target_width = w_limit
-                        target_height = int(target_width / aspect_ratio)
-
-                else:
-                    # Default to 360p (height=360) maintaining aspect ratio if no resize requested
-                    if request.resize_width == 0 and request.resize_height == 0:
-                        target_height = 360
-                        target_width = int(target_height * aspect_ratio)
-
-                # Resize image if needed
-                if target_width != original_size[0] or target_height != original_size[1]:
-                    raw_img = raw_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
-
-                # Generate raw data bytes
-                raw_buf = io.BytesIO()
-                raw_img.save(raw_buf, format='JPEG')
-                raw_data_bytes = raw_buf.getvalue()
-                raw_shape = [target_height, target_width, len(raw_img.getbands())]
-
-                data_stats.append(
-                    create_data_stat(
-                        name='raw_data',
-                        stat_type='bytes',
-                        value=raw_data_bytes,
-                        shape=raw_shape,
-                    )
+                from weightslab.data.data_utils import load_raw_image_array
+                
+                np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(
+                    dataset, dataset.get_index_from_sample_id(sample_id)
                 )
+                
+                if middle_pil is not None:
+                    original_size = middle_pil.size
+                    target_width = original_size[0]
+                    target_height = original_size[1]
+                    aspect_ratio = original_size[0] / original_size[1]
+                    if request.resize_width < 0 and request.resize_height < 0:
+                        percent = abs(request.resize_width) / 100.0
+                        target_width = int(original_size[0] * percent)
+                        target_height = int(original_size[1] * percent)
+                    elif request.resize_width > 0 and request.resize_height > 0:
+                        w_limit, h_limit = request.resize_width, request.resize_height
+                        if w_limit / h_limit > aspect_ratio:
+                            target_height = h_limit
+                            target_width = int(target_height * aspect_ratio)
+                        else:
+                            target_width = w_limit
+                            target_height = int(target_width / aspect_ratio)
+                    else:
+                        if request.resize_width == 0 and request.resize_height == 0:
+                            target_height = 360
+                            target_width = int(target_height * aspect_ratio)
+                    
+                    # Resize middle slice for thumbnail if requested (maintain aspect ratio)
+                    if target_width != original_size[0] or target_height != original_size[1]:
+                        middle_pil = middle_pil.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+                    # Determine if this is a full-resolution request (modal) or thumbnail (grid)
+                    is_full_resolution = (request.resize_width < 0 and abs(request.resize_width) >= 100) or \
+                                        (request.resize_height < 0 and abs(request.resize_height) >= 100)
+
+                    if is_volumetric and np_img is not None and is_full_resolution:
+                        # Full resolution modal view: Send full 4D array as raw bytes (C-contiguous, float32)
+                        np_img_f32 = np.asarray(np_img, dtype=np.float32)
+                        if not np_img_f32.flags['C_CONTIGUOUS']:
+                            np_img_f32 = np.ascontiguousarray(np_img_f32)
+                        raw_data_bytes = np_img_f32.tobytes()
+                        # Shape: [Z, H, W, C] using ORIGINAL 4D dimensions, not thumbnail dimensions
+                        # original_shape is (Z, H, W, C) or (Z, H, W)
+                        if len(original_shape) == 4:
+                            if original_shape[1] > original_shape[-1]:
+                                raw_shape = list(original_shape)  # [Z, H, W, C]
+                            elif original_shape[1] < original_shape[-1]:
+                                raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]]  # [Z, W, C, H]
+                        else:
+                            # If original_shape is (Z, H, W), C is 1 for monochrome volumetric data
+                            raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]
+                        logger.info(f"[Volumetric] Sending full res: np_img.shape={np_img.shape}, original_shape={original_shape}, raw_shape={raw_shape}, bytes={len(raw_data_bytes)}")
+                    else:
+                        # Thumbnail for grid OR non-volumetric: Send JPEG of middle slice only
+                        raw_buf = io.BytesIO()
+                        middle_pil.save(raw_buf, format='JPEG')
+                        raw_data_bytes = raw_buf.getvalue()
+                        # Shape: [H, W, C] for 3D RGB or [H, W] for 2D grayscale
+                        num_channels = len(middle_pil.getbands())
+                        if num_channels == 1:
+                            raw_shape = [target_height, target_width, 1]
+                        else:
+                            raw_shape = [target_height, target_width, num_channels]
+
+                    data_stats.append(
+                        create_data_stat(
+                            name='raw_data',
+                            stat_type='bytes',
+                            value=raw_data_bytes,
+                            shape=raw_shape,
+                        )
+                    )
 
             # ====== Step 10: Create DataRecord ======
             record = pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
