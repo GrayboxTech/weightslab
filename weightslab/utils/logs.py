@@ -3,14 +3,16 @@ import sys
 import tempfile
 import atexit
 import os
+import shutil
 from datetime import datetime
 
 
 # Define the log format to include the level, module name, and function name
 FORMAT = '%(levelname)s:%(name)s:%(funcName)s: %(message)s'
 
-# Global variable to track the log file path
+# Global variables to track the log file path and handler
 _LOG_FILE_PATH = None
+_FILE_HANDLER = None
 
 
 def _print_log_location():
@@ -28,7 +30,7 @@ def setup_logging(level, log_to_file=True):
         level (str): The minimum level to process (e.g., 'DEBUG', 'INFO').
         log_to_file (bool): If True, logs are written to a temp file (default: True).
     """
-    global _LOG_FILE_PATH
+    global _LOG_FILE_PATH, _FILE_HANDLER
 
     # Reset logger handlers to ensure previous configurations don't interfere
     logging.getLogger().handlers = []
@@ -66,16 +68,82 @@ def setup_logging(level, log_to_file=True):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         _LOG_FILE_PATH = os.path.join(log_dir, f'weightslab_{timestamp}.log')
 
-        file_handler = logging.FileHandler(_LOG_FILE_PATH, mode='w')
-        file_handler.setLevel(logging.DEBUG)  # Always log DEBUG+ to file
-        file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
+        _FILE_HANDLER = logging.FileHandler(_LOG_FILE_PATH, mode='w', encoding='utf-8')
+        _FILE_HANDLER.setLevel(logging.DEBUG)  # Always log DEBUG+ to file
+        _FILE_HANDLER.setFormatter(formatter)
+        root_logger.addHandler(_FILE_HANDLER)
 
         # Register exit handler to print log location
         atexit.register(_print_log_location)
 
         # Log the initialization
         logging.info(f"WeightsLab logging initialized - Log file: {_LOG_FILE_PATH}")
+
+
+def set_log_directory(new_log_dir):
+    """
+    Updates the log file location to a new directory.
+    Moves the existing log file from temp location to the new directory.
+    
+    This is automatically called when root_log_dir is resolved in training scripts.
+    Can also be called manually if you want to relocate logs.
+    
+    Args:
+        new_log_dir (str): The new directory where logs should be saved.
+    
+    Example:
+        >>> import weightslab as wl
+        >>> # Logging starts in temp directory automatically
+        >>> # Later, when you define your experiment directory:
+        >>> wl.set_log_directory("./my_experiment/logs")
+        >>> # Log file is moved from temp to ./my_experiment/logs/
+    
+    Note:
+        - The log file keeps its original timestamped filename
+        - All subsequent logs are written to the new location
+        - The old temp directory log is moved (not copied)
+    """
+    global _LOG_FILE_PATH, _FILE_HANDLER
+    
+    if not _LOG_FILE_PATH or not _FILE_HANDLER:
+        logging.warning("No log file to relocate. Call setup_logging() first.")
+        return
+    
+    # Create new log directory
+    os.makedirs(new_log_dir, exist_ok=True)
+    
+    # Generate new log file path with same filename
+    old_filename = os.path.basename(_LOG_FILE_PATH)
+    new_log_path = os.path.join(new_log_dir, old_filename)
+    
+    # Get root logger
+    root_logger = logging.getLogger()
+    
+    # Flush and close current file handler
+    _FILE_HANDLER.flush()
+    _FILE_HANDLER.close()
+    root_logger.removeHandler(_FILE_HANDLER)
+    
+    # Move the log file to new location
+    try:
+        if os.path.exists(_LOG_FILE_PATH):
+            shutil.move(_LOG_FILE_PATH, new_log_path)
+            logging.info(f"Log file moved from {_LOG_FILE_PATH} to {new_log_path}")
+    except Exception as e:
+        logging.warning(f"Could not move log file: {e}. Creating new log file at {new_log_path}")
+    
+    # Update global path
+    _LOG_FILE_PATH = new_log_path
+    
+    # Create new file handler at new location
+    formatter = logging.Formatter(FORMAT)
+    _FILE_HANDLER = logging.FileHandler(_LOG_FILE_PATH, mode='a', encoding='utf-8')
+    _FILE_HANDLER.setLevel(logging.DEBUG)
+    _FILE_HANDLER.setFormatter(formatter)
+    root_logger.addHandler(_FILE_HANDLER)
+    
+    logging.info(f"Log directory updated to: {new_log_dir}")
+    logging.info(f"Log file: {_LOG_FILE_PATH}")
 
 
 def print(first_element, *other_elements, sep=' ', **kwargs):
@@ -116,16 +184,22 @@ def print(first_element, *other_elements, sep=' ', **kwargs):
 
 
 if __name__ == "__main__":
-    # Setup prints
+    # Test 1: Setup logging
     setup_logging('DEBUG')
-
     print('This is a default INFO message')
 
-    # 2. Log message at DEBUG level
+    # Test 2: Log message at DEBUG level
     print('This message is DEBUG-only', 'and uses sep', sep='|', level='debug')
 
-    # 3. Log message at WARNING level
+    # Test 3: Log message at WARNING level
     print('Warning: Something unusual happened.', level='WARNING')
 
-    # 4. Standard logging INFO message (no level specified)
-    print('This is a final INFO message.', 'All good.')
+    # Test 4: Relocate log directory
+    import tempfile
+    new_log_dir = os.path.join(tempfile.gettempdir(), 'weightslab_test_logs')
+    print(f'Relocating logs to: {new_log_dir}')
+    set_log_directory(new_log_dir)
+    
+    # Test 5: Log after relocation
+    print('This is a message after log relocation.', 'All good.')
+    print(f'New log file location: {_LOG_FILE_PATH}')

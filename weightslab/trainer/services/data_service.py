@@ -109,10 +109,12 @@ class DataService:
         # init references to the context components
         self._ctx.ensure_components()
 
+        # Resolve root log directory and H5 path for data storage
         self._root_log_dir = self._resolve_root_log_dir()
         self._h5_path = self._resolve_h5_path()
         self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
 
+        # In-memory dataframe view of all datasets combined (streamed to UI)
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
         self._agent = DataManipulationAgent(self)

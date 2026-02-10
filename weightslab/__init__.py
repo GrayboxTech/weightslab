@@ -9,7 +9,7 @@ This file re-exports selected symbols from `weightslab.src`.
 """
 from .src import watch_or_edit, serve, keep_serving, save_signals
 from .art import _BANNER
-from .utils.logs import setup_logging
+from .utils.logs import setup_logging, set_log_directory
 
 import os
 import threading
@@ -46,6 +46,7 @@ __all__ = [
     "serve",
     "keep_serving",
     "save_signals",
+    "set_log_directory",
 
     "_BANNER",
 
