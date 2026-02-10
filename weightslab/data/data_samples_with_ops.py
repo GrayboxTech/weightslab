@@ -21,7 +21,8 @@ from weightslab.data.data_utils import (
     _detect_dataset_split,
     get_mask,
     load_label,
-    load_metadata
+    load_metadata,
+    load_uid
 )
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -306,7 +307,7 @@ class DataSampleTrackingWrapper(Dataset):
             if use_preload_uids:
                 # Attempt to load metadata for this sample and store in defaults (will be None if not available)
                 try:
-                    uid = load_metadata(self, sid)
+                    uid = load_uid(self, sid)
                     data['sample_id'] = uid
                     uids[sid] = uid
                 except Exception as e:

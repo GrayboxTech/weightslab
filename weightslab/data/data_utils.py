@@ -18,6 +18,10 @@ __all__ = [
 ]
 
 
+# load global logger
+logger = logging.getLogger(__name__)
+
+
 # Pre-compile regex patterns for stats matching
 _PATTERN_CACHE = {}
 
