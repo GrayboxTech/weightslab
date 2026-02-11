@@ -188,7 +188,6 @@ class Proxy:
     def __bool__(self):
         """Enable boolean evaluation of the proxy based on the wrapped object.
 
-<<<<<<< HEAD
         This allows `bool(proxy)` to return False when wrapping None,
         and `if proxy:` or `if not proxy:` to work correctly.
         
@@ -197,14 +196,21 @@ class Proxy:
         - Use `if not proxy:` to check if wrapped object is falsy
         - Use `proxy is None` instead of `proxy is None`
         - Use `proxy is not None` instead of `proxy is not None`
-=======
-        This allows `bool(Proxy(None))` to return False and
-        `if not proxy:` to work correctly when proxy wraps None.
->>>>>>> 533ada306e386d1e9b39d96207d1dfee45bc3494
         """
         if self._obj is None:
             return False
         return bool(self._obj)
+
+    def __hash__(self):
+        """Make Proxy hashable by hashing the wrapped object's identity.
+        
+        This allows Proxy objects to be used in sets and as dictionary keys.
+        Uses id() for consistent hashing regardless of object's __hash__ implementation.
+        """
+        if self._obj is None:
+            return hash(None)
+        # Use id() to ensure consistent hashing even for unhashable wrapped objects
+        return hash(id(self._obj))
 
     def __next__(self):
         """Allow the Proxy itself to act as an iterator when `next(proxy)` is

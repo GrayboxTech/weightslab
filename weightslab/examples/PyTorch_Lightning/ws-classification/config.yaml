@@ -1,0 +1,33 @@
+experiment_name: "mnist_lightning"
+
+device: "auto"  # "auto", "cuda", "cpu"
+max_epochs: 5
+
+# Data directory (optional - will download if not specified)
+# data_dir: "..."
+
+# WeightsLab services
+serving_grpc: false
+serving_cli: false
+serving_ui: false
+
+# H5 persistence for fast data loading
+enable_h5_persistence: true
+
+# Start Training from scratch
+is_training: true
+
+# Data loaders configuration
+data:
+  train_loader:
+    batch_size: 64
+    shuffle: true
+    num_workers: 4
+  val_loader:
+    batch_size: 64
+    shuffle: false
+    num_workers: 4
+
+# Optimizer configuration
+optimizer:
+  lr: 0.001
