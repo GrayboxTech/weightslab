@@ -322,10 +322,26 @@ class DataService:
 
     def _compute_natural_sort_stats(self):
         """
-        Compute natural sort statistics (brightness, hue, saturation) for all samples
-        and update the dataframe. Includes a single scalar 'natural_sort_score' for sorting.
+        Compute natural sort statistics (brightness, hue, saturation, entropy) for all samples
+        and update the dataframe.
+        
+        Includes a 'natural_sort_score' for sorting, configured by weights.
         """
-        logger.info("[DataService] Starting natural sort statistics computation...")
+        # --- CONFIGURATION: Define Natural Sort Cues & Weights ---
+        # Weights should sum to 1.0 ideally, but relative magnitude matters most.
+        # Strategies:
+        # 1. "Day vs Night" focus: Brightness=0.8, Entropy=0.2
+        # 2. "Complexity" focus: Brightness=0.2, Entropy=0.8
+        # 3. "Balanced": Brightness=0.5, Entropy=0.5
+        # 4. "Grouped" (Pseudo-primary key): Brightness=5.0, Entropy=1.0 (Forces clustering by light)
+        
+        SORT_WEIGHTS = {
+            "brightness": 0.7,  # Primary cue: Lighting conditions
+            "entropy": 0.3,     # Secondary cue: Texture/Scene complexity
+            "hue": 0.0          # Optional: Color tint
+        }
+        
+        logger.info(f"[DataService] Starting natural sort stats computation with weights: {SORT_WEIGHTS}")
 
         try:
             import cv2
@@ -335,6 +351,20 @@ class DataService:
 
         if self._all_datasets_df is None or self._all_datasets_df.empty:
              return "No data to process"
+
+        # Helper: Calculate Shannon Entropy (Complexity)
+        def calc_entropy(img_gray):
+            try:
+                # Calculate histogram (256 bins for 8-bit)
+                hist = cv2.calcHist([img_gray], [0], None, [256], [0, 256])
+                # Normalize histogram to get probabilities
+                p = hist.ravel() / hist.sum()
+                # Filter out zero probabilities to avoid log(0)
+                p = p[p > 0]
+                # Shannon Entropy in bits
+                return -np.sum(p * np.log2(p))
+            except Exception:
+                return 0.0
 
         # helper to process a single image
         def process_sample(args):
@@ -386,6 +416,7 @@ class DataService:
                     gray = img_np
 
                 brightness = np.mean(gray)
+                entropy = calc_entropy(gray)
 
                 # HSV Stats
                 if img_np.ndim == 3:
@@ -400,21 +431,31 @@ class DataService:
                     hue = 0.0
                     saturation = 0.0
 
+                # --- Compute Composite Score ---
+                # Normalize robustly to 0-1 range for combination
+                # Brightness: 0-255 typical for 8-bit
+                norm_brightness = min(max(brightness / 255.0, 0.0), 1.0)
+                
+                # Entropy: 0-8 bits typical for 8-bit image
+                norm_entropy = min(max(entropy / 8.0, 0.0), 1.0)
+                
+                # Hue: 0-179 in OpenCV
+                norm_hue = min(max(hue / 179.0, 0.0), 1.0)
+
+                score = (
+                    SORT_WEIGHTS.get("brightness", 0) * norm_brightness +
+                    SORT_WEIGHTS.get("entropy", 0) * norm_entropy +
+                    SORT_WEIGHTS.get("hue", 0) * norm_hue
+                )
+
                 return {
                     "sample_id": sample_id,
                     "origin": origin,
                     "brightness": brightness,
+                    "entropy": entropy,
                     "hue": hue,
                     "saturation": saturation,
-                    "natural_sort_score": brightness  # Use brightness as the scalar score
-                }
-                return {
-                    "sample_id": sample_id,
-                    "origin": origin,
-                    "brightness": brightness,
-                    "hue": hue,
-                    "saturation": saturation,
-                    "natural_sort_score": brightness  # Use brightness as the scalar score
+                    "natural_sort_score": score
                 }
             except Exception as e:
                 # Log only the first few errors globally (using a simple counter if we could, but here we can't share state easily)
@@ -950,11 +991,49 @@ class DataService:
             })
         # Parse sort part
         if sort_part:
+            # Check for Scope flag
+            # Format: "col desc scope:global" or "col desc scope:subset"
+            sort_scope = "subset" # Default to preserving current context
+            view_start = 0
+            view_count = 0
+
+            if "scope:global" in sort_part:
+                sort_scope = "global"
+                sort_part = sort_part.replace("scope:global", "")
+            elif "scope:subset" in sort_part:
+                sort_scope = "subset"
+                sort_part = sort_part.replace("scope:subset", "")
+            elif "scope:view" in sort_part:
+                sort_scope = "view"
+                sort_part = sort_part.replace("scope:view", "")
+                
+                # Extract start/count if present
+                # Split by space to find params, reassemble sort string
+                tokens = sort_part.split()
+                clean_tokens = []
+                for t in tokens:
+                    low_t = t.lower()
+                    if low_t.startswith("start:"):
+                        try: view_start = int(low_t.split(":")[1])
+                        except: pass
+                    elif low_t.startswith("count:"):
+                        try: view_count = int(low_t.split(":")[1])
+                        except: pass
+                    else:
+                        clean_tokens.append(t)
+                sort_part = " ".join(clean_tokens)
+
+                sort_part = " ".join(clean_tokens)
+
+            # If Global scope, we map it to subset behavior (sort current filtered view)
+            # We do NOT reset context anymore.
+            if sort_scope == "global":
+                sort_scope = "subset"
+
             sort_cols = []
             sort_ascs = []
 
             # Split by comma to support multiple columns: "tags asc, target desc"
-            # We need to respect quotes potentially, but for now assume simple CSV structure
             parts = [p.strip() for p in sort_part.split(',')]
 
             for p in parts:
@@ -981,18 +1060,21 @@ class DataService:
                     sort_ascs.append(ascending)
 
             if sort_cols:
-                logger.debug(f"[_parse_direct_query] Sort: cols={sort_cols}, asc={sort_ascs}")
+                logger.debug(f"[_parse_direct_query] Sort: cols={sort_cols}, asc={sort_ascs}, scope={sort_scope}")
 
-                # Special optimization for single 'index' sort
-                if len(sort_cols) == 1 and sort_cols[0].lower() == 'index':
+                if sort_scope == "view":
+                     operations.append({
+                        "function": "df.sort_view_slice",
+                        "params": {"by": sort_cols, "ascending": sort_ascs, "start": view_start, "count": view_count}
+                    })
+                elif len(sort_cols) == 1 and sort_cols[0].lower() == 'index':
+                    # Optimization for single 'index' sort
                     operations.append({
                         "function": "df.sort_index",
                         "params": {"ascending": sort_ascs[0]}
                     })
                 else:
-                    # Multi-column or single column sort
-                    # Note: 'index' mixed with columns in sort_values requires actual column named 'index'
-                    # or index level support (which sort_values handles if named).
+                    # Standard sort
                     operations.append({
                         "function": "df.sort_values",
                         "params": {"by": sort_cols, "ascending": sort_ascs}
@@ -1151,10 +1233,57 @@ class DataService:
                 logger.error(f"Modify failed: {e}")
                 return f"Failed to modify column {col}: {e}"
 
-        # C) Standard Pandas Ops (drop, sort, head, tail, sample)
-        if func in {"df.drop", "df.sort_values", "df.sort_index", "df.head", "df.tail", "df.sample"}:
+        # C) Standard Pandas Ops (drop, sort, head, tail, sample, view_sort)
+        if func in {"df.drop", "df.sort_values", "df.sort_index", "df.head", "df.tail", "df.sample", "df.sort_view_slice"}:
             func_name = func.replace("df.", "")
             try:
+                if func_name == "sort_view_slice":
+                     start = int(params.get("start", 0))
+                     count = int(params.get("count", 0))
+                     if count <= 0: count = len(df)
+                     end = min(start + count, len(df))
+
+                     if start < len(df):
+                         # Extract and sort slice
+                         sub_df = df.iloc[start:end].copy()
+
+                         # Apply sort to slice
+                         # Filter params for sort_values
+                         sort_params = {k: v for k, v in params.items() if k not in ["start", "count"]}
+                         
+                         by_cols = sort_params.get("by", [])
+                         # Handle special 'index' sort case which sort_values doesn't handle if 'index' is not a column
+                         if by_cols and len(by_cols) == 1 and by_cols[0] == "index":
+                             asc = sort_params.get("ascending", [True])
+                             ascending_val = asc[0] if isinstance(asc, list) and asc else True
+                             sub_df.sort_index(inplace=True, ascending=ascending_val)
+                         else:
+                             try:
+                                 sub_df.sort_values(inplace=True, **sort_params)
+                             except TypeError:
+                                 # Fallback for mixed types
+                                 if "key" not in sort_params:
+                                     sort_params["key"] = lambda x: x.astype(str)
+                                     sub_df.sort_values(inplace=True, **sort_params)
+
+                         # Reassign values (ignoring index alignment to swap rows in place)
+                         # We use .values to ensure we just paste the sorted data into these slots
+                         df.iloc[start:end] = sub_df.values
+                         
+                         # CRITICAL: We must also update the index (Sample IDs) to match the moved data,
+                         # otherwise Sample ID X will point to data from Sample ID Y (corruption).
+                         try:
+                             idx_name = df.index.name
+                             new_index = df.index.to_numpy().copy()
+                             new_index[start:end] = sub_df.index.to_numpy()
+                             df.index = pd.Index(new_index, name=idx_name)
+                         except Exception as e:
+                             logger.error(f"Failed to update index in sort_view_slice: {e}")
+                             # Fallback: try to reconstruct if possible or fail gracefully
+                             raise e
+                     
+                     return f"Applied operation: sort_view_slice({start}:{end})"
+
                 if func_name == "drop" and "index" in params:
                     index_to_drop = eval(params["index"], {"df": df, "np": np})
                     df.drop(index=index_to_drop, inplace=True)
@@ -1358,7 +1487,7 @@ class DataService:
 
             logger.debug("Processing %s samples at %s", len(tasks), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             data_records = self._data_executor.map(self._process_sample_row, tasks, timeout=120)
-            data_records = list(data_records)
+            data_records = [r for r in data_records if r is not None]
             logger.debug("Completed processing at %s in %.2f seconds\n", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time)
 
             return pb2.DataSamplesResponse(
@@ -1429,6 +1558,7 @@ class DataService:
                 with self._lock:
                     df = self._all_datasets_df
                     messages = []
+
 
                     for op in operations:
                         func = op.get("function")
