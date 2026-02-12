@@ -58,10 +58,19 @@ def save_signals(
             log_signal(scalar, reg_name)
 
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int)
-    pred_np = preds.detach().cpu().numpy().astype(np.uint16) if preds is not None else None
-    pred_raw_np = preds_raw.detach().cpu().numpy().astype(float) if preds_raw is not None else None
-    target_np = targets.detach().cpu().numpy().astype(np.uint16) if targets is not None else None
+    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
+    if preds is not None:
+        pred_np = preds.detach().cpu().numpy().astype(np.uint16) if isinstance(preds, th.Tensor) else np.asarray(preds).astype(np.uint16)
+    else:
+        pred_np = None
+    if preds_raw is not None:
+        pred_raw_np = preds_raw.detach().cpu().numpy() if isinstance(preds_raw, th.Tensor) else np.asarray(preds_raw) 
+    else: 
+        pred_raw_np = None
+    if targets is not None:
+        target_np = targets.detach().cpu().numpy().astype(np.uint16) if isinstance(targets, th.Tensor) else np.asarray(targets).astype(np.uint16)
+    else: 
+        target_np = None
 
     # Processing
     # # Process signals
@@ -135,11 +144,21 @@ def log_signal(scalar: float, reg_name: str, **kwargs) -> None:
 
                 if m is not None:
                     # Safe attribute access (handle Proxy returning None for missing attr)
-                    val = getattr(m, 'current_step', None)
-                    if val is not None:
-                        step = int(val)
+                    if hasattr(m, 'get_age'):
+                        val = m.get_age()
+                        if val is not None:
+                            step = int(val)
+                    elif hasattr(m, 'current_step'):
+                        val = m.current_step
+                        if val is not None:
+                            step = int(val)
+                        else:
+                            step = 0
+                            m.current_step = 0  # add current_step attribute to model for future tracking
                     else:
+                        # If model doesn't have current_step, force it to 0 or try to infer from checkpoint manager
                         step = 0
+                        m.current_step = 0  # add current_step attribute to model for future tracking
 
                 # Add to logger
                 logger.add_scalars(
@@ -281,10 +300,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
     # Model
     if 'model' in flag.lower() or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
-        # First ensure that the model has module input_shape
-        if not hasattr(obj, 'input_shape'):
-            raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
-
         # Ensure ledger has a placeholder (Proxy) for this name so callers
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_model` will create a Proxy if
@@ -607,6 +622,6 @@ def keep_serving():
     """
     try:
         while True:
-            time.sleep(1)
+            time.sleep(0.1)
     except KeyboardInterrupt:
         logger.info("Shutting down WeightsLab services.")
