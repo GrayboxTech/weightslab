@@ -104,7 +104,7 @@ class DataSampleTrackingWrapper(Dataset):
         array_use_cache: Whether to cache loaded arrays in memory for faster access (can increase memory usage)
         preload_labels: Whether to attempt preloading labels into the stats dataframe defaults (can speed up access but may increase init time)
         preload_metadata: Whether to attempt preloading metadata into the stats dataframe defaults (can speed up access but may increase init time)
-        use_preload_uids: Whether to attempt preloading unique IDs from metadata instead of generating them (requires metadata to have unique sample_id)
+        preload_uids: Whether to attempt preloading unique IDs from metadata instead of generating them (requires metadata to have unique sample_id)
         keep_leakages: Whether to keep cross-loader duplicates that may cause data leakage (not recommended, use for debugging only)
             
 
@@ -141,7 +141,7 @@ class DataSampleTrackingWrapper(Dataset):
         array_use_cache: bool = True,
         preload_labels: bool = True,
         preload_metadata: bool = True,
-        use_preload_uids: bool = False,
+        preload_uids: bool = False,
         keep_leakages: bool = False,
         **_,
     ):
@@ -206,13 +206,13 @@ class DataSampleTrackingWrapper(Dataset):
         logger.debug(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
 
         # Generate unique IDs
-        if use_preload_uids and compute_hash:
+        if preload_uids and compute_hash:
             logger.warning(
-                "use_preload_uids=True: Skipping hash-based UID generation and using preloaded UIDs from metadata. "
+                "preload_uids=True: Skipping hash-based UID generation and using preloaded UIDs from metadata. "
                 "Ensure that the dataset provides unique sample_id in metadata for proper tracking."
             )
         self._generate_uids(
-            wrapped_dataset, compute_hash=compute_hash if not use_preload_uids else False
+            wrapped_dataset, compute_hash=compute_hash if not preload_uids else False
         )
 
         # Detect duplicates and keep only first occurrences
@@ -300,11 +300,12 @@ class DataSampleTrackingWrapper(Dataset):
                 # Attempt to load metadata for this sample and store in defaults (will be None if not available)
                 try:
                     metadata = load_metadata(self, sid)
-                    data.update(metadata)
+                    if metadata is not None:
+                        data.update(metadata)
                 except Exception as e:
                     logger.debug(f"Could not preload metadata for sample {sid}: {e}")
             
-            if use_preload_uids:
+            if preload_uids:
                 # Attempt to load metadata for this sample and store in defaults (will be None if not available)
                 try:
                     uid = load_uid(self, sid)
