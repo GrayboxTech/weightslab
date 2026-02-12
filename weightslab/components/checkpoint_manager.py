@@ -213,6 +213,27 @@ class CheckpointManager:
         except Exception:
             return None
 
+    def get_hp_hash(self) -> Optional[str]:
+        """Get hash of hyperparameters snapshot.""" 
+        if ledgers.get_hyperparams() == None:
+            return "None"
+        else:
+            return self.hash_generator.get_component_hashes().get('hp')
+        
+    def get_model_hash(self) -> Optional[str]:
+        """Get hash of model snapshot.""" 
+        if ledgers.get_model() == None:
+            return "None"
+        else:
+            return self.hash_generator.get_component_hashes().get('model')
+        
+    def get_data_hash(self) -> Optional[str]:
+        """Get hash of dataframe snapshot.""" 
+        if ledgers.get_dataframe() == None:
+            return "None"
+        else:
+            return self.hash_generator.get_component_hashes().get('data')
+        
     def update_experiment_hash(
         self,
         model_snapshot: Optional[th.nn.Module] = None,
@@ -287,7 +308,6 @@ class CheckpointManager:
                 self._dump_changes(
                     model=model_snapshot,
                     config=hp_snapshot,
-                    data_state=data_snapshot,
                     changed_components=changed_components
                 )
                 self._has_pending_changes = False
@@ -560,7 +580,6 @@ class CheckpointManager:
         self._dump_changes(
             model=self._pending_model,
             config=self._pending_config,
-            data_state=self._pending_data_state,
             changed_components=self._pending_components
         )
 
@@ -578,7 +597,6 @@ class CheckpointManager:
         self,
         model: Optional[th.nn.Module],
         config: Optional[Dict[str, Any]],
-        data_state: Optional[Dict[str, Any]],
         changed_components: Set[str]
     ):
         """Internal method to dump changes to disk.
@@ -589,36 +607,55 @@ class CheckpointManager:
             data_state: Data state dict
             changed_components: Set of changed components ('model', 'config', 'data')
         """
+        
+        # Get checkpoint manager hp
+        manager_hp = config.get('checkpoint_manager', {}) if config else {}
+        enable_checkpoints = manager_hp.get('enable_checkpoints', True)
+        dump_model_architecture = manager_hp.get('dump_model_architecture', True) 
+        dump_model_state = manager_hp.get('dump_model_state', True)
+        dump_optimizer_state = manager_hp.get('dump_optimizer_state', True)
+        dump_data_state = manager_hp.get('dump_data_state', True)
+        dump_config_state = manager_hp.get('dump_config_state', True)
+
+        # Do not save checkpoints if disabled
+        if not enable_checkpoints:
+            logger.info("Checkpoint dumping is disabled in config; skipping dump.")
+            return
+    
         # Create checkpoint subdirectories for this hash
         self._create_exp_hash_directories(
             self.current_exp_hash,
-            create_data_dir='data' in changed_components,
-            create_hp_dir='config' in changed_components,
-            create_model_dir='model' in changed_components
+            create_data_dir='data' in changed_components and dump_data_state,
+            create_hp_dir='config' in changed_components and dump_config_state,
+            create_model_dir='model' in changed_components and (
+                dump_model_architecture or 
+                dump_model_state or 
+                dump_optimizer_state
+            )
         )
 
         # Track if we need to save weights
         should_save_weights = False
         weights_model = None
 
-        if 'model' in changed_components and model is not None:
+        if 'model' in changed_components and model is not None and dump_model_architecture:
             logger.info("Dumping model architecture...")
             self.save_model_architecture(model)
             should_save_weights = True
             weights_model = model
 
-        if ('hp' in changed_components or 'config' in changed_components) and config is not None:
+        if ('hp' in changed_components or 'config' in changed_components) and config is not None and dump_config_state:
             logger.info("Dumping hyperparameters config...")
             self.save_config(config)
             should_save_weights = True
 
-        if 'data' in changed_components:
+        if 'data' in changed_components and dump_data_state:
             logger.info("Dumping data snapshot...")
             self.save_data_snapshot()
             should_save_weights = True
 
         # Save weights whenever any component changes to preserve complete state
-        if should_save_weights:
+        if should_save_weights and (dump_model_state or dump_optimizer_state):
             try:
                 # Get model from ledger if not provided
                 if weights_model is None:
@@ -631,14 +668,15 @@ class CheckpointManager:
 
                 if weights_model is not None:
                     logger.info("Saving model weights checkpoint with component changes...")
-                    self.save_model_checkpoint(weights_model)
+                    self.save_model_checkpoint(weights_model, save_optimizer=dump_optimizer_state, save_model_checkpoint=dump_model_state)
                 else:
                     logger.warning("Could not save weights: no model available")
             except Exception as e:
                 logger.warning(f"Failed to save weights with component changes: {e}")
 
         # Always save logger snapshot alongside other components (same hash)
-        self.save_logger_snapshot()
+        if dump_model_architecture or dump_model_state or dump_optimizer_state or dump_config_state:
+            self.save_logger_snapshot()
 
     def has_pending_changes(self) -> tuple[bool, Set[str]]:
         """Check if there are pending changes.
@@ -656,6 +694,7 @@ class CheckpointManager:
         model: Optional[th.nn.Module] = None,
         step: Optional[int] = None,
         save_optimizer: bool = True,
+        save_model_checkpoint: bool = True,
         metadata: Optional[Dict[str, Any]] = None,
         force_dump_pending: bool = False,
         update_manifest: bool = True
@@ -737,6 +776,10 @@ class CheckpointManager:
             except Exception as e:
                 logger.warning(f"Could not save optimizer state: {e}")
 
+        # Save checkpoint only if enabled in config to avoid unnecessary disk usage when only architecture/config changes
+        if not save_model_checkpoint:
+            return None
+        
         # Add metadata
         if metadata:
             checkpoint['metadata'] = metadata

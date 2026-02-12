@@ -71,7 +71,7 @@ class PauseController:
         self._get_checkpoint_manager()
         if self.checkpoint_manager is None:
             return False
-        fl = self.checkpoint_manager.hash_by_module[0] != "00000000" and self.checkpoint_manager.hash_by_module[1] != "00000000" and self.checkpoint_manager.hash_by_module[2] != "00000000"
+        fl = self.checkpoint_manager.get_hp_hash() != "00000000" and self.checkpoint_manager.get_model_hash() != "00000000" and self.checkpoint_manager.get_data_hash() != "00000000"
 
         return fl
 
