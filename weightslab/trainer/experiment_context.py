@@ -178,7 +178,7 @@ class ExperimentContext:
 
                 return current + int(remaining)
             except Exception:
-                return 1000
+                return 0
 
         # TODO (GP): expand hyper-parameters exposed here
         self.hyper_parameters = {
