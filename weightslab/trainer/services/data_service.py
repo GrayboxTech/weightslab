@@ -130,9 +130,9 @@ class DataService:
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
-        # Auto-compute natural sort stats in background if dataset is small
-        if len(self._all_datasets_df) < 50000:
-             self._data_executor.submit(self._compute_natural_sort_stats)
+        # Always ensure natural sort stats are computed on startup
+        # This occurs before the service is fully available to the UI.
+        self._compute_natural_sort_stats()
 
         logger.info("DataService initialized.")
 
@@ -378,9 +378,9 @@ class DataService:
                 else:
                      sample_id = int(idx)
 
-                # Skip if already computed (optional optimization)
-                # if "natural_sort_score" in row and not pd.isna(row["natural_sort_score"]):
-                #    return None
+                # Skip if already computed (optimization for blocking startup)
+                if "natural_sort_score" in row and not pd.isna(row["natural_sort_score"]):
+                    return None
 
                 dataset = self._get_dataset(origin)
                 if not dataset:
@@ -510,9 +510,7 @@ class DataService:
         self._slowUpdateInternals(force=True)
 
         logger.info(f"[DataService] Completed stats computation for {processed_count} samples")
-        print(f"\n\n============================================================")
-        print(f"NATURAL SORT COMPUTATION FINISHED for {processed_count} samples")
-        print(f"============================================================\n")
+        print(f"\n\nNatural sort computation finished for {processed_count} samples\n\n")
         return f"Computed stats for {processed_count} samples"
 
     def _process_sample_row(self, args):
