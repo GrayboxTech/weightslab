@@ -33,6 +33,19 @@ from weightslab.components.global_monitoring import weightslab_rlock, pause_cont
 logger = logging.getLogger(__name__)
 
 
+def _safe_repr(obj) -> str:
+    try:
+        return str(obj)
+    except Exception:
+        try:
+            return repr(obj)
+        except Exception:
+            try:
+                return object.__repr__(obj)
+            except Exception:
+                return f"<{type(obj).__name__}>"
+
+
 def _sanitize_for_json(obj):
     """Recursively convert objects that are not JSON-serializable into
     serializable representations. In particular, handle `Proxy` objects by
@@ -41,32 +54,31 @@ def _sanitize_for_json(obj):
     # primitives
     if obj is None or isinstance(obj, (str, bool, int, float)):
         return obj
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode('utf-8', errors='replace')
     # Proxy handling
     if isinstance(obj, Proxy):
         try:
             inner = obj.get()
             return _sanitize_for_json(inner)
         except Exception:
-            return repr(obj)
+            return _safe_repr(obj)
     # dict -> sanitize values
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            try:
-                key = k if isinstance(k, str) else str(k)
-            except Exception:
-                key = str(k)
+            key = k if isinstance(k, str) else _safe_repr(k)
             out[key] = _sanitize_for_json(v)
         return out
     # list/tuple/set -> list
     if isinstance(obj, (list, tuple, set)):
         return [_sanitize_for_json(x) for x in obj]
-    # fallback: try to stringify
+    # fallback: attempt JSON, else safe string
     try:
         json.dumps(obj)
         return obj
     except Exception:
-        return {str(obj): obj}
+        return _safe_repr(obj)
 
 
 # Globals for the running server
