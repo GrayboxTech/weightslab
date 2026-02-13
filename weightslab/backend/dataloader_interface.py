@@ -497,6 +497,10 @@ class DataLoaderInterface:
             except Exception:
                 # Best-effort: skip if we cannot set the property
                 continue
+        
+        # Proxy class_names if available on the wrapped dataset
+        if hasattr(self.dataset, 'class_names'):
+             self.class_names = self.dataset.class_names
 
         # 2) Bind class-level callables (methods) of `obj` to this instance
         obj_cls_vars = getattr(obj.__class__, '__dict__', {})
