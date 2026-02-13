@@ -26,7 +26,8 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image, load_label
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
-from weightslab.backend.ledgers import get_dataloaders, get_dataframe
+from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
+from weightslab.src import compute_signals
 
 
 # Get global logger
@@ -134,6 +135,9 @@ class DataService:
         # Always ensure natural sort stats are computed on startup
         # This occurs before the service is fully available to the UI.
         self._compute_natural_sort_stats()
+        
+        # Automatically compute registered custom signals
+        self._compute_custom_signals()
 
         logger.info("DataService initialized.")
 
@@ -163,6 +167,14 @@ class DataService:
         """Recreate the in-memory dataframe view from the shared H5 store."""
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
+
+    def _slowUpdateInternals(self, force=False):
+        """Force refresh of internal dataframe view."""
+        # Simple alias for now if not defined
+        if time.time() - self._last_internals_update_time > 5.0 or force:
+             self._all_datasets_df = self._pull_into_all_data_view_df()
+             self._load_existing_tags()
+             self._last_internals_update_time = time.time()
 
     def _resolve_root_log_dir(self) -> Path:
         """Resolve root log directory from hyperparams/env, fallback to ./logs."""
@@ -513,6 +525,58 @@ class DataService:
         logger.info(f"[DataService] Completed stats computation for {processed_count} samples")
         print(f"\n\nNatural sort computation finished for {processed_count} samples\n\n")
         return f"Computed stats for {processed_count} samples"
+        
+    def _compute_custom_signals(self):
+        """
+        Discover and compute registered custom signals for all active dataloaders.
+        This allows scripts to simply register @wl.signal and have them computed automatically.
+        """
+        
+        # Get all registered signal names
+        signals = list_signals()
+        if not signals:
+            return
+            
+        # Get all active dataloaders
+        # use get_dataloaders without args to get all registered ones
+        loaders = get_dataloaders(None) 
+        
+        logger.info(f"[DataService] Checking custom signals {signals} for {len(loaders)} loaders...")
+        
+        for loader_name, loader in loaders.items():
+            if not loader or not hasattr(loader, "dataset"):
+                continue
+                
+            try:
+                # We need to determine the origin/split name for the compute_signals function
+                # Try to inspect the loader/dataset
+                origin = loader_name # Fallback
+                ds = getattr(loader, "tracked_dataset", None)
+                if ds and hasattr(ds, "_dataset_split"):
+                    origin = ds._dataset_split
+                elif hasattr(loader, "dataset") and hasattr(loader.dataset, "split"):
+                    origin = loader.dataset.split
+                
+                # Run computation
+                # Note: compute_signals handles checking if signal is already computed? 
+                # Currently compute_signals blindly recomputes. 
+                # Ideally we should check if columns exist in DF, but for now we trust the user logic or optimize later.
+                # To trigger the "Explicit Register Skeleton" logic we saw in the script, 
+                # we rely on compute_signals doing the upsert.
+                
+                # Wait, the script had manual upsert skeleton before compute. 
+                # compute_signals iterates and upserts results. 
+                # If the IDs are hashed and skeletons are missing, upsert might be tricky if columns mismatch?
+                # No, upsert_df handles new rows if IDs match index.
+                
+                logger.info(f"[DataService] Computing signals {signals} for loader '{loader_name}' (origin={origin})")
+                compute_signals(loader, origin=origin, signals=signals)
+                
+            except Exception as e:
+                logger.error(f"[DataService] Failed to compute signals for loader '{loader_name}': {e}")
+                
+        # Force view update
+        self._slowUpdateInternals(force=True)
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""

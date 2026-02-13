@@ -150,7 +150,7 @@ class LedgeredDataFrameManager:
         if origin is not None and "origin" not in df_norm.columns:
             df_norm["origin"] = origin
 
-        # Ensure sample_id index
+        # Ensure sample_id index matches existing frame type or coerces to int
         if "sample_id" in df_norm.columns:
             try:
                 df_norm = df_norm.set_index("sample_id")
@@ -163,6 +163,13 @@ class LedgeredDataFrameManager:
                     df_norm.index.name = "sample_id"
                 except Exception:
                     pass
+
+        # Robust index type enforcement: prefer int for sample_id
+        try:
+            if df_norm.index.name == "sample_id":
+                df_norm.index = df_norm.index.astype(int)
+        except Exception:
+            pass
 
         with self._lock:
             # Align columns
@@ -181,6 +188,10 @@ class LedgeredDataFrameManager:
             missing_idx = df_norm.index.difference(self._df.index)
             if len(missing_idx) > 0:
                 self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
+
+            # Defensive: ensure no ID duplication crept in
+            if self._df.index.duplicated().any():
+                self._df = self._df[~self._df.index.duplicated(keep='last')]
 
             self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
 

@@ -20,12 +20,16 @@ from weightslab.ui.weightslab_ui import ui_serve
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
+from weightslab.backend.ledgers import register_signal
+from tqdm import tqdm
 
 
 # Get global logger
 logger = logging.getLogger(__name__)
 # Get global dataframe proxy (auto-updated when ledger registers real manager)
 DATAFRAME_M = None
+# Global registry for custom signals
+_REGISTERED_SIGNALS = {}
 
 
 def save_signals(
@@ -560,3 +564,154 @@ def keep_serving():
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down WeightsLab services.")
+
+#  Signal Definition & Computation Helpers
+def signal(name: str = None, **kwargs):
+    """
+    Decorator to register a custom signal function.
+    
+    Usage:
+        @wl.signal(name="blue_pixels")
+        def compute_blue(sample, **kwargs):
+            return ...
+    """
+    def decorator(func):
+        reg_name = name or func.__name__
+        if reg_name in _REGISTERED_SIGNALS:
+            logger.warning(f"Overwriting already registered signal: {reg_name}")
+        _REGISTERED_SIGNALS[reg_name] = func
+        # Attach metadata
+        func._wl_signal_meta = kwargs
+        func._wl_signal_name = reg_name
+        
+        # Register in global ledger for visibility by backend services
+        try:
+            register_signal(func, name=reg_name)
+        except Exception as e:
+            logger.warning(f"Failed to register signal '{reg_name}' in ledger: {e}")
+            
+        return func
+    return decorator
+
+
+def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = None):
+    """
+    Execute registered signals on a dataset and update the central DataFrame.
+
+    Args:
+        dataset_or_loader: The dataset or dataloader to process.
+        origin: The split name (e.g. 'train', 'val'). Auto-detected if possible.
+        signals: List of signal names to run. If None, runs all registered signals.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    # Unwrap loader if needed
+    dataset = dataset_or_loader
+    if hasattr(dataset_or_loader, "tracked_dataset"): # WeightsLab Loader
+        dataset = dataset_or_loader.tracked_dataset
+    elif hasattr(dataset_or_loader, "dataset"): # Loader
+        dataset = dataset_or_loader.dataset
+    
+    # GP: Do not unwrap wrapped_dataset (DataSampleTrackingWrapper) blindly,
+    # as it holds the 'unique_ids' map when compute_hash=True.
+    # Only unwrap if it's a wrapper that doesn't provide IDs but obscures the underlying data?
+    # For now, we trust the wrapper if it behaves like a dataset.
+
+    # ... but we might need the raw dataset for specialized methods if the wrapper doesn't delegate.
+    # DataSampleTrackingWrapper delegates __getitem__ and __len__, so it's fine.
+
+    # Attempt to resolve origin
+    if origin is None:
+        if hasattr(dataset, "_dataset_split"):
+            origin = dataset._dataset_split
+        elif hasattr(dataset, "split"):
+            origin = dataset.split
+        else:
+            origin = "unknown"
+
+    # Resolve signals to run
+    signal_fns = {}
+    target_names = signals or _REGISTERED_SIGNALS.keys()
+    
+    for name in target_names:
+        if name in _REGISTERED_SIGNALS:
+            signal_fns[name] = _REGISTERED_SIGNALS[name]
+        else:
+            logger.warning(f"Signal '{name}' not found in registry.")
+
+    if not signal_fns:
+        logger.info("No signals to compute.")
+        return
+
+    logger.info(f"Computing {len(signal_fns)} signals for {len(dataset)} samples in '{origin}'...")
+
+    batch_updates = []
+    
+    # helper for unpacking
+    def _get_image(item):
+        # Handle tuple (img, label) or dict/object
+        if isinstance(item, (tuple, list)):
+            return item[0]
+        return item
+
+    # Iterate
+    # Note: Accessing dataset directly by index is assumed safe
+    for i in tqdm(range(len(dataset)), desc=f"Signals [{origin}]"):
+        try:
+            sample_id = i
+            # 1. Hashed ID (compute_hash=True)
+            if hasattr(dataset, "unique_ids") and dataset.unique_ids is not None:
+                try:
+                    sample_id = dataset.unique_ids[i]
+                except (IndexError, TypeError):
+                    pass
+            # 2. Dataset-specific mapping (legacy)
+            elif hasattr(dataset, "get_index_from_sample_id"):
+                try:
+                    val = dataset.get_index_from_sample_id(i)
+                    if val is not None:
+                        sample_id = val
+                except Exception:
+                    pass
+            
+            # Retrieve raw item
+            # We try to get the rawest form possible to avoid transforms if not needed,
+            # but for consistency we often just use __getitem__
+            if i == 0:
+                logger.info(f"DEBUG: compute_signals first sample_id: {sample_id} (type: {type(sample_id)}) for origin: {origin}")
+            
+            raw_item = dataset[i]
+            input_data = _get_image(raw_item)
+            
+            row = {
+                "sample_id": int(sample_id),
+                "origin": origin,
+            }
+
+            for sig_name, sig_func in signal_fns.items():
+                try:
+                    # Pass the input data (usually the image)
+                    val = sig_func(input_data)
+                    # Prefix 'signals_' if not already present to group in UI
+                    key = sig_name if sig_name.startswith("signals") else f"signals_{sig_name}"
+                    row[key] = val
+                except Exception as e:
+                    pass # Fail silently for single signal failures
+            
+            batch_updates.append(row)
+
+        except Exception as e:
+            logger.error(f"Failed to compute signals for index {i}: {e}")
+
+    # Upsert to Ledger
+    if batch_updates:
+        import pandas as pd
+        df_new = pd.DataFrame(batch_updates)
+        logger.info(f"Registering {len(df_new)} signal records to global ledger.")
+        
+        # Use upsert with force_flush
+        enqueue = getattr(DATAFRAME_M, 'upsert_df', None)
+        if callable(enqueue):
+            enqueue(df_new, force_flush=True)
