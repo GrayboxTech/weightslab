@@ -187,6 +187,12 @@ class LedgeredDataFrameManager:
         with self._lock:
             self._pending.add(int(sample_id))
 
+    def drop_column(self, column: str):
+        with self._lock:
+            if column in self._df.columns:
+                return self._df.pop(column)
+            return None
+        
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
             self._pending.update(set(sample_ids))
@@ -397,15 +403,22 @@ class LedgeredDataFrameManager:
                 else:
                     mask = (self._df.index == idx)
                 if mask.any():
-                    # Format values properly to batch of values only
-                    values = np.asanyarray(list(updates.values())[0])
-                    if values.ndim == 0:
-                        values = np.asanyarray([values])
-                    elif values.ndim == 1:
-                        pass
+                    # Handle multiple column updates by constructing Series
+                    # This supports both single-valued updates and array-valued updates
+                    if len(updates) == 1:
+                        # Single column update - use original logic
+                        values = np.asanyarray(list(updates.values())[0])
+                        if values.ndim == 0:
+                            values = np.asanyarray([values])
+                        elif values.ndim == 1:
+                            pass
+                        else:
+                            values = values.squeeze(tuple(range(values.ndim-1)))
+                        self._df.loc[mask, list(updates.keys())] = values
                     else:
-                        values = values.squeeze(tuple(range(values.ndim-1)))
-                    self._df.loc[mask, list(updates.keys())] = values
+                        # Multiple column updates - use Series for proper alignment
+                        update_series = pd.Series(updates)
+                        self._df.loc[mask, update_series.index] = update_series.values
                 else:
                     # Create new row
                     row_data = {"origin": origin, **updates}

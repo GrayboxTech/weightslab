@@ -34,15 +34,20 @@ def save_signals(
     signals: dict,
     preds_raw: th.Tensor,
     targets: th.Tensor,
-    preds: th.Tensor = None, 
+    preds: th.Tensor = None,
+    step: int = 0,
     log: bool = True
 ):
     """
         Save data statistics to the tracked dataset.
+        
         Args:
             batch_ids (th.Tensor): The batch ids.
             signals (th.Tensor): The batch losses.
             preds (th.Tensor, optional): The batch predictions. Defaults to None.
+            targets (th.Tensor, optional): The batch targets. Defaults to None.
+            step (int, optional): The current training step. Defaults to 0.
+            log (bool, optional): Whether to log the signals. Defaults to True.
     """
     global DATAFRAME_M
     if DATAFRAME_M is None:
@@ -55,7 +60,7 @@ def save_signals(
             scalar, batch_scalar = extract_scalar_from_tensor(batch_scalar)
 
             # Log if requested
-            log_signal(scalar, reg_name)
+            log_signal(scalar, reg_name, step=step)
 
     # Convert tensors to numpy for lightweight buffering
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
@@ -109,7 +114,16 @@ def save_signals(
             losses=losses_data,
         )
 
-def log_signal(scalar: float, reg_name: str, **kwargs) -> None:
+def log_signal(scalar: float, reg_name: str, step: int = 0, **kwargs) -> None:
+    """
+        Log the given scalar signal to the registered logger in the ledger, if available and logging is enabled.
+        
+        Args:
+            scalar (float): The scalar value to log. 
+            reg_name (str): The registration name of the signal, used as the key in logging. 
+            step (int, optional): The current training step to log as global_step. Defaults to 0. 
+            kwargs (dict, optional): Additional keyword arguments that may contain logging preferences. Defaults to {}.
+    """
     # Check if logging is enabled
     if not kwargs.get('log', True):
         return
@@ -128,8 +142,6 @@ def log_signal(scalar: float, reg_name: str, **kwargs) -> None:
                     logger = None
 
             if logger is not None and hasattr(logger, 'add_scalars'):
-                # attempt to get a sensible global_step
-                step = 0
                 # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
                 from weightslab.backend.ledgers import list_models, get_model as _gm
                 full_list = list_models()
@@ -153,12 +165,11 @@ def log_signal(scalar: float, reg_name: str, **kwargs) -> None:
                         if val is not None:
                             step = int(val)
                         else:
-                            step = 0
-                            m.current_step = 0  # add current_step attribute to model for future tracking
+                            step = step # fallback to provided step
+                            m.current_step = step  # add current_step attribute to model for future tracking
                     else:
                         # If model doesn't have current_step, force it to 0 or try to infer from checkpoint manager
-                        step = 0
-                        m.current_step = 0  # add current_step attribute to model for future tracking
+                        m.current_step = step  # add current_step attribute to model for future tracking
 
                 # Add to logger
                 logger.add_scalars(

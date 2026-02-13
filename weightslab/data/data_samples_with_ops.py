@@ -384,39 +384,52 @@ class DataSampleTrackingWrapper(Dataset):
         # Ensure data is a tuple for consistent handling
         if not isinstance(data, tuple):
             data = (data,)
-            raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
-        elif len(data) == 1:  # For single element (unsupervised): return (item, id)
+        
+        # Handle single element (unsupervised): return (item, id)
+        if len(data) == 1:
             return data[0], id
 
         # Element extraction
         # # First, always the input data
         item = data[0]
         
-        # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
-        # id = data[1]
-        pass
+        # Handle different tuple formats:
+        # - 2-tuple: (item, target) - common in sklearn-style datasets
+        # - 3+ tuple: (item, uid, target, *metadata) - expected format
+        if len(data) == 2:
+            # Standard 2-tuple from PyTorch datasets: (item, target)
+            target = data[1]
+            rest = ()
+        else:
+            # 3+ tuple format
+            # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
+            # id = data[1]
+            pass
 
-        # # Third, is target/label
-        target = data[2]  
-        
-        # # Finally, any additional elements (e.g., boxes, masks) are metadata
-        rest = data[3:] if len(data) > 3 else ()
+            # # Third, is target/label
+            target = data[2]  
+            
+            # # Finally, any additional elements (e.g., boxes, masks) are metadata
+            rest = data[3:] if len(data) > 3 else ()
 
         # For single element (unsupervised): return (item, id)
         # Override target with tag-based label if use_tags is enabled
         if self._use_tags:
             with self._df_lock:
-                tag_value = self._get_value(int(id), SampleStatsEx.TAGS.value) or ''
-                if pd.isna(tag_value):
-                    tag_value = ''
+                sample_tags_set = self._get_tags_for_sample(int(id))
 
             if self._is_binary_labels:
-                # Binary classification: 1 if tag matches, 0 otherwise
+                # Binary classification: 1 if target tag is present, 0 otherwise
                 target_tag = list(self._tags_mapping.keys())[0]
-                target = 1 if tag_value == target_tag else 0
+                target = 1 if target_tag in sample_tags_set else 0
             elif self._tags_mapping:
-                # Multiclass: map tag string to integer label
-                target = self._tags_mapping.get(tag_value, 0)  # Default to 0 if tag not in mapping
+                # Multiclass: find first matching tag in the mapping, default to 0
+                for tag in sample_tags_set:
+                    if tag in self._tags_mapping:
+                        target = self._tags_mapping[tag]
+                        break
+                else:
+                    target = 0  # Default to 0 if no tags match the mapping
             else:
                 # No mapping provided but use_tags=True: keep original target
                 logger.warning(f"use_tags=True but no tags_mapping provided for sample {id}")
@@ -611,6 +624,67 @@ class DataSampleTrackingWrapper(Dataset):
 
     def _set_dense(self, key: str, sample_id: int, value: np.ndarray):
         get_dataframe().set_dense(self._dataset_split, key, sample_id, value)
+
+    def _convert_tags_to_columns(self, sample_id: int, tag_value: Any) -> Dict[str, Any]:
+        """
+        LEGACY METHOD - Convert tag string(s) to individual boolean columns.
+        
+        Handles:
+        - Comma-separated: "tag1,tag2,tag3" → tags_tag1=1, tags_tag2=1, tags_tag3=1
+        - Semicolon-separated: "tag1;tag2;tag3" → tags_tag1=1, tags_tag2=1, tags_tag3=1
+        - Single tag: "mytag" → tags_mytag=1
+        
+        Returns dict with updates ready to be passed to _set_values.
+        """
+        updates = {}
+        
+        # Handle empty/None values
+        if not tag_value or (isinstance(tag_value, str) and not tag_value.strip()):
+            return updates
+        
+        # Convert to string and parse tags
+        tag_str = str(tag_value).strip()
+        
+        # Split by comma or semicolon
+        tags = set()
+        for tag in tag_str.split(';'):
+            for t in tag.split(','):
+                clean_tag = t.strip()
+                if clean_tag:
+                    tags.add(clean_tag)
+        
+        # Create individual tag columns
+        for tag in tags:
+            col_name = f"{SampleStatsEx.TAG.value}_{tag}"
+            updates[col_name] = 1
+        
+        return updates
+
+    def _get_tags_for_sample(self, sample_id: int) -> Set[str]:
+        """
+        Retrieve all tags for a given sample from individual tag columns.
+        
+        Returns a set of tag names (without the "tags_" prefix) that are True/1 for this sample.
+        """
+        tags_set = set()
+        
+        df_view = self._get_df_view()
+        if df_view.empty or sample_id not in df_view.index:
+            return tags_set
+        
+        # Get all columns that match the "tags_*" pattern
+        tag_columns = [col for col in df_view.columns if col.startswith(f"{SampleStatsEx.TAG.value}_")]
+        
+        # Check which tag columns are True/1 for this sample
+        for tag_col in tag_columns:
+            tag_value = df_view.loc[sample_id, tag_col]
+            # Check if tag is set (1, True, or non-zero)
+            if tag_value and tag_value != 0 and tag_value is not None and tag_value is not pd.NA:
+                # Extract tag name by removing "tags_" prefix
+                tag_name = tag_col[len(f"{SampleStatsEx.TAG.value}_"):]
+                tags_set.add(tag_name)
+        
+        return tags_set
 
     def _save_pending_stats_to_h5(self):
         """Mark pending rows dirty and request async flush from background thread."""
@@ -896,9 +970,17 @@ class DataSampleTrackingWrapper(Dataset):
     def set(self, sample_id: int, stat_name: str, value: Any):
         """
             Set a specific stat value for a given sample ID.
+            
+            Special handling: When stat_name is "tags", creates individual boolean columns
+            like "tags_<tagname>" set to 1 or 0, instead of storing a single string.
         """
         with self._df_lock:
-            self._set_values(sample_id=sample_id, updates={stat_name: value})
+            # Special handling for tags: convert to individual boolean columns
+            if stat_name == SampleStatsEx.TAG.value and value:
+                updates = self._convert_tags_to_columns(sample_id, value)
+            else:
+                updates = {stat_name: value}
+            self._set_values(sample_id=sample_id, updates=updates)
 
     def _detect_cross_loader_duplicates(self, current_origin: str) -> Set[int]:
         """

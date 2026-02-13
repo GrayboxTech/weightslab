@@ -157,13 +157,19 @@ class ExperimentService:
                         if trainer is not None:
                             if hyper_parameters.is_training:
                                 trainer.resume()
+                                set_hyperparam(
+                                    name=hp_name,
+                                    key_path="is_training",
+                                    value=hyper_parameters.is_training
+                                )
                             else:
+                                set_hyperparam(
+                                    name=hp_name,
+                                    key_path="is_training",
+                                    value=hyper_parameters.is_training
+                                )
                                 trainer.pause()
-                        set_hyperparam(
-                            name=hp_name,
-                            key_path="is_training",
-                            value=hyper_parameters.is_training
-                        )
+
                 except Exception as e:
                     return pb2.CommandResponse(
                         success=False,

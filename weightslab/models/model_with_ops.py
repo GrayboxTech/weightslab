@@ -81,9 +81,6 @@ class NetworkWithOps(nn.Module):
             layer.tracking_mode = mode
 
     def get_age(self):
-        return self.seen_samples
-
-    def get_batched_age(self):
         return self.seen_batched_samples
 
     def get_name(self):

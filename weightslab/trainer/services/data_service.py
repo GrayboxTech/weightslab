@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
+from weightslab.proto.experiment_service_pb2 import SampleEditType
 
 from PIL import Image
 from typing import List
@@ -279,15 +280,13 @@ class DataService:
         return df
 
     def _load_existing_tags(self):
-        """Ensure tags column is present on the streamed dataframe."""
-        if self._all_datasets_df is None or self._all_datasets_df.empty:
-            return
-
-        if SampleStatsEx.TAGS.value not in self._all_datasets_df.columns:
-            try:
-                self._all_datasets_df[SampleStatsEx.TAGS.value] = ""
-            except Exception:
-                pass
+        """
+        Legacy method - no longer needed with the new tag column system.
+        Tags are now stored as individual boolean columns (tags_<tagname>)
+        instead of a single "tags" string column.
+        """
+        # Tags are now handled via individual columns created on demand
+        pass
 
     def _get_dataset(self, origin: str):
         loader = self._get_loader_by_origin(origin)
@@ -309,7 +308,6 @@ class DataService:
                 return value_arr.size == 1 and np.isnan(value_arr.item())
             except (TypeError, ValueError):
                 return False
-
 
     def _process_sample_row(self, args):
         """Process a single dataframe row to create a DataRecord."""
@@ -363,9 +361,21 @@ class DataService:
                     value = round(value, 7)
                 if isinstance(value, bool):
                     value = int(value)
-                data_stats.append(
-                    create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
-                )
+                
+                # Check if it s a tag column here and handle it as a string stat with the tag name as value
+                if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
+                    if value == 1:
+                        tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}_"):]  # Remove "tags_" prefix to get tag name
+                        if value:  # Only include if the tag is True for this sample
+                            data_stats.append(
+                                create_data_stat(f"{SampleStatsEx.TAG.value}:{tag_name}", "string", shape=[1], value_string="1", thumbnail=b"")
+                            )
+                    else:
+                        continue  # Skip false tags
+                else:
+                    data_stats.append(
+                        create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
+                    )
 
             # ====== Step 6: Add origin and task_type stats ======
             data_stats.append(
@@ -591,20 +601,20 @@ class DataService:
             return None
 
     def _get_unique_tags(self) -> List[str]:
-        """Collect all unique tags currently present in the tracked datasets."""
+        """Collect all unique tags currently present in the tracked datasets.
+        
+        Tags are stored as individual boolean columns with prefix "tags_".
+        This method extracts all tag names from the column names.
+        """
         tags = set()
         try:
-            # Extract tags from the dataframe if it exists and has a tags column
+            # Extract tags from individual tag columns (tags_<tagname>)
             if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                if SampleStatsEx.TAGS.value in self._all_datasets_df.columns:
-                    tag_values = self._all_datasets_df[SampleStatsEx.TAGS.value].dropna()
-                    for tag_val in tag_values:
-                        if tag_val:
-                            # Tags are stored as comma-separated strings
-                            for t in str(tag_val).split(';'):
-                                clean_t = t.strip()
-                                if clean_t:
-                                    tags.add(clean_t)
+                for col in self._all_datasets_df.columns:
+                    if col.startswith(f"{SampleStatsEx.TAG.value}:"):
+                        # Extract tag name by removing "tags_" prefix
+                        tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]  # len("tags_") == 5
+                        tags.add(tag_name)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
         return sorted(list(tags))
@@ -1090,6 +1100,79 @@ class DataService:
                 data_records=[]
             )
 
+    def _calculate_tag_column_updates(self, sample_id: int, origin: str, new_tag_name: str, edit_type) -> dict:
+        """
+        Calculate individual tag column updates based on the edit type.
+        
+        Returns a dictionary of column updates like:
+        {"tags_tag1": 1, "tags_tag2": 1, ...}
+        
+        For EDIT_ACCUMULATE: adds the new tag
+        For EDIT_REMOVE: removes the specified tag
+        For EDIT_OVERRIDE: replaces all tags with the new value
+        """
+        tag_updates = {}
+        uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
+        new_tag_name = f'{SampleStatsEx.TAG.value}:{new_tag_name.strip()}'
+
+        # Get current tags from the in-memory dataframe or df_manager
+        existing_tag_value = True  # Default to True for new tags
+        current_tags_set = set()
+        try:
+            if self._all_datasets_df is not None:
+                # Read current tag columns from in-memory dataframe
+                if uses_multiindex:
+                    row = self._all_datasets_df.loc[(origin, sample_id)]
+                else:
+                    mask = (self._all_datasets_df.index == sample_id) & \
+                           (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
+                    if mask.any():
+                        row = self._all_datasets_df.loc[mask].iloc[0]
+                    else:
+                        row = None
+                
+                if row is not None:
+                    for col in row.index:
+                        if col == new_tag_name and row[col]:  # If existing, revert the value 
+                            existing_tag_value = bool(1 - row[col])
+
+        except (KeyError, AttributeError) as e:
+            logger.debug(f"Could not read current tags: {e}")
+        
+        # Calculate target tags based on edit type
+        if edit_type == SampleEditType.EDIT_REMOVE:
+            existing_tag_value = False  # For removal, we set the tag to False
+            target_tags_set = self._parse_tags(new_tag_name)
+        else:
+            # Override: replace all tags with the new value
+            target_tags_set = self._parse_tags(new_tag_name)
+        
+        # Create column updates for all target tags
+        for tag in target_tags_set:
+            tag_updates[tag] = existing_tag_value
+        
+        return tag_updates
+    
+    def _parse_tags(self, tag_value: str) -> set:
+        """
+        Parse a tag string into individual tag names.
+        Handles comma, semicolon, or mixed separators.
+        
+        Example:
+            "tag1,tag2;tag3" → {'tag1', 'tag2', 'tag3'}
+        """
+        if not tag_value or not isinstance(tag_value, str):
+            return set()
+        
+        tags = set()
+        for tag in tag_value.split(';'):
+            for t in tag.split(','):
+                clean_tag = t.strip()
+                if clean_tag:
+                    tags.add(clean_tag)
+        
+        return tags
+
     # RPC Implementations
     # ===================
     def ApplyDataQuery(self, request, context):
@@ -1285,6 +1368,10 @@ class DataService:
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and deny_listed).
+        
+        Tags are stored as individual boolean columns (tags_<tagname>) instead of
+        a single comma-separated string. This allows for efficient dataframe indexing, grouping,
+        and sorting by tags.
         """
 
         if self._all_datasets_df is None:
@@ -1304,128 +1391,96 @@ class DataService:
             else:
                 hp["is_training"] = False
 
-        if request.stat_name not in [SampleStatsEx.TAGS.value, SampleStatsEx.DENY_LISTED.value]:
+        if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DENY_LISTED.value]:
             return pb2.DataEditsResponse(
                 success=False,
                 message="Only 'tags' and 'deny_listed' stat editing is supported for now.",
             )
 
-        if request.stat_name == SampleStatsEx.TAGS.value:
-            request.string_value = request.string_value or ""
-
         # No dataset lookups needed; all edits apply directly to the global dataframe.
 
-        # ---------------------------------------------------------------------
-        # 1) Mirror edits into the in-memory DataFrame
-        # ---------------------------------------------------------------------
+        # =====================================================================
+        # Process tag edits using the new column-based tag system
+        # =====================================================================
         with self._lock:
-            if self._all_datasets_df is not None:
-                uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
-                for sid, origin in zip(request.samples_ids, request.sample_origins):
-                    if request.stat_name == SampleStatsEx.TAGS.value:
-                        new_val = request.string_value
-                        if request.type == pb2.SampleEditType.EDIT_OVERRIDE:
-                            # EDIT_OVERRIDE: directly use the new value
-                            target_val = new_val or ""
-                        elif (request.type == pb2.SampleEditType.EDIT_ACCUMULATE or request.type == pb2.SampleEditType.EDIT_REMOVE):
-                            try:
-                                if uses_multiindex:
-                                    current_val = self._all_datasets_df.loc[(origin, sid), SampleStatsEx.TAGS.value]
-                                else:
-                                    current_val = self._all_datasets_df.loc[sid, SampleStatsEx.TAGS.value]
-                            except KeyError:
-                                current_val = ""
-
-                            if pd.isna(current_val): current_val = ""
-                            current_tags = [t.strip() for t in str(current_val).split(';') if t.strip()]
-
-                            if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
-                                if new_val not in current_tags:
-                                    current_tags.append(new_val)
-                            else: # EDIT_REMOVE
-                                if new_val in current_tags:
-                                    current_tags.remove(new_val)
-
-                            target_val = ";".join(current_tags)
-                        else:
-                            target_val = new_val or ""
-                    else:
-                        target_val = request.bool_value
-
-                    try:
-                        if uses_multiindex:
-                            self._all_datasets_df.loc[(origin, sid), request.stat_name] = target_val
-                        else:
-                            # Fallback: origin / sample_id as columns
-                            mask = (
-                                (self._all_datasets_df.index == sid)
-                                & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
-                            )
-                            self._all_datasets_df.loc[mask, request.stat_name] = target_val
-
-
-                    except Exception as e:
-                        logger.debug(
-                            f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
-                        )
-
-            # ------------------------------------------------------------------
-            # 3) Persist edits into the global dataframe manager (in-memory ledger)
-            # MOVED INSIDE LOCK to prevent race conditions with _slowUpdateInternals
-            # ------------------------------------------------------------------
             try:
                 if request.samples_ids and self._df_manager is not None:
                     updates_by_origin = {}
+                    is_tag_request = request.stat_name == SampleStatsEx.TAG.value or request.stat_name.startswith(SampleStatsEx.TAG.value)
                     for sid, origin in zip(request.samples_ids, request.sample_origins):
-                        # Tags
-                        if request.stat_name == SampleStatsEx.TAGS.value:
-                            # Logic to calculate new tags based on edit type
-                            # use self._all_datasets_df (which was just updated above) as source of truth
-                            # instead of pulling from _df_manager again, to ensure consistency inside the lock.
-                            uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
-                            current_val = ""
-                            try:
-                                if uses_multiindex:
-                                    current_val = self._all_datasets_df.loc[(origin, sid), SampleStatsEx.TAGS.value]
-                                else:
-                                    # Fallback
-                                    mask = (self._all_datasets_df.index == sid) & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
-                                    if mask.any():
-                                        current_val = self._all_datasets_df.loc[mask, SampleStatsEx.TAGS.value].iloc[0]
-                            except Exception:
-                                pass
-
-                            target_val = current_val # Already updated above in step 1
-
-                            updates_by_origin.setdefault(origin, []).append({
-                                "sample_id": int(sid),
-                                SampleStatsEx.ORIGIN.value: origin,
-                                request.stat_name: target_val,
-                            })
+                        # =========
+                        # TAG EDITS
+                        # =========
+                        if is_tag_request:
+                            # Calculate tag column updates based on edit type
+                            tag_updates = self._calculate_tag_column_updates(
+                                sid, 
+                                origin,
+                                request.string_value, 
+                                request.type
+                            )
+                            
+                            # Add all tag column updates for this sample
+                            if origin not in updates_by_origin:
+                                updates_by_origin[origin] = {}
+                            if sid not in updates_by_origin[origin]:
+                                updates_by_origin[origin][sid] = {
+                                    "sample_id": int(sid),
+                                    SampleStatsEx.ORIGIN.value: origin,
+                                }
+                            
+                            # Merge tag column updates into the sample's updates
+                            updates_by_origin[origin][sid].update(tag_updates)
+                        
+                        # =================
+                        # DENY LISTED EDITS
+                        # =================
                         else:
                             # Deny_listed
-                            updates_by_origin.setdefault(origin, []).append({
+                            if origin not in updates_by_origin:
+                                updates_by_origin[origin] = {}
+                            updates_by_origin[origin][sid] = {
                                 "sample_id": int(sid),
                                 SampleStatsEx.ORIGIN.value: origin,
-                                request.stat_name: request.bool_value,
-                            })
-
-                    for origin, rows in updates_by_origin.items():
+                                request.stat_name: bool(request.bool_value),
+                            }
+                    
+                    # Upsert all tag column updates into the global dataframe
+                    for origin, samples in updates_by_origin.items():
+                        rows = list(samples.values())
                         df_update = pd.DataFrame(rows).set_index("sample_id")
-                        # upsert_df updates the ledger's dataframe immediately
                         self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
-
+                    
+                    # Auto-cleanup: if EDIT_REMOVE was used on a tag, delete the entire column immediately
+                    if is_tag_request and request.type == SampleEditType.EDIT_REMOVE and request.float_value == -1:
+                        column_name = request.stat_name.strip()
+                        if column_name:
+                            logger.info(f"[EditDataSample] Deleting tag column: {column_name}")
+                            # Delete the column from storage
+                            self._df_manager.drop_column(column_name)
+                            
+                            # Remove from in-memory dataframe if it exists
+                            if self._all_datasets_df is not None:
+                                if column_name in self._all_datasets_df.columns:
+                                    self._all_datasets_df = self._all_datasets_df.drop(columns=[column_name])
+                    
+                    # Reload dataframe to reflect all changes
+                    self._all_datasets_df = self._pull_into_all_data_view_df()
+            
+                # Prevent _slowUpdateInternals from overwriting our edits with stale data
+                self._last_internals_update_time = time.time()
+                
+                return pb2.DataEditsResponse(
+                    success=True,
+                    message=f"Edited {len(request.samples_ids)} samples",
+                )
+            
             except Exception as e:
-                logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
-
-            # Prevent _slowUpdateInternals from overwriting our in-memory edits with stale data
-            # from the disk/db for a few seconds.
-            self._last_internals_update_time = time.time()
-
-        return pb2.DataEditsResponse(
-            success=True,
-            message=f"Edited {len(request.samples_ids)} samples",
-        )
+                logger.error(f"[EditDataSample] Failed to edit samples: {e}", exc_info=True)
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message=f"Failed to edit samples: {str(e)}",
+                )
 
     def GetDataSplits(self, request, context):
         """

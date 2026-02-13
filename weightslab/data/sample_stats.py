@@ -12,7 +12,7 @@ __all__ = [
     "SAMPLES_STATS_DEFAULTS_TYPES",
     "SAMPLE_STATS_ALL",
 ]
-
+3
 
 class SampleStats:
     class Ex(str, Enum):
@@ -20,12 +20,11 @@ class SampleStats:
 
         PREDICTION = "prediction"
         PREDICTION_RAW = "prediction_raw"
-        # PREDICTION_SIGNALS_VALUES = "prediction_signals_values"  # Old name - replace now by dynamic signals name
 
         TARGET = "target"
         DENY_LISTED = "deny_listed"
 
-        TAGS = "tags"
+        TAG = "tag"
         ORIGIN = "origin"
         TASK_TYPE = "task_type"
 
@@ -42,7 +41,7 @@ class SampleStats:
 
         Ex.DENY_LISTED.value: bool,
 
-        Ex.TAGS.value: str,
+        # Ex.TAG.value: str,
         Ex.ORIGIN.value: str,
         Ex.TASK_TYPE.value: str,
     }
@@ -56,8 +55,8 @@ class SampleStats:
         Ex.TARGET.value: [],
 
         Ex.DENY_LISTED.value: False,
+        # Ex.TAG.value: "",
 
-        Ex.TAGS.value: "",
         Ex.ORIGIN.value: "",
         Ex.TASK_TYPE.value: "",
     }
@@ -71,11 +70,13 @@ class SampleStats:
     def get_to_save_to_h5_list(cls) -> List[str]:
         """Return list of stats to save to H5, conditionally including predictions and targets."""
         base_list = [
-            # cls.Ex.PREDICTION_SIGNALS_VALUES.value,
             "signals.*",  # Prefix for dynamic signals
-
+            "SIGNALS.*",  # Prefix for dynamic signals
+            "tag.*",  # Prefix for dynamic TAG
+            "TAG.*",  # Prefix for dynamic TAG
+            
             cls.Ex.DENY_LISTED.value,
-            cls.Ex.TAGS.value,
+            cls.Ex.TAG.value,
             cls.Ex.ORIGIN.value,
         ]
 

@@ -18,28 +18,32 @@ import threading
 # Change the name of the current (main) thread
 threading.current_thread().name = "WL-MainThread"
 
-print(threading.current_thread().name)  # Output: MyMainThread
+# Track if initialization has already happened
+_initialized = False
 
 # Auto-initialize logging if not already configured
-# Check for environment variable to control log level
-log_level = os.getenv(
-	'WEIGHTSLAB_LOG_LEVEL',
-	'INFO'
-)
-log_to_file = os.getenv(
-	'WEIGHTSLAB_LOG_TO_FILE',
-	'true'
-).lower() == 'true'
+if not _initialized:
+	# Check for environment variable to control log level
+	log_level = os.getenv(
+		'WEIGHTSLAB_LOG_LEVEL',
+		'INFO'
+	)
+	log_to_file = os.getenv(
+		'WEIGHTSLAB_LOG_TO_FILE',
+		'true'
+	).lower() == 'true'
 
-# Initialize logging (ensure console + file handlers are configured).
-# setup_logging resets handlers, so it's safe to call here and guarantees
-# both a console StreamHandler and a FileHandler (when requested).
-setup_logging(log_level, log_to_file=log_to_file)
+	# Initialize logging (ensure console + file handlers are configured).
+	# setup_logging resets handlers, so it's safe to call here and guarantees
+	# both a console StreamHandler and a FileHandler (when requested).
+	setup_logging(log_level, log_to_file=log_to_file)
 
-# Setup and use logger
-logger = logging.getLogger(__name__)
-logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
-logger.info(_BANNER)
+	# Setup and use logger
+	logger = logging.getLogger(__name__)
+	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
+	logger.info(_BANNER)
+	
+	_initialized = True
 
 # Get Package Metadata
 __version__ = "0.0.0"

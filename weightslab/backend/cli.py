@@ -553,6 +553,7 @@ def _handle_command(cmd: str) -> Any:
 
         if verb in ('add_tag', 'tag'):
             # Syntax: add_tag <uid> <tag> [--loader loader_name]
+            # Tags are now stored as individual boolean columns (tags_<tagname>)
 
             if len(parts) < 3:
                 return {'ok': False, 'error': 'usage: add_tag <uid> <tag> [--loader loader_name]'}
@@ -591,12 +592,19 @@ def _handle_command(cmd: str) -> Any:
                         continue
 
                     try:
-                        # Try different methods to add tags
-                        if hasattr(dataset, 'add_tag'):
+                        # Try different methods to add tags - with new tag system, use set() method
+                        sample_id = int(uid) if uid.isdigit() else uid
+                        
+                        if hasattr(dataset, 'set') and callable(dataset.set):
+                            # New tag system: use set() to create tags_<tagname> column
+                            dataset.set(sample_id=sample_id, stat_name="tags", value=tag)
+                            results['updated'][lname] = f'Tagged sample {uid} with "{tag}"'
+                        elif hasattr(dataset, 'add_tag'):
+                            # Fallback: legacy add_tag method
                             dataset.add_tag(uid, tag)
                             results['updated'][lname] = f'Added tag "{tag}" to {uid}'
                         elif hasattr(dataset, 'sample_tags'):
-                            # Direct dict manipulation
+                            # Fallback: direct dict manipulation
                             if uid not in dataset.sample_tags:
                                 dataset.sample_tags[uid] = []
                             if tag not in dataset.sample_tags[uid]:

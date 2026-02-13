@@ -16,6 +16,7 @@ class LoggerQueue:
                 pass
             register_logger(self) if lg == None else None
 
+        # Init checkpoint manager for experiment hash retrieval (if available)
         self.chkpt_manager = get_checkpoint_manager()
 
     def get_graph_names(self):

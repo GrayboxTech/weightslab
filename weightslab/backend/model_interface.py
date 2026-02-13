@@ -397,7 +397,7 @@ class ModelInterface(NetworkWithOps):
         try:
             if not self.is_training() or self._checkpoint_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
-            batched_age = int(self.get_batched_age())
+            batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
                     # Update hash for current experiment state (marks changes as pending, doesn't dump)
