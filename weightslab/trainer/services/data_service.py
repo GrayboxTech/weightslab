@@ -6,6 +6,7 @@ import os
 import traceback
 import threading
 from hashlib import md5
+import json
 
 import numpy as np
 import pandas as pd
@@ -653,6 +654,39 @@ class DataService:
                         thumbnail=b""
                     )
                 )
+
+                # Append class_names if available
+                model_comp = self._ctx.components.get("model")
+                class_names = (
+                    row.get('class_names')
+                    or (getattr(dataset, "class_names", None) if dataset else None)
+                    or getattr(model_comp, "class_names", None)
+                )
+
+                if class_names:
+                    val_str = ""
+                    try:
+                        if isinstance(class_names, (list, tuple)):
+                            val_str = json.dumps(list(class_names))
+                        elif isinstance(class_names, dict):
+                            # Convert int keys to string for JSON if all keys are ints
+                            if all(isinstance(k, int) for k in class_names.keys()):
+                                class_names = {str(k): v for k, v in class_names.items()}
+                            val_str = json.dumps(class_names)
+                        else:
+                            val_str = str(class_names)
+                    except Exception:
+                        val_str = str(class_names)
+
+                    data_stats.append(
+                        create_data_stat(
+                            name="class_names",
+                            stat_type="string",
+                            shape=[1],
+                            value_string=val_str,
+                            thumbnail=b""
+                        )
+                    )
 
             elif label is not None:
                 # Classification / other scalar-like labels

@@ -63,6 +63,8 @@ class ExperimentContext:
                 model = get_model(self._exp_name)
             elif "experiment" in names:
                 model = get_model("experiment")
+            elif "main" in names:
+                model = get_model("main")
             elif len(names) == 1:
                 model = get_model()
         except Exception:
