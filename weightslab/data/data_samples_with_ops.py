@@ -27,6 +27,7 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_TO_SAVE_TO_H5,
     SAMPLE_STATS_ALL,
 )
+from weightslab.trainer.services.service_utils import _is_point_cloud
 
 
 
@@ -127,10 +128,12 @@ class DataSampleTrackingWrapper(Dataset):
         array_return_proxies: bool = True,
         array_use_cache: bool = True,
         preload_labels: bool = True,
+        data_adapter: Optional[Callable] = None,
         **_,
     ):
         # Set name
         self.loader_name = loader_name
+        self.data_adapter = data_adapter
 
         # Init Global Ledger Manager
         ledger_manager = get_dataframe()
@@ -311,6 +314,73 @@ class DataSampleTrackingWrapper(Dataset):
                     f"Labels will remain unchanged."
                 )
 
+    def _auto_adapt_item(self, data: Any) -> tuple:
+        """
+        Recursively inspect data to find a valid (Input, Target) pair.
+        
+        Heuristics:
+        1. Input: A tensor/array that looks like a point cloud (N, 3)/(N, 4) OR an image (C, H, W).
+        2. Target: A scalar/0-dim tensor (Classification) OR a tensor (Segmentation/Mask).
+        
+        Returns:
+            (input, target) if found, else original data.
+        """
+        if not isinstance(data, (list, tuple)):
+            return data
+
+        # 1. Flatten nested structure to find candidate tensors
+        candidates = []
+        labels = []
+        
+        def _scan(item):
+            if isinstance(item, (list, tuple)):
+                for sub in item:
+                    _scan(sub)
+            elif hasattr(item, 'shape') or isinstance(item, (int, float, np.integer, np.floating)):
+                # Potential data item
+                is_pc = _is_point_cloud(item)
+                if is_pc:
+                    candidates.append(('pc', item))
+                elif hasattr(item, 'ndim') and item.ndim >= 2:
+                     # Image or high-dim feature
+                     candidates.append(('img', item))
+                elif hasattr(item, 'ndim') and item.ndim <= 1:
+                     # Scalar/Label
+                     labels.append(item)
+                elif isinstance(item, (int, float)):
+                     labels.append(item)
+
+        _scan(data)
+
+        # 2. Reassemble based on findings
+        # Priority: Point Cloud > Image
+        input_data = None
+        target_data = None
+        
+        # Determine Input
+        for type_, item in candidates:
+            if type_ == 'pc':
+                input_data = item
+                break
+        if input_data is None:
+            # Fallback to image
+            for type_, item in candidates:
+                if type_ == 'img':
+                    input_data = item
+                    break
+        
+        # Determine Target (Take first scalar/label found)
+        if labels:
+            target_data = labels[0]
+            
+        # 3. Return adapted tuple if we found both, essentially creating (Input, Target)
+        if input_data is not None and target_data is not None:
+             return (input_data, target_data)
+        
+        # If heuristics failed to find a clear pair, return original structure 
+        # (Preserves standard (img, label) tuples where one might be mis-categorized)
+        return data
+
     @property
     def num_classes(self) -> int:
         """Expose inferred number of classes as a property."""
@@ -336,6 +406,13 @@ class DataSampleTrackingWrapper(Dataset):
         if index is None and id is not None:
             index = self.unique_id_to_index[id]
         data = self.wrapped_dataset[index]
+
+        if self.data_adapter:
+            data = self.data_adapter(data)
+        elif isinstance(data, tuple) and len(data) > 2:
+             # Try auto-adaptation for complex tuples (e.g. ModelNet's 3-element tuple)
+             # Standard (img, label) is len=2, so we skip that to be safe/fast
+             data = self._auto_adapt_item(data)
 
         # Ensure data is a tuple for consistent handling
         if not isinstance(data, tuple):

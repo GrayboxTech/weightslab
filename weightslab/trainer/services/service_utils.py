@@ -10,6 +10,25 @@ from .lidar_utils import render_lidar, load_point_cloud_data, render_bev_mask
 logger = logging.getLogger(__name__)
 
 
+def _is_point_cloud(x):
+    """Heuristic check to see if a tensor/array is a 3D point cloud (N, 3) or (N, 4)."""
+    try:
+        # Check if it has shape attribute first
+        if not hasattr(x, 'shape'):
+            x_np = _to_numpy_safe(x)
+            if x_np is None:
+                return False
+            x = x_np
+        
+        shape = x.shape
+        # (N, 3) for XYZ or (N, 4) for XYZI with N > 10 (arbitrary threshold to avoid confusion with small vectors)
+        if len(shape) == 2 and shape[1] in [3, 4] and shape[0] > 10:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def _to_numpy_safe(x):
     if isinstance(x, (int, float)):
         return np.array([x])
@@ -279,12 +298,98 @@ def load_raw_image(dataset, index) -> Image.Image:
             img_path, _ = wrapped.samples[index]
         else:
             img_path, _ = wrapped.imgs[index]
+        
+        # Check if it's a point cloud file
+        if isinstance(img_path, str) and img_path.lower().endswith(('.off', '.bin', '.pcd', '.ply', '.npy')):
+             # Load point cloud data
+             points = None
+             if img_path.lower().endswith('.off'):
+                 # Simple .off loader since load_point_cloud_data might not support it yet
+                 try:
+                     with open(img_path, 'r') as f:
+                        lines = f.readlines()
+                     line0 = lines[0].strip()
+                     v_start = 2 if line0 == 'OFF' else 1
+                     if not lines[1].strip(): v_start += 1 # Handle extra newlines
+                     n_verts = int(lines[v_start-1].split()[0] if line0 == 'OFF' else line0[3:].split()[0])
+                     verts = []
+                     for i in range(v_start, v_start + n_verts):
+                         parts = lines[i].strip().split()
+                         if len(parts) >= 3:
+                             verts.append([float(x) for x in parts[:3]])
+                     points = np.array(verts, dtype=np.float32)
+                     
+                     # Visualize Mode: Normalize points to Unit Sphere to match viz_config
+                     if points.size > 0:
+                         points = points - np.mean(points, axis=0) # Center
+                         dist = np.max(np.sqrt(np.sum(points ** 2, axis=1)))
+                         if dist > 0:
+                             points = points / dist # Scale to [-1, 1]
+                 except Exception as e:
+                     logger.error(f"Failed to load .off file {img_path}: {e}")
+             else:
+                 points = load_point_cloud_data(img_path)
+            
+             if points is not None:
+                 return render_lidar(points, lidar_config, file_path=img_path)
+             else:
+                 return Image.new('RGB', (800, 600), color=(50, 50, 50))
+
         img = Image.open(img_path)
         return img.convert("L") if img.mode in ["1", "L", "I;16", "I"] else img.convert("RGB")
     elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
-        np_img = wrapped[index]
-        if isinstance(np_img, (list, tuple)):
-            np_img = np_img[0]
+        data_entry = wrapped[index]
+        
+        # DEBUG: Log raw data entry
+        # print(f"DEBUG: load_raw_image[{index}] raw type: {type(data_entry)}")
+        
+        # Helper to find point cloud in nested structure
+        def find_point_cloud(item):
+            # print(f"DEBUG: checking item type={type(item)}")
+            if _is_point_cloud(item):
+                # print(f"DEBUG: _is_point_cloud passed! shape={getattr(item, 'shape', 'unknown')}")
+                return item
+            
+            if isinstance(item, (list, tuple)):
+                for sub in item:
+                    res = find_point_cloud(sub)
+                    if res is not None:
+                        return res
+            elif isinstance(item, dict):
+                for v in item.values():
+                    res = find_point_cloud(v)
+                    if res is not None:
+                        return res
+            return None
+
+        # Try to find point cloud in the entry
+        pc_candidate = find_point_cloud(data_entry)
+        
+        if pc_candidate is not None:
+            data_entry = pc_candidate
+            # print(f"DEBUG: Point cloud found via recursion.")
+        elif isinstance(data_entry, (list, tuple)):
+            # Fallback to first element if no point cloud found but it's a tuple
+            # print(f"DEBUG: No point cloud found, falling back to index 0.")
+            data_entry = data_entry[0]
+        
+        # Check for Point Cloud auto-detection
+        if _is_point_cloud(data_entry):
+            points = _to_numpy_safe(data_entry)
+            if points is not None:
+                # Use default lidar config if none attached to dataset
+                # print(f"DEBUG: Rendering LiDAR from points shape={points.shape}")
+                res = render_lidar(points, lidar_config)
+                if res is None:
+                     print(f"DEBUG: render_lidar returned None!")
+                return res
+        else:
+             pass
+             # print(f"DEBUG: _is_point_cloud failed on final data_entry: type={type(data_entry)}")
+             # if hasattr(data_entry, 'shape'):
+             #    print(f"DEBUG: shape={data_entry.shape}")
+
+        np_img = data_entry
         if hasattr(np_img, 'numpy'):
             np_img = np_img.numpy()
         if np_img.ndim == 2:

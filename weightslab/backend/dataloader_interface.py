@@ -182,6 +182,11 @@ class DataLoaderInterface:
     - batch_size / get_batch_size(), set_batch_size()
     """
 
+    DEFAULT_ADAPTERS = {
+        "modelnet": lambda x: x[2] if isinstance(x, tuple) and len(x) == 3 and isinstance(x[2], tuple) else x,
+        "point_cloud": lambda x: x, # Handled by auto-detection in service_utils if format is (points, label)
+    }
+
     def __init__(
         self,
         data_loader_or_dataset: Any,
@@ -198,6 +203,7 @@ class DataLoaderInterface:
         compute_hash: bool = True,
         use_tags: bool = False,
         tags_mapping: Optional[dict] = None,
+        data_adapter: Optional[Any] = None,
         **kwargs,
     ) -> None:
         """Initialize the DataLoaderInterface.
@@ -216,9 +222,15 @@ class DataLoaderInterface:
             compute_hash: Whether to compute hashes for samples in tracking wrapper.
             use_tags: Whether to use tags for samples in tracking wrapper.
             tags_mapping: Optional mapping of tags to integer labels.
+            data_adapter: Optional name or callable to transform dataset output.
 
             **kwargs: Additional kwargs passed to DataLoader if a Dataset is provided.
         """
+        # Resolve data adapter
+        if isinstance(data_adapter, str):
+            data_adapter = self.DEFAULT_ADAPTERS.get(data_adapter.lower())
+        
+        self.data_adapter = data_adapter
         # Normalize inputs
         self.dataset: Dataset | DataLoader = data_loader_or_dataset
 
@@ -241,6 +253,7 @@ class DataLoaderInterface:
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
                 loader_name=loader_name,
+                data_adapter=self.data_adapter,
                 **kwargs
             )
             self.tracked_dataset._map_updates_hook_fns.append(
@@ -255,6 +268,7 @@ class DataLoaderInterface:
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
                 loader_name=loader_name,
+                data_adapter=self.data_adapter,
                 **kwargs
             )
 

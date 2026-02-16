@@ -652,8 +652,20 @@ class DataService:
                             logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
 
             # ====== Step 9: Generate raw data bytes and thumbnail ======
+            # print(f"DEBUG: GetDataSamples request sample_id={sample_id} include_raw_data={request.include_raw_data}")
             if request.include_raw_data:
-                raw_img = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
+                idx = dataset.get_index_from_sample_id(sample_id)
+                # print(f"DEBUG: sample_id={sample_id} -> index={idx}")
+                raw_img = load_raw_image(dataset, idx)
+                if raw_img is None:
+                     print(f"DEBUG: load_raw_image({idx}) returned None!")
+                else:
+                     print(f"DEBUG: load_raw_image({idx}) returned {raw_img.size} {raw_img.mode}")
+                
+                if raw_img is None:
+                    # Fallback to black image to avoid crash
+                    raw_img = Image.new('RGB', (100, 100))
+                
                 original_size = raw_img.size
 
                 # Handle resize request

@@ -464,7 +464,7 @@ def render_range_view(points, width=1024, height=64, fov_up=45.0, fov_down=45.0,
     
     # 4. Vertical Stretch
     if stretch > 1:
-         return img.resize((width, height * stretch), Image.Resampling.NEAREST)
+         return img.resize((int(width), int(height * stretch)), Image.Resampling.NEAREST)
     return img
 
 

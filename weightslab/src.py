@@ -254,8 +254,13 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             if hasattr(obj, '__name__'):
                 obj.__name__ = obj_name
 
+    # Determine if we should prioritize flag-based detection
+    flag_lower = flag.lower() if flag else ""
+    is_explicit_data = any(k in flag_lower for k in ('data', 'dataset', 'dataloader'))
+    is_explicit_model = 'model' in flag_lower
+
     # Model
-    if 'model' in flag.lower() or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
+    if is_explicit_model or (not is_explicit_data and hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
         # First ensure that the model has module input_shape
         if not hasattr(obj, 'input_shape'):
             raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
