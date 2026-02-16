@@ -13,7 +13,7 @@ from typing import Callable
 from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models, get_model
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.utils.logs import set_log_directory
 from weightslab.ui.weightslab_ui import ui_serve
@@ -29,13 +29,72 @@ logger = logging.getLogger(__name__)
 DATAFRAME_M = None
 
 
+def _update_log_directory(new_log_dir: str):
+    """
+        Move the current log file to a new directory and update the file handler.
+
+        This is useful for setting a user-specified log directory after initial
+        setup with a temporary file. The function will:
+        - Move the existing log file to the new directory (if it exists)
+        - Update the logging FileHandler to point to the new location
+    """
+
+    # Update logging directory to use root_log_dir after parameters registration
+    hp = get_hyperparams()
+    try:
+        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
+    except Exception as e:
+        logger.debug(f"Could not update log directory: {e}")
+
+
+def _get_step(step: int | None = None) -> int:
+    """
+        Attempt to get the current training step from the model in the ledger, if available. This is used for logging signals with the correct global step.
+        The function will try multiple approaches to find a valid step value:
+        1. Try to get the model from the ledger and access `get_age()` if
+              available (preferred for models that track age/step internally).
+        2. If `get_age()` is not available, try to access `current_step` attribute on the model (common pattern for external checkpoint managers).
+        3. If neither is available, fall back to 0 or the provided step argument
+                and add a `current_step` attribute to the model for future tracking.
+    """
+    # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
+    full_list = list_models()
+    if full_list:
+        # Prefer "experiment" or "main" or the first one
+        if 'experiment' in full_list:
+            m = get_model('experiment')
+        elif 'main' in full_list:
+            m = get_model('main')
+        else:
+            m = get_model(full_list[0])
+
+    if m is not None:
+        # Safe attribute access (handle Proxy returning None for missing attr)
+        if hasattr(m, 'get_age'):
+            val = m.get_age()
+            if val is not None:
+                step = int(val) -1
+        elif hasattr(m, 'current_step'):
+            val = m.current_step
+            if val is not None:
+                step = int(val) -1
+            elif step is not None:
+                # step = step # fallback to provided step
+                m.current_step = step  # add current_step attribute to model for future tracking
+        elif step is not None:
+            # If model doesn't have current_step, force it to 0 or try to infer from checkpoint manager
+            m.current_step = step  # add current_step attribute to model for future tracking
+
+    return step
+
+
 def save_signals(
     batch_ids: th.Tensor,
     signals: dict,
     preds_raw: th.Tensor,
     targets: th.Tensor,
     preds: th.Tensor = None,
-    step: int = 0,
+    step: int | None = None,
     log: bool = True
 ):
     """
@@ -53,14 +112,17 @@ def save_signals(
     if DATAFRAME_M is None:
         DATAFRAME_M = get_dataframe()
 
-    # Log if requested
+    # Get current model step
+    step = _get_step(step=step)
+
+    # Log if requested for each signals
     if log:
         for reg_name, batch_scalar in signals.items():
             # Extract scalar from tensor
-            scalar, batch_scalar = extract_scalar_from_tensor(batch_scalar)
+            scalar, batch_scalar = extract_scalar_from_tensor(batch_scalar, ids=batch_ids)
 
             # Log if requested
-            log_signal(scalar, reg_name, step=step)
+            log_signal(scalar, batch_scalar, reg_name, step=step)
 
     # Convert tensors to numpy for lightweight buffering
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
@@ -104,22 +166,23 @@ def save_signals(
         pred_raw_np = pred_raw_np[:, np.newaxis]
 
     # Enqueue to dataframe manager buffer for efficientcy
-    enqueue = getattr(DATAFRAME_M, 'enqueue_batch', None)
-    if callable(enqueue):
-        enqueue(
-            sample_ids=batch_ids_np,
-            preds_raw=pred_raw_np,
-            preds=pred_np,
-            targets=target_np,
-            losses=losses_data,
-        )
+    DATAFRAME_M.enqueue_batch(
+        sample_ids=batch_ids_np,
+        preds_raw=pred_raw_np,
+        preds=pred_np,
+        targets=target_np,
+        losses=losses_data,
+        step=step
+    )
 
-def log_signal(scalar: float, reg_name: str, step: int = 0, **kwargs) -> None:
+
+def log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
     """
         Log the given scalar signal to the registered logger in the ledger, if available and logging is enabled.
         
         Args:
             scalar (float): The scalar value to log. 
+            signal_per_sample (dict): A dictionary containing per-sample signals.
             reg_name (str): The registration name of the signal, used as the key in logging. 
             step (int, optional): The current training step to log as global_step. Defaults to 0. 
             kwargs (dict, optional): Additional keyword arguments that may contain logging preferences. Defaults to {}.
@@ -142,45 +205,18 @@ def log_signal(scalar: float, reg_name: str, step: int = 0, **kwargs) -> None:
                     logger = None
 
             if logger is not None and hasattr(logger, 'add_scalars'):
-                # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
-                from weightslab.backend.ledgers import list_models, get_model as _gm
-                full_list = list_models()
-                if full_list:
-                        # Prefer "experiment" or "main" or the first one
-                    if 'experiment' in full_list:
-                        m = _gm('experiment')
-                    elif 'main' in full_list:
-                        m = _gm('main')
-                    else:
-                        m = _gm(full_list[0])
-
-                if m is not None:
-                    # Safe attribute access (handle Proxy returning None for missing attr)
-                    if hasattr(m, 'get_age'):
-                        val = m.get_age()
-                        if val is not None:
-                            step = int(val)
-                    elif hasattr(m, 'current_step'):
-                        val = m.current_step
-                        if val is not None:
-                            step = int(val)
-                        else:
-                            step = step # fallback to provided step
-                            m.current_step = step  # add current_step attribute to model for future tracking
-                    else:
-                        # If model doesn't have current_step, force it to 0 or try to infer from checkpoint manager
-                        m.current_step = step  # add current_step attribute to model for future tracking
-
                 # Add to logger
                 logger.add_scalars(
                     reg_name,
                     {reg_name: scalar},
-                    global_step=step
+                    global_step=step,
+                    signal_per_sample=signal_per_sample
                 )
         except Exception:
             pass
 
-def extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Tensor | np.ndarray = None) -> tuple[float | None, th.Tensor | np.ndarray | None]:
+
+def extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Tensor | np.ndarray = None, ids: th.Tensor = None) -> tuple[float | None, th.Tensor | np.ndarray | None]:
     # extract scalar
     scalar = None
     try:
@@ -199,6 +235,8 @@ def extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Ten
                     scalar = float(batch_scalar.mean())
                 except Exception:
                     pass
+            # Merged batch scalar with ids
+            batch_scalar = {ids[i].item() if ids is not None else i: batch_scalar[i].item() for i in range(len(batch_scalar))}
         # 2. Otherwise fall back to extracting from 'out'
         elif out is not None:
             if isinstance(out, th.Tensor):
@@ -214,10 +252,13 @@ def extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Ten
                     scalar = float(batch_scalar.mean())
                 except Exception:
                     pass
+            # Merged batch scalar with ids
+            batch_scalar = {ids[i].item() if ids is not None else i: batch_scalar[i].item() for i in range(len(batch_scalar))}
     except Exception:
         pass
 
     return scalar, batch_scalar
+
 
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     """
@@ -242,13 +283,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     out = original_forward(*a, **kw)
     if kwargs.get('per_sample', False):
         if out.ndim > 1:
-            out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]
+            out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
 
     # Extract scalar from tensor
-    scalar, batch_scalar = extract_scalar_from_tensor(batch_scalar, out)
+    scalar, batch_scalar = extract_scalar_from_tensor(batch_scalar, out, ids)
 
     # Log if requested
-    log_signal(scalar, reg_name, **kwargs)
+    step = _get_step(None)
+    log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
 
     # Save statistics if requested and applicable
     if batch_scalar is not None and ids is not None:
@@ -259,28 +301,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             preds_raw=preds_raw,
             signals=signals,
             targets=targets,
-            log=False
+            log=False  # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
     return out
 
-
-def _update_log_directory(new_log_dir: str):
-    """
-        Move the current log file to a new directory and update the file handler.
-
-        This is useful for setting a user-specified log directory after initial
-        setup with a temporary file. The function will:
-        - Move the existing log file to the new directory (if it exists)
-        - Update the logging FileHandler to point to the new location
-    """
-
-    # Update logging directory to use root_log_dir after parameters registration
-    hp = get_hyperparams()
-    try:
-        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
-    except Exception as e:
-        logger.debug(f"Could not update log directory: {e}")
-    
 
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
     """

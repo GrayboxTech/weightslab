@@ -769,27 +769,27 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Refresh denied count
         df_after = self._get_df_view()
-        if not df_after.empty and SampleStatsEx.DENY_LISTED.value in df_after.columns:
-            self.denied_sample_cnt = int(df_after[SampleStatsEx.DENY_LISTED.value].sum())
+        if not df_after.empty and SampleStatsEx.DISCARDED.value in df_after.columns:
+            self.denied_sample_cnt = int(df_after[SampleStatsEx.DISCARDED.value].sum())
         else:
             self.denied_sample_cnt = 0
 
     def is_deny_listed(self, sample_id: int) -> bool:
-        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DENY_LISTED, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DISCARDED, raw=True)
 
     def denylist_samples(self, denied_samples_ids: Set[int] | None, accumulate: bool = False):
         with self._df_lock:
             # Get previously denied samples
             prev_denied = set()
             df_view = self._get_df_view()
-            if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
-                denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
+            if not df_view.empty and SampleStatsEx.DISCARDED in df_view.columns:
+                denied_mask = df_view[SampleStatsEx.DISCARDED] == True
                 prev_denied = set(df_view[denied_mask].index)
 
             if not denied_samples_ids:
                 # Clear all denials
                 for uid in self.unique_ids:
-                    self.set(int(uid), SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(int(uid), SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 if accumulate:
@@ -798,7 +798,7 @@ class DataSampleTrackingWrapper(Dataset):
                 for uid in self.unique_ids:
                     uid_int = int(uid)
                     is_denied = uid_int in denied_samples_ids
-                    self.set(uid_int, SampleStatsEx.DENY_LISTED.value, is_denied)
+                    self.set(uid_int, SampleStatsEx.DISCARDED.value, is_denied)
                     cnt += int(is_denied)
                 self.denied_sample_cnt = cnt
 
@@ -811,17 +811,17 @@ class DataSampleTrackingWrapper(Dataset):
                 # Allow all
                 for uid in self.unique_ids:
                     uid_int = int(uid)
-                    self.set(uid_int, SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(uid_int, SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 for sample_id in allowlist_samples_ids:
                     sample_id_int = int(sample_id)
-                    self.set(sample_id_int, SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(sample_id_int, SampleStatsEx.DISCARDED.value, False)
                 # Now count total denied
                 denied_cnt = 0
                 df_view = self._get_df_view()
-                if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
-                    denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
+                if not df_view.empty and SampleStatsEx.DISCARDED in df_view.columns:
+                    denied_mask = df_view[SampleStatsEx.DISCARDED] == True
                     denied_cnt = denied_mask.sum()
                 self.denied_sample_cnt = denied_cnt
 

@@ -155,11 +155,11 @@ class CheckpointManager:
             # Collect discarded series
             collected_discarded.update(
                 dfm.get_df_view(
-                    SampleStatsEx.DENY_LISTED.value
+                    SampleStatsEx.DISCARDED.value
                 ).to_dict()
             )
             # Collect tag series
-            df_tag_columns = [col for col in dfm.get_df_view().columns if col.startswith(f"{SampleStatsEx.TAG.value}_")]
+            df_tag_columns = [col for col in dfm.get_df_view().columns if col.startswith(f"{SampleStatsEx.TAG.value}:")]
             for col in df_tag_columns:
                 collected_tags.update(
                     {
@@ -174,7 +174,7 @@ class CheckpointManager:
                 return None
 
             return {
-                SampleStatsEx.DENY_LISTED.value: collected_discarded,
+                SampleStatsEx.DISCARDED.value: collected_discarded,
                 SampleStatsEx.TAG.value: collected_tags,
             }
         except Exception:
@@ -1006,7 +1006,7 @@ class CheckpointManager:
             available_cols = [
                 col for col in df.columns if col in [
                     SampleStatsEx.SAMPLE_ID.value,
-                    SampleStatsEx.DENY_LISTED.value
+                    SampleStatsEx.DISCARDED.value
                 ] or col.startswith(SampleStatsEx.TAG.value)
             ]
 

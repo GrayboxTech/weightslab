@@ -312,6 +312,7 @@ class LedgeredDataFrameManager:
         preds: np.ndarray | None,
         losses: Dict[str, Any] | None,
         targets: np.ndarray | None = None,
+        step: int | None = None
     ):
         """
             Enqueue a batch of sample stats for later flush.
@@ -331,7 +332,7 @@ class LedgeredDataFrameManager:
                 return True
 
         # Build all records BEFORE acquiring lock (faster)
-        records_to_add = []
+        records_to_add = {}
         normalized_preds_raw = self._normalize_preds_raw_uint16(preds_raw) if preds_raw is not None else None
         for i, sid in enumerate(sample_ids):
             sample_id = int(sid) if not isinstance(sid, np.ndarray) else int(sid[0])
@@ -342,43 +343,26 @@ class LedgeredDataFrameManager:
             }
 
             # Store arrays directly without conversion (FAST)
-            if targets is not None:
-                try:
-                    rec[SampleStats.Ex.TARGET.value] = targets[i]
-                except Exception:
-                    pass
+            if targets is not None and is_meaningful(targets[i]):
+                rec[SampleStats.Ex.TARGET.value] = targets[i]
+            if preds_raw is not None and is_meaningful(preds_raw[i]):
+                rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i]
+            if preds is not None and is_meaningful(preds[i]):
+                rec[SampleStats.Ex.PREDICTION.value] = preds[i]
+            if step is not None and is_meaningful(step):
+                rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
 
-            if preds_raw is not None:
-                try:
-                    rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i]
-                except Exception:
-                    pass
-
-            if preds is not None:
-                try:
-                    rec[SampleStats.Ex.PREDICTION.value] = preds[i]
-                except Exception:
-                    pass
-
+            # Save losses with safe conversion (handles scalars, arrays, NaNs)
             loss_dict = self._safe_loss_dict(losses, i)
             if loss_dict is not None:
                 rec.update(loss_dict)
-
-            records_to_add.append((sample_id, rec))
+            records_to_add[sample_id] = rec
 
         # Single lock acquisition for entire batch (minimize lock time)
         with self._buffer_lock:
-            for sample_id, rec in records_to_add:
-                if sample_id in self._buffer:
-                    # Update only meaningful (non-NaN) values
-                    updates = {k: v for k, v in rec.items() if is_meaningful(v)}
-                    self._buffer[sample_id].update(updates)
-                else:
-                    self._buffer[sample_id] = rec
+            self._buffer.update(records_to_add)  # Enqueue buffer for later processing
             logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
-
-            # Check buffer size and trigger flush if needed
-            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init
+            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
 
         # Trigger flush outside lock
         if should_flush:

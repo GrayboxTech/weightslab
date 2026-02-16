@@ -12,6 +12,7 @@ from PIL import Image
 from torchvision import transforms
 from typing import List, Tuple, Iterable
 
+from weightslab.data.sample_stats import SampleStatsEx
 
 # Get Global Logger
 logger = logging.getLogger(__name__)
@@ -265,7 +266,7 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
         record = pb2.RecordMetadata(
             sample_id=row.get('sample_id', sample_id),
             sample_last_loss=float(row.get('prediction_loss', -1)),
-            sample_discarded=bool(row.get('deny_listed', False)),
+            sample_discarded=bool(row.get(SampleStatsEx.DISCARDED.value, False)),
             task_type=sample_stats.task_type,
         )
 

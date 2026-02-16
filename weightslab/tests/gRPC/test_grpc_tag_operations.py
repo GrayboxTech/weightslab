@@ -17,6 +17,8 @@ import tempfile
 import warnings
 import shutil
 from pathlib import Path
+
+from weightslab.data.sample_stats import SampleStatsEx
 warnings.filterwarnings("ignore")
 
 import weightslab as wl
@@ -341,7 +343,7 @@ class TestGRPCTagOperations(unittest.TestCase):
         
         # Mark samples 10-14 as deny_listed (discarded)
         request_discard = pb2.DataEditsRequest(
-            stat_name="deny_listed",
+            stat_name=SampleStatsEx.DISCARDED.value,
             float_value=0,
             string_value="",
             bool_value=True,  # True = discarded
@@ -358,11 +360,11 @@ class TestGRPCTagOperations(unittest.TestCase):
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 15):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), "deny_listed"]
+                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
             else:
                 mask = (df.index == sample_id) & (df["origin"] == "test")
                 if mask.any():
-                    value = df.loc[mask, "deny_listed"].iloc[0]
+                    value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
                     value = False
             
@@ -372,7 +374,7 @@ class TestGRPCTagOperations(unittest.TestCase):
         
         # Now restore samples 10-12
         request_restore = pb2.DataEditsRequest(
-            stat_name="deny_listed",
+            stat_name=SampleStatsEx.DISCARDED.value,
             float_value=0,
             string_value="",
             bool_value=False,  # False = restored
@@ -389,11 +391,11 @@ class TestGRPCTagOperations(unittest.TestCase):
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 13):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), "deny_listed"]
+                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
             else:
                 mask = (df.index == sample_id) & (df["origin"] == "test")
                 if mask.any():
-                    value = df.loc[mask, "deny_listed"].iloc[0]
+                    value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
                     value = False
             
@@ -402,11 +404,11 @@ class TestGRPCTagOperations(unittest.TestCase):
         # But 13-14 should still be deny_listed
         for sample_id in range(13, 15):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), "deny_listed"]
+                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
             else:
                 mask = (df.index == sample_id) & (df["origin"] == "test")
                 if mask.any():
-                    value = df.loc[mask, "deny_listed"].iloc[0]
+                    value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
                     value = False
             
@@ -420,7 +422,7 @@ class TestGRPCTagOperations(unittest.TestCase):
         
         # Add "batch_tag" to 50 samples at once
         request = pb2.DataEditsRequest(
-            stat_name="tags",
+            stat_name=f"{SampleStatsEx.TAG.value}:batch_tag",
             float_value=0,
             string_value="batch_tag",
             bool_value=False,
@@ -435,7 +437,7 @@ class TestGRPCTagOperations(unittest.TestCase):
         
         # Verify all 50 samples have the tag
         df = self.data_service._all_datasets_df
-        tag_col = "tag:batch_tag"
+        tag_col = f"{SampleStatsEx.TAG.value}:batch_tag"
         self.assertIn(tag_col, df.columns)
         
         success_count = 0
@@ -464,7 +466,7 @@ class TestGRPCTagOperations(unittest.TestCase):
         df = self.data_service._all_datasets_df
         
         # Count tag columns
-        tag_columns = [col for col in df.columns if col.startswith("tag:")]
+        tag_columns = [col for col in df.columns if col.startswith(f"{SampleStatsEx.TAG.value}:")]
         print(f"✓ Found {len(tag_columns)} tag columns: {tag_columns}")
         
         self.assertGreater(len(tag_columns), 0, "Should have at least one tag column")

@@ -635,8 +635,8 @@ class DataService:
         """
         total_count = len(df)
         discarded_count = (
-            len(df[df.get("deny_listed", False) == True])  # noqa: E712
-            if df is not None and "deny_listed" in df.columns
+            len(df[df.get(SampleStatsEx.DISCARDED.value, False) == True])  # noqa: E712
+            if df is not None and SampleStatsEx.DISCARDED.value in df.columns
             else 0
         )
         in_loop_count = total_count - discarded_count
@@ -1391,7 +1391,7 @@ class DataService:
             else:
                 hp["is_training"] = False
 
-        if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DENY_LISTED.value]:
+        if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
                 message="Only 'tags' and 'deny_listed' stat editing is supported for now.",

@@ -26,14 +26,6 @@ class ExperimentService:
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
 
-    def get_root_log_dir(self) -> str:
-        """Get the root log directory.
-
-        Returns:
-            Absolute path to root_log_dir
-        """
-        return self.data_service.get_root_log_dir()
-
     # -------------------------------------------------------------------------
     # Logger queue sync for WeightsStudio
     # -------------------------------------------------------------------------
@@ -42,6 +34,7 @@ class ExperimentService:
         Returns logger data for WeightsStudio polling.
         - If request_full_history is True: returns full history (limited by max_points per signal)
         - If request_full_history is False: returns only new data from the queue since last request
+        - If break_by_slices is True: returns per-sample data filtered by tags
         """
         self._ctx.ensure_components()
         components = self._ctx.components
@@ -51,6 +44,60 @@ class ExperimentService:
 
         points = []
 
+        # Handle break_by_slices mode
+        if request.break_by_slices:
+            tags = list(request.tags) if request.tags else []
+            graph_name = request.graph_name if hasattr(request, 'graph_name') and request.graph_name else None
+            
+            # Get sample IDs that match the given tags
+            sample_ids = set()
+            if tags:
+                # Get dataframe manager to query samples by tags
+                df_manager = components.get("df_manager")
+                if df_manager:
+                    df = df_manager.get_df_view()
+                    # Filter by tags: samples should have ALL specified tags
+                    mask = None
+                    for tag in tags:
+                        tag_col = f"tag:{tag}"
+                        if tag_col in df.columns:
+                            if mask is None:
+                                mask = df[tag_col] == True
+                            else:
+                                mask = mask & (df[tag_col] == True)
+                    
+                    if mask is not None:
+                        filtered_df = df[mask]
+                        sample_ids = set(filtered_df.index.tolist())
+
+            # Get per-sample history from signal_logger
+            history_per_sample = signal_logger._signal_history_per_sample
+            
+            # Collect all points for matching samples, filtered by graph_name if specified
+            for metric_name, sample_data in history_per_sample.items():
+                # Filter by graph_name if specified
+                if graph_name and metric_name != graph_name:
+                    continue
+                
+                if sample_ids:
+                    # Filter by sample_ids if tags were specified
+                    for sid in sample_ids:
+                        data = sample_data.get(sid, None)
+                        if data:
+                            points.append(
+                                pb2.LoggerDataPoint(
+                                    metric_name=metric_name,
+                                    model_age=data.get("model_age", 0),
+                                    metric_value=data.get("metric_value", 0.0),
+                                    experiment_hash=data.get("experiment_hash", "N.A."),
+                                    timestamp=int(data.get("timestamp", time.time())),
+                                    sample_id=int(sid)
+                                )
+                            )
+
+            return pb2.GetLatestLoggerDataResponse(points=points)
+
+        # Original behavior for non-break_by_slices mode
         if request.request_full_history:
             # Return full history
             max_points = request.max_points or 10000
@@ -74,26 +121,90 @@ class ExperimentService:
                     signal_history = signal_history[::step]
 
                 for s in signal_history:
-                    points.append(pb2.LoggerDataPoint(
-                        metric_name=metric_name,
-                        model_age=s.get("model_age", 0),
-                        metric_value=s.get("metric_value", 0.0),
-                        experiment_hash=s.get("experiment_hash", ""),
-                        timestamp=int(s.get("timestamp", time.time())),
-                    ))
+                    points.append(
+                        pb2.LoggerDataPoint(
+                            metric_name=metric_name,
+                            model_age=s.get("model_age", 0),
+                            metric_value=s.get("metric_value", 0.0),
+                            experiment_hash=s.get("experiment_hash", "N.A."),
+                            timestamp=int(s.get("timestamp", time.time())),
+                            sample_id=0  # No sample_id in aggregated mode
+                        )
+                    )
         else:
             # Return only queue (new data since last poll)
             queue_data = signal_logger.get_and_clear_queue()
             for s in queue_data:
-                points.append(pb2.LoggerDataPoint(
-                    metric_name=s.get("metric_name", ""),
-                    model_age=s.get("model_age", 0),
-                    metric_value=s.get("metric_value", 0.0),
-                    experiment_hash=s.get("experiment_hash", ""),
-                    timestamp=int(s.get("timestamp", time.time())),
-                ))
+                points.append(
+                    pb2.LoggerDataPoint(
+                        metric_name=s.get("metric_name", ""),
+                        model_age=s.get("model_age", 0),
+                        metric_value=s.get("metric_value", 0.0),
+                        experiment_hash=s.get("experiment_hash", "N.A."),
+                        timestamp=int(s.get("timestamp", time.time())),
+                        sample_id=0  # No sample_id in queue mode
+                    )
+                )
 
         return pb2.GetLatestLoggerDataResponse(points=points)
+
+    def RestoreCheckpoint(self, request, context):
+        """
+        Restore a checkpoint from a given experiment hash.
+        - Pauses training if not already paused
+        - Calls checkpoint manager to load the state
+        - Returns success flag and message
+        """
+        try:
+            experiment_hash = request.experiment_hash
+            logger.info(f"Restoring checkpoint from hash: {experiment_hash}")
+
+            self._ctx.ensure_components()
+            components = self._ctx.components
+
+            # Pause training if it's currently running
+            trainer = components.get("trainer")
+            hp = components.get("hyperparams")
+            if trainer:
+                logger.info("Pausing training before restore...")
+                trainer.pause()
+                if "is_training" in hp:
+                    hp['is_training'] = False
+                else:
+                    hp["is_training"] = False
+
+            # Get checkpoint manager and load state
+            checkpoint_manager = components.get("checkpoint_manager")
+            if checkpoint_manager == None:
+                checkpoint_manager = ledgers.get_checkpoint_manager()
+                if checkpoint_manager == None:
+                    return pb2.RestoreCheckpointResponse(
+                        success=False,
+                        message="Checkpoint manager not initialized"
+                    )
+
+            # Load checkpoint by hash
+            success = checkpoint_manager.load_state(experiment_hash)
+
+            # Reply
+            if success:
+                logger.info(f"Successfully restored checkpoint: {experiment_hash}")
+                return pb2.RestoreCheckpointResponse(
+                    success=True,
+                    message=f"Checkpoint {experiment_hash} restored successfully"
+                )
+            else:
+                logger.warning(f"Failed to restore checkpoint: {experiment_hash}")
+                return pb2.RestoreCheckpointResponse(
+                    success=False,
+                    message=f"Failed to restore checkpoint {experiment_hash}"
+                )
+        except Exception as e:
+            logger.error(f"Error during checkpoint restore: {str(e)}")
+            return pb2.RestoreCheckpointResponse(
+                success=False,
+                message=f"Error: {str(e)}"
+            )
 
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
@@ -177,184 +288,6 @@ class ExperimentService:
                     )
 
                 return pb2.CommandResponse(success=True, message="Hyper parameter changed")
-
-        if request.HasField("deny_samples_operation"):
-            with weightslab_rlock:
-                from weightslab.backend.ledgers import get_dataloaders
-
-                # Pause training if it's currently running
-                trainer = components.get("trainer")
-                hp = components.get("hyperparams")
-                if trainer:
-                    logger.info("Pausing training before restore...")
-                    trainer.pause()
-                    if "is_training" in hp:
-                        hp['is_training'] = False
-                    else:
-                        hp["is_training"] = False
-
-                denied_cnt = len(request.deny_samples_operation.sample_ids)
-                origin = request.deny_samples_operation.origin if hasattr(request.deny_samples_operation, 'origin') else 'train'
-
-                # Find the loader for the requested origin
-                loader_names = get_dataloaders()
-                ds = None
-                for loader_name in loader_names:
-                    loader = components.get(loader_name)
-                    if loader is None:
-                        continue
-                    tracked_ds = getattr(loader, "tracked_dataset", None)
-                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
-                        if tracked_ds._dataset_split == origin:
-                            ds = loader
-                            break
-
-                if ds is None:
-                    return pb2.CommandResponse(
-                        success=False,
-                        message=f"No dataloader registered for origin '{origin}'",
-                    )
-                dataset = getattr(ds, "tracked_dataset", ds)
-                dataset.denylist_samples(
-                    set(request.deny_samples_operation.sample_ids),
-                    accumulate=request.deny_samples_operation.accumulate,
-                )
-                return pb2.CommandResponse(
-                    success=True,
-                    message=f"Denied {denied_cnt} samples from '{origin}'",
-                )
-
-        if request.HasField("deny_eval_samples_operation"):
-            with weightslab_rlock:
-                from weightslab.backend.ledgers import get_dataloaders
-
-                # Pause training if it's currently running
-                trainer = components.get("trainer")
-                hp = components.get("hyperparams")
-                if trainer:
-                    logger.info("Pausing training before restore...")
-                    trainer.pause()
-                    if "is_training" in hp:
-                        hp['is_training'] = False
-                    else:
-                        hp["is_training"] = False
-
-                denied_cnt = len(request.deny_eval_samples_operation.sample_ids)
-                origin = request.deny_eval_samples_operation.origin if hasattr(request.deny_eval_samples_operation, 'origin') else 'eval'
-
-                # Find the loader for the requested origin
-                loader_names = get_dataloaders()
-                ds = None
-                for loader_name in loader_names:
-                    loader = components.get(loader_name)
-                    if loader is None:
-                        continue
-                    tracked_ds = getattr(loader, "tracked_dataset", None)
-                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
-                        if tracked_ds._dataset_split == origin:
-                            ds = loader
-                            break
-
-                if ds is None:
-                    return pb2.CommandResponse(
-                        success=False,
-                        message=f"No dataloader registered for origin '{origin}'",
-                    )
-                dataset = getattr(ds, "tracked_dataset", ds)
-                dataset.denylist_samples(
-                    set(request.deny_eval_samples_operation.sample_ids),
-                    accumulate=request.deny_eval_samples_operation.accumulate,
-                )
-            return pb2.CommandResponse(
-                success=True,
-                message=f"Denied {denied_cnt} samples from '{origin}'",
-            )
-
-        if request.HasField("remove_from_denylist_operation"):
-            with weightslab_rlock:
-                from weightslab.backend.ledgers import get_dataloaders
-
-                # Pause training if it's currently running
-                trainer = components.get("trainer")
-                hp = components.get("hyperparams")
-                if trainer:
-                    logger.info("Pausing training before restore...")
-                    trainer.pause()
-                    if "is_training" in hp:
-                        hp['is_training'] = False
-                    else:
-                        hp["is_training"] = False
-
-                allowed = set(request.remove_from_denylist_operation.sample_ids)
-                origin = request.remove_from_denylist_operation.origin if hasattr(request.remove_from_denylist_operation, 'origin') else 'train'
-
-                # Find the loader for the requested origin
-                loader_names = get_dataloaders()
-                ds = None
-                for loader_name in loader_names:
-                    loader = components.get(loader_name)
-                    if loader is None:
-                        continue
-                    tracked_ds = getattr(loader, "tracked_dataset", None)
-                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
-                        if tracked_ds._dataset_split == origin:
-                            ds = loader
-                            break
-
-                if ds is None:
-                    return pb2.CommandResponse(
-                        success=False,
-                        message=f"No dataloader registered for origin '{origin}'",
-                    )
-                dataset = getattr(ds, "tracked_dataset", ds)
-                dataset.allowlist_samples(allowed)
-                return pb2.CommandResponse(
-                    success=True,
-                    message=f"Un-denied {len(allowed)} samples from '{origin}'",
-                )
-
-        if request.HasField("remove_eval_from_denylist_operation"):
-            with weightslab_rlock:
-                from weightslab.backend.ledgers import get_dataloaders
-
-                # Pause training if it's currently running
-                trainer = components.get("trainer")
-                hp = components.get("hyperparams")
-                if trainer:
-                    logger.info("Pausing training before restore...")
-                    trainer.pause()
-                    if "is_training" in hp:
-                        hp['is_training'] = False
-                    else:
-                        hp["is_training"] = False
-
-                allowed = set(request.remove_eval_from_denylist_operation.sample_ids)
-                origin = request.remove_eval_from_denylist_operation.origin if hasattr(request.remove_eval_from_denylist_operation, 'origin') else 'eval'
-
-                # Find the loader for the requested origin
-                loader_names = get_dataloaders()
-                ds = None
-                for loader_name in loader_names:
-                    loader = components.get(loader_name)
-                    if loader is None:
-                        continue
-                    tracked_ds = getattr(loader, "tracked_dataset", None)
-                    if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
-                        if tracked_ds._dataset_split == origin:
-                            ds = loader
-                            break
-
-                if ds is None:
-                    return pb2.CommandResponse(
-                        success=False,
-                        message=f"No dataloader registered for origin '{origin}'",
-                    )
-                dataset = getattr(ds, "tracked_dataset", ds)
-                dataset.allowlist_samples(allowed)
-                return pb2.CommandResponse(
-                    success=True,
-                    message=f"Un-denied {len(allowed)} eval samples",
-                )
 
         if request.HasField("load_checkpoint_operation"):
             with weightslab_rlock:
@@ -448,61 +381,3 @@ class ExperimentService:
                 response.sample_statistics.origin = request.get_data_records
 
         return response
-
-    def RestoreCheckpoint(self, request, context):
-        """
-        Restore a checkpoint from a given experiment hash.
-        - Pauses training if not already paused
-        - Calls checkpoint manager to load the state
-        - Returns success flag and message
-        """
-        try:
-            experiment_hash = request.experiment_hash
-            logger.info(f"Restoring checkpoint from hash: {experiment_hash}")
-
-            self._ctx.ensure_components()
-            components = self._ctx.components
-
-            # Pause training if it's currently running
-            trainer = components.get("trainer")
-            hp = components.get("hyperparams")
-            if trainer:
-                logger.info("Pausing training before restore...")
-                trainer.pause()
-                if "is_training" in hp:
-                    hp['is_training'] = False
-                else:
-                    hp["is_training"] = False
-
-            # Get checkpoint manager and load state
-            checkpoint_manager = components.get("checkpoint_manager")
-            if checkpoint_manager == None:
-                checkpoint_manager = ledgers.get_checkpoint_manager()
-                if checkpoint_manager == None:
-                    return pb2.RestoreCheckpointResponse(
-                        success=False,
-                        message="Checkpoint manager not initialized"
-                    )
-
-            # Load checkpoint by hash
-            success = checkpoint_manager.load_state(experiment_hash)
-
-            # Reply
-            if success:
-                logger.info(f"Successfully restored checkpoint: {experiment_hash}")
-                return pb2.RestoreCheckpointResponse(
-                    success=True,
-                    message=f"Checkpoint {experiment_hash} restored successfully"
-                )
-            else:
-                logger.warning(f"Failed to restore checkpoint: {experiment_hash}")
-                return pb2.RestoreCheckpointResponse(
-                    success=False,
-                    message=f"Failed to restore checkpoint {experiment_hash}"
-                )
-        except Exception as e:
-            logger.error(f"Error during checkpoint restore: {str(e)}")
-            return pb2.RestoreCheckpointResponse(
-                success=False,
-                message=f"Error: {str(e)}"
-            )
