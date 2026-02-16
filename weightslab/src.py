@@ -21,6 +21,7 @@ from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
+from weightslab.backend.ledgers import list_models, get_model as _gm
 from tqdm import tqdm
 
 
@@ -119,7 +120,6 @@ def log_signal(scalar: float, reg_name: str, **kwargs) -> None:
                 # attempt to get a sensible global_step
                 step = 0
                 # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
-                from weightslab.backend.ledgers import list_models, get_model as _gm
                 full_list = list_models()
                 if full_list:
                         # Prefer "experiment" or "main" or the first one
@@ -217,9 +217,83 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Log if requested
     log_signal(scalar, reg_name, **kwargs)
 
+    # CHECK FOR SUBSCRIBERS (Dynamic Signals)
+    # Allows @wl.signal(subscribe_to="metric_name")
+    dynamic_updates = {}
+    ids_np = None
+    if ids is not None:
+        ids_np = ids.detach().cpu().numpy() if hasattr(ids, 'detach') else np.asarray(ids)
+
+    if ids_np is not None:
+         # Identify Subscribers for this specific signal (reg_name)
+         subscribers = []
+         for name, func in _REGISTERED_SIGNALS.items():
+             meta = getattr(func, '_wl_signal_meta', {})
+             if meta.get('subscribe_to') == reg_name:
+                 subscribers.append((name, func))
+        
+         if subscribers:
+             # Resolve generic value vector
+             val_tensor = out
+             if hasattr(val_tensor, 'detach'):
+                  val_tensor = val_tensor.detach().cpu().numpy()
+             else:
+                  val_tensor = np.asarray(val_tensor)
+                  
+             # Need (B,) vector for per-sample signals
+             val_vec = None
+             if val_tensor.ndim > 1:
+                  val_vec = val_tensor.mean(axis=tuple(range(1, val_tensor.ndim)))
+             elif val_tensor.ndim == 1:
+                  val_vec = val_tensor
+             
+             if val_vec is not None and len(val_vec) == len(ids_np):
+                 # Attempt to get current step for frequency control
+                 current_step = 0
+                 try:
+                     # Quick check for common model names
+                     m = None
+                     if 'experiment' in list_models(): m = _gm('experiment')
+                     elif 'main' in list_models(): m = _gm('main')
+                     
+                     if m is not None:
+                         val = getattr(m, 'current_step', None)
+                         if val is not None: current_step = int(val)
+                 except Exception:
+                     pass
+
+                 # Get Dataframe Proxy for injection
+                 try:
+                     df_proxy = get_dataframe()
+                 except:
+                     df_proxy = None
+
+                 # Iterate subscribers
+                 for name, func in subscribers:
+                     meta = getattr(func, '_wl_signal_meta', {})
+                     compute_every = meta.get('compute_every_n_steps', 1)
+                     
+                     # Frequency Check
+                     if current_step % compute_every != 0:
+                         continue
+    
+                     try:
+                         batch_res = []
+                         for i, uid in enumerate(ids_np):
+                             # Generic 'value' argument
+                             val = float(val_vec[i])
+                             # Inject dataframe so user function is pure-ish
+                             res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
+                             batch_res.append(res)
+                         dynamic_updates[name] = np.array(batch_res)
+                     except Exception:
+                         pass # User function error, skip
+    
     # Save statistics if requested and applicable
-    if batch_scalar is not None and ids is not None:
-        signals = {reg_name: batch_scalar}
+    if (batch_scalar is not None and ids is not None) or dynamic_updates:
+        signals = {reg_name: batch_scalar} if batch_scalar is not None else {}
+        signals.update(dynamic_updates) # Merge dynamic signals
+        
         save_signals(
             batch_ids=ids,
             preds=preds,
@@ -566,22 +640,27 @@ def keep_serving():
         logger.info("Shutting down WeightsLab services.")
 
 #  Signal Definition & Computation Helpers
-def signal(name: str = None, **kwargs):
+def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
     Decorator to register a custom signal function.
     
     Usage:
         @wl.signal(name="blue_pixels")
-        def compute_blue(sample, **kwargs):
-            return ...
+        def compute_blue(sample, **kwargs): ...
+
+        @wl.signal(name="weighted_loss", subscribe_to="train_loss", compute_every_n_steps=10)
+        def compute_weighted(value, sample_id, **kwargs): ...
     """
     def decorator(func):
         reg_name = name or func.__name__
         if reg_name in _REGISTERED_SIGNALS:
             logger.warning(f"Overwriting already registered signal: {reg_name}")
         _REGISTERED_SIGNALS[reg_name] = func
+        
         # Attach metadata
         func._wl_signal_meta = kwargs
+        func._wl_signal_meta['subscribe_to'] = subscribe_to
+        func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
         func._wl_signal_name = reg_name
         
         # Register in global ledger for visibility by backend services
@@ -637,7 +716,11 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
     
     for name in target_names:
         if name in _REGISTERED_SIGNALS:
-            signal_fns[name] = _REGISTERED_SIGNALS[name]
+            func = _REGISTERED_SIGNALS[name]
+            # Only run static signals (compute_every is None or 0)
+            compute_every = getattr(func, '_wl_signal_meta', {}).get('compute_every', 0)
+            if not compute_every:
+                signal_fns[name] = func
         else:
             logger.warning(f"Signal '{name}' not found in registry.")
 
