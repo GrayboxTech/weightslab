@@ -7,13 +7,14 @@ Expose commonly used helpers at package level so users can do::
 
 This file re-exports selected symbols from `weightslab.src`.
 """
+import os
 import logging
-from .src import watch_or_edit, serve, keep_serving, save_signals
-from .art import _BANNER
+import threading
+
+from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples
+from .art import _BANNER__
 from .utils.logs import setup_logging, set_log_directory
 
-import os
-import threading
 
 # Change the name of the current (main) thread
 threading.current_thread().name = "WL-MainThread"
@@ -41,7 +42,7 @@ if not _initialized:
 	# Setup and use logger
 	logger = logging.getLogger(__name__)
 	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
-	logger.info(_BANNER)
+	logger.info(_BANNER__)
 	
 	_initialized = True
 
@@ -57,9 +58,12 @@ __all__ = [
     "keep_serving",
     "save_signals",
     "set_log_directory",
+	"tag_samples", 
+	"discard_samples", 
+	"get_samples_by_tag", 
+	"get_discarded_samples",
 
-    "_BANNER",
-
+    "_BANNER__",
     "__version__",
     "__license__",
     "__author__",

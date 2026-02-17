@@ -71,7 +71,7 @@ class ExperimentService:
                         sample_ids = set(filtered_df.index.tolist())
 
             # Get per-sample history from signal_logger
-            history_per_sample = signal_logger._signal_history_per_sample
+            history_per_sample = signal_logger.get_signal_history_per_sample()
             
             # Collect all points for matching samples, filtered by graph_name if specified
             for metric_name, sample_data in history_per_sample.items():

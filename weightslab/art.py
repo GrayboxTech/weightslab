@@ -39,7 +39,7 @@ def get_git_info():
 # --- Banner Definition ---
 branch, version, commit_hash = get_git_info()
 
-_BANNER = f"""
+_BANNER__ = f"""
 \x1b[31m /WW      /WW\x1b[0m           /$$           /$$         /$$               \x1b[32m/$$\x1b[0m                 /$$
 \x1b[31m| WW  /W | WW\x1b[0m          |__/          | $$        | $$              \x1b[32m| $$\x1b[0m                | $$
 \x1b[31m| WW /WWW| WW\x1b[0m  /$$$$$$  /$$  /$$$$$$ | $$$$$$$  /$$$$$$    /$$$$$$$\x1b[32m| $$\x1b[0m        /$$$$$$ | $$$$$$$

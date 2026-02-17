@@ -354,12 +354,13 @@ class DataService:
             # Optimized bulk processing of stats
             for stat_name in stats_to_retrieve:
                 value = row.get(stat_name)
+
                 # Skip prediction raw array
                 if (isinstance(value, np.ndarray) and value.ndim > 1) or (isinstance(value, (list, tuple, np.ndarray)) and len(value) == 0):
                     continue
-                if isinstance(value, float):
+                elif isinstance(value, float):
                     value = round(value, 7)
-                if isinstance(value, bool):
+                elif isinstance(value, bool):
                     value = int(value)
                 
                 # Check if it s a tag column here and handle it as a string stat with the tag name as value
@@ -1188,6 +1189,7 @@ class DataService:
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
+
         self._ctx.ensure_components()
         components = self._ctx.components
 
