@@ -74,26 +74,26 @@ class ExperimentService:
             history_per_sample = signal_logger.get_signal_history_per_sample()
             
             # Collect all points for matching samples, filtered by graph_name if specified
-            for metric_name, sample_data in history_per_sample.items():
-                # Filter by graph_name if specified
-                if graph_name and metric_name != graph_name:
-                    continue
-                
-                if sample_ids:
-                    # Filter by sample_ids if tags were specified
-                    for sid in sample_ids:
-                        data = sample_data.get(sid, None)
-                        if data:
-                            points.append(
-                                pb2.LoggerDataPoint(
-                                    metric_name=metric_name,
-                                    model_age=data.get("model_age", 0),
-                                    metric_value=data.get("metric_value", 0.0),
-                                    experiment_hash=data.get("experiment_hash", "N.A."),
-                                    timestamp=int(data.get("timestamp", time.time())),
-                                    sample_id=int(sid)
-                                )
+            if graph_name not in history_per_sample:
+                return pb2.GetLatestLoggerDataResponse(points=[])  # No data for this graph_name
+
+            # Collect points for the specified graph_name and sample_ids
+            sample_data = history_per_sample[graph_name]
+            if sample_ids:
+                # Filter by sample_ids if tags were specified
+                for sid in sample_ids:
+                    data = sample_data.get(sid, None)
+                    if data:
+                        points.append(
+                            pb2.LoggerDataPoint(
+                                metric_name=graph_name,
+                                model_age=data.get("model_age", 0),
+                                metric_value=data.get("metric_value", 0.0),
+                                experiment_hash=data.get("experiment_hash", "N.A."),
+                                timestamp=int(data.get("timestamp", time.time())),
+                                sample_id=int(sid)
                             )
+                        )
 
             return pb2.GetLatestLoggerDataResponse(points=points)
 
