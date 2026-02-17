@@ -37,12 +37,15 @@ class NetworkWithOps(nn.Module):
         return self.linearized_layers
 
     def __eq__(self, other: "NetworkWithOps") -> bool:
-        return other is not None and self.seen_samples == other.seen_samples and \
+        return other is not None and \
+            self.seen_samples == other.seen_samples and \
+            self.seen_batched_samples == other.seen_batched_samples and \
             self.tracking_mode == other.tracking_mode and \
             self.layers == other.layers
 
     def __hash__(self):
         return hash(self.seen_samples) + \
+            hash(self.seen_batched_samples) + \
             hash(self.tracking_mode) + \
             hash(self._dep_manager)
 
