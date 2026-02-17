@@ -68,19 +68,22 @@ class LoggerQueue:
         # If step changed, flush the previous step's buffer
         if global_step != self._last_step:
             self._flush_step_buffer()
-            self._last_step = global_step-1  # adjust for 0-based step indexing
+            self._last_step = global_step  # adjust for 0-based step indexing
         
         # Buffer the new signal for the current step
         if graph_name not in self._current_step_buffer:
-            self._current_step_buffer[graph_name] = [
-                signal_per_sample,
-                []
-            ]
+            self._current_step_buffer[graph_name] = [{}, []]  # [per_sample_signals, step_signals]
+        
+        # Update per-sample signal
+        if signal_per_sample:
+            self._current_step_buffer[graph_name][0].update(
+                signal_per_sample
+            )
+        # Update signal
         for _, line_value in signal.items():
             self._current_step_buffer[graph_name][1].append(
                 float(line_value)
             )
-        global_step -= 1  # adjust for 0-based step indexing
 
     def print_history(self):
         """Print all items in history."""
@@ -88,6 +91,14 @@ class LoggerQueue:
             print(f"[{i}] {item}")
         return self._signal_history
 
+    def print_history_per_sample(self):
+        """Print all items in per-sample history."""
+        for metric_name, samples in self._signal_history_per_sample.items():
+            print(f"Metric: {metric_name}")
+            for sid, signal in samples.items():
+                print(f"  Sample ID: {sid}, Signal: {signal}")
+        return self._signal_history_per_sample
+    
     def print_buffer(self):
         """Print current step buffer contents."""
         print(f"Current step: {self._last_step}")
@@ -98,6 +109,10 @@ class LoggerQueue:
         """Retrieve all accumulated signals from memory."""
         return list(self._signal_history)
 
+    def get_signal_history_per_sample(self):
+        """Retrieve all accumulated per-sample signals from memory."""
+        return self._signal_history_per_sample
+    
     def get_and_clear_queue(self):
         """Get pending queue and clear it (for incremental updates to WeightsStudio)."""
         queue_copy = list(self._pending_queue)
@@ -120,15 +135,35 @@ class LoggerQueue:
             except Exception:
                 continue
 
+    def load_signal_history_per_sample(self, signals_per_sample):
+        """Load a dict of per-sample signals into history (used for checkpoint restore)."""
+        if not signals_per_sample:
+            return
+        for metric_name, samples in signals_per_sample.items():
+            if metric_name not in self._signal_history_per_sample:
+                self._signal_history_per_sample[metric_name] = {}
+            for sid, signal in samples.items():
+                self._signal_history_per_sample[metric_name][sid] = signal
+
     def load_snapshot(self, snapshot: dict):
         """Restore logger state from a snapshot dict."""
         if not snapshot:
             return
+        
+        # Load graph names if available in snapshot (added in later versions)
         graph_names = snapshot.get("graph_names", [])
         self.graph_names.update(graph_names)
+
+        # Load signal history if available in snapshot (added in later versions)
         signals = snapshot.get("signal_history", [])
         self.load_signal_history(signals)
-
-    def clear_signal_history(self):
-        """Clear signal history."""
+        
+        # Load per-sample signals if available in snapshot (added in later versions)
+        signals_per_sample = snapshot.get("signal_history_per_sample", {})
+        self.load_signal_history_per_sample(signals_per_sample)
+        
+    def clear_signal_histories(self):
+        """Clear signal histories."""
+        # Note: We do not clear graph names here as they are derived from signals and may be needed for future signals after clearing history.
         self._signal_history.clear()
+        self._signal_history_per_sample.clear()
