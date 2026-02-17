@@ -368,9 +368,9 @@ class CheckpointManager:
         Args:
             exp_hash: 24-byte experiment hash (HP_MODEL_DATA)
         """
-        model_hash_dir = self.models_dir / exp_hash
-        hp_hash_dir = self.hp_dir / exp_hash
-        data_hash_dir = self.data_checkpoint_dir / exp_hash
+        model_hash_dir = self.models_dir / exp_hash[:8]
+        hp_hash_dir = self.hp_dir / exp_hash[8:16]
+        data_hash_dir = self.data_checkpoint_dir / exp_hash[16:24]
 
         if create_model_dir:
             model_hash_dir.mkdir(exist_ok=True)

@@ -477,15 +477,17 @@ class NetworkWithOps(nn.Module):
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
         state_dict = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
         state_dict[prefix + 'seen_samples'] = self.seen_samples
+        state_dict[prefix + 'seen_batched_samples'] = self.seen_batched_samples
         state_dict[prefix + 'current_step'] = self.current_step
         state_dict[prefix + 'tracking_mode'] = self.tracking_mode
         return state_dict
 
     def load_state_dict(
             self, state_dict, strict=True, assign=True, **kwargs):
-        self.seen_samples = state_dict.pop('seen_samples', 0)
-        self.current_step = state_dict.pop('current_step', 0)
-        self.tracking_mode = state_dict.pop('tracking_mode', 0)
+        self.seen_samples = state_dict.pop('seen_samples', self.seen_samples)
+        self.current_step = state_dict.pop('current_step', self.current_step)
+        self.seen_batched_samples = state_dict.pop('seen_batched_samples', self.seen_batched_samples)
+        self.tracking_mode = state_dict.pop('tracking_mode', self.tracking_mode)
 
         # Preprocess trackers
         # TODO (GP): better way to handle this? Maybe load the trackers
