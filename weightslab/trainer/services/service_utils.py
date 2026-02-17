@@ -290,6 +290,18 @@ def load_raw_image(dataset, index) -> Image.Image:
         return img.convert("RGB")
     elif hasattr(wrapped, "files") and isinstance(wrapped.files, list):
         img_path = wrapped.files[index]
+        
+        if isinstance(img_path, str) and img_path.lower().endswith(('.off', '.bin', '.pcd', '.ply', '.npy')):
+             points = load_point_cloud_data(img_path)
+             if points is not None:
+                 # Auto-normalize ModelNet .off for visualization
+                 if img_path.lower().endswith('.off') and points.size > 0:
+                     points = points - np.mean(points, axis=0) # Center
+                     dist = np.max(np.sqrt(np.sum(points ** 2, axis=1)))
+                     if dist > 0: points = points / dist
+                     
+                 return render_lidar(points, lidar_config, file_path=img_path)
+        
         img = Image.open(img_path)
         return img.convert("RGB")
     elif hasattr(wrapped, "samples") or hasattr(wrapped, "imgs"):
@@ -302,35 +314,15 @@ def load_raw_image(dataset, index) -> Image.Image:
         # Check if it's a point cloud file
         if isinstance(img_path, str) and img_path.lower().endswith(('.off', '.bin', '.pcd', '.ply', '.npy')):
              # Load point cloud data
-             points = None
-             if img_path.lower().endswith('.off'):
-                 # Simple .off loader since load_point_cloud_data might not support it yet
-                 try:
-                     with open(img_path, 'r') as f:
-                        lines = f.readlines()
-                     line0 = lines[0].strip()
-                     v_start = 2 if line0 == 'OFF' else 1
-                     if not lines[1].strip(): v_start += 1 # Handle extra newlines
-                     n_verts = int(lines[v_start-1].split()[0] if line0 == 'OFF' else line0[3:].split()[0])
-                     verts = []
-                     for i in range(v_start, v_start + n_verts):
-                         parts = lines[i].strip().split()
-                         if len(parts) >= 3:
-                             verts.append([float(x) for x in parts[:3]])
-                     points = np.array(verts, dtype=np.float32)
-                     
-                     # Visualize Mode: Normalize points to Unit Sphere to match viz_config
-                     if points.size > 0:
-                         points = points - np.mean(points, axis=0) # Center
-                         dist = np.max(np.sqrt(np.sum(points ** 2, axis=1)))
-                         if dist > 0:
-                             points = points / dist # Scale to [-1, 1]
-                 except Exception as e:
-                     logger.error(f"Failed to load .off file {img_path}: {e}")
-             else:
-                 points = load_point_cloud_data(img_path)
+             points = load_point_cloud_data(img_path)
             
              if points is not None:
+                 # Auto-normalize ModelNet .off for visualization
+                 if img_path.lower().endswith('.off') and points.size > 0:
+                     points = points - np.mean(points, axis=0) # Center
+                     dist = np.max(np.sqrt(np.sum(points ** 2, axis=1)))
+                     if dist > 0: points = points / dist
+
                  return render_lidar(points, lidar_config, file_path=img_path)
              else:
                  return Image.new('RGB', (800, 600), color=(50, 50, 50))
