@@ -469,7 +469,7 @@ def render_range_view(points, width=1024, height=64, fov_up=45.0, fov_down=45.0,
 
 
 def load_point_cloud_data(path):
-    """Load point cloud from .bin (float32 kitti) or .npy files."""
+    """Load point cloud from .bin (float32 kitti), .off (ModelNet), or .npy files."""
     try:
         if path.endswith(".bin"):
             # Assume KITTI format: N x 4 (x, y, z, intensity) float32
@@ -478,8 +478,40 @@ def load_point_cloud_data(path):
         elif path.endswith(".npy"):
              points = np.load(path)
              return points
+        elif path.endswith(".off"):
+            # Parse OFF file
+            with open(path, 'r') as f:
+                lines = f.readlines()
+            
+            # Simple OFF parser
+            # Header
+            line0 = lines[0].strip()
+            if line0 == 'OFF':
+                stats = lines[1].strip().split()
+                v_start = 2
+            elif line0.startswith('OFF'):
+                stats = line0[3:].strip().split()
+                v_start = 1
+            else:
+                return None
+
+            if not stats: 
+                # Handle empty line case
+                stats = lines[v_start].strip().split()
+                v_start += 1
+                
+            n_verts = int(stats[0])
+            verts = []
+            for i in range(v_start, v_start + n_verts):
+                parts = lines[i].strip().split()
+                if len(parts) >= 3:
+                     verts.append([float(x) for x in parts[:3]])
+            
+            return np.array(verts, dtype=np.float32)
+
         elif path.endswith(".pcd"):
-            # Placeholder for pcd parsing
+            # Placeholder for pcd parsing - requires pypcd or open3d usually
+            # For now, return None to avoid dependency issues
             pass
     except Exception as e:
         logger.warning(f"Failed to load point cloud {path}: {e}")

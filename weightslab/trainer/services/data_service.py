@@ -139,6 +139,18 @@ class DataService:
 
         self._last_internals_update_time = 0.0
 
+        # Debug Initialization
+        logger.debug(f"[DataService] Resolved root_log_dir: {self._root_log_dir}")
+        if self._h5_path:
+             logger.debug(f"[DataService] Resolved h5_path: {self._h5_path}")
+        else:
+             logger.warning(f"[DataService] h5_path could not be resolved (root_log_dir missing?)")
+             
+        if self._stats_store:
+             logger.info(f"[DataService] Connected to H5 Stats Store at {self._h5_path}")
+        else:
+             logger.info(f"[DataService] Running in-memory (no persistent H5 store)")
+
         # Shared thread pool for data processing (avoid thread explosion)
         # Size: min(CPU cores * 2, 16) to balance concurrency without excessive threading
         self._data_executor = futures.ThreadPoolExecutor(

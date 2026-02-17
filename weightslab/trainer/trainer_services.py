@@ -62,7 +62,8 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.data_service.ApplyDataQuery(request, context)
 
     def GetDataSamples(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetDataSamples({request})")
+        # Log peer to debug connectivity/firewall issues
+        logger.debug(f"[RPC] GetDataSamples from {context.peer()} (start={request.start_index}, cnt={request.records_cnt})")
         return self._exp_service.data_service.GetDataSamples(request, context)
 
     def EditDataSample(self, request, context):
@@ -70,11 +71,12 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         return self._exp_service.data_service.EditDataSample(request, context)
 
     def GetDataSplits(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetDataSplits({request})")
+        logger.debug(f"[RPC] GetDataSplits from {context.peer()}")
         return self._exp_service.data_service.GetDataSplits(request, context)
 
     def CheckAgentHealth(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.CheckAgentHealth({request})")
+        # Often the first call from UI
+        logger.debug(f"[RPC] CheckAgentHealth from {context.peer()}")
         return self._exp_service.data_service.CheckAgentHealth(request, context)
 
     # -------------------------------------------------------------------------
@@ -130,7 +132,16 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
         )
         servicer = trainer.ExperimentServiceServicer()
         pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f'{grpc_host}:'+ str(grpc_port))  # guarantees IPv4 connectivity from containers.
+        
+        # Modified to capture binding success
+        bind_addr = f'{grpc_host}:{grpc_port}'
+        port = server.add_insecure_port(bind_addr)  # guarantees IPv4 connectivity from containers.
+        
+        if port == 0:
+            logger.error(f"[FATAL] Failed to bind to {bind_addr}. Port {grpc_port} might be in use.")
+            return # Exit thread if bind fails
+            
+        logger.info(f"[gRPC] Server successfully bound to {bind_addr}")
         try:
             server.start()
             server.wait_for_termination()

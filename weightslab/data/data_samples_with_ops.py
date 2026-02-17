@@ -28,6 +28,7 @@ from weightslab.data.sample_stats import (
     SAMPLE_STATS_ALL,
 )
 from weightslab.trainer.services.service_utils import _is_point_cloud
+from weightslab.trainer.services.lidar_utils import load_point_cloud_data
 
 
 
@@ -325,6 +326,16 @@ class DataSampleTrackingWrapper(Dataset):
         Returns:
             (input, target) if found, else original data.
         """
+        # 0. Check for direct file path (auto-load point clouds)
+        if isinstance(data, str) and os.path.isfile(data):
+            ext = os.path.splitext(data)[1].lower()
+            if ext in ('.off', '.bin', '.pcd', '.npy'):
+                pc = load_point_cloud_data(data)
+                if pc is not None:
+                    # Return as single item (will be wrapped in tuple by caller)
+                    # Convert to tensor for consistency if needed, but numpy is fine for now
+                    return pc
+
         if not isinstance(data, (list, tuple)):
             return data
 
@@ -349,6 +360,15 @@ class DataSampleTrackingWrapper(Dataset):
                      labels.append(item)
                 elif isinstance(item, (int, float)):
                      labels.append(item)
+            elif isinstance(item, str) and os.path.isfile(item):
+                 ext = os.path.splitext(item)[1].lower()
+                 if ext in ('.off', '.bin', '.pcd', '.npy'):
+                     try:
+                         pc = load_point_cloud_data(item)
+                         if pc is not None:
+                             candidates.append(('pc', pc))
+                     except Exception:
+                         pass
 
         _scan(data)
 
@@ -409,9 +429,8 @@ class DataSampleTrackingWrapper(Dataset):
 
         if self.data_adapter:
             data = self.data_adapter(data)
-        elif isinstance(data, tuple) and len(data) > 2:
-             # Try auto-adaptation for complex tuples (e.g. ModelNet's 3-element tuple)
-             # Standard (img, label) is len=2, so we skip that to be safe/fast
+        elif isinstance(data, str) or (isinstance(data, tuple) and len(data) > 2):
+             # Try auto-adaptation for file paths or complex tuples
              data = self._auto_adapt_item(data)
 
         # Ensure data is a tuple for consistent handling
