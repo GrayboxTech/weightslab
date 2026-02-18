@@ -24,7 +24,8 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe
-from weightslab.data.data_utils import load_raw_image, load_label
+from weightslab.data.data_utils import load_label
+from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
 
 
 # Get global logger
@@ -128,8 +129,6 @@ class DataService:
             thread_name_prefix="WL-DataProcessing",
             max_workers=8
         )
-
-        self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
@@ -736,7 +735,7 @@ class DataService:
                     })
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
         return operations
-
+        
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -959,9 +958,17 @@ class DataService:
 
         return "No operation applied"
 
-    def _slowUpdateInternals(self):
+    def _slowUpdateInternals(self, force: bool = False):
+        """
+        This method is responsible for updating the internal dataframe view with the latest data from the manager.
+        It is called before slicing data for GetDataSamples to ensure we serve the most recent data, while also respecting the user's current view (filters/sorts) and preventing disruptive updates during active interactions.
+
+        Arguments:
+        - force: If True, forces the update regardless of timing. Use with caution as it may disrupt the user experience if called too frequently. Normally, this method should be called without force, allowing it to throttle updates to at most once every 10 seconds during active use.
+        """
+
         current_time = time.time()
-        if self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+        if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
 
         updated_df = self._pull_into_all_data_view_df()
@@ -969,6 +976,9 @@ class DataService:
         # Guard against init race conditions
         if updated_df is None:
             return
+        elif force:
+            self._all_datasets_df = updated_df  # Update view with new data (filtered or unfiltered)
+            self._last_internals_update_time = current_time
 
         if self._is_filtered and self._all_datasets_df is not None:
             # The user has applied a custom view (Filter, Sort, or Aggregation).
@@ -1036,7 +1046,7 @@ class DataService:
                      # Reindex using this full order.
                      updated_df = updated_df.reindex(full_order)
 
-        self._all_datasets_df = updated_df
+        self._all_datasets_df = updated_df  # Update view with new data (filtered or unfiltered)
         self._last_internals_update_time = current_time
 
     def _process_get_data_samples(self, request, context):
@@ -1064,7 +1074,7 @@ class DataService:
                 )
 
             with self._lock:
-                self._slowUpdateInternals()
+                self._slowUpdateInternals()  # Update global dataframe with latest data before slicing
                 df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()  # Reset index for proper row access with sample_id column
 
             if df_slice.empty:
@@ -1248,99 +1258,135 @@ class DataService:
                     message=final_message,
                     intent_type=pb2.INTENT_FILTER
                 )
+            # Pandas instruction from the user, bypassing LLM agent - execute directly on the dataframe
+            elif request.is_natural_language:
+                if request.query.lower().replace(" ", "").replace("'''", "\"\"\"").replace("\'\'\'", "\"\"\"").startswith("@\"\"\""):
+                    operations = request.query
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
+                    with self._lock:
+                        df, message = execute_df_operation(self._all_datasets_df, request.query)  # in-place operation, or replace previous dataframe
+                        logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
+                        if operations:
+                            self._is_filtered = True
+                        self._all_datasets_df = df
+                    return self._build_success_response(
+                        df=df,
+                        message=message,
+                        intent_type=pb2.INTENT_FILTER
+                    )
+                elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@reset") or request.query.lower().replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@clear"):
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset operation: {request.query[:100]}...")
+                    # Force view reset
+                    with self._lock:
+                        self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data for plotting
+                        logger.info(f"[ApplyDataQuery] Force view reset.")
+                        return pb2.DataQueryResponse(
+                            success=True,
+                            message="View has been reset successfully.",
+                        )
+                elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@overview"):
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct overview operation: {request.query[:100]}...")
+                    # Force view reset
+                    with self._lock:
+                        message = generate_overview(self._all_datasets_df)
+                        logger.info(f"[ApplyDataQuery] Generated overview.")
+                        return pb2.DataQueryResponse(
+                            success=True,
+                            message=f"Overview of the dataframe:\n{message}",
+                        )
+                else:
+                    # 3) Natural language path - go through agent
+                    logger.debug(
+                        "[ApplyDataQuery] Using AGENT for natural language query: %r",
+                        request.query,
+                    )
 
-            # 3) Natural language path - go through agent
-            logger.debug(
-                "[ApplyDataQuery] Using AGENT for natural language query: %r",
-                request.query,
-            )
+                    if self._agent is None:
+                        return pb2.DataQueryResponse(
+                            success=False,
+                            message="Natural language queries require agent (not available)",
+                        )
 
-            if self._agent is None:
-                return pb2.DataQueryResponse(
-                    success=False,
-                    message="Natural language queries require agent (not available)",
-                )
+                    # Agent translates query text -> operations spec (List[dict])
+                    # Executed outside the lock to keep grid responsive during LLM waiting time
+                    abort_event = threading.Event()
+                    if context:
+                        context.add_callback(lambda: abort_event.set())
 
-            # Agent translates query text -> operations spec (List[dict])
-            # Executed outside the lock to keep grid responsive during LLM waiting time
-            abort_event = threading.Event()
-            if context:
-                context.add_callback(lambda: abort_event.set())
+                    def status_cb(msg: str):
+                        logger.debug(f"[ApplyDataQuery] Status: {msg}")
 
-            def status_cb(msg: str):
-                logger.debug(f"[ApplyDataQuery] Status: {msg}")
+                    operations = self._agent.query(request.query, abort_event=abort_event, status_callback=status_cb)
+                    if isinstance(operations, dict): operations = [operations] # Backwards compat
+                    if not operations: operations = []
 
-            operations = self._agent.query(request.query, abort_event=abort_event, status_callback=status_cb)
-            if isinstance(operations, dict): operations = [operations] # Backwards compat
-            if not operations: operations = []
+                    # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
+                    with self._lock:
+                        # Start with the current authoritative DF
+                        df = self._all_datasets_df
+                        messages = []
+                        # Default to FILTER, switch to ANALYSIS if we detect analysis/action output
+                        intent_type = pb2.INTENT_FILTER
+                        analysis_result = ""
 
-            # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
-            with self._lock:
-                # Start with the current authoritative DF
-                df = self._all_datasets_df
-                messages = []
-                # Default to FILTER, switch to ANALYSIS if we detect analysis/action output
-                intent_type = pb2.INTENT_FILTER
-                analysis_result = ""
+                        for op in operations:
+                            func = op.get("function")
+                            params = op.get("params", {}) or {}
 
-                for i, op in enumerate(operations):
-                    func = op.get("function")
-                    params = op.get("params", {}) or {}
+                            # 2a) Agent-driven RESET has highest priority
+                            if params.get("__agent_reset__"):
+                                logger.debug("[ApplyDataQuery] Agent requested reset")
+                                # Rebuild from loaders; this is the only place we replace the df object
+                                self._all_datasets_df = self._pull_into_all_data_view_df()
+                                df = self._all_datasets_df  # Reset df to full dataset
+                                self._is_filtered = False   # Unfreeze updates
+                                messages.append("Reset view")
+                                continue
 
-                    # 2a) Agent-driven RESET has highest priority
-                    if params.get("__agent_reset__"):
-                        logger.debug("[ApplyDataQuery] Agent requested reset")
-                        # Rebuild from loaders; this is the only place we replace the df object
-                        self._all_datasets_df = self._pull_into_all_data_view_df()
-                        df = self._all_datasets_df  # Reset df to full dataset
-                        self._is_filtered = False   # Unfreeze updates
-                        messages.append("Reset view")
-                        continue
+                            # 2b) All other agent operations mutate df in-place
+                            # df is now carried forward across iterations
+                            msg = self._apply_agent_operation(df, func, params)
+                            messages.append(msg)
 
-                    # 2b) All other agent operations mutate df in-place
-                    # df is now carried forward across iterations
-                    msg = self._apply_agent_operation(df, func, params)
-                    messages.append(msg)
+                            # --- UPDATED INTENT CLASSIFICATION ---
+                            # Check for Clarification
+                            if "Clarification needed" in msg or "I need more information" in msg:
+                                intent_type = pb2.INTENT_ANALYSIS  # Usually presented as a message/analysis
+                                analysis_result = msg
 
-                    # --- UPDATED INTENT CLASSIFICATION ---
-                    # Check for Clarification
-                    if "Clarification needed" in msg or "I need more information" in msg:
-                        intent_type = pb2.INTENT_ANALYSIS  # Usually presented as a message/analysis
-                        analysis_result = msg
+                            # Check for Action Triggers (e.g. "Action: Dataset saved...")
+                            elif msg.startswith("Action:"):
+                                intent_type = pb2.INTENT_ANALYSIS
+                                analysis_result = msg
 
-                    # Check for Action Triggers (e.g. "Action: Dataset saved...")
-                    elif msg.startswith("Action:"):
-                        intent_type = pb2.INTENT_ANALYSIS
-                        analysis_result = msg
+                            # Check for Analysis Results
+                            elif msg.startswith("Analysis Result:"):
+                                intent_type = pb2.INTENT_ANALYSIS
+                                analysis_result = msg.replace("Analysis Result:", "").strip()
 
-                    # Check for Analysis Results
-                    elif msg.startswith("Analysis Result:"):
-                        intent_type = pb2.INTENT_ANALYSIS
-                        analysis_result = msg.replace("Analysis Result:", "").strip()
+                            # Check for Errors
+                            elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
+                                intent_type = pb2.INTENT_ANALYSIS
+                                analysis_result = msg
 
-                    # Check for Errors
-                    elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
-                        intent_type = pb2.INTENT_ANALYSIS
-                        analysis_result = msg
+                        final_message = " | ".join(messages) if messages else "No operation performed"
 
-                final_message = " | ".join(messages) if messages else "No operation performed"
+                        # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
+                        # Only update if it was a manipulation query, not analysis
+                        if intent_type == pb2.INTENT_FILTER:
+                            self._all_datasets_df = df
+                            # If we modified the DF, we should freeze it (unless it was a Reset which handled above)
+                            # We check if *any* operation was effectively applied.
+                            # For simplicity, if intent is FILTER, we assume manipulation happened.
+                            self._is_filtered = True
 
-                # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
-                # Only update if it was a manipulation query, not analysis
-                if intent_type == pb2.INTENT_FILTER:
-                    self._all_datasets_df = df
-                    # If we modified the DF, we should freeze it (unless it was a Reset which handled above)
-                    # We check if *any* operation was effectively applied.
-                    # For simplicity, if intent is FILTER, we assume manipulation happened.
-                    self._is_filtered = True
-
-                # 5) Return updated counts after mutation
-                return self._build_success_response(
-                    df=df,
-                    message=final_message,
-                    intent_type=intent_type,
-                    analysis_result=analysis_result
-                )
+                        # 5) Return updated counts after mutation
+                        return self._build_success_response(
+                            df=df,
+                            message=final_message,
+                            intent_type=intent_type,
+                            analysis_result=analysis_result
+                        )
 
         except Exception as e:
             logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
@@ -1356,7 +1402,7 @@ class DataService:
         """
 
         try:
-            # Process the request directly without deduplication logic
+            # Process the request directly without deduplication logicj
             return self._process_get_data_samples(request, context)
 
         except Exception as e:
