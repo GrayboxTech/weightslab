@@ -93,8 +93,11 @@ class ModelInterface(NetworkWithOps):
         if compute_dependencies:
             # First ensure that the model has module input_shape
             if not hasattr(model, 'input_shape'):
-                raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
-
+                if dummy_input is None:
+                    raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
+                else:
+                    self.model.input_shape = tuple(dummy_input.shape[1:])  # Exclude batch dimension
+                    
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
                 self.dummy_input = dummy_input.to(device)
@@ -397,7 +400,7 @@ class ModelInterface(NetworkWithOps):
         try:
             if not self.is_training() or self._checkpoint_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
-            batched_age = int(self.get_batched_age())
+            batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
                     # Update hash for current experiment state (marks changes as pending, doesn't dump)
@@ -434,9 +437,9 @@ class ModelInterface(NetworkWithOps):
             )
             return self
 
-    def train(self):
+    def train(self, mode: bool = True):
         try:
-            return super().train()
+            return super().train(mode=mode)
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during train(): {Exception}. \

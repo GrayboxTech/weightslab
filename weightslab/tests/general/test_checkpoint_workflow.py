@@ -18,7 +18,7 @@ import tempfile
 import warnings
 import json
 import pandas as pd
-from pathlib import Path
+
 warnings.filterwarnings("ignore")
 
 import weightslab as wl
@@ -29,16 +29,23 @@ import torch.nn.functional as F
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
 from tqdm import trange
+from pathlib import Path
 
 # Import components directly to avoid full weightslab initialization
 from weightslab.components.checkpoint_manager import CheckpointManager
+from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.global_monitoring import (
     guard_training_context,
+    start_hp_sync_thread_event,
     pause_controller
 )
 from weightslab.utils.tools import seed_everything
+
+
+# Init hp sync 
+start_hp_sync_thread_event()
 
 
 # Helper function to register objects in ledger directly
@@ -87,6 +94,7 @@ def register_in_ledger(obj, flag, device='cpu', **kwargs):
 seed_everything()
 DEVICE = "cuda" if th.cuda.is_available() else "cpu"
 EXP_NAME = "mnist_checkpoint_test_v3"
+
 
 class SimpleCNN(nn.Module):
     """Simple CNN for MNIST classification"""
@@ -296,13 +304,6 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Create temporary directory (used for all tests)
         cls.temp_dir = tempfile.mkdtemp(prefix="checkpoint_v3_test_")
-        # # key = 'pbn6fj2s'
-        # key = None
-        # if key is not None:
-        #     cls.temp_dir = fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}'
-        #     shutil.rmtree(fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}_copy') if os.path.exists(fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}_copy') else None
-        #     shutil.copytree(cls.temp_dir, cls.temp_dir + '_copy', dirs_exist_ok=True)
-        #     cls.temp_dir = fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}_copy'
         cls.log_dir = os.path.join(cls.temp_dir, "experiments")
 
         # Initialize config from YAML-like dict (similar to ws-classification)
@@ -672,13 +673,13 @@ class CheckpointSystemTests(unittest.TestCase):
         rows = []
         uids_discarded = []
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             uids_discarded.append(uid)
             rows.append(
                 {
                     "sample_id": uid,
-                    "tags": f"ugly_{random.randint(0, 10)}",  # Random tag with 'ugly'
-                    "deny_listed": bool(1 - dfm._df['deny_listed'].iloc[idx])
+                    f"{SampleStatsEx.TAG.value}:ugly": 1,  # Random tag with 'ugly'
+                    SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view()[SampleStatsEx.DISCARDED.value].iloc[idx])
                 }
             )
 
@@ -782,12 +783,12 @@ class CheckpointSystemTests(unittest.TestCase):
         rows = []
         dfm = ledgers.get_dataframe()  # Get dataframe manager
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             rows.append(
                 {
                     "sample_id": uid,
-                    "tags": f"hugly_{random.randint(0, 10)}",
-                    "deny_listed": bool(1 - dfm._df['deny_listed'].iloc[idx])
+                    f"{SampleStatsEx.TAG.value}:ugly": 1,
+                    SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view(SampleStatsEx.DISCARDED.value).iloc[idx])
                 }
             )
         # # # Updates data - Simulate adding tags and discarding samples in dataset
@@ -948,11 +949,11 @@ class CheckpointSystemTests(unittest.TestCase):
         tagged_samples = random.sample(range(10), 2)
         rows = []
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             rows.append({
                 "sample_id": uid,
-                "tags": f"discard_25pct_{random.randint(0, 10)}",
-                "deny_listed": True
+                f"{SampleStatsEx.TAG.value}:discard_25pct": 1,
+                SampleStatsEx.DISCARDED.value: True
             })
 
         df_update = pd.DataFrame(rows).set_index("sample_id")
@@ -1099,11 +1100,11 @@ class CheckpointSystemTests(unittest.TestCase):
         tagged_samples = random.sample(range(10), 2)
         rows = []
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             rows.append({
                 "sample_id": uid,
-                "tags": f"discard_fix_{random.randint(0, 10)}",
-                "deny_listed": True
+                f"{SampleStatsEx.TAG.value}:discard_fix": 1,
+                SampleStatsEx.DISCARDED.value: True
             })
         df_update = pd.DataFrame(rows).set_index("sample_id")
         dfm.upsert_df(df_update, origin='train_loader', force_flush=True)

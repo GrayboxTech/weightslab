@@ -7,8 +7,9 @@ import shutil
 from datetime import datetime
 
 
-# Define the log format to include the level, module name, and function name
-FORMAT = '%(levelname)s:%(name)s:%(funcName)s: %(message)s'
+# Define the log format to include timestamp, level, module name, and function name
+FORMAT = '%(asctime)s.%(msecs)03d %(levelname)s:%(name)s:%(funcName)s: %(message)s'
+DATE_FORMAT = '%d/%m/%Y-%H:%M:%S'
 
 # Global variables to track the log file path and handler
 _LOG_FILE_PATH = None
@@ -46,7 +47,7 @@ def setup_logging(level, log_to_file=True):
         pass
 
     # Create formatters
-    formatter = logging.Formatter(FORMAT)
+    formatter = logging.Formatter(FORMAT, datefmt=DATE_FORMAT)
 
     # Console handler
     console_handler = logging.StreamHandler(stream=sys.stdout)
@@ -139,7 +140,7 @@ def set_log_directory(new_log_dir):
     _TMP_DIR_PATH = new_log_dir
     
     # Create new file handler at new location
-    formatter = logging.Formatter(FORMAT)
+    formatter = logging.Formatter(FORMAT, datefmt=DATE_FORMAT)
     _FILE_HANDLER = logging.FileHandler(_LOG_FILE_PATH, mode='a', encoding='utf-8')
     _FILE_HANDLER.setLevel(logging.DEBUG)
     _FILE_HANDLER.setFormatter(formatter)

@@ -152,15 +152,30 @@ class CheckpointManager:
             collected_discarded = {}
             collected_tags = {}
 
-            collected_discarded.update(dfm.get_df_view(SampleStatsEx.DENY_LISTED.value).to_dict())
-            collected_tags.update(dfm.get_df_view(SampleStatsEx.TAGS.value).to_dict())
+            # Collect discarded series
+            collected_discarded.update(
+                dfm.get_df_view(
+                    SampleStatsEx.DISCARDED.value
+                ).to_dict()
+            )
+            # Collect tag series
+            df_tag_columns = [col for col in dfm.get_df_view().columns if col.startswith(f"{SampleStatsEx.TAG.value}:")]
+            for col in df_tag_columns:
+                collected_tags.update(
+                    {
+                        col: dfm.get_df_view(
+                            col
+                        ).to_dict()
+                    }
+                )
 
+            # if nothing found
             if not collected_tags and not collected_discarded:
                 return None
 
             return {
-                'discarded': collected_discarded,
-                'tags': collected_tags,
+                SampleStatsEx.DISCARDED.value: collected_discarded,
+                SampleStatsEx.TAG.value: collected_tags,
             }
         except Exception:
             return None
@@ -353,9 +368,9 @@ class CheckpointManager:
         Args:
             exp_hash: 24-byte experiment hash (HP_MODEL_DATA)
         """
-        model_hash_dir = self.models_dir / exp_hash
-        hp_hash_dir = self.hp_dir / exp_hash
-        data_hash_dir = self.data_checkpoint_dir / exp_hash
+        model_hash_dir = self.models_dir / exp_hash[:8]
+        hp_hash_dir = self.hp_dir / exp_hash[8:16]
+        data_hash_dir = self.data_checkpoint_dir / exp_hash[16:24]
 
         if create_model_dir:
             model_hash_dir.mkdir(exist_ok=True)
@@ -440,11 +455,16 @@ class CheckpointManager:
                 lg = ledgers.get_logger(lname)
                 if lg is None:
                     continue
+
                 # Expect LoggerQueue interface
-                history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
+                signal_history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
+                signal_history_per_sample = lg.get_signal_history_per_sample() if hasattr(lg, "get_signal_history_per_sample") else {}
                 graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
+                
+                # Get final snapshot for this logger
                 snapshot["loggers"][lname] = {
-                    "signal_history": history,
+                    "signal_history": signal_history,
+                    "signal_history_per_sample": signal_history_per_sample,
                     "graph_names": graphs,
                 }
 
@@ -988,13 +1008,14 @@ class CheckpointManager:
                 df = df.reset_index()
 
             # Keep only checkpoint-specific columns
-            snapshot_cols = [
-                SampleStatsEx.SAMPLE_ID.value,
-                SampleStatsEx.TAGS.value,
-                SampleStatsEx.DENY_LISTED.value
+            available_cols = [
+                col for col in df.columns if col in [
+                    SampleStatsEx.SAMPLE_ID.value,
+                    SampleStatsEx.DISCARDED.value
+                ] or col.startswith(SampleStatsEx.TAG.value)
             ]
-            available_cols = [col for col in snapshot_cols if col in df.columns]
 
+            # Get dataframe snapshot with only relevant columns for checkpoint metadata (sample_id, tags cols, deny_listed)
             snapshot_df = df[available_cols]
 
             # Capture current RNG states for reproducibility using tool function

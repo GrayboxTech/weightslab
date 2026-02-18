@@ -195,6 +195,17 @@ class Proxy:
             return False
         return bool(self._obj)
 
+    def __hash__(self):
+        """Make Proxy hashable by hashing the wrapped object's identity.
+        
+        This allows Proxy objects to be used in sets and as dictionary keys.
+        Uses id() for consistent hashing regardless of object's __hash__ implementation.
+        """
+        if self._obj is None:
+            return hash(None)
+        # Use id() to ensure consistent hashing even for unhashable wrapped objects
+        return hash(id(self._obj))
+
     def __next__(self):
         """Allow the Proxy itself to act as an iterator when `next(proxy)` is
         called. We cache an internal iterator per-proxy so successive calls to

@@ -21,15 +21,16 @@ from typing import Any, Iterator, Optional
 
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from weightslab.components.global_monitoring import pause_controller
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
+from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
+from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
     resolve_hp_name,
     get_checkpoint_manager,
 )
-from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
+from weightslab.data.sample_stats import SampleStatsEx
 
 
 # Get Global Logger
@@ -96,8 +97,8 @@ class WeightsLabDataSampler(Sampler):
         if self.tracked_dataset is not None and hasattr(self.tracked_dataset, "_get_df_view"):
             try:
                 df_view = self.tracked_dataset._get_df_view()
-                if not df_view.empty and "deny_listed" in df_view.columns:
-                    deny_listed_uids = set(df_view[df_view["deny_listed"] == True].index)
+                if not df_view.empty and SampleStatsEx.DISCARDED.value in df_view.columns:
+                    deny_listed_uids = set(df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index)
             except Exception:
                 pass
         return deny_listed_uids
@@ -656,7 +657,7 @@ class DataLoaderInterface:
                         diagnostic_info["dataset_len"] = len(self.tracked_dataset)
                         if hasattr(self.tracked_dataset, '_get_df_view'):
                             df = self.tracked_dataset._get_df_view()
-                            diagnostic_info["deny_listed_count"] = (df['deny_listed'] == True).sum() if 'deny_listed' in df.columns else 0
+                            diagnostic_info["deny_listed_count"] = (df[SampleStatsEx.DISCARDED.value] == True).sum() if SampleStatsEx.DISCARDED.value in df.columns else 0
                     except Exception as e:
                         diagnostic_info["dataset_info_error"] = str(e)
                 

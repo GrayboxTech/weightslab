@@ -58,15 +58,14 @@ class TestCLISanitization(unittest.TestCase):
 
     def test_sanitize_proxy(self):
         """Test Proxy object sanitization."""
-        mock_target = MagicMock()
-        mock_target.value = 42
-
-        proxy = MagicMock(spec=Proxy)
-        proxy.get.return_value = mock_target
+        # Create a real Proxy wrapping a dict
+        target_dict = {'value': 42, 'name': 'test'}
+        proxy = Proxy(target_dict)
 
         result = _sanitize_for_json(proxy)
-        # Should unwrap the proxy
+        # Should unwrap the proxy and return the underlying dict
         self.assertIsInstance(result, dict)
+        self.assertEqual(result, {'value': 42, 'name': 'test'})
 
 
 class TestCLICommands(unittest.TestCase):
@@ -286,6 +285,7 @@ class TestCLIServer(unittest.TestCase):
     def test_cli_serve_starts(self):
         """Test that CLI server starts successfully."""
         result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
+        time.sleep(10)  # Give server time to start
 
         # Custom waiter loop to wait for server to start and bind port
         cnt = 0
@@ -326,6 +326,7 @@ class TestCLIServer(unittest.TestCase):
         self.assertGreater(result['port'], 0)
 
 
+# TODO (GP): Fix CLI initialization takes too long for integration tests - need to ensure server is fully ready before client tests run, and possibly optimize server startup time for testing purposes
 # Not working yet - needs check first initialization and teardown of server between tests, and some tweaks to client connection logic to ensure it waits for server to be ready before connecting
 # class TestCLIIntegration(unittest.TestCase):
 #     """Integration tests for CLI server-client communication."""

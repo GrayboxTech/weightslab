@@ -406,17 +406,20 @@ class DataSampleTrackingWrapper(Dataset):
         # Override target with tag-based label if use_tags is enabled
         if self._use_tags:
             with self._df_lock:
-                tag_value = self._get_value(int(id), SampleStatsEx.TAGS.value) or ''
-                if pd.isna(tag_value):
-                    tag_value = ''
+                sample_tags_set = self._get_tags_for_sample(int(id))
 
             if self._is_binary_labels:
-                # Binary classification: 1 if tag matches, 0 otherwise
+                # Binary classification: 1 if target tag is present, 0 otherwise
                 target_tag = list(self._tags_mapping.keys())[0]
-                target = 1 if tag_value == target_tag else 0
+                target = 1 if target_tag in sample_tags_set else 0
             elif self._tags_mapping:
-                # Multiclass: map tag string to integer label
-                target = self._tags_mapping.get(tag_value, 0)  # Default to 0 if tag not in mapping
+                # Multiclass: find first matching tag in the mapping, default to 0
+                for tag in sample_tags_set:
+                    if tag in self._tags_mapping:
+                        target = self._tags_mapping[tag]
+                        break
+                else:
+                    target = 0  # Default to 0 if no tags match the mapping
             else:
                 # No mapping provided but use_tags=True: keep original target
                 logger.warning(f"use_tags=True but no tags_mapping provided for sample {id}")
@@ -612,6 +615,75 @@ class DataSampleTrackingWrapper(Dataset):
     def _set_dense(self, key: str, sample_id: int, value: np.ndarray):
         get_dataframe().set_dense(self._dataset_split, key, sample_id, value)
 
+    def _convert_tags_to_columns(self, sample_id: int, tag_value: Any) -> Dict[str, Any]:
+        """
+        LEGACY METHOD - Convert tag string(s) to individual boolean columns.
+        
+        Handles:
+        - Comma-separated: "tag1,tag2,tag3" → tag:tag1=1, tag:tag2=1, tag:tag3=1
+        - Semicolon-separated: "tag1;tag2;tag3" → tag:tag1=1, tag:tag2=1, tag:tag3=1
+        - Single tag: "mytag" → tag:mytag=1
+        
+        Returns dict with updates ready to be passed to _set_values.
+        """
+        updates = {}
+        
+        # Handle empty/None values
+        if not tag_value or (isinstance(tag_value, str) and not tag_value.strip()):
+            return updates
+        
+        # Convert to string and parse tags
+        tag_str = str(tag_value).strip()
+        
+        # Split by comma or semicolon
+        tags = set()
+        for tag in tag_str.split(';'):
+            for t in tag.split(','):
+                clean_tag = t.strip()
+                if clean_tag:
+                    tags.add(clean_tag)
+        
+        # Create individual tag columns
+        for tag in tags:
+            col_name = f"{SampleStatsEx.TAG.value}:{tag}"
+            updates[col_name] = 1
+        
+        return updates
+
+    def _get_tags_for_sample(self, sample_id: int) -> Set[str]:
+        """
+        Retrieve all tags for a given sample from individual tag columns.
+        
+        Returns a set of tag names (without the "tag:" or "tag_" prefix) that are True/1 for this sample.
+        """
+        tags_set = set()
+        
+        df_view = self._get_df_view()
+        if df_view.empty or sample_id not in df_view.index:
+            return tags_set
+        
+        # Get all columns that match canonical "tag:<name>" and legacy "tag_<name>" patterns
+        tag_prefix_colon = f"{SampleStatsEx.TAG.value}:"
+        tag_prefix_legacy = f"{SampleStatsEx.TAG.value}_"
+        tag_columns = [
+            col for col in df_view.columns
+            if col.startswith(tag_prefix_colon) or col.startswith(tag_prefix_legacy)
+        ]
+        
+        # Check which tag columns are True/1 for this sample
+        for tag_col in tag_columns:
+            tag_value = df_view.loc[sample_id, tag_col]
+            # Check if tag is set (1, True, or non-zero)
+            if tag_value and tag_value != 0 and tag_value is not None and tag_value is not pd.NA:
+                # Extract tag name by removing known prefix
+                if tag_col.startswith(tag_prefix_colon):
+                    tag_name = tag_col[len(tag_prefix_colon):]
+                else:
+                    tag_name = tag_col[len(tag_prefix_legacy):]
+                tags_set.add(tag_name)
+        
+        return tags_set
+
     def _save_pending_stats_to_h5(self):
         """Mark pending rows dirty and request async flush from background thread."""
         if not self._h5_pending_uids:
@@ -695,27 +767,27 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Refresh denied count
         df_after = self._get_df_view()
-        if not df_after.empty and SampleStatsEx.DENY_LISTED.value in df_after.columns:
-            self.denied_sample_cnt = int(df_after[SampleStatsEx.DENY_LISTED.value].sum())
+        if not df_after.empty and SampleStatsEx.DISCARDED.value in df_after.columns:
+            self.denied_sample_cnt = int(df_after[SampleStatsEx.DISCARDED.value].sum())
         else:
             self.denied_sample_cnt = 0
 
     def is_deny_listed(self, sample_id: int) -> bool:
-        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DENY_LISTED, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DISCARDED, raw=True)
 
     def denylist_samples(self, denied_samples_ids: Set[int] | None, accumulate: bool = False):
         with self._df_lock:
             # Get previously denied samples
             prev_denied = set()
             df_view = self._get_df_view()
-            if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
-                denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
+            if not df_view.empty and SampleStatsEx.DISCARDED in df_view.columns:
+                denied_mask = df_view[SampleStatsEx.DISCARDED] == True
                 prev_denied = set(df_view[denied_mask].index)
 
             if not denied_samples_ids:
                 # Clear all denials
                 for uid in self.unique_ids:
-                    self.set(int(uid), SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(int(uid), SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 if accumulate:
@@ -724,7 +796,7 @@ class DataSampleTrackingWrapper(Dataset):
                 for uid in self.unique_ids:
                     uid_int = int(uid)
                     is_denied = uid_int in denied_samples_ids
-                    self.set(uid_int, SampleStatsEx.DENY_LISTED.value, is_denied)
+                    self.set(uid_int, SampleStatsEx.DISCARDED.value, is_denied)
                     cnt += int(is_denied)
                 self.denied_sample_cnt = cnt
 
@@ -737,17 +809,17 @@ class DataSampleTrackingWrapper(Dataset):
                 # Allow all
                 for uid in self.unique_ids:
                     uid_int = int(uid)
-                    self.set(uid_int, SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(uid_int, SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 for sample_id in allowlist_samples_ids:
                     sample_id_int = int(sample_id)
-                    self.set(sample_id_int, SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(sample_id_int, SampleStatsEx.DISCARDED.value, False)
                 # Now count total denied
                 denied_cnt = 0
                 df_view = self._get_df_view()
-                if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
-                    denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
+                if not df_view.empty and SampleStatsEx.DISCARDED in df_view.columns:
+                    denied_mask = df_view[SampleStatsEx.DISCARDED] == True
                     denied_cnt = denied_mask.sum()
                 self.denied_sample_cnt = denied_cnt
 
@@ -896,9 +968,18 @@ class DataSampleTrackingWrapper(Dataset):
     def set(self, sample_id: int, stat_name: str, value: Any):
         """
             Set a specific stat value for a given sample ID.
+            
+            Special handling: When stat_name is "tag" or "tags", creates individual
+            boolean columns like "tag:<tagname>" set to 1.
         """
         with self._df_lock:
-            self._set_values(sample_id=sample_id, updates={stat_name: value})
+            # Special handling for tags: convert to individual boolean columns
+            is_tags_alias = stat_name in {SampleStatsEx.TAG.value, f"{SampleStatsEx.TAG.value}s"}
+            if is_tags_alias and value:
+                updates = self._convert_tags_to_columns(sample_id, value)
+            else:
+                updates = {stat_name: value}
+            self._set_values(sample_id=sample_id, updates=updates)
 
     def _detect_cross_loader_duplicates(self, current_origin: str) -> Set[int]:
         """
