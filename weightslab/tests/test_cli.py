@@ -58,15 +58,14 @@ class TestCLISanitization(unittest.TestCase):
 
     def test_sanitize_proxy(self):
         """Test Proxy object sanitization."""
-        mock_target = MagicMock()
-        mock_target.value = 42
-
-        proxy = MagicMock(spec=Proxy)
-        proxy.get.return_value = mock_target
+        # Create a real Proxy wrapping a dict
+        target_dict = {'value': 42, 'name': 'test'}
+        proxy = Proxy(target_dict)
 
         result = _sanitize_for_json(proxy)
-        # Should unwrap the proxy
+        # Should unwrap the proxy and return the underlying dict
         self.assertIsInstance(result, dict)
+        self.assertEqual(result, {'value': 42, 'name': 'test'})
 
 
 class TestCLICommands(unittest.TestCase):

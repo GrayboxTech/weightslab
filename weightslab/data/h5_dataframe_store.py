@@ -433,7 +433,7 @@ class H5DataFrameStore:
                             store.remove(key)
 
                         # Write new data
-                        store.append(key, existing, format="table", data_columns=True, min_itemsize={"tags": 512})
+                        store.append(key, existing, format="table", data_columns=True)
 
                         # Force flush to disk
                         store.flush()
