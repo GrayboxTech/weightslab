@@ -103,10 +103,19 @@ class NetworkWithOps(nn.Module):
                 pair of modules and the value is the type of the dependency
                 between them.
         """
+        # First clean dependencies
+        remove_layers_index = []
+        for n, child_module in enumerate(self.layers):
+            if not hasattr(child_module, 'module_id'):
+                remove_layers_index.append(n)
+        for index in sorted(remove_layers_index, reverse=True):
+            self.layers.pop(index)
+
         for child_module in self.layers:
             self._dep_manager.register_module(
                 child_module.get_module_id(), child_module)
 
+        # Register dependencies
         for module1, module2, value in dependencies_list:
             id1, id2 = module1.get_module_id(), module2.get_module_id()
             if value == DepType.INCOMING:

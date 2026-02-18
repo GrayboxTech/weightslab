@@ -136,7 +136,11 @@ def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Te
     return scalar, batch_scalar
 
 
+<<<<<<< HEAD
 def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
+=======
+def log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
+>>>>>>> 81b18fd4d734cedf557d46d8c5b64c515abbdec6
     """
         Log the given scalar signal to the registered logger in the ledger, if available and logging is enabled.
         
@@ -206,7 +210,11 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Log if requested
     step = _get_step(None)
+<<<<<<< HEAD
     _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
+=======
+    log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
+>>>>>>> 81b18fd4d734cedf557d46d8c5b64c515abbdec6
 
     # Save statistics if requested and applicable
     if batch_scalar is not None and ids is not None:
@@ -312,7 +320,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
-
+        proxy.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
+        
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
@@ -549,6 +558,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         raise ValueError(f"Obj name {obj} should contains at least 'model', 'data' or 'optimizer'.")
 
+
+# ##############################################################################################################
+# USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
+# ##############################################################################################################
 
 def serve(serving_ui: bool = False, serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """ Serve the trainer services.
@@ -825,7 +838,11 @@ def save_signals(
             scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, ids=batch_ids)
 
             # Log if requested
+<<<<<<< HEAD
             _log_signal(scalar, batch_scalar, reg_name, step=step)
+=======
+            log_signal(scalar, batch_scalar, reg_name, step=step)
+>>>>>>> 81b18fd4d734cedf557d46d8c5b64c515abbdec6
 
     # Convert tensors to numpy for lightweight buffering
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)

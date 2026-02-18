@@ -107,6 +107,19 @@ class TestDataLoaderInterface(unittest.TestCase):
         self.assertFalse(iface_override.dataloader.pin_memory)
 
     def test_dataloader_interface_uses_multiple_workers(self):
+        class WorkerIdDataset(Dataset):
+            def __init__(self, size: int):
+                self.size = size
+
+            def __len__(self):
+                return self.size
+
+            def __getitem__(self, idx: int):
+                info = get_worker_info()
+                worker_id = info.id if info is not None else -1
+                data = torch.tensor([idx], dtype=torch.long)
+                target = torch.tensor(worker_id, dtype=torch.long)
+                return data, target
         dataset = WorkerIdDataset(64)
 
         train_iface = DataLoaderInterface(
@@ -128,7 +141,7 @@ class TestDataLoaderInterface(unittest.TestCase):
         def _collect_worker_ids(iface, max_batches=32):
             worker_ids = set()
             for i, batch in enumerate(iface):
-                worker_ids.add(int(batch[1].item()))
+                worker_ids.add(int(batch[2].item()))
                 if i + 1 >= max_batches:
                     break
             return worker_ids

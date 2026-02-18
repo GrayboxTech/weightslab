@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ExperimentService:
     """
     Domain-level experiment service that orchestrates model/data services
-    and handles training-related commands.
+    and handles general experiment-related commands.
     """
 
     def __init__(self, ctx):

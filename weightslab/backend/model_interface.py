@@ -97,6 +97,7 @@ class ModelInterface(NetworkWithOps):
                     raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
                 else:
                     self.model.input_shape = tuple(dummy_input.shape[1:])  # Exclude batch dimension
+                    
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
                 self.dummy_input = dummy_input.to(device)
@@ -436,9 +437,9 @@ class ModelInterface(NetworkWithOps):
             )
             return self
 
-    def train(self):
+    def train(self, mode: bool = True):
         try:
-            return super().train()
+            return super().train(mode=mode)
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during train(): {Exception}. \

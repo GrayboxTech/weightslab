@@ -261,7 +261,7 @@ os.environ["GRPC_VERBOSITY"] = "debug"
 logging.getLogger("PIL").setLevel(logging.INFO)
 
 
-def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_len=1, tqdm_display=False):
+def train(loader, model, optimizer, criterion_mlt=None, device='cpu', train_loader_len=1, tqdm_display=False):
     """Iterate over the train loader to compute a detection loss on trainset.
 
     Note: This loop uses the model's high-level predict API (non-differentiable)
@@ -277,7 +277,11 @@ def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_l
             ids = data[1].to(device)
             tbbxs = data[3].to(device)  # No batches
 
+            # Infer
+            optimizer.zero_grad()
             outputs = model.predict(inputs)[0]
+
+            # Process predicted boxes
             pbbxs = torch.cat(
                 [
                     outputs.boxes.cls[..., None],
@@ -294,6 +298,10 @@ def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_l
                     preds=pbbxs,  # Full preds for data store logging, bboxs with cls
                 )
                 losses += torch.mean(loss_batch)
+
+            # Training step
+            losses.backward()
+            optimizer.step()
 
     loss = float((losses / max(1, train_loader_len)).detach().cpu().item()) if criterion_mlt is not None else None
     return loss
@@ -455,7 +463,17 @@ if __name__ == "__main__":
     model = wl.watch_or_edit(
         model,
         flag="model",
-        device=device
+        device=device,
+        use_onnx=True  # Torch fx doesn't support Ultralytics models well yet. Use ONNX instead for dep. generation.
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=parameters.get("learning_rate", 1e-3),
+        weight_decay=parameters.get("weight_decay", 1e-4),
+    )
+    optimizer = wl.watch_or_edit(
+        optimizer,
+        flag="optimizer",
     )
     
     # --- Compute class weights to handle class imbalance ---
@@ -480,9 +498,10 @@ if __name__ == "__main__":
     train_loss = None
     train_loader = test_loader
     train_loader_len = len(train_loader)
-    train_loss = pseudo_train(
+    train_loss = train(
         train_loader,
         model,
+        optimizer=optimizer,
         criterion_mlt=train_criterion,
         device=device,
         train_loader_len=train_loader_len,

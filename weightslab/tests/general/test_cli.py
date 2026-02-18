@@ -285,6 +285,7 @@ class TestCLIServer(unittest.TestCase):
     def test_cli_serve_starts(self):
         """Test that CLI server starts successfully."""
         result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
+        time.sleep(10)  # Give server time to start
 
         # Custom waiter loop to wait for server to start and bind port
         cnt = 0
@@ -325,6 +326,7 @@ class TestCLIServer(unittest.TestCase):
         self.assertGreater(result['port'], 0)
 
 
+# TODO (GP): Fix CLI initialization takes too long for integration tests - need to ensure server is fully ready before client tests run, and possibly optimize server startup time for testing purposes
 # Not working yet - needs check first initialization and teardown of server between tests, and some tweaks to client connection logic to ensure it waits for server to be ready before connecting
 # class TestCLIIntegration(unittest.TestCase):
 #     """Integration tests for CLI server-client communication."""
