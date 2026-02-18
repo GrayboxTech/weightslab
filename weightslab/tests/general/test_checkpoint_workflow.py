@@ -130,20 +130,21 @@ class TaggableDataset:
         return len(self.dataset)
 
     def __getitem__(self, idx):
+        def _pack_item(sample_idx):
+            data, target = self.dataset[sample_idx]
+            uid = th.tensor(sample_idx, dtype=th.long)
+            return data, uid, target
+
         if idx in self._discarded:
             # Return next non-discarded sample
             for i in range(idx + 1, len(self.dataset)):
                 if i not in self._discarded:
-                    return self.dataset[i]
+                    return _pack_item(i)
             # Wrap around
             for i in range(0, idx):
                 if i not in self._discarded:
-                    return self.dataset[i]
-        return (
-            self.dataset[idx][0],  # Data
-            # th.Tensor([idx]).to(int),   # UID
-            self.dataset[idx][1]   # Label
-        )
+                    return _pack_item(i)
+        return _pack_item(idx)
 
     def get_sample_uids(self):
         """Return list of sample UIDs"""

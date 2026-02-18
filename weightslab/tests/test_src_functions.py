@@ -124,7 +124,7 @@ class TestSrcSaveSignals(unittest.TestCase):
 
         with patch("weightslab.src.get_dataframe", return_value=df_manager), \
              patch("weightslab.src._get_step", return_value=7), \
-             patch("weightslab.src.log_signal") as mock_log_signal:
+             patch("weightslab.src._log_signal") as mock_log_signal:
             src.save_signals(
                 batch_ids=batch_ids,
                 signals=signals,

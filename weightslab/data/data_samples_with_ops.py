@@ -387,17 +387,18 @@ class DataSampleTrackingWrapper(Dataset):
             raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
         elif len(data) == 1:  # For single element (unsupervised): return (item, id)
             return data[0], id
-
+        elif len(data) == 2:  # For (data, label) format: return (data, id, label)
+            return data[0], data[1]
+        
         # Element extraction
         # # First, always the input data
         item = data[0]
         
         # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
         # id = data[1]
-        pass
-
+        
         # # Third, is target/label
-        target = data[2]  
+        target = data[2]
         
         # # Finally, any additional elements (e.g., boxes, masks) are metadata
         rest = data[3:] if len(data) > 3 else ()

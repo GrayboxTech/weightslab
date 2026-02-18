@@ -220,7 +220,7 @@ class DataLoaderInterface:
         data_loader_or_dataset: Any,
         batch_size: int = 1,
         shuffle: bool = False,
-        num_workers: int = 4,
+        num_workers: int = 0,
         drop_last: bool = False,
         pin_memory: bool = True,
         collate_fn: Optional[Any] = None,

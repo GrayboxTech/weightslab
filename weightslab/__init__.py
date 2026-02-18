@@ -7,11 +7,6 @@ Expose commonly used helpers at package level so users can do::
 
 This file re-exports selected symbols from `weightslab.src`.
 """
-import logging
-from .src import watch_or_edit, serve, keep_serving, save_signals
-from .art import _BANNER
-from .utils.logs import setup_logging, set_log_directory
-
 import os
 import logging
 import threading
@@ -50,11 +45,6 @@ if not _initialized:
 	logger.info(_BANNER__)
 	
 	_initialized = True
-
-# Setup and use logger
-logger = logging.getLogger(__name__)
-logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
-logger.info(_BANNER)
 
 # Get Package Metadata
 __version__ = "0.0.0"
