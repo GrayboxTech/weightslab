@@ -281,7 +281,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
 
         # Verify no tag columns exist initially
         df = wrapper.get_dataframe()
-        tag_columns_before = [col for col in df.columns if col.startswith("tags_")]
+        tag_columns_before = [col for col in df.columns if col.startswith("tag:")]
         self.assertEqual(len(tag_columns_before), 0, "No tag columns should exist initially")
 
         # Set target_tag for first sample
@@ -289,17 +289,17 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         
         # Verify tag column was created
         df = wrapper.get_dataframe()
-        self.assertIn('tags_target_tag', df.columns, "tags_target_tag column should exist")
-        self.assertEqual(df.loc[sample_id_0, 'tags_target_tag'], 1, "target_tag should be set to 1")
+        self.assertIn('tag:target_tag', df.columns, "tag:target_tag column should exist")
+        self.assertEqual(df.loc[sample_id_0, 'tag:target_tag'], 1, "target_tag should be set to 1")
 
         # Set non_target_tag for second sample
         wrapper.set(sample_id=sample_id_1, stat_name="tags", value='non_target_tag')
 
         # Verify both tag columns exist
         df = wrapper.get_dataframe()
-        self.assertIn('tags_target_tag', df.columns)
-        self.assertIn('tags_non_target_tag', df.columns)
-        self.assertEqual(df.loc[sample_id_1, 'tags_non_target_tag'], 1)
+        self.assertIn('tag:target_tag', df.columns)
+        self.assertIn('tag:non_target_tag', df.columns)
+        self.assertEqual(df.loc[sample_id_1, 'tag:non_target_tag'], 1)
 
     def test_binary_tag_labeling_single_tag(self):
         """Test binary tag-based labeling with a single target tag.
@@ -327,16 +327,16 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
 
         # Verify tags were set  
         df = wrapper.get_dataframe()
-        self.assertIn('tags_target_tag', df.columns)
-        self.assertEqual(df.loc[sample_id_0, 'tags_target_tag'], 1)
+        self.assertIn('tag:target_tag', df.columns)
+        self.assertEqual(df.loc[sample_id_0, 'tag:target_tag'], 1)
 
     def test_tag_parsing_comma_and_semicolon(self):
         """Test that tags can be separated by commas, semicolons, or both.
         
         The tag parsing should handle:
-        - "tag1,tag2,tag3" → creates tags_tag1, tags_tag2, tags_tag3
-        - "tag1;tag2;tag3" → creates tags_tag1, tags_tag2, tags_tag3
-        - "tag1, tag2; tag3" → creates tags_tag1, tags_tag2, tags_tag3 (trims whitespace)
+        - "tag1,tag2,tag3" → creates tag:tag1, tag:tag2, tag:tag3
+        - "tag1;tag2;tag3" → creates tag:tag1, tag:tag2, tag:tag3
+        - "tag1, tag2; tag3" → creates tag:tag1, tag:tag2, tag:tag3 (trims whitespace)
         """
 
         tags_mapping = {"tag1": 1, "tag2": 2, "tag3": 3}
@@ -354,17 +354,17 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         # Test comma-separated tags
         wrapper.set(sample_id=sample_id, stat_name="tags", value='tag1,tag2,tag3')
         df = wrapper.get_dataframe()
-        self.assertEqual(df.loc[sample_id, 'tags_tag1'], 1)
-        self.assertEqual(df.loc[sample_id, 'tags_tag2'], 1)
-        self.assertEqual(df.loc[sample_id, 'tags_tag3'], 1)
+        self.assertEqual(df.loc[sample_id, 'tag:tag1'], 1)
+        self.assertEqual(df.loc[sample_id, 'tag:tag2'], 1)
+        self.assertEqual(df.loc[sample_id, 'tag:tag3'], 1)
 
         # Test semicolon-separated tags on different sample
         sample_id_2 = wrapper.unique_ids[2]
         wrapper.set(sample_id=sample_id_2, stat_name="tags", value='tag1;tag2;tag3')
         df = wrapper.get_dataframe()
-        self.assertEqual(df.loc[sample_id_2, 'tags_tag1'], 1)
-        self.assertEqual(df.loc[sample_id_2, 'tags_tag2'], 1)
-        self.assertEqual(df.loc[sample_id_2, 'tags_tag3'], 1)
+        self.assertEqual(df.loc[sample_id_2, 'tag:tag1'], 1)
+        self.assertEqual(df.loc[sample_id_2, 'tag:tag2'], 1)
+        self.assertEqual(df.loc[sample_id_2, 'tag:tag3'], 1)
 
 class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
     """Test denylisting and allowlisting functionality."""

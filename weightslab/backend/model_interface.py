@@ -93,8 +93,11 @@ class ModelInterface(NetworkWithOps):
         if compute_dependencies:
             # First ensure that the model has module input_shape
             if not hasattr(model, 'input_shape'):
-                raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
-
+                if dummy_input is None:
+                    raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
+                else:
+                    self.model.input_shape = tuple(dummy_input.shape[1:])  # Exclude batch dimension
+                    
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
                 self.dummy_input = dummy_input.to(device)

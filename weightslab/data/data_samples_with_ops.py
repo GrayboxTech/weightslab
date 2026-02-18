@@ -630,9 +630,9 @@ class DataSampleTrackingWrapper(Dataset):
         LEGACY METHOD - Convert tag string(s) to individual boolean columns.
         
         Handles:
-        - Comma-separated: "tag1,tag2,tag3" → tags_tag1=1, tags_tag2=1, tags_tag3=1
-        - Semicolon-separated: "tag1;tag2;tag3" → tags_tag1=1, tags_tag2=1, tags_tag3=1
-        - Single tag: "mytag" → tags_mytag=1
+        - Comma-separated: "tag1,tag2,tag3" → tag:tag1=1, tag:tag2=1, tag:tag3=1
+        - Semicolon-separated: "tag1;tag2;tag3" → tag:tag1=1, tag:tag2=1, tag:tag3=1
+        - Single tag: "mytag" → tag:mytag=1
         
         Returns dict with updates ready to be passed to _set_values.
         """
@@ -655,7 +655,7 @@ class DataSampleTrackingWrapper(Dataset):
         
         # Create individual tag columns
         for tag in tags:
-            col_name = f"{SampleStatsEx.TAG.value}_{tag}"
+            col_name = f"{SampleStatsEx.TAG.value}:{tag}"
             updates[col_name] = 1
         
         return updates
@@ -664,7 +664,7 @@ class DataSampleTrackingWrapper(Dataset):
         """
         Retrieve all tags for a given sample from individual tag columns.
         
-        Returns a set of tag names (without the "tags_" prefix) that are True/1 for this sample.
+        Returns a set of tag names (without the "tag:" or "tag_" prefix) that are True/1 for this sample.
         """
         tags_set = set()
         
@@ -672,16 +672,24 @@ class DataSampleTrackingWrapper(Dataset):
         if df_view.empty or sample_id not in df_view.index:
             return tags_set
         
-        # Get all columns that match the "tags_*" pattern
-        tag_columns = [col for col in df_view.columns if col.startswith(f"{SampleStatsEx.TAG.value}_")]
+        # Get all columns that match canonical "tag:<name>" and legacy "tag_<name>" patterns
+        tag_prefix_colon = f"{SampleStatsEx.TAG.value}:"
+        tag_prefix_legacy = f"{SampleStatsEx.TAG.value}_"
+        tag_columns = [
+            col for col in df_view.columns
+            if col.startswith(tag_prefix_colon) or col.startswith(tag_prefix_legacy)
+        ]
         
         # Check which tag columns are True/1 for this sample
         for tag_col in tag_columns:
             tag_value = df_view.loc[sample_id, tag_col]
             # Check if tag is set (1, True, or non-zero)
             if tag_value and tag_value != 0 and tag_value is not None and tag_value is not pd.NA:
-                # Extract tag name by removing "tags_" prefix
-                tag_name = tag_col[len(f"{SampleStatsEx.TAG.value}_"):]
+                # Extract tag name by removing known prefix
+                if tag_col.startswith(tag_prefix_colon):
+                    tag_name = tag_col[len(tag_prefix_colon):]
+                else:
+                    tag_name = tag_col[len(tag_prefix_legacy):]
                 tags_set.add(tag_name)
         
         return tags_set
@@ -971,12 +979,13 @@ class DataSampleTrackingWrapper(Dataset):
         """
             Set a specific stat value for a given sample ID.
             
-            Special handling: When stat_name is "tags", creates individual boolean columns
-            like "tags_<tagname>" set to 1 or 0, instead of storing a single string.
+            Special handling: When stat_name is "tag" or "tags", creates individual
+            boolean columns like "tag:<tagname>" set to 1.
         """
         with self._df_lock:
             # Special handling for tags: convert to individual boolean columns
-            if stat_name == SampleStatsEx.TAG.value and value:
+            is_tags_alias = stat_name in {SampleStatsEx.TAG.value, f"{SampleStatsEx.TAG.value}s"}
+            if is_tags_alias and value:
                 updates = self._convert_tags_to_columns(sample_id, value)
             else:
                 updates = {stat_name: value}

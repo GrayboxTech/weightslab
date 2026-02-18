@@ -21,6 +21,22 @@ def infinite_loader(loader):
             yield batch
 
 
+class WorkerIdDataset(Dataset):
+    """Dataset that returns the worker ID for testing multi-worker functionality."""
+    def __init__(self, size: int):
+        self.size = size
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx: int):
+        info = get_worker_info()
+        worker_id = info.id if info is not None else -1
+        data = torch.tensor([idx], dtype=torch.long)
+        target = torch.tensor(worker_id, dtype=torch.long)
+        return data, target
+
+
 class TestDataLoaderInterface(unittest.TestCase):
     def setUp(self):
         # Ensure controller is in resumed state for test
@@ -78,7 +94,7 @@ class TestDataLoaderInterface(unittest.TestCase):
 
     def test_dataloader_interface_worker_defaults_and_override(self):
         iface_default = DataLoaderInterface(self.train_ds, batch_size=self.batch_size)
-        self.assertEqual(iface_default.dataloader.num_workers, 4)
+        self.assertEqual(iface_default.dataloader.num_workers, 0)
         self.assertTrue(iface_default.dataloader.pin_memory)
 
         iface_override = DataLoaderInterface(

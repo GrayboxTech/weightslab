@@ -132,6 +132,8 @@ class DataService:
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
+        self._is_filtered = False  # Track if the current view is filtered/modified by user
+
         logger.info("DataService initialized.")
 
     def _get_loader_by_origin(self, origin: str):
