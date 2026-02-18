@@ -909,7 +909,7 @@ def _create_ledger_manager():
 
     try:
         hp = get_hyperparams()
-        if isinstance(hp, dict) and hp:
+        if isinstance(hp, dict):
             flush_interval = hp.get('ledger_flush_interval', flush_interval)
             flush_max_rows = hp.get('ledger_flush_max_rows', flush_max_rows)
             enable_h5 = hp.get('ledger_enable_h5_persistence', enable_h5)

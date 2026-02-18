@@ -38,9 +38,14 @@ from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.global_monitoring import (
     guard_training_context,
+    start_hp_sync_thread_event,
     pause_controller
 )
 from weightslab.utils.tools import seed_everything
+
+
+# Init hp sync 
+start_hp_sync_thread_event()
 
 
 # Helper function to register objects in ledger directly
@@ -89,6 +94,7 @@ def register_in_ledger(obj, flag, device='cpu', **kwargs):
 seed_everything()
 DEVICE = "cuda" if th.cuda.is_available() else "cpu"
 EXP_NAME = "mnist_checkpoint_test_v3"
+
 
 class SimpleCNN(nn.Module):
     """Simple CNN for MNIST classification"""
@@ -298,13 +304,6 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Create temporary directory (used for all tests)
         cls.temp_dir = tempfile.mkdtemp(prefix="checkpoint_v3_test_")
-        # # key = 'pbn6fj2s'
-        # key = None
-        # if key is not None:
-        #     cls.temp_dir = fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}'
-        #     shutil.rmtree(fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}_copy') if os.path.exists(fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}_copy') else None
-        #     shutil.copytree(cls.temp_dir, cls.temp_dir + '_copy', dirs_exist_ok=True)
-        #     cls.temp_dir = fr'C:\Users\GUILLA~1\AppData\Local\Temp\checkpoint_v3_test_{key}_copy'
         cls.log_dir = os.path.join(cls.temp_dir, "experiments")
 
         # Initialize config from YAML-like dict (similar to ws-classification)

@@ -308,7 +308,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
-
+        proxy.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
+        
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
