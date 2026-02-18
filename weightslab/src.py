@@ -136,7 +136,7 @@ def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Te
     return scalar, batch_scalar
 
 
-def log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
+def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
     """
         Log the given scalar signal to the registered logger in the ledger, if available and logging is enabled.
         
@@ -206,7 +206,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Log if requested
     step = _get_step(None)
-    log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
+    _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
 
     # Save statistics if requested and applicable
     if batch_scalar is not None and ids is not None:
@@ -223,6 +223,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         )
     return out
 
+
+# ##############################################################################################################
+# USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
+# ##############################################################################################################
 
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
     """
@@ -546,10 +550,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         raise ValueError(f"Obj name {obj} should contains at least 'model', 'data' or 'optimizer'.")
 
 
-# ##############################################################################################################
-# USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
-# ##############################################################################################################
-
 def serve(serving_ui: bool = False, serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """ Serve the trainer services.
 
@@ -825,7 +825,7 @@ def save_signals(
             scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, ids=batch_ids)
 
             # Log if requested
-            log_signal(scalar, batch_scalar, reg_name, step=step)
+            _log_signal(scalar, batch_scalar, reg_name, step=step)
 
     # Convert tensors to numpy for lightweight buffering
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
