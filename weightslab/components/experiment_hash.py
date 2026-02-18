@@ -13,9 +13,11 @@ Combined into a 24-byte hash that allows tracking what changed between versions.
 import hashlib
 import json
 import logging
+import torch as th
+
 from typing import Any, Dict, Optional, Set
 
-import torch as th
+from weightslab.data.sample_stats import SampleStatsEx
 
 
 logger = logging.getLogger(__name__)
@@ -221,9 +223,9 @@ class ExperimentHashGenerator:
         """
         try:
             # Extract components
-            uids = list(data_state.get('discarded', dict()).keys())
-            discarded = data_state.get('discarded', dict())
-            tags = data_state.get('tags', {})
+            uids = list(data_state.get(SampleStatsEx.DISCARDED.value, dict()).keys())
+            discarded = data_state.get(SampleStatsEx.DISCARDED.value, dict())
+            tags = data_state.get(SampleStatsEx.TAG.value, {})
 
             # Create deterministic representation
             # Sort UIDs and include discard status and tags

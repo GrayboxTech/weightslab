@@ -188,14 +188,8 @@ class Proxy:
     def __bool__(self):
         """Enable boolean evaluation of the proxy based on the wrapped object.
 
-        This allows `bool(proxy)` to return False when wrapping None,
-        and `if proxy:` or `if not proxy:` to work correctly.
-        
-        Recommended patterns:
-        - Use `if proxy:` to check if wrapped object is truthy
-        - Use `if not proxy:` to check if wrapped object is falsy
-        - Use `proxy is None` instead of `proxy is None`
-        - Use `proxy is not None` instead of `proxy is not None`
+        This allows `bool(Proxy(None))` to return False and
+        `if not proxy:` to work correctly when proxy wraps None.
         """
         if self._obj is None:
             return False

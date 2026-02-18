@@ -460,3 +460,81 @@ class H5DataFrameStore:
 
     def exists(self) -> bool:
         return self._path.exists()
+
+    def delete_column(self, column_name: str, origins: Optional[Iterable[str]] = None) -> bool:
+        """Delete a column from all specified origins (or all origins if None).
+        
+        Args:
+            column_name: Name of the column to delete
+            origins: List of origins to modify, or None for all origins
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self._path.exists():
+            return True  # Nothing to delete
+        
+        # Create backup BEFORE any modifications
+        backup_path = self._create_backup()
+        
+        with self._local_lock:
+            with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                try:
+                    with pd.HDFStore(str(self._path), mode="a") as store:
+                        # Determine which origins to process
+                        if origins is None:
+                            # Process all origins
+                            origins_to_process = []
+                            for key in store.keys():
+                                if key.startswith(f"/{self._key_prefix}_"):
+                                    origin = key[len(f"/{self._key_prefix}_"):]
+                                    origins_to_process.append(origin)
+                        else:
+                            origins_to_process = list(origins)
+                        
+                        # Process each origin
+                        modified_count = 0
+                        for origin in origins_to_process:
+                            key = self._key(origin)
+                            if key not in store:
+                                continue
+                            
+                            try:
+                                # Load existing data
+                                df = store.select(key)
+                                
+                                # Check if column exists (handle column name normalization)
+                                normalized_col = column_name.replace('/', '__SLASH__')
+                                if normalized_col in df.columns:
+                                    # Drop the column
+                                    df = df.drop(columns=[normalized_col])
+                                    
+                                    # Remove old key and write updated dataframe
+                                    store.remove(key)
+                                    if not df.empty:
+                                        store.append(key, df, format="table", data_columns=True, min_itemsize={"tags": 512})
+                                    
+                                    modified_count += 1
+                                    logger.debug(f"[H5DataFrameStore] Deleted column {column_name} from {origin}")
+                                    
+                            except Exception as exc:
+                                logger.warning(f"[H5DataFrameStore] Failed to delete column from {origin}: {exc}")
+                                continue
+                        
+                        store.flush()
+                        logger.info(f"[H5DataFrameStore] Deleted column {column_name} from {modified_count} origins")
+                        return True
+                        
+                except Exception as exc:
+                    logger.error(f"[H5DataFrameStore] Failed to delete column {column_name}: {exc}")
+                    # Restore from backup on error
+                    if backup_path:
+                        self._restore_backup(backup_path)
+                    return False
+                finally:
+                    # Clean up backup after successful operation
+                    if backup_path and backup_path.exists():
+                        try:
+                            backup_path.unlink()
+                        except Exception:
+                            pass

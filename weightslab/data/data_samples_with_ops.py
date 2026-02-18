@@ -7,19 +7,22 @@ import torch as th
 import numpy as np
 import pandas as pd
 import threading
-from pathlib import Path
 
+from tqdm import tqdm
+from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
-from weightslab.trainer.services.service_utils import load_label
 from weightslab.data.dataframe_manager import _create_ledger_manager
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
 from weightslab.data.data_utils import (
     _detect_dataset_split,
-    _to_numpy_safe
+    get_mask,
+    load_label,
+    load_metadata,
+    load_uid
 )
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -94,6 +97,16 @@ class DataSampleTrackingWrapper(Dataset):
         tags_mapping: Dict mapping tag strings to label integers
             - If only 1 tag specified: binary classification (tag → 1, others → 0)
             - If multiple tags: multiclass classification using the mapping
+        stats_store: Optional shared H5DataFrameStore instance for stats persistence (if None, a new one will be created)
+        enable_h5_persistence: Whether to enable H5 persistence of sample statistics
+        array_autoload_arrays: Whether to autoload arrays from H5 into memory (can be large, use with caution)
+        array_return_proxies: Whether to return proxy objects for arrays instead of loading them fully (saves memory, may require explicit loading)
+        array_use_cache: Whether to cache loaded arrays in memory for faster access (can increase memory usage)
+        preload_labels: Whether to attempt preloading labels into the stats dataframe defaults (can speed up access but may increase init time)
+        preload_metadata: Whether to attempt preloading metadata into the stats dataframe defaults (can speed up access but may increase init time)
+        preload_uids: Whether to attempt preloading unique IDs from metadata instead of generating them (requires metadata to have unique sample_id)
+        keep_leakages: Whether to keep cross-loader duplicates that may cause data leakage (not recommended, use for debugging only)
+            
 
     Examples:
         Binary classification based on tags:
@@ -127,6 +140,9 @@ class DataSampleTrackingWrapper(Dataset):
         array_return_proxies: bool = True,
         array_use_cache: bool = True,
         preload_labels: bool = True,
+        preload_metadata: bool = True,
+        preload_uids: bool = False,
+        keep_leakages: bool = False,
         **_,
     ):
         # Set name
@@ -190,8 +206,13 @@ class DataSampleTrackingWrapper(Dataset):
         logger.debug(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
 
         # Generate unique IDs
+        if preload_uids and compute_hash:
+            logger.warning(
+                "preload_uids=True: Skipping hash-based UID generation and using preloaded UIDs from metadata. "
+                "Ensure that the dataset provides unique sample_id in metadata for proper tracking."
+            )
         self._generate_uids(
-            wrapped_dataset, compute_hash=compute_hash
+            wrapped_dataset, compute_hash=compute_hash if not preload_uids else False
         )
 
         # Detect duplicates and keep only first occurrences
@@ -228,7 +249,7 @@ class DataSampleTrackingWrapper(Dataset):
             ]
             num_cross_duplicates = len(self.unique_ids) - len(non_duplicate_indices)
 
-            if num_cross_duplicates > 0:
+            if num_cross_duplicates > 0 and not keep_leakages:
                 logger.warning(
                     f"[DataSampleTrackingWrapper] Found {num_cross_duplicates} cross-loader duplicate samples "
                     f"in '{split}' loader that already exist in other loaders. Removing them to avoid data leakage."
@@ -256,60 +277,82 @@ class DataSampleTrackingWrapper(Dataset):
         # Initialize DataFrame as single source of truth
         # Start with defaults for all UIDs (single dict build per row to trim overhead)
         sample_ids = [int(uid) for uid in self.unique_ids]
-        defaults = SampleStats.DEFAULTS
 
-        if not preload_labels:
-            default_data = [
-                dict(
-                    defaults,
-                    sample_id=sid,
-                    origin=self._dataset_split
-                )
-                for sid in sample_ids
-            ]
-        else:
-            default_data = [
-                dict(
-                    defaults,
-                    sample_id=sid,
-                    origin=self._dataset_split,
-                    target=load_label(self, sample_id=sid)
-                )
-                for sid in sample_ids
-            ]
+        default_data = []
+        uids = {}
+        for sid in tqdm(sample_ids, desc=f"Preloading samples for split '{self._dataset_split}'"):
+            data = SampleStats.DEFAULTS.copy()  # Start with default stats for this sample
+            data.update(
+                {
+                        SampleStatsEx.SAMPLE_ID.value: sid,
+                        SampleStatsEx.ORIGIN.value: self._dataset_split
+                }
+            )
+            if preload_labels:
+                # Attempt to load label for this sample and store in defaults (will be None if not available)
+                try:
+                    label = load_label(self, sid)
+                    data[SampleStatsEx.TARGET.value] = label
+                except Exception as e:
+                    logger.debug(f"Could not preload label for sample {sid}: {e}")
+            
+            if preload_metadata:
+                # Attempt to load metadata for this sample and store in defaults (will be None if not available)
+                try:
+                    metadata = load_metadata(self, sid)
+                    if metadata is not None:
+                        data.update(metadata)
+                except Exception as e:
+                    logger.debug(f"Could not preload metadata for sample {sid}: {e}")
+            
+            if preload_uids:
+                # Attempt to load metadata for this sample and store in defaults (will be None if not available)
+                try:
+                    uid = load_uid(self, sid)
+                    data[SampleStatsEx.SAMPLE_ID.value] = uid
+                    uids[sid] = uid
+                except Exception as e:
+                    logger.debug(f"Could not preload sample_id for sample {sid}: {e}")
+            default_data.append(data)
 
+        # Map new uids if exist
+        if len(uids) > 0:
+            self.unique_ids = uids.values()
+            self.unique_id_to_index = {self.unique_ids[i]: i for i in range(len(self.unique_id_to_index))}
+    
         # Register this split with the global ledger manager (shared across loaders) and load existing data
-        ledger_manager.register_split(
-            self._dataset_split,
-            default_data,
-            self._stats_store,
-            autoload_arrays=self.array_autoload_arrays,
-            return_proxies=self.array_return_proxies,
-            use_cache=self.array_use_cache
-        )
+        if ledger_manager != None:
+            ledger_manager.register_split(
+                self._dataset_split,
+                default_data,
+                self._stats_store,
+                autoload_arrays=self.array_autoload_arrays,
+                return_proxies=self.array_return_proxies,
+                use_cache=self.array_use_cache
+            )
 
-        # Log tag-based labeling configuration if enabled
-        if self._use_tags:
-            with self._df_lock:
-                df_view = ledger_manager.get_df_view(column=self._dataset_split)
-                tags_count = df_view.apply(lambda x: len(x) > 0).sum()
+            # Log tag-based labeling configuration if enabled
+            if self._use_tags:
+                with self._df_lock:
+                    df_view = ledger_manager.get_df_view(column=self._dataset_split)
+                    tags_count = df_view.apply(lambda x: len(x) > 0).sum()
 
-            if self._is_binary_labels:
-                target_tag = list(self._tags_mapping.keys())[0]
-                logger.info(
-                    f"[DataSampleTrackingWrapper] Tag-based binary labeling enabled: "
-                    f"'{target_tag}' → 1, others → 0. Found {tags_count} tagged samples."
-                )
-            elif self._tags_mapping:
-                logger.info(
-                    f"[DataSampleTrackingWrapper] Tag-based multiclass labeling enabled with mapping: "
-                    f"{self._tags_mapping}. Found {tags_count} tagged samples."
-                )
-            else:
-                logger.warning(
-                    f"[DataSampleTrackingWrapper] use_tags=True but no tags_mapping provided. "
-                    f"Labels will remain unchanged."
-                )
+                if self._is_binary_labels:
+                    target_tag = list(self._tags_mapping.keys())[0]
+                    logger.info(
+                        f"[DataSampleTrackingWrapper] Tag-based binary labeling enabled: "
+                        f"'{target_tag}' → 1, others → 0. Found {tags_count} tagged samples."
+                    )
+                elif self._tags_mapping:
+                    logger.info(
+                        f"[DataSampleTrackingWrapper] Tag-based multiclass labeling enabled with mapping: "
+                        f"{self._tags_mapping}. Found {tags_count} tagged samples."
+                    )
+                else:
+                    logger.warning(
+                        f"[DataSampleTrackingWrapper] use_tags=True but no tags_mapping provided. "
+                        f"Labels will remain unchanged."
+                    )
 
     @property
     def num_classes(self) -> int:
@@ -335,42 +378,58 @@ class DataSampleTrackingWrapper(Dataset):
     def _getitem_raw(self, index: int = None, id: int = None):
         if index is None and id is not None:
             index = self.unique_id_to_index[id]
-        data = self.wrapped_dataset[index]
+        data = self.wrapped_dataset[index]  # Get format (data, uids, targets, **metadata)
+        id = self.unique_ids[index]
 
         # Ensure data is a tuple for consistent handling
         if not isinstance(data, tuple):
             data = (data,)
+        
+        # Handle single element (unsupervised): return (item, id)
+        if len(data) == 1:
+            return data[0], id
 
-        if len(data) == 0:
-            raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
-
-        id = self.unique_ids[index]
-
-        # Extract first element (always the input data)
+        # Element extraction
+        # # First, always the input data
         item = data[0]
+        
+        # Handle different tuple formats:
+        # - 2-tuple: (item, target) - common in sklearn-style datasets
+        # - 3+ tuple: (item, uid, target, *metadata) - expected format
+        if len(data) == 2:
+            # Standard 2-tuple from PyTorch datasets: (item, target)
+            target = data[1]
+            rest = ()
+        else:
+            # 3+ tuple format
+            # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
+            # id = data[1]
+            pass
+
+            # # Third, is target/label
+            target = data[2]  
+            
+            # # Finally, any additional elements (e.g., boxes, masks) are metadata
+            rest = data[3:] if len(data) > 3 else ()
 
         # For single element (unsupervised): return (item, id)
-        if len(data) == 1:
-            return item, id
-
-        # For 2+ elements: second is target/label, rest are additional (boxes, masks, etc.)
-        target = data[1]
-        rest = data[2:] if len(data) > 2 else ()
-
         # Override target with tag-based label if use_tags is enabled
         if self._use_tags:
             with self._df_lock:
-                tag_value = self._get_value(int(id), SampleStatsEx.TAGS.value) or ''
-                if pd.isna(tag_value):
-                    tag_value = ''
+                sample_tags_set = self._get_tags_for_sample(int(id))
 
             if self._is_binary_labels:
-                # Binary classification: 1 if tag matches, 0 otherwise
+                # Binary classification: 1 if target tag is present, 0 otherwise
                 target_tag = list(self._tags_mapping.keys())[0]
-                target = 1 if tag_value == target_tag else 0
+                target = 1 if target_tag in sample_tags_set else 0
             elif self._tags_mapping:
-                # Multiclass: map tag string to integer label
-                target = self._tags_mapping.get(tag_value, 0)  # Default to 0 if tag not in mapping
+                # Multiclass: find first matching tag in the mapping, default to 0
+                for tag in sample_tags_set:
+                    if tag in self._tags_mapping:
+                        target = self._tags_mapping[tag]
+                        break
+                else:
+                    target = 0  # Default to 0 if no tags match the mapping
             else:
                 # No mapping provided but use_tags=True: keep original target
                 logger.warning(f"use_tags=True but no tags_mapping provided for sample {id}")
@@ -397,6 +456,21 @@ class DataSampleTrackingWrapper(Dataset):
 
         return (wrapped_equal and
                 self.denied_sample_cnt == other.denied_sample_cnt)
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        # Drop non-picklable objects for multiprocessing on Windows (spawn).
+        state["_df_lock"] = None
+        state["_stats_store"] = None
+        state["_map_updates_hook_fns"] = []
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Recreate thread-local locks and stores inside worker processes.
+        self._df_lock = threading.RLock()
+        if self._stats_store is None and self._enable_h5_persistence and self._h5_path is not None:
+            self._stats_store = H5DataFrameStore(self._h5_path, lock_timeout=10.0)
 
     def _generate_uids(self, wrapped_dataset: Dataset, compute_hash: bool = True):
         """
@@ -551,6 +625,67 @@ class DataSampleTrackingWrapper(Dataset):
     def _set_dense(self, key: str, sample_id: int, value: np.ndarray):
         get_dataframe().set_dense(self._dataset_split, key, sample_id, value)
 
+    def _convert_tags_to_columns(self, sample_id: int, tag_value: Any) -> Dict[str, Any]:
+        """
+        LEGACY METHOD - Convert tag string(s) to individual boolean columns.
+        
+        Handles:
+        - Comma-separated: "tag1,tag2,tag3" → tags_tag1=1, tags_tag2=1, tags_tag3=1
+        - Semicolon-separated: "tag1;tag2;tag3" → tags_tag1=1, tags_tag2=1, tags_tag3=1
+        - Single tag: "mytag" → tags_mytag=1
+        
+        Returns dict with updates ready to be passed to _set_values.
+        """
+        updates = {}
+        
+        # Handle empty/None values
+        if not tag_value or (isinstance(tag_value, str) and not tag_value.strip()):
+            return updates
+        
+        # Convert to string and parse tags
+        tag_str = str(tag_value).strip()
+        
+        # Split by comma or semicolon
+        tags = set()
+        for tag in tag_str.split(';'):
+            for t in tag.split(','):
+                clean_tag = t.strip()
+                if clean_tag:
+                    tags.add(clean_tag)
+        
+        # Create individual tag columns
+        for tag in tags:
+            col_name = f"{SampleStatsEx.TAG.value}_{tag}"
+            updates[col_name] = 1
+        
+        return updates
+
+    def _get_tags_for_sample(self, sample_id: int) -> Set[str]:
+        """
+        Retrieve all tags for a given sample from individual tag columns.
+        
+        Returns a set of tag names (without the "tags_" prefix) that are True/1 for this sample.
+        """
+        tags_set = set()
+        
+        df_view = self._get_df_view()
+        if df_view.empty or sample_id not in df_view.index:
+            return tags_set
+        
+        # Get all columns that match the "tags_*" pattern
+        tag_columns = [col for col in df_view.columns if col.startswith(f"{SampleStatsEx.TAG.value}_")]
+        
+        # Check which tag columns are True/1 for this sample
+        for tag_col in tag_columns:
+            tag_value = df_view.loc[sample_id, tag_col]
+            # Check if tag is set (1, True, or non-zero)
+            if tag_value and tag_value != 0 and tag_value is not None and tag_value is not pd.NA:
+                # Extract tag name by removing "tags_" prefix
+                tag_name = tag_col[len(f"{SampleStatsEx.TAG.value}_"):]
+                tags_set.add(tag_name)
+        
+        return tags_set
+
     def _save_pending_stats_to_h5(self):
         """Mark pending rows dirty and request async flush from background thread."""
         if not self._h5_pending_uids:
@@ -634,27 +769,27 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Refresh denied count
         df_after = self._get_df_view()
-        if not df_after.empty and SampleStatsEx.DENY_LISTED.value in df_after.columns:
-            self.denied_sample_cnt = int(df_after[SampleStatsEx.DENY_LISTED.value].sum())
+        if not df_after.empty and SampleStatsEx.DISCARDED.value in df_after.columns:
+            self.denied_sample_cnt = int(df_after[SampleStatsEx.DISCARDED.value].sum())
         else:
             self.denied_sample_cnt = 0
 
     def is_deny_listed(self, sample_id: int) -> bool:
-        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DENY_LISTED, raw=True)
+        return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DISCARDED, raw=True)
 
     def denylist_samples(self, denied_samples_ids: Set[int] | None, accumulate: bool = False):
         with self._df_lock:
             # Get previously denied samples
             prev_denied = set()
             df_view = self._get_df_view()
-            if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
-                denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
+            if not df_view.empty and SampleStatsEx.DISCARDED in df_view.columns:
+                denied_mask = df_view[SampleStatsEx.DISCARDED] == True
                 prev_denied = set(df_view[denied_mask].index)
 
             if not denied_samples_ids:
                 # Clear all denials
                 for uid in self.unique_ids:
-                    self.set(int(uid), SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(int(uid), SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 if accumulate:
@@ -663,7 +798,7 @@ class DataSampleTrackingWrapper(Dataset):
                 for uid in self.unique_ids:
                     uid_int = int(uid)
                     is_denied = uid_int in denied_samples_ids
-                    self.set(uid_int, SampleStatsEx.DENY_LISTED.value, is_denied)
+                    self.set(uid_int, SampleStatsEx.DISCARDED.value, is_denied)
                     cnt += int(is_denied)
                 self.denied_sample_cnt = cnt
 
@@ -676,17 +811,17 @@ class DataSampleTrackingWrapper(Dataset):
                 # Allow all
                 for uid in self.unique_ids:
                     uid_int = int(uid)
-                    self.set(uid_int, SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(uid_int, SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 for sample_id in allowlist_samples_ids:
                     sample_id_int = int(sample_id)
-                    self.set(sample_id_int, SampleStatsEx.DENY_LISTED.value, False)
+                    self.set(sample_id_int, SampleStatsEx.DISCARDED.value, False)
                 # Now count total denied
                 denied_cnt = 0
                 df_view = self._get_df_view()
-                if not df_view.empty and SampleStatsEx.DENY_LISTED in df_view.columns:
-                    denied_mask = df_view[SampleStatsEx.DENY_LISTED] == True
+                if not df_view.empty and SampleStatsEx.DISCARDED in df_view.columns:
+                    denied_mask = df_view[SampleStatsEx.DISCARDED] == True
                     denied_cnt = denied_mask.sum()
                 self.denied_sample_cnt = denied_cnt
 
@@ -818,69 +953,10 @@ class DataSampleTrackingWrapper(Dataset):
         self._num_classes_cache = 1
         return self._num_classes_cache
 
-    def get_mask(self, sample_id, pred_raw):
-        # Check if prediction_raw is a numpy array (could be bboxes)
-        if isinstance(pred_raw, np.ndarray) and (pred_raw.ndim == 2 or pred_raw.ndim == 3) and pred_raw.shape[-1] >= 4:
-            # pred_raw appears to be bboxes (N, 4+) format
-            # Get the item (image) to determine mask dimensions
-            index = self.get_index_from_sample_id(sample_id)
-            raw_data = self.wrapped_dataset[index]
-
-            # Extract the item (first element of the tuple)
-            if isinstance(raw_data, tuple):
-                item = raw_data[0]
-            else:
-                item = raw_data
-
-            # Convert item to numpy to get shape
-            item_np = _to_numpy_safe(item)
-            if item_np is not None:
-                # Determine height and width from item
-                if item_np.ndim == 3:
-                    # Channels-first format: (C, H, W)
-                    if item_np.shape[0] < item_np.shape[1]:
-                        _, height, width = item_np.shape
-                    else:
-                        # Channels-last format: (H, W, C)
-                        height, width, _ = item_np.shape
-                elif item_np.ndim == 2:
-                    # Grayscale: (H, W)
-                    height, width = item_np.shape
-                else:
-                    # Cannot determine dimensions
-                    return pred_raw
-
-                # Generate segmentation map from bboxes
-                segmentation_map = np.zeros((height, width), dtype=np.int64)
-
-                # Return segmentation map directly if it matches pred_raw shape
-                if segmentation_map.shape == pred_raw.shape[-2:]:  # B, C, H, W
-                    return pred_raw
-
-                # Generate segmentation map from bboxes
-                for bbox_data in pred_raw[0]:
-                    x1, y1, x2, y2 = bbox_data[:4].astype(int)
-                    # Extract class id if available, otherwise use 1
-                    class_id = int(bbox_data[4]) if len(bbox_data) > 4 else 1
-
-                    # Clip to valid image bounds
-                    x1 = max(0, min(x1, width - 1))
-                    y1 = max(0, min(y1, height - 1))
-                    x2 = max(0, min(x2, width))
-                    y2 = max(0, min(y2, height))
-
-                    # Fill the bounding box region
-                    if x2 > x1 and y2 > y1:
-                        segmentation_map[y1:y2, x1:x2] = class_id
-
-                return segmentation_map
-        # Not bounding boxes, return as is
-        return pred_raw
-
     def get_prediction_mask(self, sample_id):
         # Detection: check if prediction_raw contains bboxes
         pred_raw = self.get(sample_id=sample_id, stat_name=SampleStatsEx.PREDICTION)
-        return self.get_mask(sample_id, pred_raw)
+        return get_mask(sample_id, pred_raw)
 
     def get(self, sample_id: int, stat_name: str, raw: bool = False):
         """
@@ -894,9 +970,17 @@ class DataSampleTrackingWrapper(Dataset):
     def set(self, sample_id: int, stat_name: str, value: Any):
         """
             Set a specific stat value for a given sample ID.
+            
+            Special handling: When stat_name is "tags", creates individual boolean columns
+            like "tags_<tagname>" set to 1 or 0, instead of storing a single string.
         """
         with self._df_lock:
-            self._set_values(sample_id=sample_id, updates={stat_name: value})
+            # Special handling for tags: convert to individual boolean columns
+            if stat_name == SampleStatsEx.TAG.value and value:
+                updates = self._convert_tags_to_columns(sample_id, value)
+            else:
+                updates = {stat_name: value}
+            self._set_values(sample_id=sample_id, updates=updates)
 
     def _detect_cross_loader_duplicates(self, current_origin: str) -> Set[int]:
         """

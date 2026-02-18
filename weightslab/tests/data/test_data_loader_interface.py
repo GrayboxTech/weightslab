@@ -1,7 +1,7 @@
 import math
 import unittest
 import torch
-from torch.utils.data import TensorDataset, DataLoader, Subset
+from torch.utils.data import TensorDataset, DataLoader, Subset, Dataset, get_worker_info
 from torchvision import datasets, transforms
 
 from weightslab.utils.tools import capture_rng_state, restore_rng_state, seed_everything
@@ -23,6 +23,9 @@ def infinite_loader(loader):
 
 class TestDataLoaderInterface(unittest.TestCase):
     def setUp(self):
+        # Ensure controller is in resumed state for test
+        pause_controller._resume()
+
         # small dataset sizes to keep tests fast
         self.train_size = 100
         self.test_size = 40
@@ -36,6 +39,9 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         train_ds = make_dataset(self.train_size)
         test_ds = make_dataset(self.test_size)
+
+        self.train_ds = train_ds
+        self.test_ds = test_ds
 
         self.train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=False)
         self.test_loader = DataLoader(test_ds, batch_size=self.batch_size, shuffle=False)
@@ -69,6 +75,66 @@ class TestDataLoaderInterface(unittest.TestCase):
         # next call should raise StopIteration
         with self.assertRaises(StopIteration):
             next(it)
+
+    def test_dataloader_interface_worker_defaults_and_override(self):
+        iface_default = DataLoaderInterface(self.train_ds, batch_size=self.batch_size)
+        self.assertEqual(iface_default.dataloader.num_workers, 4)
+        self.assertTrue(iface_default.dataloader.pin_memory)
+
+        iface_override = DataLoaderInterface(
+            self.train_ds,
+            batch_size=self.batch_size,
+            num_workers=2,
+            pin_memory=False,
+        )
+        self.assertEqual(iface_override.dataloader.num_workers, 2)
+        self.assertFalse(iface_override.dataloader.pin_memory)
+
+    def test_dataloader_interface_uses_multiple_workers(self):
+        class WorkerIdDataset(Dataset):
+            def __init__(self, size: int):
+                self.size = size
+
+            def __len__(self):
+                return self.size
+
+            def __getitem__(self, idx: int):
+                info = get_worker_info()
+                worker_id = info.id if info is not None else -1
+                data = torch.tensor([idx], dtype=torch.long)
+                target = torch.tensor(worker_id, dtype=torch.long)
+                return data, target
+        dataset = WorkerIdDataset(64)
+
+        train_iface = DataLoaderInterface(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=False,
+        )
+
+        test_iface = DataLoaderInterface(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=False,
+        )
+
+        def _collect_worker_ids(iface, max_batches=32):
+            worker_ids = set()
+            for i, batch in enumerate(iface):
+                worker_ids.add(int(batch[2].item()))
+                if i + 1 >= max_batches:
+                    break
+            return worker_ids
+
+        train_worker_ids = _collect_worker_ids(train_iface)
+        test_worker_ids = _collect_worker_ids(test_iface)
+
+        self.assertGreaterEqual(len(train_worker_ids), 2)
+        self.assertGreaterEqual(len(test_worker_ids), 2)
 
     def test_infinite_loader_restarts_epochs_and_collects_all_labels(self):
         inf = infinite_loader(self.train_loader)
