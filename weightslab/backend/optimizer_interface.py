@@ -105,26 +105,9 @@ class OptimizerInterface:
                     self._last_audit_log = 0
                 
                 if time.time() - self._last_audit_log > 5.0:
-                    # Update tqdm description if available
-                    try:
-                        from tqdm import tqdm
-                        for instance in getattr(tqdm, '_instances', []):
-                            instance.set_description("AUDITING")
-                    except Exception:
-                        pass
                     print(f"\n[WeightsLab] AUDIT MODE: Weights are frozen. Optimizer step skipped.", flush=True)
                     self._last_audit_log = time.time()
                 return
-        except Exception:
-            pass
-
-        # Reset tqdm description on real training steps
-        try:
-            from tqdm import tqdm
-            for instance in getattr(tqdm, '_instances', []):
-                # Only reset if we were auditing
-                if instance.desc == "AUDITING":
-                    instance.set_description("TRAINING")
         except Exception:
             pass
 
