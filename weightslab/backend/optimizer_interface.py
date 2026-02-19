@@ -93,6 +93,41 @@ class OptimizerInterface:
                     continue
 
     def step(self, closure=None):
+        # Backend-managed Audit Mode: Skip step if auditorMode is enabled
+        from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name
+        try:
+            hp_name = resolve_hp_name()
+            hp = get_hyperparams(hp_name)
+            if hp and (hp.get('auditorMode') is True or hp.get('auditor_mode') is True):
+                import time
+                # Throttle logging to avoid spam
+                if not hasattr(self, '_last_audit_log'):
+                    self._last_audit_log = 0
+                
+                if time.time() - self._last_audit_log > 5.0:
+                    # Update tqdm description if available
+                    try:
+                        from tqdm import tqdm
+                        for instance in getattr(tqdm, '_instances', []):
+                            instance.set_description("AUDITING")
+                    except Exception:
+                        pass
+                    print(f"\n[WeightsLab] AUDIT MODE: Weights are frozen. Optimizer step skipped.", flush=True)
+                    self._last_audit_log = time.time()
+                return
+        except Exception:
+            pass
+
+        # Reset tqdm description on real training steps
+        try:
+            from tqdm import tqdm
+            for instance in getattr(tqdm, '_instances', []):
+                # Only reset if we were auditing
+                if instance.desc == "AUDITING":
+                    instance.set_description("TRAINING")
+        except Exception:
+            pass
+
         return self.optimizer.step(closure) if closure is not None else self.optimizer.step()
 
     def zero_grad(self, set_to_none=False):

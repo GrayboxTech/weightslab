@@ -192,4 +192,5 @@ class ExperimentContext:
             ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
             ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 8)),
             ("Is Training", "is_training", "number", _hp_getter("is_training", 0)),
+            ("Auditor Mode", "auditor_mode", "number", _hp_getter("auditor_mode", 0)),
         }

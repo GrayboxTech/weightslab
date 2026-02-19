@@ -156,14 +156,31 @@ class ExperimentService:
                         trainer = components.get("trainer")
                         if trainer is not None:
                             if hyper_parameters.is_training:
+                                print("\n[WeightsLab] UI Command: RESUME", flush=True)
                                 trainer.resume()
                             else:
+                                print("\n[WeightsLab] UI Command: PAUSE", flush=True)
                                 trainer.pause()
                         set_hyperparam(
                             name=hp_name,
                             key_path="is_training",
                             value=hyper_parameters.is_training
                         )
+
+                    try:
+                        if hyper_parameters.HasField("auditor_mode"):
+                            # Auto-pause training when switching modes for consistency
+                            trainer = components.get("trainer")
+                            if trainer:
+                                print(f"\n[WeightsLab] Pausing to switch mode...", flush=True)
+                                trainer.pause()
+                                set_hyperparam(name=hp_name, key_path="is_training", value=False)
+                                
+                            mode_label = "AUDIT" if hyper_parameters.auditor_mode else "TRAIN"
+                            print(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode", flush=True)
+                            set_hyperparam(name=hp_name, key_path="auditor_mode", value=hyper_parameters.auditor_mode)
+                    except ValueError:
+                        pass
                 except Exception as e:
                     return pb2.CommandResponse(
                         success=False,

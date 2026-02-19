@@ -93,6 +93,7 @@ message HyperParameters {
   optional int32 full_eval_frequency = 5;
   optional int32 checkpont_frequency = 6;
   optional bool is_training = 7;
+  optional bool auditor_mode = 8;
 }
 
 message MetricsStatus {
