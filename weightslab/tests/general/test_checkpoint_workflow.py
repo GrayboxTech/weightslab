@@ -44,7 +44,7 @@ from weightslab.components.global_monitoring import (
 from weightslab.utils.tools import seed_everything
 
 
-# Init hp sync 
+# Init hp sync thread event (used in training loop to trigger HP checkpointing)
 start_hp_sync_thread_event()
 
 
@@ -65,6 +65,7 @@ def register_in_ledger(obj, flag, device='cpu', **kwargs):
                 obj,
                 flag="model",
                 device=device,
+                compute_dependencies=True,
                 **kwargs
             )
         elif flag == "dataloader":
@@ -678,7 +679,7 @@ class CheckpointSystemTests(unittest.TestCase):
             rows.append(
                 {
                     "sample_id": uid,
-                    f"{SampleStatsEx.TAG.value}:ugly": 1,  # Random tag with 'ugly'
+                    f"{SampleStatsEx.TAG.value}:ugly": True,  # Random tag with 'ugly'
                     SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view()[SampleStatsEx.DISCARDED.value].iloc[idx])
                 }
             )
@@ -787,7 +788,7 @@ class CheckpointSystemTests(unittest.TestCase):
             rows.append(
                 {
                     "sample_id": uid,
-                    f"{SampleStatsEx.TAG.value}:ugly": 1,
+                    f"{SampleStatsEx.TAG.value}:ugly": True,
                     SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view(SampleStatsEx.DISCARDED.value).iloc[idx])
                 }
             )
@@ -952,7 +953,7 @@ class CheckpointSystemTests(unittest.TestCase):
             uid = dfm.get_df_view().index[idx]
             rows.append({
                 "sample_id": uid,
-                f"{SampleStatsEx.TAG.value}:discard_25pct": 1,
+                f"{SampleStatsEx.TAG.value}:discard_25pct": True,
                 SampleStatsEx.DISCARDED.value: True
             })
 
@@ -1103,7 +1104,7 @@ class CheckpointSystemTests(unittest.TestCase):
             uid = dfm.get_df_view().index[idx]
             rows.append({
                 "sample_id": uid,
-                f"{SampleStatsEx.TAG.value}:discard_fix": 1,
+                f"{SampleStatsEx.TAG.value}:discard_fix": True,
                 SampleStatsEx.DISCARDED.value: True
             })
         df_update = pd.DataFrame(rows).set_index("sample_id")

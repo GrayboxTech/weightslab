@@ -487,7 +487,7 @@ class CheckpointManager:
                 except Exception as e:
                     logger.warning(f"Failed to merge existing logger snapshot: {e}")
 
-            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            tmp_path = path.with_suffix(path.suffix)
             with open(tmp_path, "w") as f:
                 json.dump(snapshot, f, indent=2)
             os.replace(tmp_path, path)
@@ -903,7 +903,7 @@ class CheckpointManager:
         if self.current_exp_hash is None:
             logger.warning("No experiment hash set. Call update_experiment_hash first.")
             return None
-
+        
         model_dir = self.models_dir / self.current_exp_hash[8:-8]
         os.makedirs(model_dir, exist_ok=True)
         arch_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture.pkl"
@@ -921,7 +921,7 @@ class CheckpointManager:
 
         # Save
         try:
-            tmp_arch_file = arch_file.with_suffix(arch_file.suffix + ".tmp")
+            tmp_arch_file = arch_file.with_suffix(arch_file.suffix)
 
             # Try dill first (better for custom classes)
             if dill is not None:
@@ -945,7 +945,9 @@ class CheckpointManager:
 
             return arch_file
         except Exception as e:
+            import traceback
             logger.error(f"Failed to save model architecture: {e}")
+            logger.debug(f"Full traceback:\n{traceback.format_exc()}")
             return None
 
     def save_config(

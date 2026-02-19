@@ -154,7 +154,6 @@ class ModelInterface(NetworkWithOps):
         self.guard_testing_context.model = self
 
         # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
-        self._checkpoint_manager = None
         _checkpoint_auto_every_steps = 0
         _root_log_dir = None
         try:
@@ -189,22 +188,22 @@ class ModelInterface(NetworkWithOps):
         # Check if a checkpoint manager is already registered in ledger
         existing_manager = ledgers.get_checkpoint_manager()
         if existing_manager != None and isinstance(existing_manager, ledgers.Proxy):
-            self._checkpoint_manager = existing_manager
+            existing_manager = existing_manager
             logger.info("Using checkpoint manager from ledger")
 
             # Early auto-load latest model architecture and weights if checkpoints exist
             try:
                 # Try to get the latest experiment hash
                 latest_hash = None
-                if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
-                    latest_hash = self._checkpoint_manager.current_exp_hash
-                elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
-                    manifest = self._checkpoint_manager.manifest
+                if hasattr(existing_manager, 'current_exp_hash') and existing_manager.current_exp_hash:
+                    latest_hash = existing_manager.current_exp_hash
+                elif hasattr(existing_manager, 'manifest') and existing_manager.manifest:
+                    manifest = existing_manager.manifest
                     latest_hash = getattr(manifest, 'latest_hash', None)
 
                 if latest_hash:
                     # Use checkpoint manager's load_checkpoint to get architecture and weights
-                    checkpoint_data = self._checkpoint_manager.load_checkpoint(
+                    checkpoint_data = existing_manager.load_checkpoint(
                         exp_hash=latest_hash,
                         load_model=True,
                         load_weights=True,
@@ -243,9 +242,9 @@ class ModelInterface(NetworkWithOps):
                 logger.debug(f"Could not auto-load model checkpoint: {e}")
 
         else:
-            self._checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir, load_model=True, load_config=False, load_data=False)
+            existing_manager = CheckpointManager(root_log_dir=root_log_dir, load_model=True, load_config=False, load_data=False)
             try:
-                ledgers.register_checkpoint_manager(self._checkpoint_manager)
+                ledgers.register_checkpoint_manager(existing_manager)
                 logger.info("Registered new checkpoint manager in ledger")
             except Exception:
                 pass
@@ -391,25 +390,26 @@ class ModelInterface(NetworkWithOps):
     def _maybe_auto_dump(self):
         # Called from base class hook after step update.
         # Auto-dump: save model weights only (and architecture if changed).
+        existing_manager = ledgers.get_checkpoint_manager()
         try:
-            if not self.is_training() or self._checkpoint_manager == None or self._checkpoint_auto_every_steps <= 0:
+            if not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
             batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
                     # Update hash for current experiment state (marks changes as pending, doesn't dump)
-                    _, _, changed_components = self._checkpoint_manager.update_experiment_hash()
+                    _, _, changed_components = existing_manager.update_experiment_hash()
                     # If model architecture changed, save it
                     if 'model' in changed_components:
                         try:
-                            self._checkpoint_manager.save_model_architecture(self.model)
+                            existing_manager.save_model_architecture(self.model)
                         except Exception:
                             pass
                 except Exception:
                     pass
                 try:
                     # Save model weights checkpoint (no pending dump here)
-                    self._checkpoint_manager.save_model_checkpoint(
+                    existing_manager.save_model_checkpoint(
                         model=self.model,
                         save_optimizer=True,
                         step=batched_age,
