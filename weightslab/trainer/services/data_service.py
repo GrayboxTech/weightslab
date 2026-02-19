@@ -27,7 +27,6 @@ from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.service_utils import load_raw_image, load_label
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
-from weightslab.src import compute_signals
 
 
 # Get global logger
@@ -531,6 +530,8 @@ class DataService:
         Discover and compute registered custom signals for all active dataloaders.
         This allows scripts to simply register @wl.signal and have them computed automatically.
         """
+        # Local import to avoid circular dependency
+        import weightslab.src as wl_src
         
         # Get all registered signal names
         signals = list_signals()
@@ -558,19 +559,8 @@ class DataService:
                     origin = loader.dataset.split
                 
                 # Run computation
-                # Note: compute_signals handles checking if signal is already computed? 
-                # Currently compute_signals blindly recomputes. 
-                # Ideally we should check if columns exist in DF, but for now we trust the user logic or optimize later.
-                # To trigger the "Explicit Register Skeleton" logic we saw in the script, 
-                # we rely on compute_signals doing the upsert.
-                
-                # Wait, the script had manual upsert skeleton before compute. 
-                # compute_signals iterates and upserts results. 
-                # If the IDs are hashed and skeletons are missing, upsert might be tricky if columns mismatch?
-                # No, upsert_df handles new rows if IDs match index.
-                
                 logger.info(f"[DataService] Computing signals {signals} for loader '{loader_name}' (origin={origin})")
-                compute_signals(loader, origin=origin, signals=signals)
+                wl_src.compute_signals(loader, origin=origin, signals=signals)
                 
             except Exception as e:
                 logger.error(f"[DataService] Failed to compute signals for loader '{loader_name}': {e}")
