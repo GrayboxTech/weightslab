@@ -38,7 +38,7 @@ class ModelInterface(NetworkWithOps):
             name: str = None,
             register: bool = True,
             use_onnx: bool = False,
-            compute_dependencies: bool = True,
+            compute_dependencies: bool = False,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
             **_
@@ -104,109 +104,6 @@ class ModelInterface(NetworkWithOps):
             else:
                 self.dummy_input = th.randn(model.input_shape).to(device)
 
-        # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
-        self._checkpoint_manager = None
-        _checkpoint_auto_every_steps = 0
-        _root_log_dir = None
-        try:
-            from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
-            names = list_hyperparams()
-            chosen = None
-            if 'main' in names:
-                chosen = 'main'
-            elif 'experiment' in names:
-                chosen = 'experiment'
-            elif len(names) > 1:
-                chosen = names[-1]
-
-            if chosen:
-                hp = get_hyperparams(chosen)
-                if hasattr(hp, 'get') and not isinstance(hp, dict):
-                    try:
-                        hp = hp.get()
-                    except Exception:
-                        hp = None
-                if isinstance(hp, dict):
-                    _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
-                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
-        except Exception:
-            _root_log_dir = None
-            _checkpoint_auto_every_steps = 0
-        self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
-
-        # Initialize CheckpointManager if we have a root dir (fallback to default root)
-        root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
-        try:
-            # Check if a checkpoint manager is already registered in ledger
-            try:
-                existing_manager = ledgers.get_checkpoint_manager()
-                if existing_manager != None and not isinstance(existing_manager, ledgers.Proxy):
-                    self._checkpoint_manager = existing_manager
-                    logger.info("Using checkpoint manager from ledger")
-                else:
-                    raise KeyError("No manager in ledger")
-            except (KeyError, AttributeError):
-                # Create new manager and register it
-                self._checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir)
-                try:
-                    ledgers.register_checkpoint_manager(self._checkpoint_manager)
-                    logger.info("Registered new checkpoint manager in ledger")
-                except Exception:
-                    pass
-        except Exception:
-            self._checkpoint_manager = None
-
-            # Early auto-load latest model architecture and weights if checkpoints exist
-            if self._checkpoint_manager != None and not self.skip_previous_auto_load:
-                try:
-                    # Try to get the latest experiment hash
-                    latest_hash = None
-                    if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
-                        latest_hash = self._checkpoint_manager.current_exp_hash
-                    elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
-                        manifest = self._checkpoint_manager.manifest
-                        latest_hash = getattr(manifest, 'latest_hash', None)
-
-                    if latest_hash:
-                        # Use checkpoint manager's load_checkpoint to get architecture and weights
-                        checkpoint_data = self._checkpoint_manager.load_checkpoint(
-                            exp_hash=latest_hash,
-                            load_model=True,
-                            load_weights=True,
-                            load_config=False,
-                            load_data=False,
-                            force=True
-                        )
-
-                        # Apply loaded model if architecture was loaded
-                        if checkpoint_data.get('model'):
-                            self = checkpoint_data['model']
-                            weights = checkpoint_data.get('weights')
-                            checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
-
-                            # Restore RNG state if available
-                            restore_rng_state(checkpoint_rng_state)
-                            logger.debug(f"Restored RNG state from checkpoint")
-
-                        elif checkpoint_data.get('weights'):
-                            # Only weights available, load into existing model
-                            weights = checkpoint_data['weights']
-                            if 'model_state_dict' in weights:
-                                self.load_state_dict(weights['model_state_dict'], strict=True)
-                                self.current_step = weights.get('step', -1)
-                                logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
-
-                        # As model architecture as has been loaded, and it's an instance of the ModelInterface,
-                        # we can set its current step if available in weights
-                        if isinstance(self.model, self.__class__):
-                            self._registration(
-                                weak=weak
-                            )
-                            return
-
-                except Exception as e:
-                    logger.debug(f"Could not auto-load model checkpoint: {e}")
-
         if compute_dependencies and not use_onnx:
             self.print_graph = print_graph
             self.print_graph_filename = print_graph_filename
@@ -255,6 +152,103 @@ class ModelInterface(NetworkWithOps):
         # Set Model Training Guard
         self.guard_training_context.model = self
         self.guard_testing_context.model = self
+
+        # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
+        self._checkpoint_manager = None
+        _checkpoint_auto_every_steps = 0
+        _root_log_dir = None
+        try:
+            from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
+            names = list_hyperparams()
+            chosen = None
+            if 'main' in names:
+                chosen = 'main'
+            elif 'experiment' in names:
+                chosen = 'experiment'
+            elif len(names) > 1:
+                chosen = names[-1]
+
+            if chosen:
+                hp = get_hyperparams(chosen)
+                if hasattr(hp, 'get') and not isinstance(hp, dict):
+                    try:
+                        hp = hp.get()
+                    except Exception:
+                        hp = None
+                if isinstance(hp, dict):
+                    _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
+                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
+        except Exception:
+            _root_log_dir = None
+            _checkpoint_auto_every_steps = 0
+        self._checkpoint_auto_every_steps = int(_checkpoint_auto_every_steps or 0)
+
+        # Initialize CheckpointManager if we have a root dir (fallback to default root)
+        root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
+        
+        # Check if a checkpoint manager is already registered in ledger
+        existing_manager = ledgers.get_checkpoint_manager()
+        if existing_manager != None and isinstance(existing_manager, ledgers.Proxy):
+            self._checkpoint_manager = existing_manager
+            logger.info("Using checkpoint manager from ledger")
+
+            # Early auto-load latest model architecture and weights if checkpoints exist
+            try:
+                # Try to get the latest experiment hash
+                latest_hash = None
+                if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
+                    latest_hash = self._checkpoint_manager.current_exp_hash
+                elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
+                    manifest = self._checkpoint_manager.manifest
+                    latest_hash = getattr(manifest, 'latest_hash', None)
+
+                if latest_hash:
+                    # Use checkpoint manager's load_checkpoint to get architecture and weights
+                    checkpoint_data = self._checkpoint_manager.load_checkpoint(
+                        exp_hash=latest_hash,
+                        load_model=True,
+                        load_weights=True,
+                        load_config=False,
+                        load_data=False,
+                        force=True
+                    )
+
+                    # Apply loaded model if architecture was loaded
+                    if checkpoint_data.get('model'):
+                        self = checkpoint_data['model']
+                        weights = checkpoint_data.get('weights')
+                        checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
+
+                        # Restore RNG state if available
+                        restore_rng_state(checkpoint_rng_state)
+                        logger.debug(f"Restored RNG state from checkpoint")
+
+                    if checkpoint_data.get('weights'):
+                        # Only weights available, load into existing model
+                        weights = checkpoint_data['weights']
+                        if 'model_state_dict' in weights:
+                            self.load_state_dict(weights['model_state_dict'], strict=True)
+                            self.current_step = weights.get('step', -1)
+                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
+
+                    # As model architecture as has been loaded, and it's an instance of the ModelInterface,
+                    # we can set its current step if available in weights
+                    if isinstance(self.model, self.__class__):
+                        self._registration(
+                            weak=weak
+                        )
+                        return
+
+            except Exception as e:
+                logger.debug(f"Could not auto-load model checkpoint: {e}")
+
+        else:
+            self._checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir, load_model=True, load_config=False, load_data=False)
+            try:
+                ledgers.register_checkpoint_manager(self._checkpoint_manager)
+                logger.info("Registered new checkpoint manager in ledger")
+            except Exception:
+                pass
 
     def _registration(self, weak: bool = False):
         register_model(self, weak=weak)
@@ -395,7 +389,7 @@ class ModelInterface(NetworkWithOps):
             wl.watch_or_edit(_optimizer, flag='optimizer', name=opt_name)
 
     def _maybe_auto_dump(self):
-        # Called from base class hook after seen_samples updates.
+        # Called from base class hook after step update.
         # Auto-dump: save model weights only (and architecture if changed).
         try:
             if not self.is_training() or self._checkpoint_manager == None or self._checkpoint_auto_every_steps <= 0:

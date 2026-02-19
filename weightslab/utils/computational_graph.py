@@ -1676,7 +1676,8 @@ if __name__ == '__main__':
         model,
         dummy_input=dummy_input,
         print_graph=False,
-        use_onnx=True
+        use_onnx=True,
+        compute_dependencies=True
     )
     dependencies3 = model.mapped_dependencies_with_ops
 

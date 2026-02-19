@@ -151,12 +151,12 @@ class TaggableDataset:
 
     def is_discarded(self, uid):
         """Check if sample is discarded"""
-        idx = int(uid.split('_')[1])
+        idx = str(uid.split('_')[1])
         return idx in self._discarded
 
     def discard(self, uid):
         """Discard a sample"""
-        idx = int(uid.split('_')[1])
+        idx = str(uid.split('_')[1])
         self._discarded.add(idx)
 
     def add_tag(self, uid, tag):

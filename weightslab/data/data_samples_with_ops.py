@@ -317,7 +317,7 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Map new uids if exist
         if len(uids) > 0:
-            self.unique_ids = uids.values()
+            self.unique_ids = list(uids.values())
             self.unique_id_to_index = {self.unique_ids[i]: i for i in range(len(self.unique_id_to_index))}
     
         # Register this split with the global ledger manager (shared across loaders) and load existing data
@@ -416,7 +416,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Override target with tag-based label if use_tags is enabled
         if self._use_tags:
             with self._df_lock:
-                sample_tags_set = self._get_tags_for_sample(int(id))
+                sample_tags_set = self._get_tags_for_sample(str(id))
 
             if self._is_binary_labels:
                 # Binary classification: 1 if target tag is present, 0 otherwise
@@ -729,7 +729,7 @@ class DataSampleTrackingWrapper(Dataset):
                 "core": core,
                 "ex": ex,
                 "dense": {
-                    k: {int(sid): v for sid, v in inner.items()}
+                    k: {str(sid): v for sid, v in inner.items()}
                     for k, inner in dense.items()
                 },
             },
@@ -753,26 +753,26 @@ class DataSampleTrackingWrapper(Dataset):
             # Load core stats into ledger
             for stat_name, uid_dict in core_stats.items():
                 for uid, value in uid_dict.items():
-                    uid_int = int(uid)
+                    uid_int = str(uid)
                     self._set_values(uid_int, {stat_name: value})
 
             # Load ex stats into ledger
             for stat_name, uid_dict in ex_stats.items():
                 self._ex_columns_cache.add(stat_name)
                 for uid, value in uid_dict.items():
-                    uid_int = int(uid)
+                    uid_int = str(uid)
                     self._set_values(uid_int, {stat_name: value})
 
             # Load dense stats
             dense = samples_stats_payload.get("dense", {})
             for key, inner in dense.items():
                 for sid, val in inner.items():
-                    self._set_dense(key, int(sid), np.asarray(val))
+                    self._set_dense(key, str(sid), np.asarray(val))
         else:
             # Legacy checkpoints stored only the core dict
             for stat_name, uid_dict in samples_stats_payload.items():
                 for uid, value in uid_dict.items():
-                    uid_int = int(uid)
+                    uid_int = str(uid)
                     self._set_values(uid_int, {stat_name: value})
 
         # Refresh denied count
@@ -797,14 +797,14 @@ class DataSampleTrackingWrapper(Dataset):
             if not denied_samples_ids:
                 # Clear all denials
                 for uid in self.unique_ids:
-                    self.set(int(uid), SampleStatsEx.DISCARDED.value, False)
+                    self.set(str(uid), SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 if accumulate:
                     denied_samples_ids = set(denied_samples_ids) | prev_denied
                 cnt = 0
                 for uid in self.unique_ids:
-                    uid_int = int(uid)
+                    uid_int = str(uid)
                     is_denied = uid_int in denied_samples_ids
                     self.set(uid_int, SampleStatsEx.DISCARDED.value, is_denied)
                     cnt += int(is_denied)
@@ -818,12 +818,12 @@ class DataSampleTrackingWrapper(Dataset):
             if allowlist_samples_ids is None:
                 # Allow all
                 for uid in self.unique_ids:
-                    uid_int = int(uid)
+                    uid_int = str(uid)
                     self.set(uid_int, SampleStatsEx.DISCARDED.value, False)
                 self.denied_sample_cnt = 0
             else:
                 for sample_id in allowlist_samples_ids:
-                    sample_id_int = int(sample_id)
+                    sample_id_int = str(sample_id)
                     self.set(sample_id_int, SampleStatsEx.DISCARDED.value, False)
                 # Now count total denied
                 denied_cnt = 0
@@ -913,7 +913,7 @@ class DataSampleTrackingWrapper(Dataset):
         try:
             max_id = -1
             uniq_labels: Set[int] = set()
-            n = min(len(self.wrapped_dataset), int(sample_limit))
+            n = min(len(self.wrapped_dataset), str(sample_limit))
             for i in range(n):
                 data = self.wrapped_dataset[i]
                 if not isinstance(data, tuple) or len(data) < 2:
@@ -1000,7 +1000,7 @@ class DataSampleTrackingWrapper(Dataset):
         cross_duplicates = set()
 
         with _REGISTRY_LOCK:
-            current_uids = set(int(uid) for uid in self.unique_ids)
+            current_uids = set(str(uid) for uid in self.unique_ids)
 
             # Check against all other registered loaders
             for origin, registered_uids in _GLOBAL_UID_REGISTRY.items():
@@ -1022,7 +1022,7 @@ class DataSampleTrackingWrapper(Dataset):
         global _GLOBAL_UID_REGISTRY
 
         with _REGISTRY_LOCK:
-            current_uids = set(int(uid) for uid in self.unique_ids)
+            current_uids = set(str(uid) for uid in self.unique_ids)
             _GLOBAL_UID_REGISTRY[origin] = current_uids
             logger.debug(
                 f"[DataSampleTrackingWrapper] Registered {len(current_uids)} UIDs "

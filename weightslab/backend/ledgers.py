@@ -38,6 +38,11 @@ class Proxy:
     def __init__(self, obj: Any = None):
         self._obj = obj
 
+    @staticmethod
+    def is_proxy(obj: Any) -> bool:
+        """Return True when obj is a Proxy instance."""
+        return isinstance(obj, Proxy)
+
     @property
     def __class__(self):
         """Report the class of the wrapped object to make isinstance checks work.

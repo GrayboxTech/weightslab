@@ -26,7 +26,7 @@ class SampleStats:
         TASK_TYPE = "task_type"
         LAST_SEEN = "last_seen"
         
-        DISCARDED = "deny_listed"
+        DISCARDED = "discarded"
         TAG = "tag"
 
         @classmethod

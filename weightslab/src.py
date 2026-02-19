@@ -112,7 +112,7 @@ def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Te
                 except Exception:
                     pass
             # Merged batch scalar with ids
-            batch_scalar = {ids[i].item() if ids is not None else i: batch_scalar[i].item() for i in range(len(batch_scalar))}
+            batch_scalar = {ids[i].item() if isinstance(ids, th.Tensor) else ids[i]: batch_scalar[i].item() for i in range(len(batch_scalar))}
         # 2. Otherwise fall back to extracting from 'out'
         elif out is not None:
             if isinstance(out, th.Tensor):
@@ -129,18 +129,14 @@ def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Te
                 except Exception:
                     pass
             # Merged batch scalar with ids
-            batch_scalar = {ids[i].item() if ids is not None else i: batch_scalar[i].item() for i in range(len(batch_scalar))}
+            batch_scalar = {ids[i].item() if isinstance(ids, th.Tensor) else ids[i]: batch_scalar[i].item() for i in range(len(batch_scalar))}
     except Exception:
         pass
 
     return scalar, batch_scalar
 
 
-<<<<<<< HEAD
 def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
-=======
-def log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
->>>>>>> 81b18fd4d734cedf557d46d8c5b64c515abbdec6
     """
         Log the given scalar signal to the registered logger in the ledger, if available and logging is enabled.
         
@@ -210,16 +206,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Log if requested
     step = _get_step(None)
-<<<<<<< HEAD
     _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
-=======
-    log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
->>>>>>> 81b18fd4d734cedf557d46d8c5b64c515abbdec6
 
     # Save statistics if requested and applicable
     if batch_scalar is not None and ids is not None:
         signals = {
-            reg_name: list(batch_scalar.values())
+            reg_name: list(batch_scalar.values()) if isinstance(batch_scalar, dict) else batch_scalar.detach().cpu().tolist()
         }
         save_signals(
             batch_ids=ids,
@@ -270,6 +262,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # real wrapper is registered. `get_model` will create a Proxy if
         # the name is not yet present.
         proxy = get_model()
+
+        # Architecture operations require dependencies to be available.
+        # Keep backward-compatible behavior by enabling dependency computation
+        # unless the caller explicitly disables it.
+        kwargs.setdefault('compute_dependencies', True)
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs)
@@ -471,7 +468,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 checkpoint_hp_loaded = False
                 try:
                     chkpt_manager = get_checkpoint_manager()
-                    if chkpt_manager is not None and not isinstance(chkpt_manager, ledgers.Proxy):
+                    if chkpt_manager != None and not isinstance(chkpt_manager, ledgers.Proxy):
                         # Try to get latest hash and load hyperparameters from checkpoint
                         latest_hash = None
                         if hasattr(chkpt_manager, 'current_exp_hash') and chkpt_manager.current_exp_hash:
@@ -641,17 +638,17 @@ def tag_samples(
     try:
         if mode == 'add':
             # Set tag column to True for specified samples
-            rows = [{"sample_id": int(sid), tag_col: True} 
+            rows = [{"sample_id": sid, tag_col: True} 
                     for sid in sample_ids]
         elif mode == 'remove':
             # Set tag column to False for specified samples
-            rows = [{"sample_id": int(sid), tag_col: False} 
+            rows = [{"sample_id": sid, tag_col: False} 
                     for sid in sample_ids]
         elif mode == 'set':
             # Override: first clear all existing tags, then set new one
             # This would require more complex logic - for now just add
             logger.warning("Mode 'set' not fully implemented yet, using 'add' instead")
-            rows = [{"sample_id": int(sid), tag_col: True} 
+            rows = [{"sample_id": sid, tag_col: True} 
                     for sid in sample_ids]
         else:
             logger.error(f"Invalid mode '{mode}'. Use 'add', 'remove', or 'set'")
@@ -698,7 +695,7 @@ def discard_samples(
         return False
     
     try:
-        rows = [{"sample_id": int(sid), SampleStatsEx.DISCARDED.value: bool(discarded)} 
+        rows = [{"sample_id": sid, SampleStatsEx.DISCARDED.value: bool(discarded)} 
                 for sid in sample_ids]
         
         df_update = pd.DataFrame(rows).set_index("sample_id")
@@ -838,14 +835,10 @@ def save_signals(
             scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, ids=batch_ids)
 
             # Log if requested
-<<<<<<< HEAD
             _log_signal(scalar, batch_scalar, reg_name, step=step)
-=======
-            log_signal(scalar, batch_scalar, reg_name, step=step)
->>>>>>> 81b18fd4d734cedf557d46d8c5b64c515abbdec6
 
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
+    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(str)
     if preds is not None:
         pred_np = preds.detach().cpu().numpy().astype(np.uint16) if isinstance(preds, th.Tensor) else np.asarray(preds).astype(np.uint16)
     else:

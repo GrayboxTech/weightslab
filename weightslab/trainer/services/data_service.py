@@ -316,7 +316,7 @@ class DataService:
         start_total = time.time()
         try:
             origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
-            sample_id = int(row.get(SampleStatsEx.SAMPLE_ID.value, 0))
+            sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
 
             # ===== Step 0: Initialize Variables======
             raw_shape, data_stats = [], []
@@ -333,7 +333,7 @@ class DataService:
             # Enccode task type based on label shape heuristics
             # Maybe we should not care and send data.
             label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
-            if label_ndim >= 3:  # if label ndim superior to 3, it should be segmentation, otherwise classification or other scalar-like task (interpreted as cls)
+            if label_ndim >= 2 and label.shape[-2] >= 28 and label.shape[-1] >= 28:  # if label ndim superior to 3, it should be segmentation, otherwise classification or other scalar-like task (interpreted as cls)
                 task_type = 'segmentation'
             else:
                 task_type = "classification"
@@ -367,7 +367,7 @@ class DataService:
                 # Check if it s a tag column here and handle it as a string stat with the tag name as value
                 if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
                     if value == 1:
-                        tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}_"):]  # Remove "tags_" prefix to get tag name
+                        tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
                         if value:  # Only include if the tag is True for this sample
                             data_stats.append(
                                 create_data_stat(f"{SampleStatsEx.TAG.value}:{tag_name}", "string", shape=[1], value_string="1", thumbnail=b"")
@@ -517,7 +517,7 @@ class DataService:
                             logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
 
             # ====== Step 9: Generate raw data bytes and thumbnail (handles 4D volumetric) ======
-            if request.include_raw_data:
+            if request.include_raw_data and dataset is not None:
                 from weightslab.data.data_utils import load_raw_image_array
                 
                 np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(
@@ -593,7 +593,7 @@ class DataService:
                     )
 
             # ====== Step 10: Create DataRecord ======
-            record = pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
+            record = pb2.DataRecord(sample_id=str(sample_id), data_stats=data_stats)
 
             return record
 
@@ -1099,6 +1099,12 @@ class DataService:
             data_records = list(data_records)
             logger.debug("Completed processing at %s in %.2f seconds\n", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time)
 
+            if data_records is None or None in data_records:
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message=f"Failed to retrieve samples: {tasks}",
+                    data_records=[]
+                )
             return pb2.DataSamplesResponse(
                 success=True,
                 message=f"Retrieved {len(data_records)} data records",
@@ -1130,7 +1136,6 @@ class DataService:
 
         # Get current tags from the in-memory dataframe or df_manager
         existing_tag_value = True  # Default to True for new tags
-        current_tags_set = set()
         try:
             if self._all_datasets_df is not None:
                 # Read current tag columns from in-memory dataframe
@@ -1162,7 +1167,7 @@ class DataService:
         
         # Create column updates for all target tags
         for tag in target_tags_set:
-            tag_updates[tag] = existing_tag_value
+            tag_updates[tag] = bool(existing_tag_value)
         
         return tag_updates
     
@@ -1458,6 +1463,7 @@ class DataService:
                     updates_by_origin = {}
                     is_tag_request = request.stat_name == SampleStatsEx.TAG.value or request.stat_name.startswith(SampleStatsEx.TAG.value)
                     for sid, origin in zip(request.samples_ids, request.sample_origins):
+                        sid_value = str(sid)
                         # =========
                         # TAG EDITS
                         # =========
@@ -1466,21 +1472,21 @@ class DataService:
                             tag_updates = self._calculate_tag_column_updates(
                                 sid, 
                                 origin,
-                                request.string_value, 
+                                request.string_value,  
                                 request.type
                             )
                             
                             # Add all tag column updates for this sample
                             if origin not in updates_by_origin:
                                 updates_by_origin[origin] = {}
-                            if sid not in updates_by_origin[origin]:
-                                updates_by_origin[origin][sid] = {
-                                    "sample_id": int(sid),
+                            if sid_value not in updates_by_origin[origin]:
+                                updates_by_origin[origin][sid_value] = {
+                                    "sample_id": sid_value,
                                     SampleStatsEx.ORIGIN.value: origin,
                                 }
                             
                             # Merge tag column updates into the sample's updates
-                            updates_by_origin[origin][sid].update(tag_updates)
+                            updates_by_origin[origin][sid_value].update(tag_updates)
                         
                         # =================
                         # DENY LISTED EDITS
@@ -1489,8 +1495,8 @@ class DataService:
                             # Deny_listed
                             if origin not in updates_by_origin:
                                 updates_by_origin[origin] = {}
-                            updates_by_origin[origin][sid] = {
-                                "sample_id": int(sid),
+                            updates_by_origin[origin][sid_value] = {
+                                "sample_id": sid_value,
                                 SampleStatsEx.ORIGIN.value: origin,
                                 request.stat_name: bool(request.bool_value),
                             }

@@ -230,7 +230,7 @@ class ExperimentHashGenerator:
             # Create deterministic representation
             # Sort UIDs and include discard status and tags
             data_info = []
-            for uid in sorted(uids):
+            for uid in sorted(uids, key=lambda value: str(value)):
                 is_discarded = discarded[uid]
                 uid_tags = sorted(tags.get(uid, []))
                 data_info.append(f"{uid}:d{int(is_discarded)}:t{','.join(uid_tags)}")

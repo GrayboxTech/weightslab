@@ -48,15 +48,11 @@ def execute_df_operation(df, operation_str):
         operation_str = operation_str.replace("'''", "\"\"\"").replace("@\"\"\"", "").replace("\"\"\"", "").replace("@\'\'\'", "").replace("\'\'\'", "")
 
         # Execute the operation
-        result = eval(operation_str, {"df": df, "pd": pd})
+        exec(operation_str, {"df": df, "pd": pd})
         
         # If result is None, the operation was inplace, return the modified df
-        if result is None:
-            success_message = f"Operation '{operation_str}' executed successfully (inplace)."
-            return df, success_message
-        else:
-            success_message = f"Operation '{operation_str}' executed successfully."
-            return result, success_message
+        success_message = f"Operation '{operation_str}' executed successfully."
+        return df, success_message
 
     except Exception as e:
         error_msg = f"Error executing DataFrame operation '{operation_str}': {e}"

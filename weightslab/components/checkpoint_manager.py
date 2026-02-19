@@ -49,6 +49,7 @@ from weightslab.backend.ledgers import (
     get_dataloaders,
 )
 from weightslab.backend import ledgers
+from weightslab.utils.logger import LoggerQueue
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.tools import capture_rng_state, restore_rng_state
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl
@@ -72,7 +73,7 @@ class CheckpointManager:
         _step_counter (int): Global step counter for model checkpoints
     """
 
-    def __init__(self, root_log_dir: str = 'root_experiment'):
+    def __init__(self, root_log_dir: str = 'root_experiment', load_model: bool = True, load_config: bool = True, load_data: bool = True):
         """Initialize the checkpoint manager.
 
         Args:
@@ -130,7 +131,7 @@ class CheckpointManager:
         self._load_all_logger_snapshots()
 
         # Automatically resume latest state when an existing root_log_dir is provided
-        self._bootstrap_latest_state()
+        self._bootstrap_latest_state(load_model=load_model, load_config=load_config, load_data=load_data)
 
         logger.info(f"CheckpointManager initialized at {self.root_log_dir}")
 
@@ -508,11 +509,9 @@ class CheckpointManager:
             loggers_payload = snapshot.get("loggers", {})
             for lname, payload in loggers_payload.items():
                 try:
-                    from weightslab.utils.logger import LoggerQueue
-
                     lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else None
                     # If no real logger (or only a proxy) exists, create a fresh LoggerQueue so we can enqueue history
-                    if lg is None or not hasattr(lg, "load_snapshot"):
+                    if lg is None or not hasattr(lg, "load_snapshot") and ledgers.get_logger() == None:  # Test if logger proxy is None. If yes, load, otherwise skip
                         lg = LoggerQueue(register=True)
                         ledgers.register_logger(lg)
                     lg.load_snapshot(payload)
@@ -1316,7 +1315,7 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Failed to load manager state: {e}")
 
-    def _bootstrap_latest_state(self):
+    def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = True, load_data: bool = True):
         """If a current hash is known (or manifest has one), load and apply it.
 
         This enables auto-resume when instantiating the manager on an existing
@@ -1326,7 +1325,7 @@ class CheckpointManager:
         if not target:
             return
         try:
-            self.load_state(target)
+            self.load_state(target, load_model=load_model, load_config=load_config, load_data=load_data)
         except Exception as e:
             logger.warning(f"Auto-resume failed for {target}: {e}")
 
@@ -1390,7 +1389,6 @@ class CheckpointManager:
         logger.info(f"Loading checkpoint {exp_hash[:16]}...")
         logger.info(f"  Target: HP={target_hp_hash} MODEL={target_model_hash} DATA={target_data_hash}")
         logger.info(f"  Current: HP={current_hp_hash} MODEL={current_model_hash} DATA={current_data_hash}")
-
 
         # Load model architecture if different, or load only RNG state for reproducibility if model hash is unchanged
         model_rng_loaded = False
@@ -1568,7 +1566,7 @@ class CheckpointManager:
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
 
-    def load_state(self, exp_hash: str, force: bool = False) -> bool:
+    def load_state(self, exp_hash: str, force: bool = False, load_model: bool = True, load_config: bool = True, load_data: bool = True) -> bool:
         """Load and apply a complete checkpoint state by experiment hash.
 
         This method loads all components and updates the system state in-place:
@@ -1591,19 +1589,17 @@ class CheckpointManager:
         # Load checkpoint data
         checkpoint_data = self.load_checkpoint(
             exp_hash=exp_hash,
-            load_model=True,
-            load_weights=True,
-            load_config=True,
-            load_data=True,
+            load_model=load_model,
+            load_weights=load_model,
+            load_config=load_config,
+            load_data=load_data,
             force=force
         )
-
         if not checkpoint_data['loaded_components']:
             logger.warning("No components were loaded")
             return False
-
         success = True
-
+        
         # Apply model (architecture + weights)
         if 'model' in checkpoint_data['loaded_components']:
             try:

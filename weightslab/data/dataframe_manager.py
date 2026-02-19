@@ -75,6 +75,55 @@ class LedgeredDataFrameManager:
                     array_path = store.get_path().parent / "arrays.h5"
                     self._array_store = H5ArrayStore(array_path)
 
+    def _normalize_sample_id(self, sample_id: Any) -> Any:
+        """Normalize incoming sample IDs while preserving numeric IDs when possible."""
+        try:
+            if isinstance(sample_id, np.generic):
+                sample_id = sample_id.item()
+        except Exception:
+            pass
+
+        if isinstance(sample_id, bytes):
+            try:
+                sample_id = sample_id.decode("utf-8")
+            except Exception:
+                pass
+
+        if isinstance(sample_id, str):
+            sid = sample_id.strip()
+            if sid.lstrip("+-").isdigit():
+                try:
+                    return int(sid)
+                except Exception:
+                    return sid
+            return sid
+
+        return sample_id
+
+    def _coerce_sample_id_for_index(self, sample_id: Any) -> Any:
+        """Coerce sample_id to match current dataframe index representation."""
+        sid = self._normalize_sample_id(sample_id)
+
+        if self._df.empty:
+            return sid
+
+        if sid in self._df.index:
+            return sid
+
+        sid_str = str(sid)
+        if sid_str in self._df.index:
+            return sid_str
+
+        if isinstance(sid, str) and sid.lstrip("+-").isdigit():
+            try:
+                sid_int = int(sid)
+                if sid_int in self._df.index:
+                    return sid_int
+            except Exception:
+                pass
+
+        return sid
+
     def set_array_store(self, array_store: H5ArrayStore):
         """Explicitly set the array store."""
         with self._lock:
@@ -163,6 +212,12 @@ class LedgeredDataFrameManager:
                 except Exception:
                     pass
 
+        # Normalize index values to avoid int/str mismatches for sample IDs
+        try:
+            df_norm.index = pd.Index([self._normalize_sample_id(v) for v in df_norm.index], name="sample_id")
+        except Exception:
+            pass
+
         with self._lock:
             # Align columns
             all_cols = df_norm.columns
@@ -173,6 +228,7 @@ class LedgeredDataFrameManager:
             # Right-preferred upsert: df_norm overrides existing, adds new rows
             # Only update columns present in df_norm, keep other columns/values from self._df
             existing_idx = df_norm.index.intersection(self._df.index)
+            missing_cols = df_norm.columns.difference(self._df.columns)
             if len(existing_idx) > 0:
                 self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
@@ -181,11 +237,17 @@ class LedgeredDataFrameManager:
             if len(missing_idx) > 0:
                 self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
 
+            # Set missing cols value for bool
+            for col in missing_cols:
+                if df_norm[col].dtype == bool:
+                    self._df[col] = self._df[col].fillna(False).astype(bool)
+
+            # Flag index to be flushed later (outside lock) to minimize lock time
             self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
 
     def mark_dirty(self, sample_id: int):
         with self._lock:
-            self._pending.add(int(sample_id))
+            self._pending.add(self._coerce_sample_id_for_index(sample_id))
 
     def drop_column(self, column: str):
         with self._lock:
@@ -335,7 +397,7 @@ class LedgeredDataFrameManager:
         records_to_add = {}
         normalized_preds_raw = self._normalize_preds_raw_uint16(preds_raw) if preds_raw is not None else None
         for i, sid in enumerate(sample_ids):
-            sample_id = int(sid) if not isinstance(sid, np.ndarray) else int(sid[0])
+            sample_id = sid if not isinstance(sid, (np.ndarray, list)) else sid[0]
 
             # Build record incrementally - keep numpy arrays as-is for speed
             rec: Dict[str, Any] = {
@@ -372,10 +434,10 @@ class LedgeredDataFrameManager:
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
         if not updates:
             return
-        idx = int(sample_id)
         with self._lock:
+            idx = self._coerce_sample_id_for_index(sample_id)
             if self._df.empty:
-                row_data = {"origin": origin, "sample_id": int(sample_id), **updates}
+                row_data = {"origin": origin, "sample_id": idx, **updates}
                 self._df = pd.DataFrame([row_data]).set_index("sample_id")
             else:
                 all_cols = self._df.columns.union(updates.keys())
@@ -418,8 +480,9 @@ class LedgeredDataFrameManager:
         with self._lock:
             if self._df.empty:
                 return None
+            idx = self._coerce_sample_id_for_index(sample_id)
             try:
-                row = self._df.loc[int(sample_id)]
+                row = self._df.loc[idx]
                 if isinstance(row, pd.DataFrame):
                     # Multiple rows with same sample_id; filter by origin
                     if "origin" in row.columns:
@@ -453,7 +516,7 @@ class LedgeredDataFrameManager:
 
     def set_dense(self, key: str, sample_id: int, value: np.ndarray):
         with self._lock:
-            self._dense_store.setdefault(key, {})[int(sample_id)] = value
+            self._dense_store.setdefault(key, {})[str(sample_id)] = value
 
     def get_dense_map(self, origin: str) -> Dict[str, Dict[int, np.ndarray]]:
         with self._lock:

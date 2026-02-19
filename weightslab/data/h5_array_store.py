@@ -405,13 +405,13 @@ class H5ArrayStore:
         if len(parts) != 2:
             raise ValueError(f"Invalid path reference format: {path_ref}")
 
-        sample_id = int(parts[0])
+        sample_id = str(parts[0])
         key_name = parts[1]
         return sample_id, key_name
 
     def save_array(
         self,
-        sample_id: int,
+        sample_id: str,
         key_name: str,
         array: np.ndarray,
         preserve_original: bool = False

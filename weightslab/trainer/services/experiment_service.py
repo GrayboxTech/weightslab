@@ -91,7 +91,7 @@ class ExperimentService:
                                 metric_value=data.get("metric_value", 0.0),
                                 experiment_hash=data.get("experiment_hash", "N.A."),
                                 timestamp=int(data.get("timestamp", time.time())),
-                                sample_id=int(sid)
+                                sample_id=str(sid)
                             )
                         )
 
@@ -128,7 +128,7 @@ class ExperimentService:
                             metric_value=s.get("metric_value", 0.0),
                             experiment_hash=s.get("experiment_hash", "N.A."),
                             timestamp=int(s.get("timestamp", time.time())),
-                            sample_id=0  # No sample_id in aggregated mode
+                            sample_id=""  # No sample_id in aggregated mode
                         )
                     )
         else:
@@ -142,7 +142,7 @@ class ExperimentService:
                         metric_value=s.get("metric_value", 0.0),
                         experiment_hash=s.get("experiment_hash", "N.A."),
                         timestamp=int(s.get("timestamp", time.time())),
-                        sample_id=0  # No sample_id in queue mode
+                        sample_id=""  # No sample_id in queue mode
                     )
                 )
 

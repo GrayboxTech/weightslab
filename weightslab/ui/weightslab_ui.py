@@ -2058,7 +2058,7 @@ def render_images(ui_state: UIState, stub, sample_ids, origin,
     try:
         if task_type == "classification":
             for sid in sample_ids:
-                sid = int(sid)
+                sid = str(sid)
                 is_discarded = sid in discarded_ids
                 img_style = base_img_style(sid, is_discarded)
                 url = f"/img/{origin}/{sid}?w={img_size}&h={img_size}&fmt=webp"
@@ -2090,7 +2090,7 @@ def render_images(ui_state: UIState, stub, sample_ids, origin,
             ))
 
             for sample in batch_response.samples:
-                sid = int(sample.sample_id)
+                sid = str(sample.sample_id)
                 is_discarded = sid in discarded_ids
                 last_loss = id_to_loss.get(sid, None)
 
@@ -3141,7 +3141,7 @@ def main(root_directory, ui_host: int = 8050, grpc_host: str = 'localhost:50051'
             return dash.no_update, {'display': 'none'}
 
         layer_id = int(act_id['layer_id'])
-        sample_id = int(sample_value) if sample_value is not None else 0
+        sample_id = str(sample_value) if sample_value is not None else 0
         origin = origin_value or "eval"
 
         resp_pre = stub.GetActivations(pb2.ActivationRequest(

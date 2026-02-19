@@ -250,7 +250,7 @@ class COCOBBoxSegmentationDataset(Dataset):
         ], dtype=torch.int64) if anns else torch.zeros((0,), dtype=torch.int64)
         image_id = torch.tensor([image_id], dtype=torch.int64)
         # Outputs is stackable tensors only
-        return image_t, transformed_gt, boxes, labels, image_id
+        return image_t, image_id, transformed_gt, boxes, labels
 
 
 # Set up logging

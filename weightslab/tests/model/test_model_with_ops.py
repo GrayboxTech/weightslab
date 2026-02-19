@@ -35,7 +35,8 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.dummy_network = ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
-            print_graph=False, skip_previous_auto_load=True
+            print_graph=False, skip_previous_auto_load=True,
+            compute_dependencies=True
         )
 
         self.dataset_train = ds.MNIST(
@@ -68,7 +69,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         return ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
-            print_graph=False, skip_previous_auto_load=True
+            print_graph=False, skip_previous_auto_load=True, compute_dependencies=True
         )
 
     def _train_one_epoch(self, cutoff: int | None = None):

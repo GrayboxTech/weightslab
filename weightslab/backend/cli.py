@@ -593,7 +593,7 @@ def _handle_command(cmd: str) -> Any:
 
                     try:
                         # Try different methods to add tags - with new tag system, use set() method
-                        sample_id = int(uid) if uid.isdigit() else uid
+                        sample_id = str(uid) if uid.isdigit() else uid
                         
                         if hasattr(dataset, 'set') and callable(dataset.set):
                             # New tag system: use set() to create tags_<tagname> column
@@ -766,7 +766,12 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
     cli_port = int(os.environ.get('CLI_PORT', cli_port))
 
     if _server_thread is not None and _server_thread.is_alive():
-        return {'ok': False, 'error': 'server_already_running'}
+        return {
+            'ok': True,
+            'host': _server_host or cli_host,
+            'port': int(_server_port or cli_port),
+            'already_running': True,
+        }
 
     # start server thread on a pre-bound socket to avoid races
     # Try binding to the requested port, and if it fails (port in use),
