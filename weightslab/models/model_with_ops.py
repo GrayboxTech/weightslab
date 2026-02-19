@@ -37,12 +37,15 @@ class NetworkWithOps(nn.Module):
         return self.linearized_layers
 
     def __eq__(self, other: "NetworkWithOps") -> bool:
-        return other is not None and self.seen_samples == other.seen_samples and \
+        return other is not None and \
+            self.seen_samples == other.seen_samples and \
+            self.seen_batched_samples == other.seen_batched_samples and \
             self.tracking_mode == other.tracking_mode and \
             self.layers == other.layers
 
     def __hash__(self):
         return hash(self.seen_samples) + \
+            hash(self.seen_batched_samples) + \
             hash(self.tracking_mode) + \
             hash(self._dep_manager)
 
@@ -81,9 +84,6 @@ class NetworkWithOps(nn.Module):
             layer.tracking_mode = mode
 
     def get_age(self):
-        return self.seen_samples
-
-    def get_batched_age(self):
         return self.seen_batched_samples
 
     def get_name(self):
@@ -103,10 +103,19 @@ class NetworkWithOps(nn.Module):
                 pair of modules and the value is the type of the dependency
                 between them.
         """
+        # First clean dependencies
+        remove_layers_index = []
+        for n, child_module in enumerate(self.layers):
+            if not hasattr(child_module, 'module_id'):
+                remove_layers_index.append(n)
+        for index in sorted(remove_layers_index, reverse=True):
+            self.layers.pop(index)
+
         for child_module in self.layers:
             self._dep_manager.register_module(
                 child_module.get_module_id(), child_module)
 
+        # Register dependencies
         for module1, module2, value in dependencies_list:
             id1, id2 = module1.get_module_id(), module2.get_module_id()
             if value == DepType.INCOMING:
@@ -480,15 +489,17 @@ class NetworkWithOps(nn.Module):
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
         state_dict = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
         state_dict[prefix + 'seen_samples'] = self.seen_samples
+        state_dict[prefix + 'seen_batched_samples'] = self.seen_batched_samples
         state_dict[prefix + 'current_step'] = self.current_step
         state_dict[prefix + 'tracking_mode'] = self.tracking_mode
         return state_dict
 
     def load_state_dict(
             self, state_dict, strict=True, assign=True, **kwargs):
-        self.seen_samples = state_dict.pop('seen_samples', 0)
-        self.current_step = state_dict.pop('current_step', 0)
-        self.tracking_mode = state_dict.pop('tracking_mode', 0)
+        self.seen_samples = state_dict.pop('seen_samples', self.seen_samples)
+        self.current_step = state_dict.pop('current_step', self.current_step)
+        self.seen_batched_samples = state_dict.pop('seen_batched_samples', self.seen_batched_samples)
+        self.tracking_mode = state_dict.pop('tracking_mode', self.tracking_mode)
 
         # Preprocess trackers
         # TODO (GP): better way to handle this? Maybe load the trackers

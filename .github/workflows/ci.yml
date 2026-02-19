@@ -118,7 +118,6 @@ jobs:
 
       - name: Install project dependencies
         run: |
-          export WEIGHTSLAB_TORCH_VARIANT="cpu"
           python -m pip install --upgrade pip
           python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
 
@@ -148,10 +147,25 @@ jobs:
 
       - name: Install project dependencies
         run: |
-          export WEIGHTSLAB_TORCH_VARIANT="cpu"
           python -m pip install --upgrade pip
           python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
 
-      - name: Run unit tests (unittest)
+      - name: Run unit tests - General
         run: |
-          python -m unittest discover -s ./weightslab/tests -v
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
+
+      - name: Run unit tests - Model
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests/model -v
+
+      - name: Run unit tests - Data
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests/data -v
+
+      - name: Run unit tests - Integrations
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests/integrations -v

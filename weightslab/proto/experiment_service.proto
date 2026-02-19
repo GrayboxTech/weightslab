@@ -29,6 +29,9 @@ service ExperimentService {
 message GetLatestLoggerDataRequest {
   bool request_full_history = 1;  // true = full history, false = only queue (new data)
   int32 max_points = 2;            // max points per signal (only used for full history)
+  bool break_by_slices = 3;        // true = return per-sample data filtered by tags
+  repeated string tags = 4;        // list of tags to filter samples (used when break_by_slices=true)
+  string graph_name = 5;           // specific signal/graph name to filter (used when break_by_slices=true)
 }
 
 message LoggerDataPoint {
@@ -37,6 +40,7 @@ message LoggerDataPoint {
   float metric_value = 3;
   string experiment_hash = 4;
   int64 timestamp = 5;
+  int32 sample_id = 6;             // sample_id (used for break_by_slices mode)
 }
 
 message GetLatestLoggerDataResponse {

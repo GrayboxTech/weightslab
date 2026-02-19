@@ -31,13 +31,14 @@ class ModelInterface(NetworkWithOps):
     def __init__(
             self,
             model: th.nn.Module,
-            dummy_input: th.Tensor = None,
+            dummy_input: th.Tensor | dict = None,
             device: str = 'cpu',
             print_graph: bool = False,
             print_graph_filename: str = None,
             name: str = None,
             register: bool = True,
             use_onnx: bool = False,
+            compute_dependencies: bool = True,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
             **_
@@ -66,11 +67,12 @@ class ModelInterface(NetworkWithOps):
                 registered in the global ledger. Defaults to True.
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
+            compute_dependencies (bool, optional): If True, computes the graph
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
                 of previous checkpoints during initialization. Defaults to False.
-
+            
         Returns:
             None: This method initializes the object and does not return any value.
         """
@@ -84,12 +86,23 @@ class ModelInterface(NetworkWithOps):
         self.tracking_mode = TrackingMode.DISABLED
         self.name = "Default Name" if name is None else name
         self.device = device
-        self.model = model.to(device)
+        self.model = model.to(device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
-        if dummy_input is not None:
-            self.dummy_input = dummy_input.to(device)
-        else:
-            self.dummy_input = th.randn(model.input_shape).to(device)
+
+        # Generate dummy input if not provided and sanity check
+        if compute_dependencies:
+            # First ensure that the model has module input_shape
+            if not hasattr(model, 'input_shape'):
+                if dummy_input is None:
+                    raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
+                else:
+                    self.model.input_shape = tuple(dummy_input.shape[1:])  # Exclude batch dimension
+                    
+            # Move dummy input to the correct device, or create a default one if not provided
+            if dummy_input is not None:
+                self.dummy_input = dummy_input.to(device)
+            else:
+                self.dummy_input = th.randn(model.input_shape).to(device)
 
         # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
         self._checkpoint_manager = None
@@ -194,7 +207,7 @@ class ModelInterface(NetworkWithOps):
                 except Exception as e:
                     logger.debug(f"Could not auto-load model checkpoint: {e}")
 
-        if not use_onnx:
+        if compute_dependencies and not use_onnx:
             self.print_graph = print_graph
             self.print_graph_filename = print_graph_filename
             self.traced_model = symbolic_trace(self.model)
@@ -205,34 +218,39 @@ class ModelInterface(NetworkWithOps):
         # Init attributes from super object (i.e., self.model)
         self.init_attributes(self.model)
 
-        if not use_onnx:
-            # Only propagate shapes if we need them for visualization
-            if self.print_graph:
-                self.shape_propagation()
-                # Clean up any leftover threads from shape propagation
-                # import gc
-                # gc.collect()
+        # Compute dependencies and generate graph visualization if enabled
+        if compute_dependencies: 
+            if not use_onnx:
+                # Only propagate shapes if we need them for visualization
+                if self.print_graph:
+                    self.shape_propagation()
+                    # Clean up any leftover threads from shape propagation
+                    # import gc
+                    # gc.collect()
 
-            # Generate the graph vizualisation
-            self.generate_graph_vizu()
+                # Generate the graph vizualisation
+                self.generate_graph_vizu()
 
-        # Generate the graph dependencies
-        self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
+            # Generate the graph dependencies
+            self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
 
-        # Clean
-        # Optionally register wrapper in global ledger
+        # Clean - Optionally register wrapper in global ledger
         if register:
             self._registration(
                 weak=weak
             )
+        
+        # Set the optimizer hook for model architecture changes if we
+        # are computing dependencies (i.e., we have the graph info to
+        # know when they happen)
+        if compute_dependencies:
+            if not use_onnx:
+                del self.traced_model
 
-        if not use_onnx:
-            del self.traced_model
-
-        # Hook optimizer update on architecture change
-        self.register_hook_fn_for_architecture_change(
-            lambda model: self._update_optimizer(model)
-        )
+            # Hook optimizer update on architecture change
+            self.register_hook_fn_for_architecture_change(
+                lambda model: self._update_optimizer(model)
+            )
 
         # Set Model Training Guard
         self.guard_training_context.model = self
@@ -382,7 +400,7 @@ class ModelInterface(NetworkWithOps):
         try:
             if not self.is_training() or self._checkpoint_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
-            batched_age = int(self.get_batched_age())
+            batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
                     # Update hash for current experiment state (marks changes as pending, doesn't dump)
@@ -419,9 +437,9 @@ class ModelInterface(NetworkWithOps):
             )
             return self
 
-    def train(self):
+    def train(self, mode: bool = True):
         try:
-            return super().train()
+            return super().train(mode=mode)
         except (RuntimeError, Exception):
             logger.warning(
                 f"[{self.__class__.__name__}]: Caught RuntimeError during train(): {Exception}. \
