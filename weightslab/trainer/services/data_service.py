@@ -1458,6 +1458,8 @@ class DataService:
              updated_df[SampleStatsEx.TAGS.value] = ""
         if "natural_sort_score" not in updated_df.columns:
              updated_df["natural_sort_score"] = np.nan
+        if "deny_listed" not in updated_df.columns:
+             updated_df["deny_listed"] = False
 
         if self._is_filtered and self._all_datasets_df is not None:
             # The user has applied a custom view (Filter, Sort, or Aggregation).
@@ -1618,17 +1620,6 @@ class DataService:
                 )
 
         try:
-            # Pause training if it's currently running
-            trainer = components.get("trainer")
-            hp = components.get("hyperparams")
-            if trainer:
-                logger.info("Pausing training before restore...")
-                trainer.pause()
-                if "is_training" in hp:
-                    hp['is_training'] = False
-                else:
-                    hp["is_training"] = False
-
             # 2) Check if we should bypass the agent (Quick Filters path)
             if not request.is_natural_language:
                 logger.info(
