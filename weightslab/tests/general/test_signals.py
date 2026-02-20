@@ -111,7 +111,7 @@ class TestSignals(unittest.TestCase):
             # 'kwargs' in definition corresponds to decorator kwargs.
             # '*a, **kw' are the runtime args.
             
-            res = wrappered_fwd(
+            wrappered_fwd(
                 original_forward, 
                 decorator_kwargs, 
                 "source_metric", 
