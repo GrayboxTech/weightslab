@@ -807,7 +807,7 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
             input_data = _get_image(raw_item)
             
             row = {
-                "sample_id": int(sample_id),
+                "sample_id": str(sample_id),
                 "origin": origin,
             }
 
