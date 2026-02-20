@@ -804,9 +804,8 @@ class DataSampleTrackingWrapper(Dataset):
                     denied_samples_ids = set(denied_samples_ids) | prev_denied
                 cnt = 0
                 for uid in self.unique_ids:
-                    uid_int = str(uid)
-                    is_denied = uid_int in denied_samples_ids
-                    self.set(uid_int, SampleStatsEx.DISCARDED.value, is_denied)
+                    is_denied = uid in denied_samples_ids
+                    self.set(uid, SampleStatsEx.DISCARDED.value, is_denied)
                     cnt += int(is_denied)
                 self.denied_sample_cnt = cnt
 
