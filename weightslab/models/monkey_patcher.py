@@ -57,7 +57,7 @@ def monkey_patch_modules(module: nn.Module):
             super_out_name=out_name
         )
     except Exception as e:
-        logger.error(f'Exception raised during custom init for"\
+        logger.warning(f'Exception raised during custom init for"\
                f"{module.__class__.__name__}: {e}')
         pass
 

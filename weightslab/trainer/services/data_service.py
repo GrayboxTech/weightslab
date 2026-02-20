@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
+from weightslab.proto.experiment_service_pb2 import SampleEditType
 
 from PIL import Image
 from tqdm import tqdm
@@ -24,9 +25,10 @@ from concurrent import futures
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
-from weightslab.trainer.services.service_utils import load_raw_image, load_label
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
+from weightslab.data.data_utils import load_label
+from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
 
 
 # Get global logger
@@ -112,10 +114,12 @@ class DataService:
         # init references to the context components
         self._ctx.ensure_components()
 
+        # Resolve root log directory and H5 path for data storage
         self._root_log_dir = self._resolve_root_log_dir()
         self._h5_path = self._resolve_h5_path()
         self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
 
+        # In-memory dataframe view of all datasets combined (streamed to UI)
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
@@ -574,7 +578,7 @@ class DataService:
         start_total = time.time()
         try:
             origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
-            sample_id = int(row.get(SampleStatsEx.SAMPLE_ID.value, 0))
+            sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
 
             # ===== Step 0: Initialize Variables======
             raw_shape, data_stats = [], []
@@ -586,46 +590,20 @@ class DataService:
             # ====== Step 2: Determine task type ======
             # ====== Step 2: Determine task type ======
             label = row.get(SampleStatsEx.TARGET.value)
-            
-            # Force reload label if dataset has viz_config (fixes issue where H5 has stringified dict)
-            force_reload = False
-            if dataset:
-                curr_ds = dataset
-                # Unwrap to find config
-                while True:
-                    if hasattr(curr_ds, "viz_config"):
-                        force_reload = True
-                        break
-                    if hasattr(curr_ds, "dataset"):
-                        curr_ds = curr_ds.dataset
-                    elif hasattr(curr_ds, "wrapped_dataset"):
-                        curr_ds = curr_ds.wrapped_dataset
-                    else:
-                        break
-            
-            if (label is None or (isinstance(label, list) and label == []) or force_reload) and dataset:
-                try:
-                    label = load_label(dataset, sample_id)
-                except Exception as e:
-                    logger.warning(f"Failed to load label for sample {sample_id}: {e}")
-                    label = None
+            if (label is None or (isinstance(label, list) and label == [])) and dataset:
+                label = load_label(dataset, sample_id)
 
             # Scalar / single element -> treat as classification
             label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
             label_size = label.size if hasattr(label, 'size') else (1 if label_ndim == 0 else None)
 
             # Enccode task type based on label shape heuristics
-            # TODO (GP): more robust task type inference
-            task_type = 'segmentation'  # _infer_task_type_from_label(label, default='Segmentation')
-            if label_ndim == 0 or label_size == 1:
+            # Maybe we should not care and send data.
+            label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
+            if label_ndim >= 2 and label.shape[-2] >= 28 and label.shape[-1] >= 28:  # if label ndim superior to 3, it should be segmentation, otherwise classification or other scalar-like task (interpreted as cls)
+                task_type = 'segmentation'
+            else:
                 task_type = "classification"
-            elif label_ndim >= 2:
-                # Cache shape to avoid multiple H5 accesses
-                shape = label.shape
-                if shape[-2] > 28 or shape[-1] > 28:
-                    task_type = 'segmentation'
-                else:
-                    task_type = "unknown"
 
             # ====== Step 5a: Process stats ======
             stats_to_retrieve = list(request.stats_to_retrieve)
@@ -636,7 +614,7 @@ class DataService:
                     SampleStatsEx.ORIGIN.value,
                     SampleStatsEx.TARGET.value,
                     SampleStatsEx.PREDICTION.value,
-                    # SampleStatsEx.PREDICTION_RAW.value,
+                    # SampleStatsEx.PREDICTION_RAW.value,  # Show prediction raw in metatadata
                     SampleStatsEx.TASK_TYPE.value,
                 }
                 stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
@@ -644,16 +622,29 @@ class DataService:
             # Optimized bulk processing of stats
             for stat_name in stats_to_retrieve:
                 value = row.get(stat_name)
+
                 # Skip prediction raw array
                 if (isinstance(value, np.ndarray) and value.ndim > 1) or (isinstance(value, (list, tuple, np.ndarray)) and len(value) == 0):
                     continue
-                if isinstance(value, float):
+                elif isinstance(value, float):
                     value = round(value, 7)
-                if isinstance(value, bool):
+                elif isinstance(value, bool):
                     value = int(value)
-                data_stats.append(
-                    create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
-                )
+                
+                # Check if it s a tag column here and handle it as a string stat with the tag name as value
+                if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
+                    if value == 1:
+                        tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
+                        if value:  # Only include if the tag is True for this sample
+                            data_stats.append(
+                                create_data_stat(f"{SampleStatsEx.TAG.value}:{tag_name}", "string", shape=[1], value_string="1", thumbnail=b"")
+                            )
+                    else:
+                        continue  # Skip false tags
+                else:
+                    data_stats.append(
+                        create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
+                    )
 
             # ====== Step 6: Add origin and task_type stats ======
             data_stats.append(
@@ -925,64 +916,88 @@ class DataService:
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
 
-            # ====== Step 9: Generate raw data bytes and thumbnail ======
-            if request.include_raw_data:
-                raw_img = load_raw_image(dataset, dataset.get_index_from_sample_id(sample_id))
-                original_size = raw_img.size
+            # ====== Step 9: Generate raw data bytes and thumbnail (handles 4D volumetric) ======
+            if request.include_raw_data and dataset is not None:
+                from weightslab.data.data_utils import load_raw_image_array
+                
+                np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(
+                    dataset, dataset.get_index_from_sample_id(sample_id)
+                )
+                
+                if middle_pil is not None:
+                    original_size = middle_pil.size
+                    target_width = original_size[0]
+                    target_height = original_size[1]
+                    aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
 
-                # Handle resize request
-                target_width = original_size[0]
-                target_height = original_size[1]
-                aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
-
-                if request.resize_width < 0 and request.resize_height < 0:
-                    percent = abs(request.resize_width) / 100.0
-                    target_width = int(original_size[0] * percent)
-                    target_height = int(original_size[1] * percent)
-
-                elif request.resize_width > 0 and request.resize_height > 0:
-                    # Bounding box resize preserving aspect ratio.
-                    # Fit the image inside (resize_width x resize_height).
-                    w_limit, h_limit = request.resize_width, request.resize_height
-                    if w_limit / h_limit > aspect_ratio:
-                        # Box is wider than image relative to height, height is the constraint
-                        target_height = h_limit
+                    if request.resize_width < 0 and request.resize_height < 0:
+                        percent = abs(request.resize_width) / 100.0
+                        target_width = int(original_size[0] * percent)
+                        target_height = int(original_size[1] * percent)
+                    elif request.resize_width > 0 and request.resize_height > 0:
+                        w_limit, h_limit = request.resize_width, request.resize_height
+                        if w_limit / h_limit > aspect_ratio:
+                            target_height = h_limit
+                            target_width = int(target_height * aspect_ratio)
+                        else:
+                            target_width = w_limit
+                            target_height = int(target_width / aspect_ratio)
+                    elif request.resize_width == 0 and request.resize_height == 0:
+                        target_height = 360
                         target_width = int(target_height * aspect_ratio)
-                    else:
-                        # Image is wider than box relative to height, width is the constraint
-                        target_width = w_limit
-                        target_height = int(target_width / aspect_ratio)
-
-                elif request.resize_width == 0 and request.resize_height == 0:
-                     # Default to 360p (height=360) maintaining aspect ratio if no resize requested
-                     target_height = 360
-                     target_width = int(target_height * aspect_ratio)
-
-                # Ensure dimensions are at least 1x1
+                    
+                    # Ensure dimensions are at least 1x1
                 target_width = max(1, target_width)
                 target_height = max(1, target_height)
 
-                # Resize image if needed
+                # Resize middle slice for thumbnail if requested (maintain aspect ratio)
                 if target_width != original_size[0] or target_height != original_size[1]:
-                    raw_img = raw_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                    middle_pil = middle_pil.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
-                # Generate raw data bytes
-                raw_buf = io.BytesIO()
-                raw_img.save(raw_buf, format='JPEG')
-                raw_data_bytes = raw_buf.getvalue()
-                raw_shape = [target_height, target_width, len(raw_img.getbands())]
+                # Determine if this is a full-resolution request (modal) or thumbnail (grid)
+                is_full_resolution = (request.resize_width < 0 and abs(request.resize_width) >= 100) or \
+                                    (request.resize_height < 0 and abs(request.resize_height) >= 100)
 
-                data_stats.append(
-                    create_data_stat(
-                        name='raw_data',
-                        stat_type='bytes',
-                        value=raw_data_bytes,
-                        shape=raw_shape,
+                if is_volumetric and np_img is not None and is_full_resolution:
+                    # Full resolution modal view: Send full 4D array as raw bytes (C-contiguous, float32)
+                    np_img_f32 = np.asarray(np_img, dtype=np.float32)
+                    if not np_img_f32.flags['C_CONTIGUOUS']:
+                        np_img_f32 = np.ascontiguousarray(np_img_f32)
+                    raw_data_bytes = np_img_f32.tobytes()
+                    # Shape: [Z, H, W, C] using ORIGINAL 4D dimensions, not thumbnail dimensions
+                    # original_shape is (Z, H, W, C) or (Z, H, W)
+                    if len(original_shape) == 4:
+                        if original_shape[1] > original_shape[-1]:
+                            raw_shape = list(original_shape)  # [Z, H, W, C]
+                        elif original_shape[1] < original_shape[-1]:
+                            raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]]  # [Z, W, C, H]
+                        else:
+                            # If original_shape is (Z, H, W), C is 1 for monochrome volumetric data
+                            raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]
+                        logger.info(f"[Volumetric] Sending full res: np_img.shape={np_img.shape}, original_shape={original_shape}, raw_shape={raw_shape}, bytes={len(raw_data_bytes)}")
+                    else:
+                        # Thumbnail for grid OR non-volumetric: Send JPEG of middle slice only
+                        raw_buf = io.BytesIO()
+                        middle_pil.save(raw_buf, format='JPEG')
+                        raw_data_bytes = raw_buf.getvalue()
+                        # Shape: [H, W, C] for 3D RGB or [H, W] for 2D grayscale
+                        num_channels = len(middle_pil.getbands())
+                        if num_channels == 1:
+                            raw_shape = [target_height, target_width, 1]
+                        else:
+                            raw_shape = [target_height, target_width, num_channels]
+
+                    data_stats.append(
+                        create_data_stat(
+                            name='raw_data',
+                            stat_type='bytes',
+                            value=raw_data_bytes,
+                            shape=raw_shape,
+                        )
                     )
-                )
 
             # ====== Step 10: Create DataRecord ======
-            record = pb2.DataRecord(sample_id=sample_id, data_stats=data_stats)
+            record = pb2.DataRecord(sample_id=str(sample_id), data_stats=data_stats)
 
             return record
 
@@ -992,20 +1007,20 @@ class DataService:
             return None
 
     def _get_unique_tags(self) -> List[str]:
-        """Collect all unique tags currently present in the tracked datasets."""
+        """Collect all unique tags currently present in the tracked datasets.
+        
+        Tags are stored as individual boolean columns with prefix "tags_".
+        This method extracts all tag names from the column names.
+        """
         tags = set()
         try:
-            # Extract tags from the dataframe if it exists and has a tags column
+            # Extract tags from individual tag columns (tags_<tagname>)
             if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                if SampleStatsEx.TAGS.value in self._all_datasets_df.columns:
-                    tag_values = self._all_datasets_df[SampleStatsEx.TAGS.value].dropna()
-                    for tag_val in tag_values:
-                        if tag_val:
-                            # Tags are stored as comma-separated strings
-                            for t in str(tag_val).split(';'):
-                                clean_t = t.strip()
-                                if clean_t:
-                                    tags.add(clean_t)
+                for col in self._all_datasets_df.columns:
+                    if col.startswith(f"{SampleStatsEx.TAG.value}:"):
+                        # Extract tag name by removing "tags_" prefix
+                        tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]  # len("tags_") == 5
+                        tags.add(tag_name)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
         return sorted(list(tags))
@@ -1026,8 +1041,8 @@ class DataService:
         """
         total_count = len(df)
         discarded_count = (
-            len(df[df.get("deny_listed", False) == True])  # noqa: E712
-            if df is not None and "deny_listed" in df.columns
+            len(df[df.get(SampleStatsEx.DISCARDED.value, False) == True])  # noqa: E712
+            if df is not None and SampleStatsEx.DISCARDED.value in df.columns
             else 0
         )
         in_loop_count = total_count - discarded_count
@@ -1167,7 +1182,7 @@ class DataService:
                     })
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
         return operations
-
+        
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -1442,7 +1457,15 @@ class DataService:
 
         return "No operation applied"
 
-    def _slowUpdateInternals(self, force=False):
+    def _slowUpdateInternals(self, force: bool = False):
+        """
+        This method is responsible for updating the internal dataframe view with the latest data from the manager.
+        It is called before slicing data for GetDataSamples to ensure we serve the most recent data, while also respecting the user's current view (filters/sorts) and preventing disruptive updates during active interactions.
+
+        Arguments:
+        - force: If True, forces the update regardless of timing. Use with caution as it may disrupt the user experience if called too frequently. Normally, this method should be called without force, allowing it to throttle updates to at most once every 10 seconds during active use.
+        """
+
         current_time = time.time()
         if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
@@ -1527,7 +1550,7 @@ class DataService:
                      # Reindex using this full order.
                      updated_df = updated_df.reindex(full_order)
 
-        self._all_datasets_df = updated_df
+        self._all_datasets_df = updated_df  # Update view with new data (filtered or unfiltered)
         self._last_internals_update_time = current_time
 
     def _process_get_data_samples(self, request, context):
@@ -1555,7 +1578,7 @@ class DataService:
                 )
 
             with self._lock:
-                self._slowUpdateInternals()
+                self._slowUpdateInternals()  # Update global dataframe with latest data before slicing
                 df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()  # Reset index for proper row access with sample_id column
 
             if df_slice.empty:
@@ -1578,6 +1601,12 @@ class DataService:
             data_records = [r for r in data_records if r is not None]
             logger.debug("Completed processing at %s in %.2f seconds\n", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time)
 
+            if data_records is None or None in data_records:
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message=f"Failed to retrieve samples: {tasks}",
+                    data_records=[]
+                )
             return pb2.DataSamplesResponse(
                 success=True,
                 message=f"Retrieved {len(data_records)} data records",
@@ -1591,6 +1620,78 @@ class DataService:
                 message=f"Failed to retrieve samples: {str(e)}\n{traceback.format_exc()}",
                 data_records=[]
             )
+
+    def _calculate_tag_column_updates(self, sample_id: int, origin: str, new_tag_name: str, edit_type) -> dict:
+        """
+        Calculate individual tag column updates based on the edit type.
+        
+        Returns a dictionary of column updates like:
+        {"tags_tag1": 1, "tags_tag2": 1, ...}
+        
+        For EDIT_ACCUMULATE: adds the new tag
+        For EDIT_REMOVE: removes the specified tag
+        For EDIT_OVERRIDE: replaces all tags with the new value
+        """
+        tag_updates = {}
+        uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
+        new_tag_name = f'{SampleStatsEx.TAG.value}:{new_tag_name.strip()}'
+
+        # Get current tags from the in-memory dataframe or df_manager
+        existing_tag_value = True  # Default to True for new tags
+        try:
+            if self._all_datasets_df is not None:
+                # Read current tag columns from in-memory dataframe
+                if uses_multiindex:
+                    row = self._all_datasets_df.loc[(origin, sample_id)]
+                else:
+                    mask = (self._all_datasets_df.index == sample_id) & \
+                           (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
+                    if mask.any():
+                        row = self._all_datasets_df.loc[mask].iloc[0]
+                    else:
+                        row = None
+                
+                if row is not None:
+                    for col in row.index:
+                        if col == new_tag_name and row[col]:  # If existing, revert the value 
+                            existing_tag_value = bool(1 - row[col])
+
+        except (KeyError, AttributeError) as e:
+            logger.debug(f"Could not read current tags: {e}")
+        
+        # Calculate target tags based on edit type
+        if edit_type == SampleEditType.EDIT_REMOVE:
+            existing_tag_value = False  # For removal, we set the tag to False
+            target_tags_set = self._parse_tags(new_tag_name)
+        else:
+            # Override: replace all tags with the new value
+            target_tags_set = self._parse_tags(new_tag_name)
+        
+        # Create column updates for all target tags
+        for tag in target_tags_set:
+            tag_updates[tag] = bool(existing_tag_value)
+        
+        return tag_updates
+    
+    def _parse_tags(self, tag_value: str) -> set:
+        """
+        Parse a tag string into individual tag names.
+        Handles comma, semicolon, or mixed separators.
+        
+        Example:
+            "tag1,tag2;tag3" → {'tag1', 'tag2', 'tag3'}
+        """
+        if not tag_value or not isinstance(tag_value, str):
+            return set()
+        
+        tags = set()
+        for tag in tag_value.split(';'):
+            for t in tag.split(','):
+                clean_tag = t.strip()
+                if clean_tag:
+                    tags.add(clean_tag)
+        
+        return tags
 
     # RPC Implementations
     # ===================
@@ -1607,6 +1708,7 @@ class DataService:
           - number_of_samples_in_the_loop: rows not deny_listed
           - number_of_discarded_samples: rows with deny_listed == True
         """
+
         self._ctx.ensure_components()
         components = self._ctx.components
 
@@ -1655,99 +1757,135 @@ class DataService:
                     message=final_message,
                     intent_type=pb2.INTENT_FILTER
                 )
+            # Pandas instruction from the user, bypassing LLM agent - execute directly on the dataframe
+            elif request.is_natural_language:
+                if request.query.lower().replace(" ", "").replace("'''", "\"\"\"").replace("\'\'\'", "\"\"\"").startswith("@\"\"\""):
+                    operations = request.query
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
+                    with self._lock:
+                        df, message = execute_df_operation(self._all_datasets_df, request.query)  # in-place operation, or replace previous dataframe
+                        logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
+                        if operations:
+                            self._is_filtered = True
+                        self._all_datasets_df = df
+                    return self._build_success_response(
+                        df=df,
+                        message=message,
+                        intent_type=pb2.INTENT_FILTER
+                    )
+                elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@reset") or request.query.lower().replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@clear"):
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset operation: {request.query[:100]}...")
+                    # Force view reset
+                    with self._lock:
+                        self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data for plotting
+                        logger.info(f"[ApplyDataQuery] Force view reset.")
+                        return pb2.DataQueryResponse(
+                            success=True,
+                            message="View has been reset successfully.",
+                        )
+                elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@overview"):
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct overview operation: {request.query[:100]}...")
+                    # Force view reset
+                    with self._lock:
+                        message = generate_overview(self._all_datasets_df)
+                        logger.info(f"[ApplyDataQuery] Generated overview.")
+                        return pb2.DataQueryResponse(
+                            success=True,
+                            message=f"Overview of the dataframe:\n{message}",
+                        )
+                else:
+                    # 3) Natural language path - go through agent
+                    logger.debug(
+                        "[ApplyDataQuery] Using AGENT for natural language query: %r",
+                        request.query,
+                    )
 
-            # 3) Natural language path - go through agent
-            logger.debug(
-                "[ApplyDataQuery] Using AGENT for natural language query: %r",
-                request.query,
-            )
+                    if self._agent is None:
+                        return pb2.DataQueryResponse(
+                            success=False,
+                            message="Natural language queries require agent (not available)",
+                        )
 
-            if self._agent is None:
-                return pb2.DataQueryResponse(
-                    success=False,
-                    message="Natural language queries require agent (not available)",
-                )
+                    # Agent translates query text -> operations spec (List[dict])
+                    # Executed outside the lock to keep grid responsive during LLM waiting time
+                    abort_event = threading.Event()
+                    if context:
+                        context.add_callback(lambda: abort_event.set())
 
-            # Agent translates query text -> operations spec (List[dict])
-            # Executed outside the lock to keep grid responsive during LLM waiting time
-            abort_event = threading.Event()
-            if context:
-                context.add_callback(lambda: abort_event.set())
+                    def status_cb(msg: str):
+                        logger.debug(f"[ApplyDataQuery] Status: {msg}")
 
-            def status_cb(msg: str):
-                logger.debug(f"[ApplyDataQuery] Status: {msg}")
+                    operations = self._agent.query(request.query, abort_event=abort_event, status_callback=status_cb)
+                    if isinstance(operations, dict): operations = [operations] # Backwards compat
+                    if not operations: operations = []
 
-            operations = self._agent.query(request.query, abort_event=abort_event, status_callback=status_cb)
-            if isinstance(operations, dict): operations = [operations] # Backwards compat
-            if not operations: operations = []
+                    # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
+                    with self._lock:
+                        # Start with the current authoritative DF
+                        df = self._all_datasets_df
+                        messages = []
+                        # Default to FILTER, switch to ANALYSIS if we detect analysis/action output
+                        intent_type = pb2.INTENT_FILTER
+                        analysis_result = ""
 
-            # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
-            with self._lock:
-                # Start with the current authoritative DF
-                df = self._all_datasets_df
-                messages = []
-                # Default to FILTER, switch to ANALYSIS if we detect analysis/action output
-                intent_type = pb2.INTENT_FILTER
-                analysis_result = ""
+                        for op in operations:
+                            func = op.get("function")
+                            params = op.get("params", {}) or {}
 
-                for i, op in enumerate(operations):
-                    func = op.get("function")
-                    params = op.get("params", {}) or {}
+                            # 2a) Agent-driven RESET has highest priority
+                            if params.get("__agent_reset__"):
+                                logger.debug("[ApplyDataQuery] Agent requested reset")
+                                # Rebuild from loaders; this is the only place we replace the df object
+                                self._all_datasets_df = self._pull_into_all_data_view_df()
+                                df = self._all_datasets_df  # Reset df to full dataset
+                                self._is_filtered = False   # Unfreeze updates
+                                messages.append("Reset view")
+                                continue
 
-                    # 2a) Agent-driven RESET has highest priority
-                    if params.get("__agent_reset__"):
-                        logger.debug("[ApplyDataQuery] Agent requested reset")
-                        # Rebuild from loaders; this is the only place we replace the df object
-                        self._all_datasets_df = self._pull_into_all_data_view_df()
-                        df = self._all_datasets_df  # Reset df to full dataset
-                        self._is_filtered = False   # Unfreeze updates
-                        messages.append("Reset view")
-                        continue
+                            # 2b) All other agent operations mutate df in-place
+                            # df is now carried forward across iterations
+                            msg = self._apply_agent_operation(df, func, params)
+                            messages.append(msg)
 
-                    # 2b) All other agent operations mutate df in-place
-                    # df is now carried forward across iterations
-                    msg = self._apply_agent_operation(df, func, params)
-                    messages.append(msg)
+                            # --- UPDATED INTENT CLASSIFICATION ---
+                            # Check for Clarification
+                            if "Clarification needed" in msg or "I need more information" in msg:
+                                intent_type = pb2.INTENT_ANALYSIS  # Usually presented as a message/analysis
+                                analysis_result = msg
 
-                    # --- UPDATED INTENT CLASSIFICATION ---
-                    # Check for Clarification
-                    if "Clarification needed" in msg or "I need more information" in msg:
-                        intent_type = pb2.INTENT_ANALYSIS  # Usually presented as a message/analysis
-                        analysis_result = msg
+                            # Check for Action Triggers (e.g. "Action: Dataset saved...")
+                            elif msg.startswith("Action:"):
+                                intent_type = pb2.INTENT_ANALYSIS
+                                analysis_result = msg
 
-                    # Check for Action Triggers (e.g. "Action: Dataset saved...")
-                    elif msg.startswith("Action:"):
-                        intent_type = pb2.INTENT_ANALYSIS
-                        analysis_result = msg
+                            # Check for Analysis Results
+                            elif msg.startswith("Analysis Result:"):
+                                intent_type = pb2.INTENT_ANALYSIS
+                                analysis_result = msg.replace("Analysis Result:", "").strip()
 
-                    # Check for Analysis Results
-                    elif msg.startswith("Analysis Result:"):
-                        intent_type = pb2.INTENT_ANALYSIS
-                        analysis_result = msg.replace("Analysis Result:", "").strip()
+                            # Check for Errors
+                            elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
+                                intent_type = pb2.INTENT_ANALYSIS
+                                analysis_result = msg
 
-                    # Check for Errors
-                    elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
-                        intent_type = pb2.INTENT_ANALYSIS
-                        analysis_result = msg
+                        final_message = " | ".join(messages) if messages else "No operation performed"
 
-                final_message = " | ".join(messages) if messages else "No operation performed"
+                        # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
+                        # Only update if it was a manipulation query, not analysis
+                        if intent_type == pb2.INTENT_FILTER:
+                            self._all_datasets_df = df
+                            # If we modified the DF, we should freeze it (unless it was a Reset which handled above)
+                            # We check if *any* operation was effectively applied.
+                            # For simplicity, if intent is FILTER, we assume manipulation happened.
+                            self._is_filtered = True
 
-                # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
-                # Only update if it was a manipulation query, not analysis
-                if intent_type == pb2.INTENT_FILTER:
-                    self._all_datasets_df = df
-                    # If we modified the DF, we should freeze it (unless it was a Reset which handled above)
-                    # We check if *any* operation was effectively applied.
-                    # For simplicity, if intent is FILTER, we assume manipulation happened.
-                    self._is_filtered = True
-
-                # 5) Return updated counts after mutation
-                return self._build_success_response(
-                    df=df,
-                    message=final_message,
-                    intent_type=intent_type,
-                    analysis_result=analysis_result
-                )
+                        # 5) Return updated counts after mutation
+                        return self._build_success_response(
+                            df=df,
+                            message=final_message,
+                            intent_type=intent_type,
+                            analysis_result=analysis_result
+                        )
 
         except Exception as e:
             logger.error(f"ApplyDataQuery: Failed to apply query: {e}", exc_info=True)
@@ -1763,7 +1901,7 @@ class DataService:
         """
 
         try:
-            # Process the request directly without deduplication logic
+            # Process the request directly without deduplication logicj
             return self._process_get_data_samples(request, context)
 
         except Exception as e:
@@ -1777,6 +1915,10 @@ class DataService:
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and deny_listed).
+        
+        Tags are stored as individual boolean columns (tags_<tagname>) instead of
+        a single comma-separated string. This allows for efficient dataframe indexing, grouping,
+        and sorting by tags.
         """
 
         if self._all_datasets_df is None:
@@ -1796,128 +1938,97 @@ class DataService:
             else:
                 hp["is_training"] = False
 
-        if request.stat_name not in [SampleStatsEx.TAGS.value, SampleStatsEx.DENY_LISTED.value]:
+        if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
                 message="Only 'tags' and 'deny_listed' stat editing is supported for now.",
             )
 
-        if request.stat_name == SampleStatsEx.TAGS.value:
-            request.string_value = request.string_value or ""
-
         # No dataset lookups needed; all edits apply directly to the global dataframe.
 
-        # ---------------------------------------------------------------------
-        # 1) Mirror edits into the in-memory DataFrame
-        # ---------------------------------------------------------------------
+        # =====================================================================
+        # Process tag edits using the new column-based tag system
+        # =====================================================================
         with self._lock:
-            if self._all_datasets_df is not None:
-                uses_multiindex = isinstance(self._all_datasets_df.index, pd.MultiIndex)
-                for sid, origin in zip(request.samples_ids, request.sample_origins):
-                    if request.stat_name == SampleStatsEx.TAGS.value:
-                        new_val = request.string_value
-                        if request.type == pb2.SampleEditType.EDIT_OVERRIDE:
-                            # EDIT_OVERRIDE: directly use the new value
-                            target_val = new_val or ""
-                        elif (request.type == pb2.SampleEditType.EDIT_ACCUMULATE or request.type == pb2.SampleEditType.EDIT_REMOVE):
-                            try:
-                                if uses_multiindex:
-                                    current_val = self._all_datasets_df.loc[(origin, sid), SampleStatsEx.TAGS.value]
-                                else:
-                                    current_val = self._all_datasets_df.loc[sid, SampleStatsEx.TAGS.value]
-                            except KeyError:
-                                current_val = ""
-
-                            if pd.isna(current_val): current_val = ""
-                            current_tags = [t.strip() for t in str(current_val).split(';') if t.strip()]
-
-                            if request.type == pb2.SampleEditType.EDIT_ACCUMULATE:
-                                if new_val not in current_tags:
-                                    current_tags.append(new_val)
-                            else: # EDIT_REMOVE
-                                if new_val in current_tags:
-                                    current_tags.remove(new_val)
-
-                            target_val = ";".join(current_tags)
-                        else:
-                            target_val = new_val or ""
-                    else:
-                        target_val = request.bool_value
-
-                    try:
-                        if uses_multiindex:
-                            self._all_datasets_df.loc[(origin, sid), request.stat_name] = target_val
-                        else:
-                            # Fallback: origin / sample_id as columns
-                            mask = (
-                                (self._all_datasets_df.index == sid)
-                                & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
-                            )
-                            self._all_datasets_df.loc[mask, request.stat_name] = target_val
-
-
-                    except Exception as e:
-                        logger.debug(
-                            f"[EditDataSample] Failed to update dataframe for sample {sid}: {e}"
-                        )
-
-            # ------------------------------------------------------------------
-            # 3) Persist edits into the global dataframe manager (in-memory ledger)
-            # MOVED INSIDE LOCK to prevent race conditions with _slowUpdateInternals
-            # ------------------------------------------------------------------
             try:
                 if request.samples_ids and self._df_manager is not None:
                     updates_by_origin = {}
+                    is_tag_request = request.stat_name == SampleStatsEx.TAG.value or request.stat_name.startswith(SampleStatsEx.TAG.value)
                     for sid, origin in zip(request.samples_ids, request.sample_origins):
-                        # Tags
-                        if request.stat_name == SampleStatsEx.TAGS.value:
-                            # Logic to calculate new tags based on edit type
-                            # use self._all_datasets_df (which was just updated above) as source of truth
-                            # instead of pulling from _df_manager again, to ensure consistency inside the lock.
-                            uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
-                            current_val = ""
-                            try:
-                                if uses_multiindex:
-                                    current_val = self._all_datasets_df.loc[(origin, sid), SampleStatsEx.TAGS.value]
-                                else:
-                                    # Fallback
-                                    mask = (self._all_datasets_df.index == sid) & (self._all_datasets_df[SampleStatsEx.ORIGIN.value] == origin)
-                                    if mask.any():
-                                        current_val = self._all_datasets_df.loc[mask, SampleStatsEx.TAGS.value].iloc[0]
-                            except Exception:
-                                pass
-
-                            target_val = current_val # Already updated above in step 1
-
-                            updates_by_origin.setdefault(origin, []).append({
-                                "sample_id": int(sid),
-                                SampleStatsEx.ORIGIN.value: origin,
-                                request.stat_name: target_val,
-                            })
+                        sid_value = str(sid)
+                        # =========
+                        # TAG EDITS
+                        # =========
+                        if is_tag_request:
+                            # Calculate tag column updates based on edit type
+                            tag_updates = self._calculate_tag_column_updates(
+                                sid, 
+                                origin,
+                                request.string_value,  
+                                request.type
+                            )
+                            
+                            # Add all tag column updates for this sample
+                            if origin not in updates_by_origin:
+                                updates_by_origin[origin] = {}
+                            if sid_value not in updates_by_origin[origin]:
+                                updates_by_origin[origin][sid_value] = {
+                                    "sample_id": sid_value,
+                                    SampleStatsEx.ORIGIN.value: origin,
+                                }
+                            
+                            # Merge tag column updates into the sample's updates
+                            updates_by_origin[origin][sid_value].update(tag_updates)
+                        
+                        # =================
+                        # DENY LISTED EDITS
+                        # =================
                         else:
                             # Deny_listed
-                            updates_by_origin.setdefault(origin, []).append({
-                                "sample_id": int(sid),
+                            if origin not in updates_by_origin:
+                                updates_by_origin[origin] = {}
+                            updates_by_origin[origin][sid_value] = {
+                                "sample_id": sid_value,
                                 SampleStatsEx.ORIGIN.value: origin,
-                                request.stat_name: request.bool_value,
-                            })
-
-                    for origin, rows in updates_by_origin.items():
+                                request.stat_name: bool(request.bool_value),
+                            }
+                    
+                    # Upsert all tag column updates into the global dataframe
+                    for origin, samples in updates_by_origin.items():
+                        rows = list(samples.values())
                         df_update = pd.DataFrame(rows).set_index("sample_id")
-                        # upsert_df updates the ledger's dataframe immediately
                         self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
-
+                    
+                    # Auto-cleanup: if EDIT_REMOVE was used on a tag, delete the entire column immediately
+                    if is_tag_request and request.type == SampleEditType.EDIT_REMOVE and request.float_value == -1:
+                        column_name = request.stat_name.strip()
+                        if column_name:
+                            logger.info(f"[EditDataSample] Deleting tag column: {column_name}")
+                            # Delete the column from storage
+                            self._df_manager.drop_column(column_name)
+                            
+                            # Remove from in-memory dataframe if it exists
+                            if self._all_datasets_df is not None:
+                                if column_name in self._all_datasets_df.columns:
+                                    self._all_datasets_df = self._all_datasets_df.drop(columns=[column_name])
+                    
+                    # Reload dataframe to reflect all changes
+                    self._all_datasets_df = self._pull_into_all_data_view_df()
+            
+                # Prevent _slowUpdateInternals from overwriting our edits with stale data
+                self._last_internals_update_time = time.time()
+                
+                return pb2.DataEditsResponse(
+                    success=True,
+                    message=f"Edited {len(request.samples_ids)} samples",
+                )
+            
             except Exception as e:
-                logger.debug(f"[EditDataSample] Failed to upsert edits into global dataframe: {e}")
-
-            # Prevent _slowUpdateInternals from overwriting our in-memory edits with stale data
-            # from the disk/db for a few seconds.
-            self._last_internals_update_time = time.time()
-
-        return pb2.DataEditsResponse(
-            success=True,
-            message=f"Edited {len(request.samples_ids)} samples",
-        )
+                logger.error(f"[EditDataSample] Failed to edit samples: {e}", exc_info=True)
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message=f"Failed to edit samples: {str(e)}",
+                )
 
     def GetDataSplits(self, request, context):
         """

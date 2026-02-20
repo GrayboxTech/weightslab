@@ -126,6 +126,7 @@ class BDD100kSegDataset(Dataset):
         num_classes=6,
         ignore_index=255,
         image_size=256,
+        max_samples=None,
     ):
         super().__init__()
         self.root = root
@@ -133,16 +134,19 @@ class BDD100kSegDataset(Dataset):
         self.num_classes = num_classes
         self.ignore_index = ignore_index
         self.task_type = "segmentation"
+        self.max_samples = max_samples
 
+        # Directories for images and labels
         img_dir = os.path.join(root, "images", split)
         lbl_dir = os.path.join(root, "labels", split)
 
+        # Find files
         image_files = [
             f
             for f in os.listdir(img_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
-        image_files = sorted(set(image_files))
+        image_files = sorted(set(image_files))[: max_samples] if max_samples is not None else sorted(set(image_files))
 
         self.images = []
         self.masks = []
@@ -189,20 +193,21 @@ class BDD100kSegDataset(Dataset):
         mask_path = self.masks[idx]
 
         img = Image.open(img_path).convert("RGB")
+        uid = '.'.join(os.path.basename(img_path).split(".")[:-1])
         mask = Image.open(mask_path)
 
         img_t = self.image_transform(img)
-
         mask_r = self.mask_resize(mask)
         mask_np = np.array(mask_r, dtype=np.int64)
         mask_t = torch.from_numpy(mask_np)  # [H, W] int64
-
-        return img_t, mask_t
+        
+        return img_t, uid, mask_t
 
 
 # =============================================================================
 # Train / Test loops (segmentation, using watcher-wrapped loaders)
 # =============================================================================
+
 def train(loader, model, optimizer, criterion_mlt, device):
     """
     Single training step using the tracked dataloader + watched loss.
@@ -231,7 +236,6 @@ def train(loader, model, optimizer, criterion_mlt, device):
         optimizer.step()
 
     return float(loss.detach().cpu().item())
-
 
 def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the val loader."""
@@ -334,6 +338,7 @@ if __name__ == "__main__":
         num_classes=num_classes,
         ignore_index=ignore_index,
         image_size=image_size,
+        max_samples=100
     )
     _val_dataset = BDD100kSegDataset(
         root=data_root,
@@ -341,6 +346,7 @@ if __name__ == "__main__":
         num_classes=num_classes,
         ignore_index=ignore_index,
         image_size=image_size,
+        max_samples=100
     )
 
     train_loader = wl.watch_or_edit(
@@ -354,7 +360,8 @@ if __name__ == "__main__":
         array_autoload_arrays=False,
         array_return_proxies=True,
         array_use_cache=True,
-        preload_labels = False,
+        preload_labels=True,
+        preload_uids=True,  # use file names as unique IDs for tracking
     )
     test_loader = wl.watch_or_edit(
         _val_dataset,
@@ -367,7 +374,8 @@ if __name__ == "__main__":
         array_autoload_arrays=False,
         array_return_proxies=True,
         array_use_cache=True,
-        preload_labels = False,
+        preload_labels=True,
+        preload_uids=True,  # use file names as unique IDs for tracking
     )
 
     # --- 6) Model, optimizer, losses, metric ---
@@ -377,7 +385,8 @@ if __name__ == "__main__":
     model = wl.watch_or_edit(
         model,
         flag="model",
-        device=device
+        device=device,
+        compute_dependencies=False
     )
 
     lr = parameters.get("optimizer", {}).get("lr", 1e-3)
@@ -402,7 +411,7 @@ if __name__ == "__main__":
         for idx in range(num_samples):
             try:
                 # The dataset returns (img_t, mask_t)
-                _, label = dataset[idx]
+                _, _, label = dataset[idx]
                 label_np = label.numpy() if hasattr(label, 'numpy') else np.array(label)
 
                 # Count pixels for each class

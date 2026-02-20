@@ -27,6 +27,7 @@ from weightslab.components.global_monitoring import (
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
+
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
@@ -144,7 +145,7 @@ if __name__ == "__main__":
         parameters["root_log_dir"] = tmp_dir
         print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
-
+    data_path = os.path.join(parameters["data_path"], parameters.get('root_log_dir', '')) if parameters.get("data_path") else parameters["root_log_dir"]
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
@@ -164,7 +165,8 @@ if __name__ == "__main__":
     model = wl.watch_or_edit(
         model,
         flag="model",
-        device=device
+        device=device,
+        compute_dependencies=False,
     )
 
     # Optimizer
@@ -173,7 +175,7 @@ if __name__ == "__main__":
 
     # Data (MNIST train/val/test)
     _full_train_dataset = datasets.MNIST(
-        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
+        root=data_path,
         train=True,
         download=True,
         transform=transforms.Compose(
@@ -183,7 +185,7 @@ if __name__ == "__main__":
         ),
     )
     _test_dataset = datasets.MNIST(
-        root=os.path.join(r'C:/Users/GuillaumePelluet/Desktop/trash/cls_usecase/', "data"),
+        root=data_path,
         train=False,
         download=True,
         transform=transforms.Compose(
@@ -195,9 +197,10 @@ if __name__ == "__main__":
 
     # Split train into train + val (80/20 split)
     val_split = parameters.get("data", {}).get("val_split", 0.2)
-    train_size = int((1.0 - val_split) * len(_full_train_dataset))
+    train_size = int((1.0 - val_split) * len(_full_train_dataset) * 0.2)  # only 20% of train steps to speed up example; adjust as needed
     val_size = len(_full_train_dataset) - train_size
-
+    
+    # Use a fixed random seed for reproducibility of the split
     _train_dataset, _val_dataset = torch.utils.data.random_split(
         _full_train_dataset,
         [train_size, val_size],
@@ -226,7 +229,8 @@ if __name__ == "__main__":
         shuffle=train_shuffle,
         is_training=True,
         compute_hash=True,
-        enable_h5_persistence=enable_h5_persistence
+        enable_h5_persistence=enable_h5_persistence,
+        preload_labels=False,  # Don't preload labels for training loader to save memory; they are logged via signals during training
     )
     val_loader = wl.watch_or_edit(
         _val_dataset,
@@ -236,7 +240,8 @@ if __name__ == "__main__":
         shuffle=val_shuffle,
         is_training=False,
         compute_hash=True,
-        enable_h5_persistence=enable_h5_persistence
+        enable_h5_persistence=enable_h5_persistence,
+        preload_labels=False,  # Don't preload labels for training loader to save memory; they are logged via signals during training
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -246,7 +251,8 @@ if __name__ == "__main__":
         shuffle=test_shuffle,
         is_training=False,
         compute_hash=True,
-        enable_h5_persistence=enable_h5_persistence
+        enable_h5_persistence=enable_h5_persistence,
+        preload_labels=False,  # Don't preload labels for training loader to save memory; they are logged via signals during training
     )
 
     # Losses & metrics (watched objects – they log themselves)
@@ -268,7 +274,6 @@ if __name__ == "__main__":
         log=True,
         name="test_loss/CE",
     )
-
     val_metric_mlt = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric",
@@ -304,7 +309,13 @@ if __name__ == "__main__":
     test_loss, test_metric = None, None
     for train_step in train_range:
         # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
+        train_loss = train(
+            train_loader, 
+            model, 
+            optimizer, 
+            train_criterion_mlt, 
+            device
+        )
 
         # Periodic validation and test evaluation
         if train_step > 0 and train_step % eval_every == 0:

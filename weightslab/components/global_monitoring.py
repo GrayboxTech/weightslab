@@ -63,12 +63,12 @@ class PauseController:
 
     def pause(self):
         self._event.clear()
-        self.hyperparams['is_training'] = False
+        set_hyperparam(key_path='is_training', value=False)
         logger.info('\nTraining paused.')
 
     def _resume(self):
         self._event.set()
-        self.hyperparams['is_training'] = True
+        set_hyperparam(key_path='is_training', value=True)
         
     def resume(self):
         hash_by_module = None
@@ -107,7 +107,7 @@ class PauseController:
         self._get_checkpoint_manager()
         if self.checkpoint_manager == None:
             return False
-        fl = self.checkpoint_manager.hash_by_module[0] != "00000000" and self.checkpoint_manager.hash_by_module[1] != "00000000" and self.checkpoint_manager.hash_by_module[2] != "00000000"
+        fl = self.checkpoint_manager.get_hp_hash() != "00000000" and self.checkpoint_manager.get_model_hash() != "00000000" and self.checkpoint_manager.get_data_hash() != "00000000"
 
         return fl
 
@@ -266,9 +266,9 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
                 # Propagate controller state back to ledger if it differs
                 if controller_paused and not firstresume:
                     try:
-                        hp['is_training'] = False
+                        set_hyperparam(key_path='is_training', value=False)
                     except Exception:
-                        set_hyperparam(name, 'is_training', False)
+                        set_hyperparam(key_path='is_training', value=False)
 
         except Exception as e:
             # swallow to keep thread alive

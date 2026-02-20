@@ -18,12 +18,16 @@ from pydantic import BaseModel, Field
 # Ensure intent_prompt is accessible
 from .intent_prompt import INTENT_PROMPT
 
+
+# Set up logging
 _LOGGER = logging.getLogger(__name__)
+
 
 # Try to find .env in weightslab/ or parent root
 env_path = Path(__file__).resolve().parents[3] / '.env'
 load_dotenv(dotenv_path=env_path)
 load_dotenv()
+
 
 # ==========================================
 # 1. PYDANTIC MODELS (Robust & Flexible)

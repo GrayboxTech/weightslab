@@ -29,6 +29,9 @@ service ExperimentService {
 message GetLatestLoggerDataRequest {
   bool request_full_history = 1;  // true = full history, false = only queue (new data)
   int32 max_points = 2;            // max points per signal (only used for full history)
+  bool break_by_slices = 3;        // true = return per-sample data filtered by tags
+  repeated string tags = 4;        // list of tags to filter samples (used when break_by_slices=true)
+  string graph_name = 5;           // specific signal/graph name to filter (used when break_by_slices=true)
 }
 
 message LoggerDataPoint {
@@ -37,6 +40,7 @@ message LoggerDataPoint {
   float metric_value = 3;
   string experiment_hash = 4;
   int64 timestamp = 5;
+  string sample_id = 6;            // sample_id (used for break_by_slices mode)
 }
 
 message GetLatestLoggerDataResponse {
@@ -120,7 +124,7 @@ message HyperParameterCommand {
 }
 
 message DenySamplesOperation {
-  repeated int32 sample_ids = 1;
+  repeated string sample_ids = 1;
   bool accumulate = 2;
 }
 
@@ -175,7 +179,7 @@ message LayerRepresentation {
 
 message ActivationRequest {
   int32 layer_id = 1;
-  int32 sample_id = 2;
+  string sample_id = 2;
   string origin = 3;
 }
 
@@ -204,7 +208,7 @@ message TaskField {
 }
 
 message RecordMetadata {
-  int32 sample_id = 1;
+  string sample_id = 1;
   repeated int32 sample_label = 2;
   repeated int32 sample_prediction = 3;
   map<string, float> sample_last_loss = 4;
@@ -234,12 +238,12 @@ message CommandResponse {
 }
 
 message SampleRequest {
-  optional int32 sample_id = 1;
+  optional string sample_id = 1;
   optional string origin = 2;
 }
 
 message SampleRequestResponse {
-  optional int32 sample_id = 1;
+  optional string sample_id = 1;
   optional string origin = 2;
   optional int32 label = 3;
   optional bytes data = 4;
@@ -250,7 +254,7 @@ message SampleRequestResponse {
 }
 
 message BatchSampleRequest {
-  repeated int32 sample_ids = 1;
+  repeated string sample_ids = 1;
   string origin = 2;
   optional int32 resize_width = 3;
   optional int32 resize_height = 4;
@@ -327,7 +331,7 @@ message DataStat {
 }
 
 message DataRecord {
-  int32 sample_id = 1;
+  string sample_id = 1;
   repeated DataStat data_stats = 2;
 }
 
@@ -349,7 +353,7 @@ message DataEditsRequest {
   string string_value = 3;
   bool bool_value = 4;
   SampleEditType type = 5;
-  repeated int32 samples_ids = 6;
+  repeated string samples_ids = 6;
   repeated string sample_origins = 7;
 }
 

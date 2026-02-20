@@ -15,140 +15,173 @@ It also supports:
   hyperparameters
 - checkpoint-based data loading and reproducible iterator restoration
 """
+import torch
 import logging
 from typing import Any, Iterator, Optional
 
 from torch.utils.data import DataLoader, Dataset, Sampler
-from torch.utils.data import RandomSampler, SequentialSampler
 
-from weightslab.components.global_monitoring import pause_controller
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
+from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
+from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
     resolve_hp_name,
     get_checkpoint_manager,
 )
-from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
+from weightslab.data.sample_stats import SampleStatsEx
 
 
 # Get Global Logger
 logger = logging.getLogger(__name__)
 
 
-class MaskedSampler(Sampler):
-    """A sampler that filters out deny-listed samples from iteration.
+class WeightsLabDataSampler(Sampler):
+    """Unified sampler for WeightsLab with shuffle, masking, offset, and optional batching.
 
-    Wraps a base sampler (e.g., RandomSampler, SequentialSampler) and
-    skips indices that correspond to deny-listed samples in the dataset.
+    This sampler combines the functionality of multiple samplers:
+    - Shuffle/sequential mode toggle (runtime changeable)
+    - Deny-list filtering for tracked datasets
+    - Sample offset for checkpoint restoration
+    - Optional batching with mutable batch size
 
-    This allows the DataLoader to dynamically exclude samples without
-    rebuilding the dataset or sampler.
+    Can be used as either a regular sampler (yields indices) or batch sampler
+    (yields lists of indices) based on batch_size parameter.
+
+    Example:
+        # As a regular sampler with shuffle and masking
+        sampler = WeightsLabDataSampler(dataset, tracked_dataset=wrapper, shuffle=True)
+        loader = DataLoader(dataset, sampler=sampler)
+
+        # As a batch sampler with all features
+        sampler = WeightsLabDataSampler(
+            dataset, tracked_dataset=wrapper, shuffle=True,
+            offset=100, batch_size=32, drop_last=True
+        )
+        loader = DataLoader(dataset, batch_sampler=sampler)
+
+        # Toggle shuffle at runtime
+        sampler.shuffle = False  # Switch to sequential
     """
 
-    def __init__(self, base_sampler: Sampler, tracked_dataset: DataSampleTrackingWrapper):
-        """Initialize the masked sampler.
+    def __init__(
+        self,
+        data_source: Dataset,
+        tracked_dataset: Optional[DataSampleTrackingWrapper] = None,
+        shuffle: bool = True,
+        offset: int = 0,
+        batch_size: Optional[int] = None,
+        drop_last: bool = False,
+    ):
+        """Initialize the unified sampler.
 
         Args:
-            base_sampler: The underlying sampler (RandomSampler, SequentialSampler, etc.)
-            tracked_dataset: A DataSampleTrackingWrapper with deny-listed samples
-        """
-        self.base_sampler = base_sampler
-        self.tracked_dataset = tracked_dataset
-
-    def __iter__(self):
-        """Iterate over non-deny-listed indices."""
-        # Build a set of deny-listed UIDs for fast lookup via DataFrame
-        df_view = self.tracked_dataset._get_df_view()
-        deny_listed_uids = set()
-        if not df_view.empty and 'deny_listed' in df_view.columns:
-            deny_listed_uids = set(df_view[df_view['deny_listed'] == True].index)
-
-        # Iterate through base sampler, yielding only non-denied indices
-        for idx in self.base_sampler:
-            # Skip already generated samples based on offset
-            uid = int(self.tracked_dataset.unique_ids[idx])
-            if uid not in deny_listed_uids:
-                yield idx
-
-    def __len__(self):
-        """Return the number of non-deny-listed samples."""
-        # Count non-denied samples via DataFrame
-        df_view = self.tracked_dataset._get_df_view()
-        deny_listed_uids = set()
-        if not df_view.empty and 'deny_listed' in df_view.columns:
-            deny_listed_uids = set(df_view[df_view['deny_listed'] == True].index)
-        total = len(self.base_sampler)
-        denied_count = len(deny_listed_uids)
-        return max(0, total - denied_count)
-
-
-class OffsetSampler(Sampler):
-    """A sampler wrapper that skips the first N samples without loading them.
-
-    This enables efficient state restoration by avoiding data preprocessing
-    for skipped samples. Works with any base sampler.
-    """
-
-    def __init__(self, base_sampler: Sampler, offset: int = 0):
-        """Initialize with a base sampler and number of samples to skip.
-
-        Args:
-            base_sampler: The underlying sampler to wrap
+            data_source: The dataset to sample from
+            tracked_dataset: Optional tracking wrapper for deny-list support
+            shuffle: Whether to shuffle indices during iteration
             offset: Number of samples to skip from the beginning
+            batch_size: If provided, acts as batch sampler yielding lists of indices
+            drop_last: If True, drop incomplete batches (only used if batch_size is set)
         """
-        self.base_sampler = base_sampler
+        self.data_source = data_source
+        self.tracked_dataset = tracked_dataset or data_source
+        self.shuffle = shuffle
         self.offset = max(0, offset)
+        self.batch_size = batch_size
+        self.drop_last = drop_last
 
-    def __iter__(self):
-        """Iterate, skipping the first offset samples."""
-        iterator = iter(self.base_sampler)
-        # Skip offset samples without yielding
-        for _ in range(self.offset):
+    def _get_deny_listed_uids(self) -> set:
+        """Get set of deny-listed UIDs from tracked dataset."""
+        deny_listed_uids = set()
+        if self.tracked_dataset is not None and hasattr(self.tracked_dataset, "_get_df_view"):
             try:
-                next(iterator)
-            except StopIteration:
-                return
-        # Yield remaining samples
-        yield from iterator
+                df_view = self.tracked_dataset._get_df_view()
+                if not df_view.empty and SampleStatsEx.DISCARDED.value in df_view.columns:
+                    deny_listed_uids = set(df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index)
+            except Exception:
+                pass
+        return deny_listed_uids
 
-    def __len__(self):
-        """Return remaining length after offset."""
-        try:
-            total = len(self.base_sampler)
-            return max(0, total - self.offset)
-        except Exception:
-            raise TypeError("len not supported for this sampler")
+    def _generate_indices(self):
+        """Generate base indices (shuffled or sequential)."""
+        n = len(self.data_source)
+        if self.shuffle:
+            indices = torch.randperm(n).tolist()
+        else:
+            indices = list(range(n))
+        return indices
 
+    def _filter_indices(self, indices):
+        """Filter out deny-listed and offset indices."""
+        deny_listed_uids = self._get_deny_listed_uids()
 
-class MutableBatchSampler:
-    """A simple mutable batch sampler that yields lists of indices.
+        # Filter and apply offset
+        filtered = []
+        skipped = 0
 
-    Changing the `batch_size` attribute at runtime will affect
-    subsequent iterations.
-    """
+        for idx in indices:
+            # Check if deny-listed
+            if self.tracked_dataset is not None and hasattr(self.tracked_dataset, "unique_ids"):
+                try:
+                    uid = int(self.tracked_dataset.unique_ids[idx])
+                    if uid in deny_listed_uids:
+                        continue
+                except Exception:
+                    pass
 
-    def __init__(self, base_sampler, batch_size, drop_last=False):
-        self.base_sampler = base_sampler
-        self.batch_size = int(batch_size)
-        self.drop_last = bool(drop_last)
+            # Apply offset
+            if skipped < self.offset:
+                skipped += 1
+                continue
+
+            filtered.append(idx)
+
+        return filtered
 
     def __iter__(self):
-        batch = []
-        for idx in self.base_sampler:
-            batch.append(idx)
-            if len(batch) >= int(self.batch_size):
+        """Iterate over indices or batches of indices."""
+        # Generate and filter indices
+        indices = self._generate_indices()
+        filtered_indices = self._filter_indices(indices)
+
+        # If no batching, yield individual indices
+        if self.batch_size is None:
+            yield from filtered_indices
+        else:
+            # Yield batches
+            batch = []
+            for idx in filtered_indices:
+                batch.append(idx)
+                if len(batch) >= int(self.batch_size):
+                    yield list(batch)
+                    batch = []
+
+            # Yield remaining batch if not dropping last
+            if batch and not self.drop_last:
                 yield list(batch)
-        if batch and not self.drop_last:
-            yield list(batch)
 
     def __len__(self):
-        try:
-            total = len(self.base_sampler)
+        """Return the number of samples or batches."""
+        # Start with total dataset size
+        total = len(self.data_source)
+
+        # Subtract deny-listed samples
+        deny_listed_uids = self._get_deny_listed_uids()
+        total -= len(deny_listed_uids)
+
+        # Subtract offset
+        total = max(0, total - self.offset)
+
+        # If batching, return number of batches
+        if self.batch_size is not None:
             b = max(1, int(self.batch_size))
-            return (total + b - 1) // b
-        except Exception:
-            raise TypeError("len not supported for this sampler")
+            if self.drop_last:
+                return total // b
+            else:
+                return (total + b - 1) // b
+
+        return total
 
 
 class DataLoaderInterface:
@@ -166,7 +199,7 @@ class DataLoaderInterface:
 
     **Deny-listed Sample Handling:**
     When using a DataSampleTrackingWrapper, deny-listed samples are automatically
-    excluded from batches during iteration via the MaskedSampler. This allows
+    excluded from batches during iteration via the WeightsLabDataSampler. This allows
     you to dynamically filter samples at train/eval time without rebuilding
     the dataset:
 
@@ -189,7 +222,7 @@ class DataLoaderInterface:
         shuffle: bool = False,
         num_workers: int = 0,
         drop_last: bool = False,
-        pin_memory: bool = False,
+        pin_memory: bool = True,
         collate_fn: Optional[Any] = None,
         loader_name: Optional[str] = None,
         register: bool = True,
@@ -226,6 +259,8 @@ class DataLoaderInterface:
         self._mutable_batch_sampler = None
         self._dl_build_kwargs: Optional[dict] = None
         self._pending_iteration_state: Optional[dict] = None
+        self.is_training = kwargs.pop("is_training", False)
+        self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
 
         if isinstance(data_loader_or_dataset, DataLoader):
             logger.warning(
@@ -244,10 +279,13 @@ class DataLoaderInterface:
                 **kwargs
             )
             self.tracked_dataset._map_updates_hook_fns.append(
-                (self._reset_iterator, {})
+                (
+                    self._reset_iterator,
+                    {}
+                )
             )
         else:
-            # Dataset supplied: wrap and build our own DataLoader with a mutable batch sampler
+            # First, wrap the dataset with our tracking wrapper to get deny-list and logging support
             self.tracked_dataset = DataSampleTrackingWrapper(
                 data_loader_or_dataset,
                 root_log_dir=root_log_dir,
@@ -257,15 +295,38 @@ class DataLoaderInterface:
                 loader_name=loader_name,
                 **kwargs
             )
-
             self.tracked_dataset._map_updates_hook_fns.append(
-                (self._reset_iterator, {})
+                (
+                    self._reset_iterator,
+                    {}
+                )
             )
 
-            # Load checkpoint data early (before dataloader is used)
+            # Then, load checkpoint data early (before dataloader is used)
             self._load_checkpoint_data()
 
-            # store kwargs so we can recreate dataloader if needed
+            # Next, define the batch sampler with the initial offset (if any) for checkpoint restoration
+            batch_sampler = WeightsLabDataSampler(
+                self.tracked_dataset,
+                tracked_dataset=self.tracked_dataset,
+                shuffle=shuffle,
+                offset=0,
+                batch_size=batch_size,
+                drop_last=drop_last,
+            )
+
+            # Finally, construct dataloader using our batch_sampler
+            self.dataloader = DataLoader(
+                self.tracked_dataset,
+                batch_sampler=batch_sampler,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                collate_fn=collate_fn,
+                **filter_kwargs_for_callable(DataLoader, kwargs)
+            )
+            self._mutable_batch_sampler = batch_sampler
+
+            # Store kwargs so we can recreate dataloader if needed
             self._dl_build_kwargs = {
                 "batch_size": batch_size,
                 "shuffle": shuffle,
@@ -276,73 +337,7 @@ class DataLoaderInterface:
             }
             self._dl_build_kwargs.update(kwargs or {})
 
-            # Choose base sampler according to shuffle flag
-            base_sampler = (
-                RandomSampler(self.tracked_dataset)
-                if shuffle
-                else SequentialSampler(self.tracked_dataset)
-            )
-
-            # Wrap base sampler with MaskedSampler to skip deny-listed samples
-            masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
-
-            # Inner class: mutable batch sampler for batch size changes
-            class MutableBatchSampler:
-                """A simple mutable batch sampler that yields lists of indices.
-
-                Changing the `batch_size` attribute at runtime will affect
-                subsequent iterations.
-                """
-
-                def __init__(self, base_sampler, batch_size, drop_last=False):
-                    self.base_sampler = base_sampler
-                    self.batch_size = int(batch_size)
-                    self.drop_last = bool(drop_last)
-
-                def _wait_if_paused(self) -> None:
-                    """If the global pause controller is paused, wait until resumed."""
-                    try:
-                        pause_controller.wait_if_paused()
-                    except Exception:
-                        # Fail-open if pause controller is not available
-                        pass
-
-                def __iter__(self):
-                    batch = []
-                    for idx in self.base_sampler:
-                        batch.append(idx)
-                        if len(batch) >= int(self.batch_size):
-                            yield list(batch)
-                            batch = []
-                    if batch and not self.drop_last:
-                        yield list(batch)
-
-                def __len__(self):
-                    try:
-                        total = len(self.base_sampler.tracked_dataset)  # type: ignore
-                        b = max(1, int(self.batch_size))
-                        return (total + b - 1) // b
-                    except Exception:
-                        raise TypeError("len not supported for this sampler")
-
-            mbs = MutableBatchSampler(
-                masked_sampler, batch_size=batch_size, drop_last=drop_last
-            )
-            self._mutable_batch_sampler = mbs
-
-            # Construct dataloader using our batch_sampler
-            self.is_training = kwargs.pop("is_training", False)
-            self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
-            self.dataloader = DataLoader(
-                self.tracked_dataset,
-                batch_sampler=mbs,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-                collate_fn=collate_fn,
-                **filter_kwargs_for_callable(DataLoader, kwargs)
-            )
-
-        self.init_attributes(self.dataloader)
+        self._init_attributes(self.dataloader)
 
         # Apply pending iteration state if one was loaded from checkpoint
         if hasattr(self, '_pending_iteration_state') and self._pending_iteration_state:
@@ -455,7 +450,7 @@ class DataLoaderInterface:
         except Exception as e:
             logger.debug(f"Could not load checkpoint data: {e}")
 
-    def init_attributes(self, obj):
+    def _init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
 
         Implementation strategy (direct iteration):
@@ -561,7 +556,7 @@ class DataLoaderInterface:
         handles StopIteration by recreating the underlying iterator. This
         makes ``for batch in dataloader_interface`` loop forever over epochs
         without the user having to call ``reset_iterator`` manually.
-        """
+        """ 
         self._sync_batch_size_from_ledger()
         self._wait_if_paused()
         self._reset_iterator()  # Reset
@@ -627,56 +622,125 @@ class DataLoaderInterface:
         """Return the next batch from the dataloader.
 
         If the iterator is exhausted it is automatically reset and iteration
-        resumes.
+        resumes. With num_workers > 0, this properly cleans up worker processes
+        before resetting the iterator.
         """
         try:
             if self._iterator is None:
                 self._reset_iterator()
-            # # Execute offset
-            self._execute_offset()
             # Generate batch
             batch = next(self._iterator)
             # Count yielded samples to support iteration state capture/restore
             self._samples_yielded += 1
+            return batch
         except StopIteration:
-            # Reset iterator and try again
-            self._reset_iterator()
-            # Execute offset
-            self._execute_offset()
-            # Generate batch
-            batch = next(self._iterator)
-            self._samples_yielded += 1
-        return batch
-
-    def _execute_offset(self) -> None:
-        """
-            Execute sample offset if set, skipping samples as needed.
-            This is a fallback mechanism for user-supplied dataloaders where
-            we cannot use an OffsetSampler.
-
-            TODO (GP):
-            We can reproduce the random generation of samples by restoring RNG state, if during the previous checkpoints, batchsize changed dynamically and shuffle is True.
-        """
-        if self._sample_offset > 0:
-            current_bs = self.get_batch_size()
-            # Fast-forward the iterator by the offset amount
-            while len(self._skipped) < self._sample_offset:
-                try:
-                    bs = 4 if self._sample_offset - len(self._skipped) >= 4 else self._sample_offset - len(self._skipped)  # Autoscale bs to sample offset
-                    self.set_batch_size(bs)
-                    self._skipped.extend(next(self._iterator)[1].detach().cpu().tolist())
-                    logger.debug(f"Offset sampler: skipped {len(self._skipped)}/{self._sample_offset}")
-                except StopIteration as e:
-                    logger.debug(f"Offset sampler: reached end of iterator while skipping: {e}")
-                    self._reset_iterator()  # Reset iterator and try again
-
-            self.set_batch_size(current_bs)
-            self._skipped = []
+            # End of epoch: reset iterator and try again (starting new epoch)
+            logger.debug(f"Epoch complete ({self._samples_yielded} samples yielded), resetting iterator for new epoch")
+            # Reset offset tracking for new epoch
             self._sample_offset = 0
+            self._reset_iterator()
+            
+            # Try to get first batch from new epoch
+            try:
+                batch = next(self._iterator)
+                self._samples_yielded += 1
+                return batch
+            except StopIteration:
+                # Dataloader is empty or has no more data even after reset
+                sampler = self._mutable_batch_sampler
+                diagnostic_info = {
+                    "dataloader_len": len(self.dataloader),
+                    "sampler_type": type(sampler).__name__ if sampler else None,
+                }
+                if sampler and hasattr(sampler, 'offset'):
+                    diagnostic_info["sampler_offset"] = sampler.offset
+                if sampler and hasattr(sampler, 'batch_size'):
+                    diagnostic_info["sampler_batch_size"] = sampler.batch_size
+                if self.tracked_dataset:
+                    try:
+                        diagnostic_info["dataset_len"] = len(self.tracked_dataset)
+                        if hasattr(self.tracked_dataset, '_get_df_view'):
+                            df = self.tracked_dataset._get_df_view()
+                            diagnostic_info["deny_listed_count"] = (df[SampleStatsEx.DISCARDED.value] == True).sum() if SampleStatsEx.DISCARDED.value in df.columns else 0
+                    except Exception as e:
+                        diagnostic_info["dataset_info_error"] = str(e)
+                
+                logger.warning(
+                    f"Dataloader exhausted after reset. Diagnostic info: {diagnostic_info}"
+                )
+                raise
+        except Exception as e:
+            # Log unexpected errors to help diagnosis with multiprocessing
+            logger.error(f"Error in _next_batch: {e}", exc_info=True)
+            raise
+
+    # def _execute_offset(self) -> None:
+    #     """
+    #         Execute sample offset if set, skipping samples as needed.
+    #         This is a fallback mechanism for user-supplied dataloaders where
+    #         we cannot use an OffsetSampler.
+
+    #         TODO (GP):
+    #         We can reproduce the random generation of samples by restoring RNG state, if during the previous checkpoints, batchsize changed dynamically and shuffle is True.
+    #     """
+    #     if self._sample_offset > 0:
+    #         current_bs = self.get_batch_size()
+    #         # Fast-forward the iterator by the offset amount
+    #         while len(self._skipped) < self._sample_offset:
+    #             try:
+    #                 bs = 4 if self._sample_offset - len(self._skipped) >= 4 else self._sample_offset - len(self._skipped)  # Autoscale bs to sample offset
+    #                 self.set_batch_size(bs)
+    #                 self._skipped.extend(next(self._iterator)[1].detach().cpu().tolist())
+    #                 logger.debug(f"Offset sampler: skipped {len(self._skipped)}/{self._sample_offset}")
+    #             except StopIteration as e:
+    #                 logger.debug(f"Offset sampler: reached end of iterator while skipping: {e}")
+    #                 self._reset_iterator()  # Reset iterator and try again
+
+    #         self.set_batch_size(current_bs)
+    #         self._skipped = []
+    #         self._sample_offset = 0
 
     def _reset_iterator(self) -> None:
-        """Reset the internal iterator so `_next_batch()` starts from the beginning."""
+        """Reset the internal iterator so `_next_batch()` starts from the beginning.
+        
+        For dataloaders with num_workers > 0, this explicitly cleans up the old iterator
+        and its worker processes before creating a new one to avoid deadlocks or resource leaks.
+        Also resets the sampler's offset to ensure we don't skip samples on new epochs.
+        """
+        import gc
+        import time
+        
+        # Explicitly delete old iterator to allow worker processes to be cleaned up
+        if hasattr(self, '_iterator') and self._iterator is not None:
+            try:
+                del self._iterator
+                logger.debug("Deleted old iterator for cleanup")
+            except Exception as e:
+                logger.debug(f"Failed to delete old iterator: {e}")
+        
+        # Force garbage collection to ensure worker processes are terminated
+        # This is especially important when num_workers > 0
+        try:
+            gc.collect()
+        except Exception:
+            pass
+        
+        # Reset sampler's offset for new epoch (important: prevents skipping samples on subsequent epochs)
+        if hasattr(self, '_mutable_batch_sampler') and self._mutable_batch_sampler is not None:
+            if hasattr(self._mutable_batch_sampler, 'offset'):
+                old_offset = self._mutable_batch_sampler.offset
+                self._mutable_batch_sampler.offset = 0
+                if old_offset > 0:
+                    logger.debug(f"Reset sampler offset from {old_offset} to 0")
+        
+        # Give worker processes time to fully terminate (especially important with num_workers > 0)
+        # Short delay to avoid race conditions when spawning new workers
+        if hasattr(self.dataloader, 'num_workers') and self.dataloader.num_workers > 0:
+            time.sleep(0.01)  # 10ms delay for worker cleanup
+        
+        # Create new iterator
         self._iterator = iter(self.dataloader)
+        logger.debug(f"Created new iterator (num_workers={getattr(self.dataloader, 'num_workers', 'unknown')}, sampler_len={len(self._mutable_batch_sampler) if self._mutable_batch_sampler else 'N/A'})")
 
     def reset_iterator(self) -> None:
         """Recreate the internal iterator (e.g., after restoring RNG state).
@@ -742,29 +806,22 @@ class DataLoaderInterface:
                 kwargs.pop("drop_last", None)
                 kwargs.pop("shuffle", None)
 
-                # Create base sampler
-                base_sampler = (
-                    RandomSampler(self.tracked_dataset)
-                    if shuffle
-                    else SequentialSampler(self.tracked_dataset)
+                # Create a new sampler with the offset and batch size, and rebuild the dataloader
+                sampler = WeightsLabDataSampler(
+                    self.tracked_dataset,
+                    tracked_dataset=self.tracked_dataset,
+                    shuffle=shuffle,
+                    offset=sample_offset,
+                    batch_size=batch_size,
+                    drop_last=drop_last,
                 )
-
-                # # Wrap with offset to skip already-yielded samples
-                # offset_sampler = OffsetSampler(base_sampler, offset=sample_offset)
-
-                # Wrap with masked sampler for deny-listed samples
-                masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
-
-                # Rebuild mutable batch sampler
-                mbs_cls = type(self._mutable_batch_sampler) if self._mutable_batch_sampler else MutableBatchSampler
-                mbs = mbs_cls(masked_sampler, batch_size=batch_size, drop_last=drop_last)
-                self._mutable_batch_sampler = mbs
-                self._sample_offset = sample_offset
+                self._mutable_batch_sampler = sampler
+                self._sample_offset = 0
 
                 # Rebuild dataloader with offset sampler
                 self.dataloader = DataLoader(
                     self.tracked_dataset,
-                    batch_sampler=mbs,
+                    batch_sampler=sampler,
                     num_workers=num_workers,
                     pin_memory=pin_memory,
                     collate_fn=collate_fn,
@@ -826,23 +883,20 @@ class DataLoaderInterface:
                 pin_memory = kwargs.pop("pin_memory", False)
                 collate_fn = kwargs.pop("collate_fn", None)
 
-                # Rebuild base sampler & mutable sampler if we had one
+                # Rebuild sampler & dataloader if we had one
                 if getattr(self, "_mutable_batch_sampler", None) is not None:
-                    base_sampler = (
-                        RandomSampler(self.tracked_dataset)
-                        if shuffle
-                        else SequentialSampler(self.tracked_dataset)
+                    sampler = WeightsLabDataSampler(
+                        self.tracked_dataset,
+                        tracked_dataset=self.tracked_dataset,
+                        shuffle=shuffle,
+                        offset=0,
+                        batch_size=batch_size,
+                        drop_last=drop_last,
                     )
-                    # Wrap with MaskedSampler to skip deny-listed samples
-                    masked_sampler = MaskedSampler(base_sampler, self.tracked_dataset)
-                    mbs_cls = type(self._mutable_batch_sampler)
-                    mbs = mbs_cls(
-                        masked_sampler, batch_size=batch_size, drop_last=drop_last
-                    )
-                    self._mutable_batch_sampler = mbs
+                    self._mutable_batch_sampler = sampler
                     self.dataloader = DataLoader(
                         self.tracked_dataset,
-                        batch_sampler=mbs,
+                        batch_sampler=sampler,
                         num_workers=num_workers,
                         pin_memory=pin_memory,
                         collate_fn=collate_fn,

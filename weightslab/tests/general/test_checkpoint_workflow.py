@@ -18,7 +18,7 @@ import tempfile
 import warnings
 import json
 import pandas as pd
-from pathlib import Path
+
 warnings.filterwarnings("ignore")
 
 import weightslab as wl
@@ -29,9 +29,11 @@ import torch.nn.functional as F
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
 from tqdm import trange
+from pathlib import Path
 
 # Import components directly to avoid full weightslab initialization
 from weightslab.components.checkpoint_manager import CheckpointManager
+from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.global_monitoring import (
@@ -42,7 +44,7 @@ from weightslab.components.global_monitoring import (
 from weightslab.utils.tools import seed_everything
 
 
-# Init hp sync 
+# Init hp sync thread event (used in training loop to trigger HP checkpointing)
 start_hp_sync_thread_event()
 
 
@@ -63,6 +65,7 @@ def register_in_ledger(obj, flag, device='cpu', **kwargs):
                 obj,
                 flag="model",
                 device=device,
+                compute_dependencies=True,
                 **kwargs
             )
         elif flag == "dataloader":
@@ -149,12 +152,12 @@ class TaggableDataset:
 
     def is_discarded(self, uid):
         """Check if sample is discarded"""
-        idx = int(uid.split('_')[1])
+        idx = str(uid.split('_')[1])
         return idx in self._discarded
 
     def discard(self, uid):
         """Discard a sample"""
-        idx = int(uid.split('_')[1])
+        idx = str(uid.split('_')[1])
         self._discarded.add(idx)
 
     def add_tag(self, uid, tag):
@@ -267,7 +270,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
     def check_reproducibility(self, original_loss, reloaded_loss, original_uids=None, reloaded_uids=None, loss_tol=0.1, uids_msg=None):
         """Common reproducibility check for losses and UIDs"""
-        return
+        return 
         # #   Check reproducibility of losses and UIDs
         # if isinstance(original_loss, (list, tuple)):
         #     original_loss_sum = sum(original_loss)/len(original_loss)
@@ -671,13 +674,13 @@ class CheckpointSystemTests(unittest.TestCase):
         rows = []
         uids_discarded = []
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             uids_discarded.append(uid)
             rows.append(
                 {
                     "sample_id": uid,
-                    "tags": f"ugly_{random.randint(0, 10)}",  # Random tag with 'ugly'
-                    "deny_listed": bool(1 - dfm._df['deny_listed'].iloc[idx])
+                    f"{SampleStatsEx.TAG.value}:ugly": True,  # Random tag with 'ugly'
+                    SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view()[SampleStatsEx.DISCARDED.value].iloc[idx])
                 }
             )
 
@@ -781,12 +784,12 @@ class CheckpointSystemTests(unittest.TestCase):
         rows = []
         dfm = ledgers.get_dataframe()  # Get dataframe manager
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             rows.append(
                 {
                     "sample_id": uid,
-                    "tags": f"hugly_{random.randint(0, 10)}",
-                    "deny_listed": bool(1 - dfm._df['deny_listed'].iloc[idx])
+                    f"{SampleStatsEx.TAG.value}:ugly": True,
+                    SampleStatsEx.DISCARDED.value: bool(1 - dfm.get_df_view(SampleStatsEx.DISCARDED.value).iloc[idx])
                 }
             )
         # # # Updates data - Simulate adding tags and discarding samples in dataset
@@ -947,11 +950,11 @@ class CheckpointSystemTests(unittest.TestCase):
         tagged_samples = random.sample(range(10), 2)
         rows = []
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             rows.append({
                 "sample_id": uid,
-                "tags": f"discard_25pct_{random.randint(0, 10)}",
-                "deny_listed": True
+                f"{SampleStatsEx.TAG.value}:discard_25pct": True,
+                SampleStatsEx.DISCARDED.value: True
             })
 
         df_update = pd.DataFrame(rows).set_index("sample_id")
@@ -1098,11 +1101,11 @@ class CheckpointSystemTests(unittest.TestCase):
         tagged_samples = random.sample(range(10), 2)
         rows = []
         for idx in tagged_samples:
-            uid = dfm._df.index[idx]
+            uid = dfm.get_df_view().index[idx]
             rows.append({
                 "sample_id": uid,
-                "tags": f"discard_fix_{random.randint(0, 10)}",
-                "deny_listed": True
+                f"{SampleStatsEx.TAG.value}:discard_fix": True,
+                SampleStatsEx.DISCARDED.value: True
             })
         df_update = pd.DataFrame(rows).set_index("sample_id")
         dfm.upsert_df(df_update, origin='train_loader', force_flush=True)
