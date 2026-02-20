@@ -175,12 +175,17 @@ class GuardContext:
             try:
                 hp_name = resolve_hp_name()
                 hp = get_hyperparams(hp_name)
-                if hp and (hp.get('auditorMode') is True or hp.get('auditor_mode') is True):
+                if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
                     is_audit = True
             except Exception:
                 pass
 
             if self.for_training and not is_audit:
+                self.model.set_tracking_mode(TrackingMode.TRAIN)
+            elif self.for_training and is_audit:
+                # In audit mode: keep TRAIN tracking so current_step increments
+                # and the signal logger can flush its buffer on each step change.
+                # Weight updates are already blocked by OptimizerInterface.step().
                 self.model.set_tracking_mode(TrackingMode.TRAIN)
             else:
                 self.model.set_tracking_mode(TrackingMode.EVAL)

@@ -98,7 +98,7 @@ class OptimizerInterface:
         try:
             hp_name = resolve_hp_name()
             hp = get_hyperparams(hp_name)
-            if hp and (hp.get('auditorMode') is True or hp.get('auditor_mode') is True):
+            if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
                 import time
                 # Throttle logging to avoid spam
                 if not hasattr(self, '_last_audit_log'):

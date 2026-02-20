@@ -5,7 +5,7 @@ import logging
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import weightslab_rlock
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
-from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name
+from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name, get_hyperparams
 from weightslab.backend import ledgers
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
@@ -262,51 +262,62 @@ class ExperimentService:
                         value=hyper_parameters.checkpont_frequency
                     )
 
-                    if hyper_parameters.HasField("is_training"):
-                        trainer = components.get("trainer")
-                        if trainer is not None:
-                            if hyper_parameters.is_training:
-                                print("\n[WeightsLab] UI Command: RESUME", flush=True)
-                                trainer.resume()
-                            else:
-                                print("\n[WeightsLab] UI Command: PAUSE", flush=True)
-                                trainer.pause()
-                        set_hyperparam(
-                            name=hp_name,
-                            key_path="is_training",
-                            value=hyper_parameters.is_training
-                        )
+                # Process auditor_mode FIRST so mode is set before we resume
+                try:
+                    if hyper_parameters.HasField("auditor_mode"):
+                        incoming_audit = bool(hyper_parameters.auditor_mode)
 
-                    try:
-                        if hyper_parameters.HasField("auditor_mode"):
-                            # Auto-pause training when switching modes for consistency
+                        # Read the CURRENT stored value to detect a real change
+                        hp_now = get_hyperparams(hp_name)
+                        current_audit = bool(hp_now.get("auditor_mode", False)) if hp_now else False
+
+                        if incoming_audit != current_audit:
+                            # Mode actually changed — pause and announce switch
                             trainer = components.get("trainer")
                             if trainer:
                                 print(f"\n[WeightsLab] Pausing to switch mode...", flush=True)
                                 trainer.pause()
                                 set_hyperparam(name=hp_name, key_path="is_training", value=False)
-                                
-                            mode_label = "AUDIT" if hyper_parameters.auditor_mode else "TRAIN"
+                            mode_label = "AUDIT" if incoming_audit else "TRAIN"
                             print(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode", flush=True)
-                            set_hyperparam(name=hp_name, key_path="auditor_mode", value=hyper_parameters.auditor_mode)
-                    except ValueError:
-                        pass
-                except Exception as e:
-                    return pb2.CommandResponse(
-                        success=False,
-                        message=f"Failed to set hyperparameters: {e}",
+
+                        # Always update the stored value (harmless no-op if unchanged)
+                        set_hyperparam(name=hp_name, key_path="auditor_mode", value=incoming_audit)
+                except ValueError:
+                    pass
+
+                # Process is_training AFTER mode is set — so Resume fires with correct mode
+                if hyper_parameters.HasField("is_training"):
+                    trainer = components.get("trainer")
+                    if trainer is not None:
+                        if hyper_parameters.is_training:
+                            print("\n[WeightsLab] UI Command: RESUME", flush=True)
+                            trainer.resume()
+                        else:
+                            print("\n[WeightsLab] UI Command: PAUSE", flush=True)
+                            trainer.pause()
+                    set_hyperparam(
+                        name=hp_name,
+                        key_path="is_training",
+                        value=hyper_parameters.is_training
                     )
 
+            except Exception as e:
+                return pb2.CommandResponse(
+                    success=False,
+                    message=f"Failed to set hyperparameters: {e}",
+                )
+                
             return pb2.CommandResponse(success=True, message="Hyper parameter changed")
-
-        if request.HasField("load_checkpoint_operation"):
-            with weightslab_rlock:
-                # Pause training if it's currently running
-                trainer = components.get("trainer")
-                hp = components.get("hyperparams")
-                if trainer:
-                    logger.info("Pausing training before restore...")
-                    trainer.pause()
+                    
+            if request.HasField("load_checkpoint_operation"):
+                with weightslab_rlock:
+                    # Pause training if it's currently running
+                    trainer = components.get("trainer")
+                    hp = components.get("hyperparams")
+                    if trainer:
+                        logger.info("Pausing training before restore...")
+                        trainer.pause()
                     if "is_training" in hp:
                         hp['is_training'] = False
                     else:

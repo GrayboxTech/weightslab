@@ -390,7 +390,10 @@ if __name__ == "__main__":
     )
 
     lr = parameters.get("optimizer", {}).get("lr", 1e-3)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = wl.watch_or_edit(
+        optim.Adam(model.parameters(), lr=lr),
+        flag="optimizer",
+    )
 
     # --- Compute class weights to handle class imbalance ---
     print("\n" + "=" * 60)

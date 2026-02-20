@@ -27,7 +27,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
-from weightslab.data.data_utils import load_label
+from weightslab.data.data_utils import load_label, load_raw_image
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
 
 
@@ -135,9 +135,18 @@ class DataService:
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
-        # Always ensure natural sort stats are computed on startup
-        # This occurs before the service is fully available to the UI.
-        self._compute_natural_sort_stats()
+        # Check hyperparameters for compute_natural_sort flag (default: False)
+        # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
+        hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
+        hp_dict = hp.get() if (hp is not None and hasattr(hp, "get")) else (hp if isinstance(hp, dict) else {})
+        self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
+
+        if self._compute_natural_sort:
+            # Always ensure natural sort stats are computed on startup
+            # This occurs before the service is fully available to the UI.
+            self._compute_natural_sort_stats()
+        else:
+            logger.info("[DataService] Natural sort computation skipped (compute_natural_sort=False in hyperparams).")
         
         # Automatically compute registered custom signals
         self._compute_custom_signals()
@@ -301,9 +310,9 @@ class DataService:
         if self._all_datasets_df is None or self._all_datasets_df.empty:
             return
 
-        if SampleStatsEx.TAGS.value not in self._all_datasets_df.columns:
+        if SampleStatsEx.TAG.value not in self._all_datasets_df.columns:
             try:
-                self._all_datasets_df[SampleStatsEx.TAGS.value] = ""
+                self._all_datasets_df[SampleStatsEx.TAG.value] = ""
             except Exception:
                 pass
         
@@ -388,11 +397,11 @@ class DataService:
             try:
                 origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
                 
-                # Sample ID is likely the index if not in columns
+                # Sample ID is either the index or in the columns — use as-is (may be string UID)
                 if SampleStatsEx.SAMPLE_ID.value in row:
-                     sample_id = int(row[SampleStatsEx.SAMPLE_ID.value])
+                    sample_id = row[SampleStatsEx.SAMPLE_ID.value]
                 else:
-                     sample_id = int(idx)
+                    sample_id = idx
 
                 # Skip if already computed (optimization for blocking startup)
                 if "natural_sort_score" in row and not pd.isna(row["natural_sort_score"]):
@@ -945,36 +954,37 @@ class DataService:
                     elif request.resize_width == 0 and request.resize_height == 0:
                         target_height = 360
                         target_width = int(target_height * aspect_ratio)
-                    
+
                     # Ensure dimensions are at least 1x1
-                target_width = max(1, target_width)
-                target_height = max(1, target_height)
+                    target_width = max(1, target_width)
+                    target_height = max(1, target_height)
 
-                # Resize middle slice for thumbnail if requested (maintain aspect ratio)
-                if target_width != original_size[0] or target_height != original_size[1]:
-                    middle_pil = middle_pil.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                    # Resize middle slice for thumbnail if requested (maintain aspect ratio)
+                    if target_width != original_size[0] or target_height != original_size[1]:
+                        middle_pil = middle_pil.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
-                # Determine if this is a full-resolution request (modal) or thumbnail (grid)
-                is_full_resolution = (request.resize_width < 0 and abs(request.resize_width) >= 100) or \
-                                    (request.resize_height < 0 and abs(request.resize_height) >= 100)
+                    # Determine if this is a full-resolution request (modal) or thumbnail (grid)
+                    is_full_resolution = (request.resize_width < 0 and abs(request.resize_width) >= 100) or \
+                                        (request.resize_height < 0 and abs(request.resize_height) >= 100)
 
-                if is_volumetric and np_img is not None and is_full_resolution:
-                    # Full resolution modal view: Send full 4D array as raw bytes (C-contiguous, float32)
-                    np_img_f32 = np.asarray(np_img, dtype=np.float32)
-                    if not np_img_f32.flags['C_CONTIGUOUS']:
-                        np_img_f32 = np.ascontiguousarray(np_img_f32)
-                    raw_data_bytes = np_img_f32.tobytes()
-                    # Shape: [Z, H, W, C] using ORIGINAL 4D dimensions, not thumbnail dimensions
-                    # original_shape is (Z, H, W, C) or (Z, H, W)
-                    if len(original_shape) == 4:
-                        if original_shape[1] > original_shape[-1]:
-                            raw_shape = list(original_shape)  # [Z, H, W, C]
-                        elif original_shape[1] < original_shape[-1]:
-                            raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]]  # [Z, W, C, H]
-                        else:
-                            # If original_shape is (Z, H, W), C is 1 for monochrome volumetric data
-                            raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]
-                        logger.info(f"[Volumetric] Sending full res: np_img.shape={np_img.shape}, original_shape={original_shape}, raw_shape={raw_shape}, bytes={len(raw_data_bytes)}")
+                    raw_data_bytes = b""
+                    raw_shape = []
+
+                    if is_volumetric and np_img is not None and is_full_resolution:
+                        # Full resolution modal view: Send full 4D array as raw bytes (C-contiguous, float32)
+                        np_img_f32 = np.asarray(np_img, dtype=np.float32)
+                        if not np_img_f32.flags['C_CONTIGUOUS']:
+                            np_img_f32 = np.ascontiguousarray(np_img_f32)
+                        raw_data_bytes = np_img_f32.tobytes()
+                        # Shape: [Z, H, W, C] using ORIGINAL 4D dimensions, not thumbnail dimensions
+                        if len(original_shape) == 4:
+                            if original_shape[1] > original_shape[-1]:
+                                raw_shape = list(original_shape)  # [Z, H, W, C]
+                            elif original_shape[1] < original_shape[-1]:
+                                raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]]
+                            else:
+                                raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]
+                            logger.info(f"[Volumetric] Sending full res: np_img.shape={np_img.shape}, original_shape={original_shape}, raw_shape={raw_shape}, bytes={len(raw_data_bytes)}")
                     else:
                         # Thumbnail for grid OR non-volumetric: Send JPEG of middle slice only
                         raw_buf = io.BytesIO()
@@ -991,7 +1001,7 @@ class DataService:
                         create_data_stat(
                             name='raw_data',
                             stat_type='bytes',
-                            value=raw_data_bytes,
+                            thumbnail=raw_data_bytes,
                             shape=raw_shape,
                         )
                     )
@@ -1477,8 +1487,8 @@ class DataService:
             return
 
         # Ensure default columns exist (persists them across updates even if not in H5 yet)
-        if SampleStatsEx.TAGS.value not in updated_df.columns:
-             updated_df[SampleStatsEx.TAGS.value] = ""
+        if SampleStatsEx.TAG.value not in updated_df.columns:
+             updated_df[SampleStatsEx.TAG.value] = ""
         if "natural_sort_score" not in updated_df.columns:
              updated_df["natural_sort_score"] = np.nan
         if "deny_listed" not in updated_df.columns:

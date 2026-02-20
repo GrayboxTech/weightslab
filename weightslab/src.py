@@ -35,19 +35,6 @@ DATAFRAME_M = None
 _REGISTERED_SIGNALS = {}
 
 
-def save_signals(
-    batch_ids: th.Tensor,
-    signals: dict,
-    preds_raw: th.Tensor,
-    targets: th.Tensor,
-    preds: th.Tensor = None, 
-    log: bool = True
-):
-# Get Global variables
-logger = logging.getLogger(__name__)  # Get global logger
-DATAFRAME_M = None  # Get global dataframe proxy (auto-updated when ledger registers real manager)
-
-
 # #####################################################################################################################
 # WEIGHTSLAB INTERNAL FUNCTIONS FOR LOGGING, SIGNAL EXTRACTION, WRAPPING, ETC. (not typically called directly by users)
 # #####################################################################################################################
