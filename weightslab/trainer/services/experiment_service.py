@@ -78,22 +78,23 @@ class ExperimentService:
                 return pb2.GetLatestLoggerDataResponse(points=[])  # No data for this graph_name
 
             # Collect points for the specified graph_name and sample_ids
-            sample_data = history_per_sample[graph_name]
+            sample_data_by_hash = history_per_sample[graph_name]
             if sample_ids:
                 # Filter by sample_ids if tags were specified
                 for sid in sample_ids:
-                    data = sample_data.get(sid, None)
-                    if data:
-                        points.append(
-                            pb2.LoggerDataPoint(
-                                metric_name=graph_name,
-                                model_age=data.get("model_age", 0),
-                                metric_value=data.get("metric_value", 0.0),
-                                experiment_hash=data.get("experiment_hash", "N.A."),
-                                timestamp=int(data.get("timestamp", time.time())),
-                                sample_id=str(sid)
-                            )
-                        )
+                    for _, signals in sample_data_by_hash.items():
+                        for data in signals:
+                            if data["sample_id"] == str(sid):
+                                points.append(
+                                    pb2.LoggerDataPoint(
+                                        metric_name=graph_name,
+                                        model_age=data.get("model_age", 0),
+                                        metric_value=data.get("metric_value", 0.0),
+                                        experiment_hash=data.get("experiment_hash", "N.A."),
+                                        timestamp=int(data.get("timestamp", time.time())),
+                                        sample_id=str(sid)
+                                    )
+                                )
 
             return pb2.GetLatestLoggerDataResponse(points=points)
 

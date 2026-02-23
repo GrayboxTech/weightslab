@@ -183,7 +183,7 @@ class DataService:
     def _slowUpdateInternals(self, force=False):
         """Force refresh of internal dataframe view."""
         # Simple alias for now if not defined
-        if time.time() - self._last_internals_update_time > 5.0 or force:
+        if time.time() - self._last_internals_update_time > 15.0 or force:
              self._all_datasets_df = self._pull_into_all_data_view_df()
              self._load_existing_tags()
              self._last_internals_update_time = time.time()

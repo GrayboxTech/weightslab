@@ -38,20 +38,26 @@ class LoggerQueue:
         """Add a new signal to the logger and push it immediately to history/queue."""
         self.graph_names.add(graph_name)
         self._last_step = global_step
+        exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None
 
         # Update per-sample signal history immediately
         if graph_name not in self._signal_history_per_sample:
             self._signal_history_per_sample[graph_name] = {}
+        if exp_hash not in self._signal_history_per_sample[graph_name]:
+            self._signal_history_per_sample[graph_name][exp_hash] = []
 
         if signal_per_sample:
             for sid, value in signal_per_sample.items():
-                self._signal_history_per_sample[graph_name][sid] = {
-                    "experiment_name": graph_name,
-                    "model_age": global_step,
-                    "metric_name": graph_name,
-                    "metric_value": value.item() if isinstance(value, th.Tensor) else value,
-                    "experiment_hash": 'Overview only'
-                }
+                self._signal_history_per_sample[graph_name][exp_hash].append(
+                    {
+                        "experiment_name": graph_name,
+                        "sample_id": sid,
+                        "model_age": global_step,
+                        "metric_name": graph_name,
+                        "metric_value": value.item() if isinstance(value, th.Tensor) else value,
+                        "experiment_hash": exp_hash
+                    }
+                )
 
         # Update averaged signal history immediately
         metric_values = []
@@ -64,7 +70,7 @@ class LoggerQueue:
                 "model_age": global_step,
                 "metric_name": graph_name,
                 "metric_value": sum(metric_values) / len(metric_values) if len(metric_values) > 1 else metric_values[0],
-                "experiment_hash": self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None,
+                "experiment_hash": exp_hash,
             }
             self._signal_history.append(signal_entry)
             self._pending_queue.append(signal_entry)
@@ -79,8 +85,10 @@ class LoggerQueue:
         """Print all items in per-sample history."""
         for metric_name, samples in self._signal_history_per_sample.items():
             print(f"Metric: {metric_name}")
-            for sid, signal in samples.items():
-                print(f"  Sample ID: {sid}, Signal: {signal}")
+            for exp_hash, signals in samples.items():
+                print(f"  Experiment Hash: {exp_hash}")
+                for signal in signals:
+                    print(f"    Sample ID: {signal['sample_id']}, Signal: {signal}")
         return self._signal_history_per_sample
     
     def print_buffer(self):
