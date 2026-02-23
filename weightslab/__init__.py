@@ -58,10 +58,6 @@ __all__ = [
     "keep_serving",
     "save_signals",
     "set_log_directory",
-	"tag_samples", 
-	"discard_samples", 
-	"get_samples_by_tag", 
-	"get_discarded_samples",
 
     "_BANNER__",
     "__version__",

@@ -981,7 +981,7 @@ class CheckpointManager:
             return None
 
     def save_data_snapshot(self) -> Optional[Path]:
-        """Save lightweight JSON snapshot of data state (sample_id, tags, deny_listed) + RNG state.
+        """Save lightweight JSON snapshot of data state (sample_id, tags, discarded) + RNG state.
 
         H5 files (data.h5 and arrays.h5) are saved in parent directory (shared).
         Only checkpoint-specific metadata is saved here as JSON, including random state
@@ -1000,7 +1000,7 @@ class CheckpointManager:
             # Trigger H5 flush to parent directory (shared)
             dfm.flush_if_needed_nonblocking(force=True)
 
-            # Extract only sample_id, tags, deny_listed for this checkpoint
+            # Extract only sample_id, tags, discarded for this checkpoint
             df = dfm.get_df_view()
             if df.empty:
                 return None
@@ -1016,7 +1016,7 @@ class CheckpointManager:
                 ] or col.startswith(SampleStatsEx.TAG.value)
             ]
 
-            # Get dataframe snapshot with only relevant columns for checkpoint metadata (sample_id, tags cols, deny_listed)
+            # Get dataframe snapshot with only relevant columns for checkpoint metadata (sample_id, tags cols, discarded)
             snapshot_df = df[available_cols]
 
             # Capture current RNG states for reproducibility using tool function
@@ -1685,7 +1685,7 @@ class CheckpointManager:
                         if 'sample_id' in snapshot_df.columns:
                             snapshot_df = snapshot_df.set_index('sample_id')
 
-                        # Merge only the checkpoint-specific columns (tags, deny_listed)
+                        # Merge only the checkpoint-specific columns (tags, discarded)
                         # This updates existing rows without replacing all data
                         dfm.upsert_df(snapshot_df, force_flush=True)
                         logger.info(f"[OK] Applied data snapshot ({len(snapshot_df)} rows)")

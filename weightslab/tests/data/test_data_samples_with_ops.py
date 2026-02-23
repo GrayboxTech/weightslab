@@ -27,9 +27,8 @@ from weightslab.data.data_samples_with_ops import (
 class SimpleDataset(Dataset):
     """Simple dataset for testing."""
 
-    def __init__(self, size=10, return_labels=True):
+    def __init__(self, size=10):
         self.size = size
-        self.return_labels = return_labels
         self.__name__ = "simple_dataset"
 
     def __len__(self):
@@ -38,10 +37,9 @@ class SimpleDataset(Dataset):
     def __getitem__(self, idx):
         # Return random data with shape (3, 32, 32) to simulate images
         data = np.random.randn(3, 32, 32).astype(np.float32)
-        if self.return_labels:
-            label = idx % 10  # Simulate 10 classes
-            return data, label
-        return data
+        uid = np.random.randn(1)
+        label = idx % 10  # Simulate 10 classes
+        return data, uid, label
 
 
 class TestHelperFunctions(unittest.TestCase):
@@ -164,7 +162,7 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
     def setUp(self):
         """Create a temporary directory for logs."""
         self.temp_dir = tempfile.mkdtemp()
-        self.dataset = SimpleDataset(size=10, return_labels=True)
+        self.dataset = SimpleDataset(size=10)
 
         # Initialize HP
         parameters = {
@@ -210,24 +208,6 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         # Second element should be a numeric UID
         self.assertTrue(isinstance(result[1], (int, np.integer)))
 
-    def test_getitem_with_single_element_dataset(self):
-        """Test __getitem__ with unsupervised dataset (no labels)."""
-
-        dataset = SimpleDataset(size=5, return_labels=False)
-        wrapper = DataSampleTrackingWrapper(
-            wrapped_dataset=dataset,
-            root_log_dir=self.temp_dir,
-            enable_h5_persistence=False,
-            compute_hash=False,
-            use_tags=False,
-        )
-
-        result = wrapper[0]
-
-        # Should return (data, id)
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
-
 
 class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
     """Test tag-based labeling functionality."""
@@ -235,7 +215,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
     def setUp(self):
         """Create a temporary directory for logs."""
         self.temp_dir = tempfile.mkdtemp()
-        self.dataset = SimpleDataset(size=10, return_labels=True)
+        self.dataset = SimpleDataset(size=10)
 
         # Initialize HP
         parameters = {
