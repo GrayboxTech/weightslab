@@ -192,8 +192,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     ids = kw.pop('batch_ids', None)
     preds = kw.pop('preds', None)
     batch_scalar = kw.pop('signals', None)
-    preds_raw = a[0]
-    targets = a[1]
+    preds_raw = a[0] if len(a) > 0 else None
+    targets = a[1] if len(a) > 1 else None
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
@@ -406,7 +406,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 @functools.wraps(original_forward)
                 def new_forward(*a, **kw):
                     return wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw)
-                obj.forward = new_forward
+                obj.compute = new_forward
 
             elif hasattr(obj, 'forward') and callable(getattr(obj, 'forward')):
                 original_forward = obj.forward
