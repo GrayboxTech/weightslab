@@ -1,12 +1,12 @@
 """
-Unit Tests for gRPC Tag and Deny_Listed Operations
+Unit Tests for gRPC Tag and discarded Operations
 
 Tests the complete workflow of tag management via gRPC:
 - Adding tags to samples (EDIT_ACCUMULATE)
 - Removing tags from samples (EDIT_REMOVE)
 - Deleting entire tag columns (EDIT_REMOVE with value=-1)
-- Marking samples as deny_listed (discarded)
-- Restoring deny_listed samples
+- Marking samples as discarded (discarded)
+- Restoring discarded samples
 
 Uses a subsample of 100 MNIST test samples.
 """
@@ -71,7 +71,7 @@ class SimpleCNN(nn.Module):
 
 
 class TestGRPCTagOperations(unittest.TestCase):
-    """Test suite for tag and deny_listed operations via gRPC"""
+    """Test suite for tag and discarded operations via gRPC"""
 
     @classmethod
     def setUpClass(cls):
@@ -338,10 +338,10 @@ class TestGRPCTagOperations(unittest.TestCase):
         print(f"✓ Verified tag column no longer exists in dataframe")
 
     def test_05_deny_listed_operations(self):
-        """Test deny_listed (discard/restore) operations"""
-        print("\n[TEST 5] Testing deny_listed operations")
+        """Test discarded (discard/restore) operations"""
+        print("\n[TEST 5] Testing discarded operations")
         
-        # Mark samples 10-14 as deny_listed (discarded)
+        # Mark samples 10-14 as discarded (discarded)
         request_discard = pb2.DataEditsRequest(
             stat_name=SampleStatsEx.DISCARDED.value,
             float_value=0,
@@ -354,9 +354,9 @@ class TestGRPCTagOperations(unittest.TestCase):
         
         response = self.data_service.EditDataSample(request_discard, self.mock_context)
         self.assertTrue(response.success, f"Failed to discard samples: {response.message}")
-        print(f"✓ Marked samples 10-14 as deny_listed")
+        print(f"✓ Marked samples 10-14 as discarded")
         
-        # Verify samples are marked as deny_listed
+        # Verify samples are marked as discarded
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 15):
             if isinstance(df.index, pd.MultiIndex):
@@ -368,9 +368,9 @@ class TestGRPCTagOperations(unittest.TestCase):
                 else:
                     value = False
             
-            self.assertTrue(value, f"Sample {sample_id} should be deny_listed")
+            self.assertTrue(value, f"Sample {sample_id} should be discarded")
         
-        print(f"✓ Verified samples are deny_listed")
+        print(f"✓ Verified samples are discarded")
         
         # Now restore samples 10-12
         request_restore = pb2.DataEditsRequest(
@@ -401,7 +401,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             
             self.assertFalse(value, f"Sample {sample_id} should be restored")
         
-        # But 13-14 should still be deny_listed
+        # But 13-14 should still be discarded
         for sample_id in range(13, 15):
             if isinstance(df.index, pd.MultiIndex):
                 value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
@@ -412,7 +412,7 @@ class TestGRPCTagOperations(unittest.TestCase):
                 else:
                     value = False
             
-            self.assertTrue(value, f"Sample {sample_id} should still be deny_listed")
+            self.assertTrue(value, f"Sample {sample_id} should still be discarded")
         
         print(f"✓ Verified restoration worked correctly")
 

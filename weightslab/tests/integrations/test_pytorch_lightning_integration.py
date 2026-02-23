@@ -137,10 +137,11 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
         
         torch.manual_seed(42)
         x_data = torch.randn(self.n_samples, 1, self.img_size, self.img_size)
+        uids = torch.randint(0, self.n_classes, (self.n_samples,))
         y_data = torch.randint(0, self.n_classes, (self.n_samples,))
         
-        self.train_dataset = TensorDataset(x_data[:80], y_data[:80])
-        self.val_dataset = TensorDataset(x_data[80:], y_data[80:])
+        self.train_dataset = TensorDataset(x_data[:80], uids[:80], y_data[:80])
+        self.val_dataset = TensorDataset(x_data[80:], uids[80:], y_data[80:])
 
     def tearDown(self):
         """Clean up after each test."""
@@ -285,17 +286,17 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
                 with guard_training_context:
                     context = get_current_context()
                     context_log.append(("train", context))
-                    x, y = batch
-                    logits = self(x)
-                    loss = nn.functional.cross_entropy(logits, y)
+                    a = batch
+                    logits = self(a[0])
+                    loss = nn.functional.cross_entropy(logits, a[2])
                     return loss
             
             def validation_step(self, batch):
                 with guard_testing_context:
                     context = get_current_context()
                     context_log.append(("val", context))
-                    x, y = batch
-                    self(x)
+                    a = batch
+                    self(a[0])
             
             def configure_optimizers(self):
                 return torch.optim.Adam(self.parameters(), lr=0.001)
