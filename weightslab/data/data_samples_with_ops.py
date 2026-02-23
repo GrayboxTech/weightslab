@@ -145,6 +145,8 @@ class DataSampleTrackingWrapper(Dataset):
         keep_leakages: bool = False,
         **_,
     ):
+        preload_uids = False  # TODO (GP): Enable this after ensuring datasets provide unique sample_id in metadata and updating the loading logic to handle missing/duplicate IDs gracefully + fix str int sid type for dataframe.
+
         # Set name
         self.loader_name = loader_name
 
