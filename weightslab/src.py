@@ -10,10 +10,11 @@ import torch as th
 
 from typing import Callable
 
-from weightslab.backend.model_interface import ModelInterface
 from weightslab.backend.dataloader_interface import DataLoaderInterface
+from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.optimizer_interface import OptimizerInterface
-from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models, get_model
+from weightslab.backend.ledgers import DEFAULT_NAME, get_checkpoint_manager, get_model, get_dataloader, get_dataframe, get_optimizer, register_hyperparams, watch_hyperparams_file, get_hyperparams, register_logger, get_logger, register_signal, get_signal, list_models
+from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
@@ -198,8 +199,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     ids = kw.pop('batch_ids', None)
     preds = kw.pop('preds', None)
     batch_scalar = kw.pop('signals', None)
-    preds_raw = a[0]
-    targets = a[1]
+    preds_raw = a[0] if len(a) > 0 else None
+    targets = a[1] if len(a) > 1 else None
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
@@ -303,6 +304,24 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         )
     return out
 
+
+def _update_log_directory(new_log_dir: str):
+    """
+        Move the current log file to a new directory and update the file handler.
+
+        This is useful for setting a user-specified log directory after initial
+        setup with a temporary file. The function will:
+        - Move the existing log file to the new directory (if it exists)
+        - Update the logging FileHandler to point to the new location
+    """
+
+    # Update logging directory to use root_log_dir after parameters registration
+    hp = get_hyperparams()
+    try:
+        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
+    except Exception as e:
+        logger.debug(f"Could not update log directory: {e}")
+    
 
 # ##############################################################################################################
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
@@ -486,7 +505,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 @functools.wraps(original_forward)
                 def new_forward(*a, **kw):
                     return wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw)
-                obj.forward = new_forward
+                obj.compute = new_forward
 
             elif hasattr(obj, 'forward') and callable(getattr(obj, 'forward')):
                 original_forward = obj.forward

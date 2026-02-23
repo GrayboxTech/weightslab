@@ -1046,8 +1046,8 @@ class DataService:
         Centralized helper so every code path reports counts consistently.
 
         - number_of_all_samples: all rows in df
-        - number_of_discarded_samples: rows with deny_listed == True (if column exists)
-        - number_of_samples_in_the_loop: rows not deny_listed
+        - number_of_discarded_samples: rows with discarded == True (if column exists)
+        - number_of_samples_in_the_loop: rows not discarded
         """
         total_count = len(df)
         discarded_count = (
@@ -1715,8 +1715,8 @@ class DataService:
 
         Counts returned:
           - number_of_all_samples: all rows currently in the dataframe
-          - number_of_samples_in_the_loop: rows not deny_listed
-          - number_of_discarded_samples: rows with deny_listed == True
+          - number_of_samples_in_the_loop: rows not discarded
+          - number_of_discarded_samples: rows with discarded == True
         """
 
         self._ctx.ensure_components()
@@ -1924,7 +1924,7 @@ class DataService:
 
     def EditDataSample(self, request, context):
         """
-        Edit sample metadata (tags and deny_listed).
+        Edit sample metadata (tags and discarded).
         
         Tags are stored as individual boolean columns (tags_<tagname>) instead of
         a single comma-separated string. This allows for efficient dataframe indexing, grouping,
@@ -1951,7 +1951,7 @@ class DataService:
         if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
-                message="Only 'tags' and 'deny_listed' stat editing is supported for now.",
+                message="Only 'tags' and 'discarded' stat editing is supported for now.",
             )
 
         # No dataset lookups needed; all edits apply directly to the global dataframe.

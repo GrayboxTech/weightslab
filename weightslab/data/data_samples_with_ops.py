@@ -389,33 +389,24 @@ class DataSampleTrackingWrapper(Dataset):
         # Ensure data is a tuple for consistent handling
         if not isinstance(data, tuple):
             data = (data,)
-        
-        # Handle single element (unsupervised): return (item, id)
-        if len(data) == 1:
+            raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
+        elif len(data) == 1:  # For single element (unsupervised): return (item, id)
             return data[0], id
-
+        elif len(data) == 2:  # For (data, label) format: return (data, id, label)
+            return data[0], data[1]
+        
         # Element extraction
         # # First, always the input data
         item = data[0]
         
-        # Handle different tuple formats:
-        # - 2-tuple: (item, target) - common in sklearn-style datasets
-        # - 3+ tuple: (item, uid, target, *metadata) - expected format
-        if len(data) == 2:
-            # Standard 2-tuple from PyTorch datasets: (item, target)
-            target = data[1]
-            rest = ()
-        else:
-            # 3+ tuple format
-            # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
-            # id = data[1]
-            pass
-
-            # # Third, is target/label
-            target = data[2]  
-            
-            # # Finally, any additional elements (e.g., boxes, masks) are metadata
-            rest = data[3:] if len(data) > 3 else ()
+        # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
+        # id = data[1]
+        
+        # # Third, is target/label
+        target = data[2]
+        
+        # # Finally, any additional elements (e.g., boxes, masks) are metadata
+        rest = data[3:] if len(data) > 3 else ()
 
         # For single element (unsupervised): return (item, id)
         # Override target with tag-based label if use_tags is enabled
@@ -809,9 +800,8 @@ class DataSampleTrackingWrapper(Dataset):
                     denied_samples_ids = set(denied_samples_ids) | prev_denied
                 cnt = 0
                 for uid in self.unique_ids:
-                    uid_int = str(uid)
-                    is_denied = uid_int in denied_samples_ids
-                    self.set(uid_int, SampleStatsEx.DISCARDED.value, is_denied)
+                    is_denied = uid in denied_samples_ids
+                    self.set(uid, SampleStatsEx.DISCARDED.value, is_denied)
                     cnt += int(is_denied)
                 self.denied_sample_cnt = cnt
 

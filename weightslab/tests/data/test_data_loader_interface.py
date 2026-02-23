@@ -108,7 +108,7 @@ class TestDataLoaderInterface(unittest.TestCase):
 
     def test_dataloader_interface_uses_multiple_workers(self):
         dataset = WorkerIdDataset(64)
-
+ 
         train_iface = DataLoaderInterface(
             dataset,
             batch_size=1,
@@ -128,9 +128,10 @@ class TestDataLoaderInterface(unittest.TestCase):
         def _collect_worker_ids(iface, max_batches=32):
             worker_ids = set()
             for i, batch in enumerate(iface):
-                worker_ids.add(int(batch[2].item()))
+                worker_tensor = batch[-1]
+                worker_ids.add(int(worker_tensor.reshape(-1)[0].item()))
                 if i + 1 >= max_batches:
-                    break
+                    break 
             return worker_ids
 
         train_worker_ids = _collect_worker_ids(train_iface)
@@ -230,8 +231,8 @@ class TestDataLoaderReproducibility(unittest.TestCase):
 
         # 3. Generate batches with current RNG
         print("\n3. Generating batches...")
-        _, bids_1, _ = next(dataloader)
-        _, bids_2, _ = next(dataloader)
+        _, bids_1 = next(dataloader)
+        _, bids_2 = next(dataloader)
         print(f"Batches: {bids_1.tolist()}, {bids_2.tolist()}")
 
         # 4. Restore RNG and reset iterator
@@ -242,8 +243,8 @@ class TestDataLoaderReproducibility(unittest.TestCase):
 
         # 5. Generate batches again - should be identical
         print("\n5. Generating batches with restored RNG...")
-        _, bids_1_repeat, _ = next(dataloader)
-        _, bids_2_repeat, _ = next(dataloader)
+        _, bids_1_repeat = next(dataloader)
+        _, bids_2_repeat = next(dataloader)
         print(f"Repeated batches: {bids_1_repeat.tolist()}, {bids_2_repeat.tolist()}")
 
         # Verify
