@@ -642,7 +642,10 @@ class LedgeredDataFrameManager:
             missing_idx = df_updates.index.difference(self._df.index)
             if len(missing_idx) > 0:
                 self._df = pd.concat(
-                    [self._df, pd.DataFrame(index=missing_idx, columns=self._df.columns)],
+                    [
+                        self._df,
+                        pd.DataFrame(index=missing_idx, columns=self._df.columns)
+                    ],
                     copy=False,
                 )
 

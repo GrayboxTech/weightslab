@@ -11,7 +11,7 @@ __all__ = [
     "_detect_dataset_split",
     "_is_scalarish",
     "_is_dense_array",
-    "_to_numpy_safe",
+    "to_numpy_safe",
     "_downsample_nn",
     "_filter_columns_by_patterns",
     "_matches_pattern",
@@ -103,22 +103,6 @@ def _is_dense_array(x) -> bool:
     return isinstance(x, np.ndarray) and x.ndim >= 2
 
 
-def _to_numpy_safe(x: Any):
-    if isinstance(x, np.ndarray):
-        return x
-    if isinstance(x, (list, tuple)):
-        try:
-            return np.asarray(x)
-        except Exception:
-            return None
-    try:
-        if isinstance(x, th.Tensor):
-            return x.detach().cpu().numpy()
-    except Exception:
-        pass
-    return None
-
-
 def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
     """Downsample 2D/3D arrays using simple striding (nearest-neighbor-like)."""
     if arr.ndim == 2:
@@ -137,7 +121,7 @@ def _downsample_nn(arr: np.ndarray, max_hw: int = 96) -> np.ndarray:
     return arr
 
 
-def _to_numpy_safe(x):
+def to_numpy_safe(x):
     if isinstance(x, (int, float)):
         return np.array([x])
 
@@ -175,7 +159,7 @@ def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
             item = raw_data
 
         # Convert item to numpy to get shape
-        item_np = _to_numpy_safe(item)
+        item_np = to_numpy_safe(item)
         if item_np is not None:
             # Determine height and width from item
             if item_np.ndim == 3:
@@ -256,22 +240,22 @@ def load_label(dataset, sample_id):
             elif len(data) == 2:  # if len==2, only data and uid, no extra info
                 return None  # No label, only data and uid
             elif len(data) == 3:  # if len==3, data, uids, label, no extra info
-                label = _to_numpy_safe(data[2])  # Third element is typically the label
+                label = to_numpy_safe(data[2])  # Third element is typically the label
                 label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
             elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
                 if len(data) == 4:
-                    label = _to_numpy_safe(data[2])  # Third element is typically the label
+                    label = to_numpy_safe(data[2])  # Third element is typically the label
                     label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                     metadata = data[3]
-                    classes = _to_numpy_safe(metadata['classes']) if isinstance(metadata, dict) and 'classes' in metadata else None
+                    classes = to_numpy_safe(metadata['classes']) if isinstance(metadata, dict) and 'classes' in metadata else None
                     if classes is not None:
-                        label = _to_numpy_safe(data[2])  # Second element is typically the label
+                        label = to_numpy_safe(data[2])  # Second element is typically the label
                         # Concat label with classes if available (bbox detection, i.e., (4,) -> (5,) with class id)
                         label = np.concatenate([label, classes[..., None]], axis=1)
                     else:
-                        label = _to_numpy_safe(data[2])  # Second element is typically the label
+                        label = to_numpy_safe(data[2])  # Second element is typically the label
                 else:
-                    label = _to_numpy_safe(data[2])  # Third element is typically the label
+                    label = to_numpy_safe(data[2])  # Third element is typically the label
                     label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                     metadata = data[3:]
             return label[0] if label.ndim == 1 and label.shape[0] == 1 else label

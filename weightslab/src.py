@@ -1060,10 +1060,10 @@ def get_discarded_samples(
 
 
 def save_signals(
-    batch_ids: th.Tensor,
     signals: dict,
-    preds_raw: th.Tensor,
-    targets: th.Tensor,
+    batch_ids: th.Tensor,
+    preds_raw: th.Tensor = None,
+    targets: th.Tensor = None,
     preds: th.Tensor = None,
     step: int | None = None,
     log: bool = True
@@ -1072,14 +1072,31 @@ def save_signals(
         Save data statistics to the tracked dataset.
         
         Args:
-            batch_ids (th.Tensor): The batch ids.
             signals (th.Tensor): The batch losses.
-            preds (th.Tensor, optional): The batch predictions. Defaults to None.
             preds_raw (th.Tensor, optional): The raw batch predictions. Defaults to None.
             targets (th.Tensor, optional): The batch targets. Defaults to None.
+            batch_ids (th.Tensor, optional): The batch ids. Defaults to None.
+            preds (th.Tensor, optional): The batch predictions. Defaults to None.
             step (int, optional): The current training step. Defaults to 0.
             log (bool, optional): Whether to log the signals. Defaults to True.
+        
+        Examples:
+            >>> # In your training loop, after computing losses and predictions:
+            >>> for batch in train_loader:
+            ...     inputs, targets = batch
+            ...     preds = model(inputs)
+            ...     loss = loss_fn(preds, targets)
+            ...     batch_ids = batch['sample_id']  # Assuming your dataloader provides sample IDs
+            ...     wl.save_signals(
+            ...         signals={'train_loss': loss},
+            ...         batch_ids=batch_ids,
+            ...         preds_raw=preds,  # Optionally save raw predictions. Not useful if already saved by loss wrapper.
+            ...         targets=targets,  # Optionally save target predictions. Not useful if already saved by loss wrapper.
+            ...         step=current_step,  # Optionally save step. If not provided, will attempt to infer from training loop context.
+            ...         log=True  # Should we log the signals also or only save to sample metadata.
+            ...     )
     """
+
     global DATAFRAME_M
     if DATAFRAME_M is None:
         DATAFRAME_M = get_dataframe()
@@ -1096,8 +1113,12 @@ def save_signals(
             # Log if requested
             _log_signal(scalar, batch_scalar, reg_name, step=step)
 
+        if batch_ids is None or len(batch_ids) == 0:
+            logger.warning("No batch IDs provided for signal saving; skipping logging and saving.")
+            return
+        
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(str)
+    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
     if preds is not None:
         pred_np = preds.detach().cpu().numpy().astype(np.uint16) if isinstance(preds, th.Tensor) else np.asarray(preds).astype(np.uint16)
     else:
@@ -1130,7 +1151,7 @@ def save_signals(
     else:
         losses_data = None
     # # Process targets
-    if target_np.ndim == 1:
+    if target_np is not None and target_np.ndim == 1:
         target_np = target_np[:, np.newaxis]
     if pred_np is not None and pred_np.ndim == 1:
         pred_np = pred_np[:, np.newaxis]

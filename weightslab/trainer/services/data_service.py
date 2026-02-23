@@ -27,7 +27,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
-from weightslab.data.data_utils import load_label, load_raw_image
+from weightslab.data.data_utils import load_label, load_raw_image, to_numpy_safe
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
 
 
@@ -604,7 +604,6 @@ class DataService:
 
             # Scalar / single element -> treat as classification
             label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
-            label_size = label.size if hasattr(label, 'size') else (1 if label_ndim == 0 else None)
 
             # Enccode task type based on label shape heuristics
             # Maybe we should not care and send data.
@@ -764,8 +763,8 @@ class DataService:
                     
                     if lidar_config and 'boxes' in label:
                         logger.info(f"[DataService] Rendering BEV mask. Boxes: {len(label['boxes'])}")
-                        boxes = _to_numpy_safe(label['boxes'])
-                        labels_ = _to_numpy_safe(label['labels'])
+                        boxes = to_numpy_safe(label['boxes'])
+                        labels_ = to_numpy_safe(label['labels'])
                         
                         id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
                         fmt_labels = []
@@ -844,8 +843,8 @@ class DataService:
                 # Handle Dict Prediction (Detection -> BEV Mask)
                 if isinstance(pred, dict) and lidar_config and 'boxes' in pred:
                      # Render Prediction Mask similar to Ground Truth
-                     boxes = _to_numpy_safe(pred['boxes'])
-                     labels_ = _to_numpy_safe(pred['labels'])
+                     boxes = to_numpy_safe(pred['boxes'])
+                     labels_ = to_numpy_safe(pred['labels'])
                      
                      # Map IDs
                      id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
@@ -932,7 +931,7 @@ class DataService:
                 np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(
                     dataset, dataset.get_index_from_sample_id(sample_id)
                 )
-                
+
                 if middle_pil is not None:
                     original_size = middle_pil.size
                     target_width = original_size[0]
@@ -2052,7 +2051,7 @@ class DataService:
                 self._slowUpdateInternals()
                 if self._all_datasets_df is not None and not self._all_datasets_df.empty:
                     if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
-                        split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist())
+                        split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value][~self._all_datasets_df[SampleStatsEx.ORIGIN.value].isna()].unique().tolist())
                     elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
                         if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
                             split_names = sorted(self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist())
