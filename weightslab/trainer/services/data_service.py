@@ -2052,7 +2052,7 @@ class DataService:
                 self._slowUpdateInternals()
                 if self._all_datasets_df is not None and not self._all_datasets_df.empty:
                     if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
-                        split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist())
+                        split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value][~self._all_datasets_df[SampleStatsEx.ORIGIN.value].isna()].unique().tolist())
                     elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
                         if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
                             split_names = sorted(self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist())
