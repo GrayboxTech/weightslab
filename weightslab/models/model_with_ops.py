@@ -521,7 +521,7 @@ class NetworkWithOps(nn.Module):
                 if k.startswith('model.'):
                     remapped[k[len('model.'):]] = v
                 else:
-                    remapped[k] = v
+                    remapped['model.' + k] = v
             super().load_state_dict(
                 remapped, strict=strict, assign=assign, **kwargs)
 

@@ -31,6 +31,7 @@ import json
 import yaml
 import logging
 import time
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from datetime import datetime
@@ -112,7 +113,8 @@ class CheckpointManager:
         self.hash_by_module: list = [None, None, None]  # HP, MODEL, DATA
 
         # Step tracking
-        self._step_counter = 0
+        self._step_counter = None
+        self._model_init_step = 0
 
         # First time only
         self.firsttime = True
@@ -182,7 +184,22 @@ class CheckpointManager:
             return None
 
     def get_current_experiment_hash(self) -> Optional[str]:
-        """Get the current experiment hash."""
+        """Get the current experiment hash. Computes it on-demand if not yet set."""
+        if self.current_exp_hash is None:
+            # Compute hash on first access to ensure logger has valid hash from step 0
+            model_snapshot = self.get_model_snapshot()
+            hp_snapshot = self.get_HP_snapshot()
+            data_snapshot = self.get_dataframe_snapshot()
+            
+            if model_snapshot is not None or hp_snapshot or data_snapshot:
+                self.current_exp_hash = self.hash_generator.generate_hash(
+                    model=model_snapshot,
+                    config=hp_snapshot,
+                    data_state=data_snapshot,
+                    model_init_step=self._model_init_step,
+                )
+                logger.info(f"Initial experiment hash computed on-demand: {self.current_exp_hash}")
+        
         return self.current_exp_hash
 
     def get_HP_snapshot(self) -> Dict[str, Any]:
@@ -292,6 +309,7 @@ class CheckpointManager:
             model=model_snapshot,
             config=hp_snapshot,
             data_state=data_snapshot,
+            model_init_step=self._model_init_step,
             force=force
         )
 
@@ -302,7 +320,8 @@ class CheckpointManager:
         new_hash = self.hash_generator.generate_hash(
             model=model_snapshot,
             config=hp_snapshot,
-            data_state=data_snapshot
+            data_state=data_snapshot,
+            model_init_step=self._model_init_step,
         )
 
         is_new = (new_hash != self.current_exp_hash) or (force or dump_immediately)
@@ -687,7 +706,7 @@ class CheckpointManager:
 
                 if weights_model is not None:
                     logger.info("Saving model weights checkpoint with component changes...")
-                    self.save_model_checkpoint(weights_model, save_optimizer=dump_optimizer_state, save_model_checkpoint=dump_model_state)
+                    self.save_model_checkpoint(save_optimizer=dump_optimizer_state, save_model_checkpoint=dump_model_state)
                 else:
                     logger.warning("Could not save weights: no model available")
             except Exception as e:
@@ -744,14 +763,7 @@ class CheckpointManager:
 
         # Get model from ledger if not provided
         if model is None:
-            try:
-                model = get_model()
-                # Unwrap proxy if needed
-                if hasattr(model, 'get') and callable(model.get):
-                    model = model.get()
-            except Exception as e:
-                logger.error(f"Could not get model from ledger: {e}")
-                return None
+            model = get_model()
 
         if model is None:
             logger.error("No model available to checkpoint")
@@ -759,8 +771,8 @@ class CheckpointManager:
 
         # Determine step
         if step is None:
-            step = self._step_counter
-        self._step_counter = max(self._step_counter, step + 1)
+            step = self._step_counter if self._step_counter is not None else model.get_age()
+        self._step_counter = min(self._step_counter, step) if self._step_counter is not None else step
 
         # Prepare checkpoint data
         checkpoint = {
@@ -1254,6 +1266,7 @@ class CheckpointManager:
             'current_exp_hash': self.current_exp_hash,
             'previous_exp_hash': self.previous_exp_hash,
             'step_counter': self._step_counter,
+            'model_init_step': self._model_init_step,
             'last_updated': datetime.now().isoformat(),
             'component_hashes': self.hash_generator.get_component_hashes(),
         }
@@ -1293,6 +1306,7 @@ class CheckpointManager:
             self.current_exp_hash = state.get('current_exp_hash')
             self.previous_exp_hash = state.get('previous_exp_hash')
             self._step_counter = state.get('step_counter', 0)
+            self._model_init_step = state.get('model_init_step', 0)
 
             component_hashes = state.get('component_hashes')
 
@@ -1337,6 +1351,7 @@ class CheckpointManager:
                         load_weights: bool = True,
                         load_config: bool = True,
                         load_data: bool = True,
+                        target_step: Optional[int] = None,
                         force: bool = False
     ) -> Dict[str, Any]:
         """Load a complete checkpoint state by experiment hash.
@@ -1459,7 +1474,7 @@ class CheckpointManager:
             exp_info = manifest['experiments'][exp_hash]
             manifest_weight_checkpoint = exp_info.get('latest_weight_checkpoint')
 
-            if manifest_weight_checkpoint:
+            if manifest_weight_checkpoint and target_step is None:
                 checkpoint_path = model_dir / manifest_weight_checkpoint
                 if checkpoint_path.exists():
                     checkpoint_file_to_load = checkpoint_path
@@ -1467,15 +1482,12 @@ class CheckpointManager:
 
             # Fallback: scan for weight files (old behavior for backward compatibility)
             if checkpoint_file_to_load is None:
-                # Try new naming format first (with full exp_hash)
-                weight_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
-                # Fallback to old naming format
-                if not weight_files:
-                    weight_files = sorted(model_dir.glob(f"{exp_hash[8:-8]}_step_*.pt"))
-
-                if weight_files:
-                    checkpoint_file_to_load = weight_files[-1]  # Get most recent
-                    logger.debug(f"  Using weight checkpoint from directory scan: {checkpoint_file_to_load.name}")
+                checkpoint_file_to_load = self._select_weight_checkpoint_file(exp_hash, target_step=target_step)
+                if checkpoint_file_to_load is not None:
+                    if target_step is None:
+                        logger.debug(f"  Using latest weight checkpoint from directory scan: {checkpoint_file_to_load.name}")
+                    else:
+                        logger.debug(f"  Using closest weight checkpoint for target step {target_step}: {checkpoint_file_to_load.name}")
 
             if checkpoint_file_to_load:
                 try:
@@ -1568,7 +1580,58 @@ class CheckpointManager:
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
 
-    def load_state(self, exp_hash: str, force: bool = False, load_model: bool = True, load_config: bool = True, load_data: bool = True) -> bool:
+    def _extract_step_from_checkpoint_name(self, filename: str) -> Optional[int]:
+        match = re.search(r"_step_(\d+)\.pt$", filename)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except Exception:
+            return None
+
+    def _select_weight_checkpoint_file(self, exp_hash: str, target_step: Optional[int] = None) -> Optional[Path]:
+        """Select weight checkpoint file for an experiment hash.
+
+        - If target_step is None: returns latest checkpoint.
+        - If target_step is provided: returns closest step; tie breaks toward higher step.
+        """
+        model_dir = self.models_dir / exp_hash[8:-8]
+        if not model_dir.exists():
+            return None
+
+        weight_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
+        if not weight_files:
+            weight_files = sorted(model_dir.glob(f"{exp_hash[8:-8]}_step_*.pt"))
+        if not weight_files:
+            return None
+
+        if target_step is None:
+            return weight_files[-1]
+
+        target = int(target_step)
+        parsed: List[tuple[Path, int]] = []
+        for path in weight_files:
+            step = self._extract_step_from_checkpoint_name(path.name)
+            if step is not None:
+                parsed.append((path, step))
+
+        if not parsed:
+            return weight_files[-1]
+
+        parsed.sort(key=lambda item: item[1])
+        best_path, _ = min(parsed, key=lambda item: (abs(item[1] - target), -item[1]))
+        return best_path
+
+    def load_state(
+        self,
+        exp_hash: str,
+        force: bool = False,
+        load_model: bool = True,
+        load_weights: bool = True,
+        load_config: bool = True,
+        load_data: bool = True,
+        target_step: Optional[int] = None,
+    ) -> bool:
         """Load and apply a complete checkpoint state by experiment hash.
 
         This method loads all components and updates the system state in-place:
@@ -1592,9 +1655,10 @@ class CheckpointManager:
         checkpoint_data = self.load_checkpoint(
             exp_hash=exp_hash,
             load_model=load_model,
-            load_weights=load_model,
+            load_weights=load_weights,
             load_config=load_config,
             load_data=load_data,
+            target_step=target_step,
             force=force
         )
         if not checkpoint_data['loaded_components']:
@@ -1613,6 +1677,12 @@ class CheckpointManager:
                 # Set Model Training Guard
                 guard_training_context.model = model  # Train
                 guard_testing_context.model = model  # Eval
+
+                loaded_step = None
+                if checkpoint_data.get('weights') is not None:
+                    loaded_step = checkpoint_data['weights'].get('step', None)
+                if loaded_step is not None:
+                    self._model_init_step = int(loaded_step)
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply model: {e}")
                 success = False
@@ -1626,6 +1696,7 @@ class CheckpointManager:
                     model.load_state_dict(weights['model_state_dict'])
                     step = weights.get('step', -1)
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
+                    self._model_init_step = int(step)
 
                 # Set Model Training Guard
                 guard_training_context.model = model  # Train
@@ -1654,6 +1725,7 @@ class CheckpointManager:
                         model.load_state_dict(weights['model_state_dict'])
                         step = weights.get('step', -1)
                         logger.info(f"[OK] Applied weights to reloaded model (step {step})")
+                        self._model_init_step = int(step)
 
                     # Set Model Training Guard
                     guard_training_context.model = model  # Train

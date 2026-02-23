@@ -966,7 +966,7 @@ class LedgeredDataFrameManager:
 
 
 # Create global instance with config-driven parameters
-def _create_ledger_manager():
+def create_ledger_manager():
     """Create LedgeredDataFrameManager with parameters from config if available."""
     flush_interval = 3.0
     flush_max_rows = 100
@@ -994,8 +994,8 @@ def _create_ledger_manager():
 
 # Global LedgeredDataFrameManager instance
 # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
-LM = _create_ledger_manager()
-try:
-    register_dataframe(LM)
-except Exception as e:
-    logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")
+# LM = create_ledger_manager()
+# try:
+#     register_dataframe(LM)
+# except Exception as e:
+#     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

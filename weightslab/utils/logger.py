@@ -31,59 +31,43 @@ class LoggerQueue:
         return list(self.graph_names)
 
     def _flush_step_buffer(self):
-        """Flush accumulated metrics for the previous step to history."""
-        if self._current_step_buffer and self._last_step is not None:
-            for metric_name, values in self._current_step_buffer.items():
-                # Per sample signal
-                if metric_name not in self._signal_history_per_sample:
-                    self._signal_history_per_sample[metric_name] = {}
-                for sid, value in values[0].items():
-                    self._signal_history_per_sample[metric_name][sid] = {
-                        "experiment_name": metric_name,
-                        "model_age": self._last_step,
-                        "metric_name": metric_name,
-                        "metric_value": value.item() if isinstance(value, th.Tensor) else value,
-                        "experiment_hash": 'Overview only'  # For now, we don't track per-sample signals by experiment hash in the checkpoint manager
-                    }
-
-                # Average signal for step 
-                self._signal_history.append(
-                    {
-                        "experiment_name": metric_name,
-                        "model_age": self._last_step,
-                        "metric_name": metric_name,
-                        "metric_value": sum(values[1]) / len(values[1]) if len(values[1]) > 1 else values[1][0],
-                        "experiment_hash": self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None,
-                    }
-                )
-                self._pending_queue.append(
-                    self._signal_history[-1]
-                )  # Add to pending queue for WeightsStudio gRPC updates
-            self._current_step_buffer.clear()
+        """Backward-compatible no-op: history is now updated immediately in add_scalars."""
+        self._current_step_buffer.clear()
 
     def add_scalars(self, graph_name, signal, global_step, signal_per_sample):
-        """Add a new signal to the logger, buffering it by step and graph name."""
+        """Add a new signal to the logger and push it immediately to history/queue."""
         self.graph_names.add(graph_name)
+        self._last_step = global_step
 
-        # If step changed, flush the previous step's buffer
-        if global_step != self._last_step:
-            self._flush_step_buffer()
-            self._last_step = global_step  # adjust for 0-based step indexing
-        
-        # Buffer the new signal for the current step
-        if graph_name not in self._current_step_buffer:
-            self._current_step_buffer[graph_name] = [{}, []]  # [per_sample_signals, step_signals]
-        
-        # Update per-sample signal
+        # Update per-sample signal history immediately
+        if graph_name not in self._signal_history_per_sample:
+            self._signal_history_per_sample[graph_name] = {}
+
         if signal_per_sample:
-            self._current_step_buffer[graph_name][0].update(
-                signal_per_sample
-            )
-        # Update signal
+            for sid, value in signal_per_sample.items():
+                self._signal_history_per_sample[graph_name][sid] = {
+                    "experiment_name": graph_name,
+                    "model_age": global_step,
+                    "metric_name": graph_name,
+                    "metric_value": value.item() if isinstance(value, th.Tensor) else value,
+                    "experiment_hash": 'Overview only'
+                }
+
+        # Update averaged signal history immediately
+        metric_values = []
         for _, line_value in signal.items():
-            self._current_step_buffer[graph_name][1].append(
-                float(line_value)
-            )
+            metric_values.append(float(line_value.item() if isinstance(line_value, th.Tensor) else line_value))
+
+        if len(metric_values) > 0:
+            signal_entry = {
+                "experiment_name": graph_name,
+                "model_age": global_step,
+                "metric_name": graph_name,
+                "metric_value": sum(metric_values) / len(metric_values) if len(metric_values) > 1 else metric_values[0],
+                "experiment_hash": self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None,
+            }
+            self._signal_history.append(signal_entry)
+            self._pending_queue.append(signal_entry)
 
     def print_history(self):
         """Print all items in history."""

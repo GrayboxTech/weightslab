@@ -15,7 +15,7 @@ from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
-from weightslab.data.dataframe_manager import _create_ledger_manager
+from weightslab.data.dataframe_manager import create_ledger_manager
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
 from weightslab.data.data_utils import (
     _detect_dataset_split,
@@ -151,7 +151,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Init Global Ledger Manager
         ledger_manager = get_dataframe()
         if ledger_manager == None:
-            ledger_manager = _create_ledger_manager()
+            ledger_manager = create_ledger_manager()
             try:
                 register_dataframe(ledger_manager)
             except Exception as e:

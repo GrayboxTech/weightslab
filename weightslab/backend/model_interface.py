@@ -406,7 +406,7 @@ class ModelInterface(NetworkWithOps):
                     # If model architecture changed, save it
                     if 'model' in changed_components:
                         try:
-                            existing_manager.save_model_architecture(self.model)
+                            existing_manager.save_model_architecture()
                         except Exception:
                             pass
                 except Exception:
@@ -414,7 +414,6 @@ class ModelInterface(NetworkWithOps):
                 try:
                     # Save model weights checkpoint (no pending dump here)
                     existing_manager.save_model_checkpoint(
-                        model=self.model,
                         save_optimizer=True,
                         step=batched_age,
                         force_dump_pending=False,
