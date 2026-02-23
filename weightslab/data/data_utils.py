@@ -237,8 +237,9 @@ def load_label(dataset, sample_id):
         if isinstance(data, (list, tuple)):
             if len(data) == 1:
                 return None  # Only data, no label
-            elif len(data) == 2:  # if len==2, only data and uid, no extra info
-                return None  # No label, only data and uid
+            elif len(data) == 2:  # Commonly (data, label) in standard PyTorch datasets
+                label = to_numpy_safe(data[1])
+                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
             elif len(data) == 3:  # if len==3, data, uids, label, no extra info
                 label = to_numpy_safe(data[2])  # Third element is typically the label
                 label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
