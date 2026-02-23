@@ -276,7 +276,7 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Initialize DataFrame as single source of truth
         # Start with defaults for all UIDs (single dict build per row to trim overhead)
-        sample_ids = [int(uid) for uid in self.unique_ids]
+        sample_ids = [str(uid) for uid in self.unique_ids]
 
         default_data = []
         uids = {}
