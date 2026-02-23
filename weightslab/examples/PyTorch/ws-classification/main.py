@@ -1,21 +1,21 @@
-import itertools
 import os
 import time
-import tempfile
 import logging
+import tempfile
 
+import yaml
 import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import yaml
-
-import weightslab as wl
 
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
 from torchvision import datasets, transforms
+from torch.utils.data import Dataset
 
+import weightslab as wl
+from weightslab.backend import ledgers
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.components.global_monitoring import (
     guard_training_context,
@@ -28,13 +28,87 @@ logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Custom MNIST Dataset with Filepath Metadata
+# =============================================================================
+class MNISTCustomDataset(Dataset):
+    """
+    Custom MNIST dataset that includes filepath metadata for each image.
+    
+    Returns tuples of (image, label, filepath) where filepath is stored
+    as metadata that can be tracked by WeightsLab.
+    """
+    
+    def __init__(self, root, train=True, download=False, transform=None):
+        """
+        Args:
+            root (str): Root directory where MNIST data is stored
+            train (bool): If True, use training data; else use test data
+            download (bool): If True, download the data if not present
+            transform (callable, optional): Optional transform to be applied on images
+        """
+        # Load the standard MNIST dataset
+        self.mnist = datasets.MNIST(
+            root=root,
+            train=train,
+            download=download,
+            transform=None  # We'll apply transform manually to track filepath
+        )
+        self.transform = transform
+        self.train = train
+        self.root = root
+        
+        # Build filepath mapping for each sample
+        self._build_filepath_mapping()
+    
+    def _build_filepath_mapping(self):
+        """Build a mapping of sample index to filepath."""
+        self.filepaths = {}
+        
+        # For each index, construct a meaningful filepath
+        # MNIST doesn't have original individual files, so we create virtual paths
+        for idx in range(len(self.mnist)):
+            label = self.mnist.targets[idx].item() if hasattr(self.mnist.targets[idx], 'item') else self.mnist.targets[idx]
+            split = 'train' if self.train else 'test'
+            
+            # Create a virtual filepath that identifies the image
+            virtual_path = os.path.join(
+                'MNIST',
+                'processed',
+                split,
+                f'class_{label}',
+                f'sample_{idx:05d}.pt'
+            )
+            self.filepaths[idx] = virtual_path
+    
+    def __len__(self):
+        return len(self.mnist)
+    
+    def __getitem__(self, idx):
+        """
+        Returns:
+            tuple: (image, label, filepath)
+        """
+        image, label = self.mnist[idx]
+        
+        # Apply transform if provided
+        if self.transform:
+            image = self.transform(image)
+        
+        # Get the filepath for this sample
+        metadata = {
+            'filepath': self.filepaths.get(idx, 'unknown')}
+        
+        return image, idx, label, metadata
+
+
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
-    with guard_training_context:
-        (inputs, ids, labels) = next(loader)
+    with guard_training_context:    
+        (inputs, ids, labels, _) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
 
@@ -66,9 +140,9 @@ def train(loader, model, optimizer, criterion_mlt, device):
 
 def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
-    losses = 0.0
+    losses = torch.tensor(0.0, device=device)
 
-    for (inputs, ids, labels) in loader:
+    for (inputs, ids, labels, _) in loader:
         with guard_testing_context, torch.no_grad():
             inputs = inputs.to(device)
             labels = labels.to(device)
@@ -95,13 +169,18 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
             # Per-sample accuracy: 1.0 if correct, else 0.0
             preds_flat = preds.view(-1)
             acc_per_sample = (preds_flat == labels.view(-1)).float()
+            acc_reversed_per_sample = (preds_flat != labels.view(-1)).float()
 
             # Log per-sample metric alongside signals; persists via the storer
+            signals = {
+                "test_metric/Accuracy_per_sample": acc_per_sample,
+                "test_metric/Inverse_Accuracy_per_sample": acc_reversed_per_sample,
+            }
             wl.save_signals(
                 preds_raw=outputs,
                 targets=labels,
                 batch_ids=ids,
-                signals={"valOrtest/accuracy_per_sample": acc_per_sample},
+                signals=signals,
                 preds=preds,
             )
 
@@ -129,7 +208,7 @@ if __name__ == "__main__":
     parameters.setdefault("experiment_name", "mnist_cnn")
     parameters.setdefault("device", "auto")
     parameters.setdefault("training_steps_to_do", 1000)
-    parameters.setdefault("eval_full_to_train_steps_ratio", 50)
+    parameters.setdefault("eval_full_to_steps_ratio", 50)
 
     # Experiment name
     exp_name = parameters["experiment_name"]
@@ -145,14 +224,16 @@ if __name__ == "__main__":
         parameters["root_log_dir"] = tmp_dir
         print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
-    data_path = os.path.join(parameters["data_path"], parameters.get('root_log_dir', '')) if parameters.get("data_path") else parameters["root_log_dir"]
+
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
-    eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
+    eval_every = parameters.get("eval_every", 50)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
+    training_steps_to_do = parameters.get("training_steps_to_do", 1000)
 
     # Hyperparameters (must use 'hyperparameters' flag for trainer services / UI)
+    hp = ledgers.get_hyperparams()
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -161,66 +242,80 @@ if __name__ == "__main__":
     )
 
     # Model
-    model = CNN().to(device)
-    model = wl.watch_or_edit(
-        model,
-        flag="model",
-        device=device,
-        compute_dependencies=False,
-    )
+    _model = CNN().to(device)
+    model = wl.watch_or_edit(_model, flag="model", device=device)
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    _optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = wl.watch_or_edit(
+        _optimizer,
+        flag="optimizer",
+    )
 
     # Data (MNIST train/val/test)
-    _full_train_dataset = datasets.MNIST(
-        root=data_path,
-        train=True,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        ),
-    )
-    _test_dataset = datasets.MNIST(
-        root=data_path,
-        train=False,
-        download=True,
-        transform=transforms.Compose(
-            [
-                transforms.ToTensor(),
-            ]
-        ),
-    )
+    # Use data_dir from config if provided, otherwise fall back to log_dir/data
+    if parameters.get("data_dir"):
+        user_path = parameters["data_dir"]
+        # Check if files are directly in user_path (e.g. data_dir ends in .../MNIST/raw)
+        files_here = os.path.exists(os.path.join(user_path, "train-images-idx3-ubyte")) or \
+                     os.path.exists(os.path.join(user_path, "train-images-idx3-ubyte.gz"))
 
-    # Split train into train + val (80/20 split)
-    val_split = parameters.get("data", {}).get("val_split", 0.2)
-    train_size = int((1.0 - val_split) * len(_full_train_dataset) * 0.2)  # only 20% of train steps to speed up example; adjust as needed
-    val_size = len(_full_train_dataset) - train_size
-    
-    # Use a fixed random seed for reproducibility of the split
-    _train_dataset, _val_dataset = torch.utils.data.random_split(
-        _full_train_dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+        if files_here:
+            data_root = os.path.dirname(os.path.dirname(user_path))
+            should_download = False
+            print(f"Using existing data from {user_path}")
+        else:
+            check_child = os.path.join(user_path, "MNIST", "raw")
+            files_child = os.path.exists(os.path.join(check_child, "train-images-idx3-ubyte")) or \
+                          os.path.exists(os.path.join(check_child, "train-images-idx3-ubyte.gz"))
+            if files_child:
+                data_root = user_path
+                should_download = False
+                print(f"Using existing data found in {check_child}")
+            else:
+                # Not found, download to the specified directory (acting as root)
+                data_root = user_path
+                should_download = True
+                print(f"Data not found, will download to {data_root}")
+    else:
+        data_root = os.path.join(parameters["root_log_dir"], "data")
+        should_download = True
+        print(f"Downloading data to {data_root}")
+    os.makedirs(data_root, exist_ok=True)
+
+    _train_dataset = MNISTCustomDataset(
+        root=data_root,
+        train=True,
+        download=should_download,
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+            ]
+        ),
+    )
+    _test_dataset = MNISTCustomDataset(
+        root=data_root,
+        train=False,
+        download=should_download,
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+            ]
+        ),
     )
 
     # Read data config for all loaders
     train_cfg = parameters.get("data", {}).get("train_loader", {})
-    val_cfg = parameters.get("data", {}).get("val_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
 
     train_bs = train_cfg.get("batch_size", 16)
-    val_bs = val_cfg.get("batch_size", 16)
     test_bs = test_cfg.get("batch_size", 16)
 
     train_shuffle = train_cfg.get("shuffle", True)
-    val_shuffle = val_cfg.get("shuffle", False)
     test_shuffle = test_cfg.get("shuffle", False)
 
-    # Create tracked loaders for train, val, and test
+    # Create tracked loaders for train, test, and test
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
@@ -229,19 +324,9 @@ if __name__ == "__main__":
         shuffle=train_shuffle,
         is_training=True,
         compute_hash=True,
-        enable_h5_persistence=enable_h5_persistence,
-        preload_labels=False,  # Don't preload labels for training loader to save memory; they are logged via signals during training
-    )
-    val_loader = wl.watch_or_edit(
-        _val_dataset,
-        flag="data",
-        loader_name="val_loader",
-        batch_size=val_bs,
-        shuffle=val_shuffle,
-        is_training=False,
-        compute_hash=True,
-        enable_h5_persistence=enable_h5_persistence,
-        preload_labels=False,  # Don't preload labels for training loader to save memory; they are logged via signals during training
+        preload_labels=False,
+        preload_metadata=False,
+        enable_h5_persistence=enable_h5_persistence
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -251,116 +336,90 @@ if __name__ == "__main__":
         shuffle=test_shuffle,
         is_training=False,
         compute_hash=True,
-        enable_h5_persistence=enable_h5_persistence,
-        preload_labels=False,  # Don't preload labels for training loader to save memory; they are logged via signals during training
+        preload_labels=False,
+        preload_metadata=False,
+        enable_h5_persistence=enable_h5_persistence
     )
 
     # Losses & metrics (watched objects – they log themselves)
-    train_criterion_mlt = wl.watch_or_edit(
+    train_criterion = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
-        flag="loss",
-        log=True,
-        name="train_loss/CE",
-    )
-    val_criterion_mlt = wl.watch_or_edit(
+        flag="loss", signal_name="train-loss-CE", log=True)
+    test_criterion = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
-        flag="loss",
-        log=True,
-        name="val_loss/CE",
-    )
-    test_criterion_mlt = wl.watch_or_edit(
-        nn.CrossEntropyLoss(reduction="none"),
-        flag="loss",
-        log=True,
-        name="test_loss/CE",
-    )
-    val_metric_mlt = wl.watch_or_edit(
+        flag="loss", signal_name="test-loss-CE", log=True)
+
+    metric = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
-        flag="metric",
-        log=True,
-        name="val_metric/Accuracy",
-    )
-    test_metric_mlt = wl.watch_or_edit(
-        Accuracy(task="multiclass", num_classes=10).to(device),
-        flag="metric",
-        log=True,
-        name="test_metric/Accuracy",
-    )
+        flag="metric", signal_name="metric-ACC", log=True)
 
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
         serving_grpc=parameters.get("serving_grpc", False),
         serving_cli=parameters.get("serving_cli", False),
+        serving_ui=parameters.get("serving_ui", False),
     )
 
     print("=" * 60)
     print("🚀 STARTING TRAINING")
     print(f"🔄 Evaluation every {eval_every} steps")
-    print(f"� Dataset splits: train={len(_train_dataset)}, val={len(_val_dataset)}, test={len(_test_dataset)}")
+    print(f"� Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
-    train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
-    val_loader_len = len(val_loader)  # Store length before wrapping with tqdm
-    test_loader_len = len(test_loader)
+    # Setup clean progress bar with custom format
+    if tqdm_display:
+        train_range = tqdm.tqdm(
+            range(training_steps_to_do),
+            desc="Training",
+            bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
+            ncols=140,
+            position=0,
+            leave=True
+        )
+    else:
+        train_range = range(training_steps_to_do)
+
+    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
 
     train_loss = None
-    val_loss, val_metric = None, None
     test_loss, test_metric = None, None
     for train_step in train_range:
         # Train one step
-        train_loss = train(
-            train_loader, 
-            model, 
-            optimizer, 
-            train_criterion_mlt, 
-            device
-        )
+        train_loss = train(train_loader, model, optimizer, train_criterion, device)
 
-        # Periodic validation and test evaluation
+        # Periodic test evaluation
         if train_step > 0 and train_step % eval_every == 0:
-            # Validate
-            val_loader_iter = tqdm.tqdm(val_loader, desc="Validating") if tqdm_display else val_loader
-            val_loss, val_metric = test(
-                val_loader_iter,
-                model,
-                val_criterion_mlt,
-                val_metric_mlt,
-                device,
-                val_loader_len
-            )
-
-            # Test (less frequent or same as val)
-            test_loader_iter = tqdm.tqdm(test_loader, desc="Testing") if tqdm_display else test_loader
+            # Test (no nested progress bar)
             test_loss, test_metric = test(
-                test_loader_iter,
+                test_loader,
                 model,
-                test_criterion_mlt,
-                test_metric_mlt,
+                test_criterion,
+                metric,
                 device,
                 test_loader_len
             )
 
         # Verbose
         if verbose and not tqdm_display:
-            print(
-                f"Training.. " +
-                f"Step {train_step}: " +
-                f"| Train Loss: {train_loss:.4f} " +
-                (f"| Val Loss: {val_loss:.4f} " if val_loss is not None else '') +
-                (f"| Val Acc: {val_metric:.2f}% " if val_metric is not None else '') +
-                (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
-                (f"| Test Acc: {test_metric:.2f}% " if test_metric is not None else '')
-            )
+            import sys
+            # Build compact progress message
+            msg = f"Step {train_step}: Loss={train_loss:.4f}"
+            if test_loss is not None:
+                msg += f" | Test={test_loss:.4f} ({test_metric:.1f}%)"
+
+            # Clear line completely and print (pad to 100 chars to overwrite previous content)
+            sys.stdout.write(f"\r{msg:<100}")
+            sys.stdout.flush()
         elif tqdm_display:
-            train_range.set_description(f"Step")
-            train_range.set_postfix(
-                train_loss=f"{train_loss:.4f}",
-                val_loss=f"{val_loss:.4f}" if val_loss is not None else "N/A",
-                val_acc=f"{val_metric:.2f}%" if val_metric is not None else "N/A",
-                test_loss=f"{test_loss:.4f}" if test_loss is not None else "N/A",
-                test_acc=f"{test_metric:.2f}%" if test_metric is not None else "N/A"
-            )
+            # Build compact postfix string
+            postfix_parts = [f"train_loss={train_loss:.4f}"]
+            if test_loss is not None:
+                postfix_parts.append(f"test_loss={test_loss:.4f}")
+            if test_metric is not None:
+                postfix_parts.append(f"test_acc={test_metric:.1f}%")
+
+            train_range.set_postfix_str(" | ".join(postfix_parts))
 
     print("\n" + "=" * 60)
     print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")

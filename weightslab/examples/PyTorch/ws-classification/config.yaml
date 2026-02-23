@@ -1,5 +1,7 @@
 experiment_name: cls_usecase
-device: cuda
+device: auto
+root_log_dir: ./logs/0
+compute_natural_sort: false
 
 eval_full_to_train_steps_ratio: 500
 experiment_dump_to_train_steps_ratio: 250
