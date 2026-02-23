@@ -1079,6 +1079,22 @@ def save_signals(
             preds (th.Tensor, optional): The batch predictions. Defaults to None.
             step (int, optional): The current training step. Defaults to 0.
             log (bool, optional): Whether to log the signals. Defaults to True.
+        
+        Examples:
+            >>> # In your training loop, after computing losses and predictions:
+            >>> for batch in train_loader:
+            ...     inputs, targets = batch
+            ...     preds = model(inputs)
+            ...     loss = loss_fn(preds, targets)
+            ...     batch_ids = batch['sample_id']  # Assuming your dataloader provides sample IDs
+            ...     wl.save_signals(
+            ...         signals={'train_loss': loss},
+            ...         batch_ids=batch_ids,
+            ...         preds_raw=preds,  # Optionally save raw predictions. Not useful if already saved by loss wrapper.
+            ...         targets=targets,  # Optionally save target predictions. Not useful if already saved by loss wrapper.
+            ...         step=current_step,  # Optionally save step. If not provided, will attempt to infer from training loop context.
+            ...         log=True  # Should we log the signals also or only save to sample metadata.
+            ...     )
     """
 
     global DATAFRAME_M
