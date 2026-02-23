@@ -119,6 +119,12 @@ class DataService:
         self._h5_path = self._resolve_h5_path()
         self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
 
+        # Check hyperparameters for compute_natural_sort flag (default: False)
+        # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
+        hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
+        hp_dict = hp.get() if (hp is not None and hasattr(hp, "get")) else (hp if isinstance(hp, dict) else {})
+        self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
+
         # In-memory dataframe view of all datasets combined (streamed to UI)
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
@@ -134,12 +140,6 @@ class DataService:
         )
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
-
-        # Check hyperparameters for compute_natural_sort flag (default: False)
-        # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
-        hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
-        hp_dict = hp.get() if (hp is not None and hasattr(hp, "get")) else (hp if isinstance(hp, dict) else {})
-        self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
 
         if self._compute_natural_sort:
             # Always ensure natural sort stats are computed on startup
@@ -317,7 +317,7 @@ class DataService:
                 pass
         
         # Ensure natural_sort_score exists (init with NaN if missing)
-        if "natural_sort_score" not in self._all_datasets_df.columns:
+        if self._compute_natural_sort and "natural_sort_score" not in self._all_datasets_df.columns:
             try:
                 self._all_datasets_df["natural_sort_score"] = np.nan
             except Exception:
@@ -1489,7 +1489,7 @@ class DataService:
         # Ensure default columns exist (persists them across updates even if not in H5 yet)
         if SampleStatsEx.TAG.value not in updated_df.columns:
              updated_df[SampleStatsEx.TAG.value] = ""
-        if "natural_sort_score" not in updated_df.columns:
+        if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
              updated_df["natural_sort_score"] = np.nan
         if "deny_listed" not in updated_df.columns:
              updated_df["deny_listed"] = False
