@@ -198,7 +198,7 @@ class LedgeredDataFrameManager:
         if origin is not None and "origin" not in df_norm.columns:
             df_norm["origin"] = origin
 
-        # Ensure sample_id index
+        # Ensure sample_id index matches existing frame type or coerces to int
         if "sample_id" in df_norm.columns:
             try:
                 df_norm = df_norm.set_index("sample_id")

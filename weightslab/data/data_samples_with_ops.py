@@ -359,6 +359,11 @@ class DataSampleTrackingWrapper(Dataset):
         """Expose inferred number of classes as a property."""
         return self.infer_num_classes()
 
+    @property
+    def class_names(self):
+        """Expose class names from the wrapped dataset if available."""
+        return getattr(self.wrapped_dataset, "class_names", None)
+
     def _get_stats_dataframe(self, limit: int = -1):
         """Return a copy of the stats dataframe (optionally limited)."""
         with self._df_lock:

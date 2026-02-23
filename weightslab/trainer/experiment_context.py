@@ -65,6 +65,8 @@ class ExperimentContext:
                 model = get_model(self._exp_name)
             elif "experiment" in names:
                 model = get_model("experiment")
+            elif "main" in names:
+                model = get_model("main")
             elif len(names) == 1:
                 model = get_model()
         except Exception:
@@ -204,4 +206,5 @@ class ExperimentContext:
             ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
             ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 8)),
             ("Is Training", "is_training", "number", _hp_getter("is_training", 0)),
+            ("Auditor Mode", "auditor_mode", "number", _hp_getter("auditor_mode", 0)),
         }
