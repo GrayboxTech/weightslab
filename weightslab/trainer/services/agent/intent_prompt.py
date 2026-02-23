@@ -24,7 +24,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 | **Grouping**| "Group by...", "Aggregate...", "Break down by..." | `group` (primary) + `sort` (secondary) |
 | **Calculation**| "What is the average X?", "Sum of Y", "Average of top 10" | `analysis` (or `keep` + `analysis` for subsets) |
 | **Modification**| "Create column...", "Set X to...", "Add 1 to loss", "Calculate error_sq" | `transform` |
-| **Discarding**  | "Discard...", "Ban...", "Denylist...", "Exclude from training" | `transform` (target=`deny_listed`) |
+| **Discarding**  | "Discard...", "Ban...", "Denylist...", "Exclude from training" | `transform` (target=`discarded`) |
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
 
 ---
@@ -33,7 +33,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 2. **Path Resolution**: `nested//col_name` can be referred to as `col_name` (e.g. `some_group//metric` -> `metric`).
 3. **Index Access**: Columns marked `[INDEX]` must be accessed via `df.index.get_level_values('name')` in `analysis_expression`.
 4. **ML Terminology**: "class" = `target`/`label`. "set" = `origin` (train/val/test). "lowest/best loss" = `min`.
-5. **Denylisting**: "Discarding", "Excluding", or "Banning" samples means setting the `deny_listed` column to `True`. Do NOT use `drop` for this, as `drop` only hides them from the view.
+5. **Denylisting**: "Discarding", "Excluding", or "Banning" samples means setting the `discarded` column to `True`. Do NOT use `drop` for this, as `drop` only hides them from the view.
 6. **Tags Filtering**: The `tags` column contains semicolon-separated values. ALWAYS use `op="contains"` instead of `==` for searching tags.
 
 ---
@@ -241,13 +241,13 @@ User: "Keep the top 10% with highest loss"
 **Ex15: Persistent Discard (Training Control)**
 User: "Discard all samples with loss > 5"
 {{
-  "reasoning": "User wants to exclude high-loss samples from training. Strategy: Transform deny_listed column.",
+  "reasoning": "User wants to exclude high-loss samples from training. Strategy: Transform discarded column.",
   "primary_goal": "ui_manipulation",
   "steps": [
     {{
       "kind": "transform",
-      "target_column": "deny_listed",
-      "transform_code": "np.where(df['loss'] > 5, True, df['deny_listed'])"
+      "target_column": "discarded",
+      "transform_code": "np.where(df['loss'] > 5, True, df['discarded'])"
     }}
   ]
 }}
