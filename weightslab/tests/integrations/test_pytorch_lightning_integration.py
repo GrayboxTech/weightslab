@@ -7,12 +7,9 @@ that WeightsLab tracking works correctly within Lightning's training loop.
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset
-from torchmetrics.classification import Accuracy
 
 try:
     import pytorch_lightning as pl
@@ -21,6 +18,10 @@ except ImportError:
     PYTORCH_LIGHTNING_AVAILABLE = False
 
 import weightslab as wl
+
+from torch.utils.data import TensorDataset
+from torchmetrics.classification import Accuracy
+
 from weightslab.backend.ledgers import GLOBAL_LEDGER, Proxy
 from weightslab.components.global_monitoring import (
     guard_training_context,
@@ -154,6 +155,7 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
     def test_proxy_hashable_in_lightning(self):
         """Test that Proxy objects are hashable and work with Lightning's module system."""
         model = SimpleCNN()
+        print(wl.__file__)
         model_wl = wl.watch_or_edit(model, flag="model", device=self.device)
         
         # Test that proxy can be used in sets (requires __hash__)

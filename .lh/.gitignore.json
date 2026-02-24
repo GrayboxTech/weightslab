@@ -1,0 +1,30 @@
+{
+    "sourceFile": ".gitignore",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 3,
+            "patches": [
+                {
+                    "date": 1771951752089,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                },
+                {
+                    "date": 1771951767001,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -20,8 +20,10 @@\n *.db\r\n *.ipynb_checkpoints\r\n *.code-workspace\r\n .vscode/\r\n+laumch.json\r\n+settings.json\r\n \r\n __pycache__/\r\n \r\n experiment_service_pb2.py\r\n"
+                },
+                {
+                    "date": 1771951856804,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -20,8 +20,9 @@\n *.db\r\n *.ipynb_checkpoints\r\n *.code-workspace\r\n .vscode/\r\n+venv\r\n laumch.json\r\n settings.json\r\n \r\n __pycache__/\r\n"
+                },
+                {
+                    "date": 1771951896313,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -20,9 +20,10 @@\n *.db\r\n *.ipynb_checkpoints\r\n *.code-workspace\r\n .vscode/\r\n-venv\r\n+venv/\r\n+.venv/\r\n laumch.json\r\n settings.json\r\n \r\n __pycache__/\r\n"
+                }
+            ],
+            "date": 1771951752089,
+            "name": "Commit-0",
+            "content": "weightslab.egg-info/*\r\nbuild/*\r\ndist/*\r\nroot_log_dir/*\r\nweightslab/__pycache__/*\r\ntests/__pycache__/*\r\n__pycache__/*\r\n.DS_Store\r\npkg_main.py\r\n.ruff_cache/*\r\n\r\n*.onnx\r\n*.pt\r\n*.pth\r\n*.h5\r\n*.ckpt\r\n*.log\r\n*.csv\r\n*.sqlite\r\n*.db\r\n*.ipynb_checkpoints\r\n*.code-workspace\r\n.vscode/\r\n\r\n__pycache__/\r\n\r\nexperiment_service_pb2.py\r\nexperiment_service_pb2_grpc.py\r\n\r\n.env\r\n"
+        }
+    ]
+}

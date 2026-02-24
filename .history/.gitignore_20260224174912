@@ -21,10 +21,6 @@ pkg_main.py
 *.ipynb_checkpoints
 *.code-workspace
 .vscode/
-venv/
-.venv/
-laumch.json
-settings.json
 
 __pycache__/
 

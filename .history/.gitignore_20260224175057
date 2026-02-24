@@ -22,7 +22,6 @@ pkg_main.py
 *.code-workspace
 .vscode/
 venv/
-.venv/
 laumch.json
 settings.json
 

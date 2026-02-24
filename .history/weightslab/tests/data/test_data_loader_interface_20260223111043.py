@@ -231,8 +231,8 @@ class TestDataLoaderReproducibility(unittest.TestCase):
 
         # 3. Generate batches with current RNG
         print("\n3. Generating batches...")
-        _, bids_1, _ = next(dataloader)
-        _, bids_2, _ = next(dataloader)
+        _, bids_1 = next(dataloader)
+        _, bids_2 = next(dataloader)
         print(f"Batches: {bids_1.tolist()}, {bids_2.tolist()}")
 
         # 4. Restore RNG and reset iterator
@@ -243,8 +243,8 @@ class TestDataLoaderReproducibility(unittest.TestCase):
 
         # 5. Generate batches again - should be identical
         print("\n5. Generating batches with restored RNG...")
-        _, bids_1_repeat, _ = next(dataloader)
-        _, bids_2_repeat, _ = next(dataloader)
+        _, bids_1_repeat = next(dataloader)
+        _, bids_2_repeat = next(dataloader)
         print(f"Repeated batches: {bids_1_repeat.tolist()}, {bids_2_repeat.tolist()}")
 
         # Verify
