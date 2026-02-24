@@ -1282,13 +1282,31 @@ class CheckpointSystemTests(unittest.TestCase):
     def test_logger_queue_saved_with_weights(self):
         self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
 
-        snapshot_path = Path(self.chkpt_manager.loggers_dir) / self.chkpt_manager.current_exp_hash / "loggers.json"
-        self.assertTrue(snapshot_path.exists(), "Logger snapshot should be saved with checkpoint")
+        snapshot_dir = Path(self.chkpt_manager.loggers_dir) / self.chkpt_manager.current_exp_hash
+        manifest_path = snapshot_dir / "loggers.manifest.json"
+        legacy_snapshot_path = snapshot_dir / "loggers.json"
+        self.assertTrue(
+            manifest_path.exists() or legacy_snapshot_path.exists(),
+            "Logger snapshot should be saved with checkpoint"
+        )
 
-        with open(snapshot_path, "r") as f:
-            snapshot = json.load(f)
+        if manifest_path.exists():
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+            chunk_files = manifest.get("chunks", [])
+            self.assertGreaterEqual(len(chunk_files), 1, "Chunked logger snapshot should contain at least one chunk")
+            self.assertTrue(
+                all((snapshot_dir / chunk_name).exists() for chunk_name in chunk_files),
+                "All logger snapshot chunks referenced by manifest should exist"
+            )
+            self.assertTrue(self.chkpt_manager.load_logger_snapshot(self.chkpt_manager.current_exp_hash))
+            lg = ledgers.get_logger('main')
+            loggers = {'main': {'signal_history': lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []}}
+        else:
+            with open(legacy_snapshot_path, "r") as f:
+                snapshot = json.load(f)
+            loggers = snapshot.get("loggers", {})
 
-        loggers = snapshot.get("loggers", {})
         self.assertIn('main', loggers, "Logger entry should be present")
         signals = loggers['main'].get("signal_history", [])
         self.assertGreaterEqual(len(signals), 1, "Signal history should contain logged signals")

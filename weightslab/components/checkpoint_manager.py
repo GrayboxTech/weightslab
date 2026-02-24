@@ -40,6 +40,7 @@ import pandas as pd
 import torch as th
 import dill
 import pickle
+import zstandard as zstd
 
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
 from weightslab.components.experiment_hash import ExperimentHashGenerator
@@ -73,6 +74,11 @@ class CheckpointManager:
         current_exp_hash (str): Current experiment hash
         _step_counter (int): Global step counter for model checkpoints
     """
+
+    LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
+    LOGGER_SNAPSHOT_CHUNK_PREFIX = "loggers.part"
+    LOGGER_SNAPSHOT_CHUNK_SUFFIX = ".json.zst"
+    LOGGER_SNAPSHOT_MANIFEST_FILE = "loggers.manifest.json"
 
     def __init__(self, root_log_dir: str = 'root_experiment', load_model: bool = True, load_config: bool = True, load_data: bool = True):
         """Initialize the checkpoint manager.
@@ -183,6 +189,215 @@ class CheckpointManager:
         except Exception:
             return None
 
+    def _get_logger_snapshot_dir(self, exp_hash: Optional[str] = None) -> Path:
+        exp = exp_hash or self.current_exp_hash
+        if exp:
+            return self.loggers_dir / exp
+        return self.loggers_dir
+
+    def _get_logger_snapshot_path(self, exp_hash: Optional[str] = None) -> Path:
+        return self._get_logger_snapshot_dir(exp_hash) / "loggers.json"
+
+    def _get_logger_snapshot_manifest_path(self, exp_hash: Optional[str] = None) -> Path:
+        return self._get_logger_snapshot_dir(exp_hash) / self.LOGGER_SNAPSHOT_MANIFEST_FILE
+
+    def _get_logger_snapshot_chunk_path(self, chunk_index: int, exp_hash: Optional[str] = None) -> Path:
+        fname = f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}{chunk_index:04d}{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"
+        return self._get_logger_snapshot_dir(exp_hash) / fname
+
+    def _list_logger_snapshot_chunks(self, exp_hash: Optional[str] = None) -> List[Path]:
+        snapshot_dir = self._get_logger_snapshot_dir(exp_hash)
+        if not snapshot_dir.exists():
+            return []
+        return sorted(snapshot_dir.glob(f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}*{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"))
+
+    def _load_logger_snapshot_payload(self, exp_hash: str) -> Dict[str, Any]:
+        snapshot_dir = self._get_logger_snapshot_dir(exp_hash)
+        manifest_path = self._get_logger_snapshot_manifest_path(exp_hash)
+
+        chunk_paths: List[Path] = []
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f) or {}
+                chunk_names = manifest.get("chunks", [])
+                chunk_paths = [snapshot_dir / name for name in chunk_names if name]
+            except Exception as e:
+                logger.warning(f"Failed to read logger snapshot manifest for {exp_hash}: {e}")
+
+        if not chunk_paths:
+            chunk_paths = self._list_logger_snapshot_chunks(exp_hash)
+
+        if chunk_paths:
+            snapshot = {"exp_hash": exp_hash, "timestamp": datetime.now().isoformat(), "loggers": {}}
+            dctx = zstd.ZstdDecompressor()
+            for path in chunk_paths:
+                if not path.exists():
+                    continue
+                try:
+                    with open(path, "rb") as f:
+                        raw_payload = dctx.decompress(f.read())
+                    lines = raw_payload.decode("utf-8").splitlines()
+                    for line in lines:
+                        if not line:
+                            continue
+                        record = json.loads(line)
+                        lname = record.get("logger_name")
+                        payload = record.get("payload")
+                        if lname:
+                            snapshot["loggers"][lname] = payload or {}
+                except Exception as e:
+                    logger.warning(f"Failed to load logger snapshot chunk {path}: {e}")
+            if snapshot["loggers"]:
+                return snapshot
+
+        # Legacy layout fallback (new per-exp first, then old global file)
+        legacy_candidates = [
+            self._get_logger_snapshot_path(exp_hash),
+            self.loggers_dir / "loggers.json",
+        ]
+        for legacy_path in legacy_candidates:
+            if not legacy_path.exists():
+                continue
+            try:
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f) or {}
+                if payload.get("loggers"):
+                    return payload
+            except Exception as e:
+                logger.warning(f"Failed to read legacy logger snapshot at {legacy_path}: {e}")
+
+        return {}
+
+    def _create_exp_hash_directories(
+            self,
+            exp_hash: str,
+            create_model_dir: bool = True,
+            create_hp_dir: bool = True,
+            create_data_dir: bool = True
+    ):
+        """Create directory structure for an experiment hash in separate component folders.
+
+        Args:
+            exp_hash: 24-byte experiment hash (HP_MODEL_DATA)
+        """
+        model_hash_dir = self.models_dir / exp_hash[:8]
+        hp_hash_dir = self.hp_dir / exp_hash[8:16]
+        data_hash_dir = self.data_checkpoint_dir / exp_hash[16:24]
+
+        if create_model_dir:
+            model_hash_dir.mkdir(exist_ok=True)
+        if create_hp_dir:
+            hp_hash_dir.mkdir(exist_ok=True)
+        if create_data_dir:
+            data_hash_dir.mkdir(exist_ok=True)
+
+        logger.debug(f"Created checkpoint directories for {exp_hash}")
+        self._update_manifest(exp_hash)
+
+    def _update_manifest(self, exp_hash: str):
+        """Update manifest file with new or updated hash."""
+        try:
+            manifest = self._load_manifest()
+            component_hashes = self.hash_generator.get_component_hashes()
+
+            if exp_hash not in manifest['experiments']:
+                manifest['experiments'][exp_hash] = {
+                    'hp_hash': component_hashes.get('hp', exp_hash[0:8]),
+                    'model_hash': component_hashes.get('model', exp_hash[8:16]),
+                    'data_hash': component_hashes.get('data', exp_hash[16:24]),
+                    'created': datetime.now().isoformat(),
+                    'last_used': datetime.now().isoformat(),
+                    'latest_weight_checkpoint': None,
+                    'latest_weight_step': None
+                }
+            else:
+                manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
+
+            manifest['latest_hash'] = exp_hash
+            manifest['last_updated'] = datetime.now().isoformat()
+
+            # Ensure parent directory exists
+            self.manifest_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write manifest file (overwrites if exists)
+            with open(self.manifest_file, 'w') as f:
+                yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+        except Exception as e:
+            logger.warning(f"Failed to update manifest: {e}")
+
+    def _update_manifest_weight_checkpoint(self, exp_hash: str, checkpoint_filename: str, step: int):
+        """Update manifest with latest weight checkpoint for given experiment hash."""
+        try:
+            manifest = self._load_manifest()
+            if exp_hash in manifest['experiments']:
+                manifest['experiments'][exp_hash]['latest_weight_checkpoint'] = checkpoint_filename
+                manifest['experiments'][exp_hash]['latest_weight_step'] = step
+                manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
+
+                # Write updated manifest
+                with open(self.manifest_file, 'w') as f:
+                    yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+                logger.debug(f"Updated manifest with weight checkpoint: {checkpoint_filename} (step {step})")
+        except Exception as e:
+            logger.warning(f"Failed to update manifest weight checkpoint: {e}")
+
+    def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = True, load_data: bool = True):
+        """If a current hash is known (or manifest has one), load and apply it.
+
+        This enables auto-resume when instantiating the manager on an existing
+        root_log_dir without requiring an explicit load_state call by the user.
+        """
+        target = self.current_exp_hash or self.get_latest_hash()
+        if not target:
+            return
+        try:
+            self.load_state(target, load_model=load_model, load_config=load_config, load_data=load_data)
+        except Exception as e:
+            logger.warning(f"Auto-resume failed for {target}: {e}")
+
+    def _extract_step_from_checkpoint_name(self, filename: str) -> Optional[int]:
+        match = re.search(r"_step_(\d+)\.pt$", filename)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except Exception:
+            return None
+
+    def _select_weight_checkpoint_file(self, exp_hash: str, target_step: Optional[int] = None) -> Optional[Path]:
+        """Select weight checkpoint file for an experiment hash.
+
+        - If target_step is None: returns latest checkpoint.
+        - If target_step is provided: returns closest step; tie breaks toward higher step.
+        """
+        model_dir = self.models_dir / exp_hash[8:-8]
+        if not model_dir.exists():
+            return None
+
+        weight_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
+        if not weight_files:
+            weight_files = sorted(model_dir.glob(f"{exp_hash[8:-8]}_step_*.pt"))
+        if not weight_files:
+            return None
+
+        if target_step is None:
+            return weight_files[-1]
+
+        target = int(target_step)
+        parsed: List[tuple[Path, int]] = []
+        for path in weight_files:
+            step = self._extract_step_from_checkpoint_name(path.name)
+            if step is not None:
+                parsed.append((path, step))
+
+        if not parsed:
+            return weight_files[-1]
+
+        parsed.sort(key=lambda item: item[1])
+        best_path, _ = min(parsed, key=lambda item: (abs(item[1] - target), -item[1]))
+        return best_path
+
     def get_current_experiment_hash(self) -> Optional[str]:
         """Get the current experiment hash. Computes it on-demand if not yet set."""
         if self.current_exp_hash is None:
@@ -267,6 +482,82 @@ class CheckpointManager:
         else:
             return self.hash_generator.get_component_hashes().get('data')
         
+    def get_latest_hash(self) -> Optional[str]:
+        """Get the most recent experiment hash."""
+        manifest = self._load_manifest()
+        return manifest.get('latest_hash')
+
+    def get_all_hashes(self, sort_by: str = 'created') -> List[Dict[str, Any]]:
+        """Get all hashes sorted by timestamp."""
+        manifest = self._load_manifest()
+        experiments = manifest.get('experiments', {})
+        hash_list = [{'hash': h, **info} for h, info in experiments.items()]
+        if sort_by in ['created', 'last_used']:
+            hash_list.sort(key=lambda x: x.get(sort_by, ''), reverse=True)
+        return hash_list
+
+    def get_hashes_by_component(self, hp_hash: Optional[str] = None,
+                                model_hash: Optional[str] = None,
+                                data_hash: Optional[str] = None) -> List[str]:
+        """Find hashes matching component hash(es)."""
+        manifest = self._load_manifest()
+        experiments = manifest.get('experiments', {})
+        matching = []
+        for exp_hash, info in experiments.items():
+            if hp_hash and info.get('hp_hash') != hp_hash:
+                continue
+            if model_hash and info.get('model_hash') != model_hash:
+                continue
+            if data_hash and info.get('data_hash') != data_hash:
+                continue
+            matching.append(exp_hash)
+        return matching
+
+    def get_checkpoint_info(self, exp_hash: Optional[str] = None) -> Dict[str, Any]:
+        """Get information about checkpoints for an experiment.
+
+        Args:
+            exp_hash: Specific experiment hash (uses current if None)
+
+        Returns:
+            dict: Information about checkpoints, configs, data backups
+        """
+        target_hash = exp_hash or self.current_exp_hash
+
+        if target_hash is None:
+            return {}
+
+        exp_dir = self.checkpoints_dir / target_hash
+
+        if not exp_dir.exists():
+            return {}
+
+        info = {
+            'exp_hash': target_hash,
+            'model_checkpoints': [],
+            'architecture_saved': False,
+            'configs': [],
+            'data_backups': []
+        }
+
+        model_dir = exp_dir / "model"
+        if model_dir.exists():
+            info['model_checkpoints'] = [
+                f.name for f in sorted(model_dir.glob(f"{target_hash}_step_*.pt"))
+            ]
+
+        # Configs
+        hp_dir = exp_dir / "hp"
+        if hp_dir.exists():
+            info['configs'] = [f.name for f in hp_dir.glob("*.yaml")]
+
+        # Data backups
+        data_dir = exp_dir / "data"
+        if data_dir.exists():
+            info['data_backups'] = [f.name for f in data_dir.glob("*.h5")]
+
+        return info
+
     def update_experiment_hash(
         self,
         model_snapshot: Optional[th.nn.Module] = None,
@@ -340,7 +631,7 @@ class CheckpointManager:
 
             if dump_immediately:
                 # Dump changes immediately
-                self._dump_changes(
+                self._save_changes(
                     model=model_snapshot,
                     config=hp_snapshot,
                     changed_components=changed_components
@@ -376,262 +667,104 @@ class CheckpointManager:
 
         return new_hash, is_new, changed_components
 
-    def _create_exp_hash_directories(
-            self,
-            exp_hash: str,
-            create_model_dir: bool = True,
-            create_hp_dir: bool = True,
-            create_data_dir: bool = True
-    ):
-        """Create directory structure for an experiment hash in separate component folders.
-
-        Args:
-            exp_hash: 24-byte experiment hash (HP_MODEL_DATA)
-        """
-        model_hash_dir = self.models_dir / exp_hash[:8]
-        hp_hash_dir = self.hp_dir / exp_hash[8:16]
-        data_hash_dir = self.data_checkpoint_dir / exp_hash[16:24]
-
-        if create_model_dir:
-            model_hash_dir.mkdir(exist_ok=True)
-        if create_hp_dir:
-            hp_hash_dir.mkdir(exist_ok=True)
-        if create_data_dir:
-            data_hash_dir.mkdir(exist_ok=True)
-
-        logger.debug(f"Created checkpoint directories for {exp_hash}")
-        self._update_manifest(exp_hash)
-
-    def _update_manifest(self, exp_hash: str):
-        """Update manifest file with new or updated hash."""
-        try:
-            manifest = self._load_manifest()
-            component_hashes = self.hash_generator.get_component_hashes()
-
-            if exp_hash not in manifest['experiments']:
-                manifest['experiments'][exp_hash] = {
-                    'hp_hash': component_hashes.get('hp', exp_hash[0:8]),
-                    'model_hash': component_hashes.get('model', exp_hash[8:16]),
-                    'data_hash': component_hashes.get('data', exp_hash[16:24]),
-                    'created': datetime.now().isoformat(),
-                    'last_used': datetime.now().isoformat(),
-                    'latest_weight_checkpoint': None,
-                    'latest_weight_step': None
-                }
-            else:
-                manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
-
-            manifest['latest_hash'] = exp_hash
-            manifest['last_updated'] = datetime.now().isoformat()
-
-            # Ensure parent directory exists
-            self.manifest_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write manifest file (overwrites if exists)
-            with open(self.manifest_file, 'w') as f:
-                yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
-        except Exception as e:
-            logger.warning(f"Failed to update manifest: {e}")
-
-    def _update_manifest_weight_checkpoint(self, exp_hash: str, checkpoint_filename: str, step: int):
-        """Update manifest with latest weight checkpoint for given experiment hash."""
-        try:
-            manifest = self._load_manifest()
-            if exp_hash in manifest['experiments']:
-                manifest['experiments'][exp_hash]['latest_weight_checkpoint'] = checkpoint_filename
-                manifest['experiments'][exp_hash]['latest_weight_step'] = step
-                manifest['experiments'][exp_hash]['last_used'] = datetime.now().isoformat()
-
-                # Write updated manifest
-                with open(self.manifest_file, 'w') as f:
-                    yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
-                logger.debug(f"Updated manifest with weight checkpoint: {checkpoint_filename} (step {step})")
-        except Exception as e:
-            logger.warning(f"Failed to update manifest weight checkpoint: {e}")
-
-    # ------------------------------------------------------------------
-    # Logger snapshot management
-    # ------------------------------------------------------------------
-    def _get_logger_snapshot_path(self, exp_hash: Optional[str] = None) -> Path:
-        exp = exp_hash or self.current_exp_hash
-        return self.loggers_dir / exp / "loggers.json" if exp else None
-
-    def save_logger_snapshot(self, exp_hash: Optional[str] = None) -> Optional[Path]:
-        """Persist logger queues for the given experiment hash.
-
-        Uses the same hash as model/hp/data; does not affect hashing.
-        """
-        exp = exp_hash or self.current_exp_hash
-        if exp is None:
-            return None
-
-        try:
-            logger_names = ledgers.list_loggers()
-            if not logger_names:
-                return None
-
-            snapshot = {"exp_hash": exp, "timestamp": datetime.now().isoformat(), "loggers": {}}
-            for lname in logger_names:
-                lg = ledgers.get_logger(lname)
-                if lg is None:
-                    continue
-
-                # Expect LoggerQueue interface
-                signal_history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
-                signal_history_per_sample = lg.get_signal_history_per_sample() if hasattr(lg, "get_signal_history_per_sample") else {}
-                graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
-                
-                # Get final snapshot for this logger
-                snapshot["loggers"][lname] = {
-                    "signal_history": signal_history,
-                    "signal_history_per_sample": signal_history_per_sample,
-                    "graph_names": graphs,
-                }
-
-            if not snapshot["loggers"]:
-                return None
-
-            path = self._get_logger_snapshot_path(exp)
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Merge with existing snapshot if present to avoid losing data
-            if path.exists():
-                try:
-                    with open(path, "r") as f:
-                        existing = json.load(f) or {}
-                    existing_loggers = existing.get("loggers", {})
-                    existing_loggers.update(snapshot.get("loggers", {}))
-                    snapshot["loggers"] = existing_loggers
-                    snapshot["exp_hash"] = existing.get("exp_hash", exp)
-                except Exception as e:
-                    logger.warning(f"Failed to merge existing logger snapshot: {e}")
-
-            tmp_path = path.with_suffix(path.suffix)
-            with open(tmp_path, "w") as f:
-                json.dump(snapshot, f, indent=2)
-            os.replace(tmp_path, path)
-            logger.info(f"Saved logger snapshot: {path}")
-            return path
-        except Exception as e:
-            logger.warning(f"Failed to save logger snapshot: {e}")
-            return None
-
-    def load_logger_snapshot(self, exp_hash: str) -> bool:
-        """Load logger queues from snapshot for a specific experiment hash."""
-        path = self._get_logger_snapshot_path(exp_hash)
-        if path is None or not path.exists():
-            return False
-        try:
-            with open(path, "r") as f:
-                snapshot = json.load(f)
-
-            loggers_payload = snapshot.get("loggers", {})
-            for lname, payload in loggers_payload.items():
-                try:
-                    lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else None
-                    # If no real logger (or only a proxy) exists, create a fresh LoggerQueue so we can enqueue history
-                    if lg is None or not hasattr(lg, "load_snapshot") and ledgers.get_logger() == None:  # Test if logger proxy is None. If yes, load, otherwise skip
-                        lg = LoggerQueue(register=True)
-                        ledgers.register_logger(lg)
-                    lg.load_snapshot(payload)
-                except Exception as inner_e:
-                    logger.warning(f"Failed to restore logger '{lname}': {inner_e}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to load logger snapshot for {exp_hash}: {e}")
-            return False
-
-    def _load_all_logger_snapshots(self):
-        """Load all logger snapshots found under loggers/ for visibility when starting."""
-        if not self.loggers_dir.exists():
-            return
-        for exp_dir in self.loggers_dir.iterdir():
-            if exp_dir.is_dir():
-                snapshot_file = exp_dir / "loggers.json"
-                if snapshot_file.exists():
-                    self.load_logger_snapshot(exp_dir.name)
-
-    def _load_manifest(self) -> Dict[str, Any]:
-        """Load manifest file."""
-        if self.manifest_file.exists():
-            try:
-                with open(self.manifest_file, 'r') as f:
-                    return yaml.safe_load(f) or {'experiments': {}, 'latest_hash': None}
-            except Exception as e:
-                logger.warning(f"Failed to load manifest: {e}")
-        return {'experiments': {}, 'latest_hash': None}
-
-    def get_latest_hash(self) -> Optional[str]:
-        """Get the most recent experiment hash."""
-        manifest = self._load_manifest()
-        return manifest.get('latest_hash')
-
-    def get_all_hashes(self, sort_by: str = 'created') -> List[Dict[str, Any]]:
-        """Get all hashes sorted by timestamp."""
-        manifest = self._load_manifest()
-        experiments = manifest.get('experiments', {})
-        hash_list = [{'hash': h, **info} for h, info in experiments.items()]
-        if sort_by in ['created', 'last_used']:
-            hash_list.sort(key=lambda x: x.get(sort_by, ''), reverse=True)
-        return hash_list
-
-    def get_hashes_by_component(self, hp_hash: Optional[str] = None,
-                                model_hash: Optional[str] = None,
-                                data_hash: Optional[str] = None) -> List[str]:
-        """Find hashes matching component hash(es)."""
-        manifest = self._load_manifest()
-        experiments = manifest.get('experiments', {})
-        matching = []
-        for exp_hash, info in experiments.items():
-            if hp_hash and info.get('hp_hash') != hp_hash:
-                continue
-            if model_hash and info.get('model_hash') != model_hash:
-                continue
-            if data_hash and info.get('data_hash') != data_hash:
-                continue
-            matching.append(exp_hash)
-        return matching
-
-    def dump_pending_changes(self, force: bool = False) -> bool:
-        """Dump any pending changes to disk.
-
-        This is called when:
-        - Training resumes after model/config/data changes
-        - Manual checkpoint is requested with force=True
-
-        Args:
-            force: Force dump even if no pending changes
+    def list_experiment_hashes(self) -> List[str]:
+        """List all experiment hashes with checkpoints.
 
         Returns:
-            bool: True if changes were dumped, False otherwise
+            list: List of experiment hash strings
         """
-        if not self._has_pending_changes and not force:
-            logger.debug("No pending changes to dump")
-            return False
+        if not self.checkpoints_dir.exists():
+            return []
 
+        hashes = [d.name for d in self.checkpoints_dir.iterdir() if d.is_dir()]
+        return sorted(hashes)
+
+    def has_pending_changes(self) -> tuple[bool, Set[str]]:
+        """Check if there are pending changes.
+
+        Returns:
+            tuple: (has_pending: bool, pending_components: Set[str])
+        """
+        return self._has_pending_changes, self._pending_components.copy()
+
+    # ================
+    # SAVING FUNCTIONS
+    # ================
+    def _save_architecture_reference_if_needed(self):
+        """Save architecture reference file if architecture doesn't exist in current hash.
+
+        This handles the case where weights are saved to a new hash (due to HP or data changes)
+        but the model architecture hasn't changed. Instead of duplicating the architecture file,
+        we save a JSON reference pointing to the hash that contains the actual architecture.
+        """
         if self.current_exp_hash is None:
-            logger.warning("No experiment hash set. Cannot dump pending changes.")
-            return False
+            return
 
-        logger.info(f"Dumping pending changes: {self._pending_components}")
+        model_dir = self.models_dir / self.current_exp_hash[8:-8]
+        arch_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture.pkl"
+        arch_ref_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture_ref.json"
 
-        self._dump_changes(
-            model=self._pending_model,
-            config=self._pending_config,
-            changed_components=self._pending_components
-        )
+        # If architecture file already exists here, no need for reference
+        if arch_file.exists():
+            return
 
-        # Clear pending state
-        self._pending_model = None
-        self._pending_config = None
-        self._pending_data_state = None
-        self._has_pending_changes = False
-        self._pending_components = set()
+        # If reference file already exists, no need to create it again
+        if arch_ref_file.exists():
+            return
 
-        self._save_manager_state()
-        return True
+        # Find the most recent hash with the same model hash that has the architecture
+        try:
+            component_hashes = self.hash_generator.get_component_hashes()
+            current_model_hash = component_hashes.get('model')
 
-    def _dump_changes(
+            if not current_model_hash:
+                return
+
+            # Get all hashes with the same model hash
+            matching_hashes = self.get_hashes_by_component(model_hash=current_model_hash)
+
+            # Find the most recent one that has the architecture file
+            for hash_candidate in sorted(matching_hashes, reverse=True):
+                arch_candidate = self.models_dir / hash_candidate / f"{hash_candidate}_architecture.pkl"
+                if arch_candidate.exists():
+                    # Save reference to this hash
+                    ref_data = {
+                        'architecture_hash': hash_candidate,
+                        'current_hash': self.current_exp_hash,
+                        'model_hash': current_model_hash,
+                        'reason': 'Model architecture unchanged, reference points to hash where it is stored',
+                        'created': datetime.now().isoformat()
+                    }
+
+                    os.makedirs(model_dir, exist_ok=True)
+                    with open(arch_ref_file, 'w') as f:
+                        json.dump(ref_data, f, indent=2)
+
+                    logger.info(f"Saved architecture reference: {self.current_exp_hash[:16]} → {hash_candidate[:16]}")
+                    return
+        except Exception as e:
+            logger.debug(f"Could not save architecture reference: {e}")
+
+    def _save_manager_state(self):
+        """Save manager state (current hash, step counter, etc.)"""
+        state_file = self.root_log_dir / ".checkpoint_manager_state.json"
+
+        state = {
+            'current_exp_hash': self.current_exp_hash,
+            'previous_exp_hash': self.previous_exp_hash,
+            'step_counter': self._step_counter,
+            'model_init_step': self._model_init_step,
+            'last_updated': datetime.now().isoformat(),
+            'component_hashes': self.hash_generator.get_component_hashes(),
+        }
+
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save manager state: {e}")
+
+    def _save_changes(
         self,
         model: Optional[th.nn.Module],
         config: Optional[Dict[str, Any]],
@@ -716,17 +849,6 @@ class CheckpointManager:
         if dump_model_architecture or dump_model_state or dump_optimizer_state or dump_config_state:
             self.save_logger_snapshot()
 
-    def has_pending_changes(self) -> tuple[bool, Set[str]]:
-        """Check if there are pending changes.
-
-        Returns:
-            tuple: (has_pending: bool, pending_components: Set[str])
-        """
-        return self._has_pending_changes, self._pending_components.copy()
-
-    # ================
-    # SAVING FUNCTIONS
-    # ================
     def save_model_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -759,7 +881,7 @@ class CheckpointManager:
         # Dump pending changes if requested
         if force_dump_pending and self._has_pending_changes:
             logger.info("Force dumping pending changes before checkpoint...")
-            self.dump_pending_changes(force=True)
+            self.save_pending_changes(force=True)
 
         # Get model from ledger if not provided
         if model is None:
@@ -841,61 +963,6 @@ class CheckpointManager:
         except Exception as e:
             logger.error(f"Failed to save model checkpoint: {e}")
             return None
-
-    def _save_architecture_reference_if_needed(self):
-        """Save architecture reference file if architecture doesn't exist in current hash.
-
-        This handles the case where weights are saved to a new hash (due to HP or data changes)
-        but the model architecture hasn't changed. Instead of duplicating the architecture file,
-        we save a JSON reference pointing to the hash that contains the actual architecture.
-        """
-        if self.current_exp_hash is None:
-            return
-
-        model_dir = self.models_dir / self.current_exp_hash[8:-8]
-        arch_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture.pkl"
-        arch_ref_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture_ref.json"
-
-        # If architecture file already exists here, no need for reference
-        if arch_file.exists():
-            return
-
-        # If reference file already exists, no need to create it again
-        if arch_ref_file.exists():
-            return
-
-        # Find the most recent hash with the same model hash that has the architecture
-        try:
-            component_hashes = self.hash_generator.get_component_hashes()
-            current_model_hash = component_hashes.get('model')
-
-            if not current_model_hash:
-                return
-
-            # Get all hashes with the same model hash
-            matching_hashes = self.get_hashes_by_component(model_hash=current_model_hash)
-
-            # Find the most recent one that has the architecture file
-            for hash_candidate in sorted(matching_hashes, reverse=True):
-                arch_candidate = self.models_dir / hash_candidate / f"{hash_candidate}_architecture.pkl"
-                if arch_candidate.exists():
-                    # Save reference to this hash
-                    ref_data = {
-                        'architecture_hash': hash_candidate,
-                        'current_hash': self.current_exp_hash,
-                        'model_hash': current_model_hash,
-                        'reason': 'Model architecture unchanged, reference points to hash where it is stored',
-                        'created': datetime.now().isoformat()
-                    }
-
-                    os.makedirs(model_dir, exist_ok=True)
-                    with open(arch_ref_file, 'w') as f:
-                        json.dump(ref_data, f, indent=2)
-
-                    logger.info(f"Saved architecture reference: {self.current_exp_hash[:16]} → {hash_candidate[:16]}")
-                    return
-        except Exception as e:
-            logger.debug(f"Could not save architecture reference: {e}")
 
     def save_model_architecture(
         self,
@@ -1070,6 +1137,147 @@ class CheckpointManager:
             logger.error(f"Failed to save data snapshot: {e}")
         return None
 
+    def save_logger_snapshot(self, exp_hash: Optional[str] = None) -> Optional[Path]:
+        """Persist logger queues for the given experiment hash.
+
+        Uses the same hash as model/hp/data; does not affect hashing.
+        """
+        exp = exp_hash or self.current_exp_hash
+        if exp is None:
+            return None
+
+        try:
+            logger_names = ledgers.list_loggers()
+            if not logger_names:
+                return None
+
+            snapshot = {"exp_hash": exp, "timestamp": datetime.now().isoformat(), "loggers": {}}
+            for lname in logger_names:
+                lg = ledgers.get_logger(lname)
+                if lg is None:
+                    continue
+
+                # Expect LoggerQueue interface
+                signal_history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
+                signal_history_per_sample = lg.get_signal_history_per_sample() if hasattr(lg, "get_signal_history_per_sample") else {}
+                graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
+                
+                # Get final snapshot for this logger
+                snapshot["loggers"][lname] = {
+                    "signal_history": signal_history,
+                    "signal_history_per_sample": signal_history_per_sample,
+                    "graph_names": graphs,
+                }
+
+            if not snapshot["loggers"]:
+                return None
+
+            snapshot_dir = self._get_logger_snapshot_dir(exp)
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+            # Merge existing payload to avoid dropping loggers not currently registered
+            try:
+                existing = self._load_logger_snapshot_payload(exp)
+                existing_loggers = existing.get("loggers", {}) if isinstance(existing, dict) else {}
+                if existing_loggers:
+                    existing_loggers.update(snapshot.get("loggers", {}))
+                    snapshot["loggers"] = existing_loggers
+            except Exception as e:
+                logger.warning(f"Failed to merge existing logger snapshot: {e}")
+
+            records: List[bytes] = []
+            for lname, payload in snapshot["loggers"].items():
+                line = json.dumps({"logger_name": lname, "payload": payload}, default=str) + "\n"
+                records.append(line.encode("utf-8"))
+
+            chunks: List[bytes] = []
+            current_chunk = bytearray()
+            for record in records:
+                if current_chunk and (len(current_chunk) + len(record) > self.LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES):
+                    chunks.append(bytes(current_chunk))
+                    current_chunk = bytearray()
+                current_chunk.extend(record)
+            if current_chunk:
+                chunks.append(bytes(current_chunk))
+
+            old_chunks = self._list_logger_snapshot_chunks(exp)
+            for old_chunk in old_chunks:
+                try:
+                    old_chunk.unlink()
+                except Exception:
+                    pass
+
+            compressor = zstd.ZstdCompressor(level=3)
+            chunk_names: List[str] = []
+            for idx, raw_chunk in enumerate(chunks, start=1):
+                chunk_path = self._get_logger_snapshot_chunk_path(idx, exp)
+                tmp_chunk_path = chunk_path.with_name(chunk_path.name + ".tmp")
+                with open(tmp_chunk_path, "wb") as f:
+                    f.write(compressor.compress(raw_chunk))
+                os.replace(tmp_chunk_path, chunk_path)
+                chunk_names.append(chunk_path.name)
+
+            manifest = {
+                "exp_hash": exp,
+                "timestamp": datetime.now().isoformat(),
+                "format": "ndjson+zstd",
+                "max_file_size_bytes": self.LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES,
+                "chunks": chunk_names,
+            }
+            manifest_path = self._get_logger_snapshot_manifest_path(exp)
+            tmp_manifest_path = manifest_path.with_name(manifest_path.name + ".tmp")
+            with open(tmp_manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+            os.replace(tmp_manifest_path, manifest_path)
+
+            logger.info(f"Saved logger snapshot: {manifest_path} ({len(chunk_names)} chunks)")
+            return manifest_path
+        except Exception as e:
+            logger.warning(f"Failed to save logger snapshot: {e}")
+            return None
+
+    def save_pending_changes(self, force: bool = False) -> bool:
+        """Dump any pending changes to disk.
+
+        This is called when:
+        - Training resumes after model/config/data changes
+        - Manual checkpoint is requested with force=True
+
+        Args:
+            force: Force dump even if no pending changes
+
+        Returns:
+            bool: True if changes were dumped, False otherwise
+        """
+        if not self._has_pending_changes and not force:
+            logger.debug("No pending changes to dump")
+            return False
+
+        if self.current_exp_hash is None:
+            logger.warning("No experiment hash set. Cannot dump pending changes.")
+            return False
+
+        logger.info(f"Dumping pending changes: {self._pending_components}")
+
+        self._save_changes(
+            model=self._pending_model,
+            config=self._pending_config,
+            changed_components=self._pending_components
+        )
+
+        # Clear pending state
+        self._pending_model = None
+        self._pending_config = None
+        self._pending_data_state = None
+        self._has_pending_changes = False
+        self._pending_components = set()
+
+        self._save_manager_state()
+        return True
+
+    # =================
+    # LOADING FUNCTIONS
+    # =================
     def _load_architecture_with_retry(self, arch_file: Path, max_retries: int = 5, base_delay: float = 0.2):
         """Load a model architecture file with retry/backoff for transient file locks."""
         last_error: Optional[Exception] = None
@@ -1118,9 +1326,84 @@ class CheckpointManager:
         if last_error:
             raise last_error
 
-    # =================
-    # LOADING FUNCTIONS
-    # =================
+    def _load_all_logger_snapshots(self):
+        """Load all logger snapshots found under loggers/ for visibility when starting."""
+        if not self.loggers_dir.exists():
+            return
+        for exp_dir in self.loggers_dir.iterdir():
+            if exp_dir.is_dir():
+                has_snapshot = (
+                    (exp_dir / self.LOGGER_SNAPSHOT_MANIFEST_FILE).exists()
+                    or (exp_dir / "loggers.json").exists()
+                    or any(exp_dir.glob(f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}*{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"))
+                )
+                if has_snapshot:
+                    self.load_logger_snapshot(exp_dir.name)
+
+    def _load_manifest(self) -> Dict[str, Any]:
+        """Load manifest file."""
+        if self.manifest_file.exists():
+            try:
+                with open(self.manifest_file, 'r') as f:
+                    return yaml.safe_load(f) or {'experiments': {}, 'latest_hash': None}
+            except Exception as e:
+                logger.warning(f"Failed to load manifest: {e}")
+        return {'experiments': {}, 'latest_hash': None}
+
+    def _load_manager_state(self):
+        """Load manager state if available"""
+        state_file = self.root_log_dir / ".checkpoint_manager_state.json"
+
+        if not state_file.exists():
+            # handled above
+            # No explicit state file; try to derive from manifest
+            manifest = self._load_manifest()
+            latest = manifest.get('latest_hash')
+            if latest:
+                self.current_exp_hash = latest
+                exp_info = manifest.get('experiments', {}).get(latest, {})
+                component_hashes = {
+                    'hp': exp_info.get('hp_hash'),
+                    'model': exp_info.get('model_hash'),
+                    'data': exp_info.get('data_hash'),
+                    'combined': latest,
+                }
+                self.hash_generator.restore_hashes(component_hashes, combined_hash=latest)
+                logger.info(f"Derived manager state from manifest: hash={latest}")
+            return
+
+        try:
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+
+            self.current_exp_hash = state.get('current_exp_hash')
+            self.previous_exp_hash = state.get('previous_exp_hash')
+            self._step_counter = state.get('step_counter', 0)
+            self._model_init_step = state.get('model_init_step', 0)
+
+            component_hashes = state.get('component_hashes')
+
+            # Fallback: derive component hashes from manifest when missing
+            if not component_hashes and self.current_exp_hash:
+                manifest = self._load_manifest()
+                exp_info = manifest.get('experiments', {}).get(self.current_exp_hash, {})
+                if exp_info:
+                    component_hashes = {
+                        'hp': exp_info.get('hp_hash'),
+                        'model': exp_info.get('model_hash'),
+                        'data': exp_info.get('data_hash'),
+                        'combined': self.current_exp_hash
+                    }
+
+            self.hash_generator.restore_hashes(
+                component_hashes,
+                combined_hash=self.current_exp_hash
+            )
+
+            logger.info(f"Loaded manager state: hash={self.current_exp_hash}, step={self._step_counter}")
+        except Exception as e:
+            logger.warning(f"Failed to load manager state: {e}")
+
     def load_latest_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
@@ -1201,149 +1484,27 @@ class CheckpointManager:
             logger.error(f"Failed to load checkpoint: {e}")
             return None
 
-    def list_experiment_hashes(self) -> List[str]:
-        """List all experiment hashes with checkpoints.
-
-        Returns:
-            list: List of experiment hash strings
-        """
-        if not self.checkpoints_dir.exists():
-            return []
-
-        hashes = [d.name for d in self.checkpoints_dir.iterdir() if d.is_dir()]
-        return sorted(hashes)
-
-    def get_checkpoint_info(self, exp_hash: Optional[str] = None) -> Dict[str, Any]:
-        """Get information about checkpoints for an experiment.
-
-        Args:
-            exp_hash: Specific experiment hash (uses current if None)
-
-        Returns:
-            dict: Information about checkpoints, configs, data backups
-        """
-        target_hash = exp_hash or self.current_exp_hash
-
-        if target_hash is None:
-            return {}
-
-        exp_dir = self.checkpoints_dir / target_hash
-
-        if not exp_dir.exists():
-            return {}
-
-        info = {
-            'exp_hash': target_hash,
-            'model_checkpoints': [],
-            'architecture_saved': False,
-            'configs': [],
-            'data_backups': []
-        }
-
-        model_dir = exp_dir / "model"
-        if model_dir.exists():
-            info['model_checkpoints'] = [
-                f.name for f in sorted(model_dir.glob(f"{target_hash}_step_*.pt"))
-            ]
-
-        # Configs
-        hp_dir = exp_dir / "hp"
-        if hp_dir.exists():
-            info['configs'] = [f.name for f in hp_dir.glob("*.yaml")]
-
-        # Data backups
-        data_dir = exp_dir / "data"
-        if data_dir.exists():
-            info['data_backups'] = [f.name for f in data_dir.glob("*.h5")]
-
-        return info
-
-    def _save_manager_state(self):
-        """Save manager state (current hash, step counter, etc.)"""
-        state_file = self.root_log_dir / ".checkpoint_manager_state.json"
-
-        state = {
-            'current_exp_hash': self.current_exp_hash,
-            'previous_exp_hash': self.previous_exp_hash,
-            'step_counter': self._step_counter,
-            'model_init_step': self._model_init_step,
-            'last_updated': datetime.now().isoformat(),
-            'component_hashes': self.hash_generator.get_component_hashes(),
-        }
-
+    def load_logger_snapshot(self, exp_hash: str) -> bool:
+        """Load logger queues from snapshot for a specific experiment hash."""
         try:
-            with open(state_file, 'w') as f:
-                json.dump(state, f, indent=2)
+            snapshot = self._load_logger_snapshot_payload(exp_hash)
+            if not snapshot:
+                return False
+
+            loggers_payload = snapshot.get("loggers", {})
+            for lname, payload in loggers_payload.items():
+                try:
+                    lg = ledgers.get_logger(lname) if lname in ledgers.list_loggers() else None
+                    if lg is None or not hasattr(lg, "load_snapshot"):
+                        lg = LoggerQueue(register=False)
+                        ledgers.register_logger(lg, name=lname)
+                    lg.load_snapshot(payload)
+                except Exception as inner_e:
+                    logger.warning(f"Failed to restore logger '{lname}': {inner_e}")
+            return True
         except Exception as e:
-            logger.warning(f"Failed to save manager state: {e}")
-
-    def _load_manager_state(self):
-        """Load manager state if available"""
-        state_file = self.root_log_dir / ".checkpoint_manager_state.json"
-
-        if not state_file.exists():
-            # handled above
-            # No explicit state file; try to derive from manifest
-            manifest = self._load_manifest()
-            latest = manifest.get('latest_hash')
-            if latest:
-                self.current_exp_hash = latest
-                exp_info = manifest.get('experiments', {}).get(latest, {})
-                component_hashes = {
-                    'hp': exp_info.get('hp_hash'),
-                    'model': exp_info.get('model_hash'),
-                    'data': exp_info.get('data_hash'),
-                    'combined': latest,
-                }
-                self.hash_generator.restore_hashes(component_hashes, combined_hash=latest)
-                logger.info(f"Derived manager state from manifest: hash={latest}")
-            return
-
-        try:
-            with open(state_file, 'r') as f:
-                state = json.load(f)
-
-            self.current_exp_hash = state.get('current_exp_hash')
-            self.previous_exp_hash = state.get('previous_exp_hash')
-            self._step_counter = state.get('step_counter', 0)
-            self._model_init_step = state.get('model_init_step', 0)
-
-            component_hashes = state.get('component_hashes')
-
-            # Fallback: derive component hashes from manifest when missing
-            if not component_hashes and self.current_exp_hash:
-                manifest = self._load_manifest()
-                exp_info = manifest.get('experiments', {}).get(self.current_exp_hash, {})
-                if exp_info:
-                    component_hashes = {
-                        'hp': exp_info.get('hp_hash'),
-                        'model': exp_info.get('model_hash'),
-                        'data': exp_info.get('data_hash'),
-                        'combined': self.current_exp_hash
-                    }
-
-            self.hash_generator.restore_hashes(
-                component_hashes,
-                combined_hash=self.current_exp_hash
-            )
-
-            logger.info(f"Loaded manager state: hash={self.current_exp_hash}, step={self._step_counter}")
-        except Exception as e:
-            logger.warning(f"Failed to load manager state: {e}")
-
-    def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = True, load_data: bool = True):
-        """If a current hash is known (or manifest has one), load and apply it.
-
-        This enables auto-resume when instantiating the manager on an existing
-        root_log_dir without requiring an explicit load_state call by the user.
-        """
-        target = self.current_exp_hash or self.get_latest_hash()
-        if not target:
-            return
-        try:
-            self.load_state(target, load_model=load_model, load_config=load_config, load_data=load_data)
-        except Exception as e:
-            logger.warning(f"Auto-resume failed for {target}: {e}")
+            logger.warning(f"Failed to load logger snapshot for {exp_hash}: {e}")
+            return False
 
     def load_checkpoint(self,
                         exp_hash: str,
@@ -1579,48 +1740,6 @@ class CheckpointManager:
 
         logger.info(f"Loaded components: {result['loaded_components']}")
         return result
-
-    def _extract_step_from_checkpoint_name(self, filename: str) -> Optional[int]:
-        match = re.search(r"_step_(\d+)\.pt$", filename)
-        if not match:
-            return None
-        try:
-            return int(match.group(1))
-        except Exception:
-            return None
-
-    def _select_weight_checkpoint_file(self, exp_hash: str, target_step: Optional[int] = None) -> Optional[Path]:
-        """Select weight checkpoint file for an experiment hash.
-
-        - If target_step is None: returns latest checkpoint.
-        - If target_step is provided: returns closest step; tie breaks toward higher step.
-        """
-        model_dir = self.models_dir / exp_hash[8:-8]
-        if not model_dir.exists():
-            return None
-
-        weight_files = sorted(model_dir.glob(f"{exp_hash}_step_*.pt"))
-        if not weight_files:
-            weight_files = sorted(model_dir.glob(f"{exp_hash[8:-8]}_step_*.pt"))
-        if not weight_files:
-            return None
-
-        if target_step is None:
-            return weight_files[-1]
-
-        target = int(target_step)
-        parsed: List[tuple[Path, int]] = []
-        for path in weight_files:
-            step = self._extract_step_from_checkpoint_name(path.name)
-            if step is not None:
-                parsed.append((path, step))
-
-        if not parsed:
-            return weight_files[-1]
-
-        parsed.sort(key=lambda item: item[1])
-        best_path, _ = min(parsed, key=lambda item: (abs(item[1] - target), -item[1]))
-        return best_path
 
     def load_state(
         self,
