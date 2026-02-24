@@ -140,30 +140,30 @@ class H5DataFrameStore:
         # Replace None with np.nan (vectorized)
         df = df.fillna(np.nan)
 
-        # Identify columns that need serialization (contain lists/dicts)
-        cols_to_serialize = SampleStats.MODEL_INOUT_LIST
-
         # Serialize only the columns that need it
         def serialize_value(val):
             if not isinstance(val, (list, set, np.ndarray)) and pd.isna(val):
                 return np.nan
+
             if isinstance(val, np.ndarray) and val.ndim <= 1:
                 if val.ndim == 0:
                     val = val.reshape(-1)
                 val = val.tolist()
-            if isinstance(val, (int, float, bool)):
-                val = [val]
+
             if isinstance(val, (list, dict)):
                 try:
                     return json.dumps(val)
                 except Exception:
                     return str(val)
-
+            elif isinstance(val, (tuple, set)):
+                try:
+                    return json.dumps(list(val))
+                except Exception:
+                    return str(val)
             return val
 
-        for col in cols_to_serialize:
-            if col in df.columns:
-                df[col] = df[col].apply(serialize_value)
+        for col in df.columns:
+            df[col] = df[col].apply(serialize_value)
 
         return df
 

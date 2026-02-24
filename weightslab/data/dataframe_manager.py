@@ -89,16 +89,7 @@ class LedgeredDataFrameManager:
             except Exception:
                 pass
 
-        if isinstance(sample_id, str):
-            sid = sample_id.strip()
-            if sid.lstrip("+-").isdigit():
-                try:
-                    return int(sid)
-                except Exception:
-                    return sid
-            return sid
-
-        return sample_id
+        return str(sample_id)
 
     def _coerce_sample_id_for_index(self, sample_id: Any) -> Any:
         """Coerce sample_id to match current dataframe index representation."""
@@ -113,15 +104,7 @@ class LedgeredDataFrameManager:
         sid_str = str(sid)
         if sid_str in self._df.index:
             return sid_str
-
-        if isinstance(sid, str) and sid.lstrip("+-").isdigit():
-            try:
-                sid_int = int(sid)
-                if sid_int in self._df.index:
-                    return sid_int
-            except Exception:
-                pass
-
+        
         return sid
 
     def set_array_store(self, array_store: H5ArrayStore):
@@ -422,7 +405,9 @@ class LedgeredDataFrameManager:
 
         # Single lock acquisition for entire batch (minimize lock time)
         with self._buffer_lock:
-            self._buffer.update(records_to_add)  # Enqueue buffer for later processing
+            # Merge nested dicts: update existing sample_id records, add new ones
+            for sample_id, record in records_to_add.items():
+                self._buffer.setdefault(sample_id, {}).update(record)
             logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
             should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
 
@@ -658,7 +643,12 @@ class LedgeredDataFrameManager:
 
         # Det to seg conversion - pre-fetch dataset once for efficiency
         if df_updates.index.size > 0:
-            self._df.loc[df_updates.index] = self._df.loc[df_updates.index].apply(lambda row: self._normalize_arrays_for_storage(row), axis=1)
+            normalized_rows = self._df.loc[df_updates.index].apply(
+                lambda row: self._normalize_arrays_for_storage(row),
+                axis=1
+            )
+            cols_to_update = df_updates.columns.intersection(self._df.columns)
+            self._df.loc[df_updates.index, cols_to_update] = normalized_rows[cols_to_update]
 
         # Mark dirty outside lock
         self.mark_dirty_batch(sample_ids)

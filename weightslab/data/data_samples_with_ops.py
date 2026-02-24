@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.dataframe_manager import create_ledger_manager
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
@@ -145,8 +146,6 @@ class DataSampleTrackingWrapper(Dataset):
         keep_leakages: bool = False,
         **_,
     ):
-        preload_uids = False  # TODO (GP): Enable this after ensuring datasets provide unique sample_id in metadata and updating the loading logic to handle missing/duplicate IDs gracefully + fix str int sid type for dataframe.
-
         # Set name
         self.loader_name = loader_name
 
@@ -207,7 +206,7 @@ class DataSampleTrackingWrapper(Dataset):
         # First, generate UIDs and detect duplicates before wrapping
         logger.debug(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
 
-        # Generate unique IDs
+        # Generate str unique IDs
         if preload_uids and compute_hash:
             logger.warning(
                 "preload_uids=True: Skipping hash-based UID generation and using preloaded UIDs from metadata. "
@@ -218,17 +217,17 @@ class DataSampleTrackingWrapper(Dataset):
         )
 
         # Detect duplicates and keep only first occurrences
-        seen_uid: Dict[int, int] = {}
+        seen_uid: Dict[str, int] = {}
         kept_indices = []
 
         # Detect dataset split for H5 storage
         original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
         split = self.loader_name or _detect_dataset_split(original_ds)
         for idx, uid in enumerate(self.unique_ids):
-            uid_int = int(uid)
-            if uid_int not in seen_uid:
+            uid_str = str(uid)
+            if uid_str not in seen_uid:
                 # First occurrence, keep it
-                seen_uid[uid_int] = idx
+                seen_uid[uid_str] = idx
                 kept_indices.append(idx)
         num_duplicates = len(self.unique_ids) - len(kept_indices)
         self.unique_ids = self.unique_ids[kept_indices]
@@ -247,7 +246,7 @@ class DataSampleTrackingWrapper(Dataset):
             # Filter out cross-loader duplicates
             non_duplicate_indices = [
                 i for i, uid in enumerate(self.unique_ids)
-                if int(uid) not in cross_loader_duplicates
+                if uid not in cross_loader_duplicates
             ]
             num_cross_duplicates = len(self.unique_ids) - len(non_duplicate_indices)
 
@@ -260,7 +259,7 @@ class DataSampleTrackingWrapper(Dataset):
                 self.unique_id_to_index = {uid: i for i, uid in enumerate(self.unique_ids)}
                 wrapped_dataset = Subset(wrapped_dataset, non_duplicate_indices)
 
-        # Register this loader's UIDs in global registry for future cross-loader checks
+        # Register this loader's UIDs in global registry for future cross-loader checks with other loaders
         self._register_loader_uids(split)
 
         # Now proceed with initialization using the deduplicated dataset
@@ -311,6 +310,7 @@ class DataSampleTrackingWrapper(Dataset):
                 # Attempt to load metadata for this sample and store in defaults (will be None if not available)
                 try:
                     uid = load_uid(self, sid)
+                    uid = str(uid)  # Ensure UID is a string for consistent handling
                     data[SampleStatsEx.SAMPLE_ID.value] = uid
                     uids[sid] = uid
                 except Exception as e:
@@ -320,7 +320,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Map new uids if exist
         if len(uids) > 0:
             self.unique_ids = list(uids.values())
-            self.unique_id_to_index = {self.unique_ids[i]: i for i in range(len(self.unique_id_to_index))}
+            self.unique_id_to_index = {self.unique_ids[i]: i for i in range(len(self.unique_ids))}
     
         # Register this split with the global ledger manager (shared across loaders) and load existing data
         if ledger_manager != None:
@@ -383,6 +383,17 @@ class DataSampleTrackingWrapper(Dataset):
         return len(self.wrapped_dataset)
 
     def _getitem_raw(self, index: int = None, id: int = None):
+        """
+        Get item by index or unique ID, returning (data, id, target, *metadata).
+
+         - If the wrapped dataset returns a single element (unsupervised), we return (item, id).
+         - If it returns two elements (data, label), we return (data, id, label).
+         - If it returns more than two elements, we assume the format is (data, uids, targets, **metadata) and return (data, id, target, *metadata).
+           In this case, we also override the target with tag-based labels if use_tags is enabled.
+
+         The unique ID is determined by the provided index or id parameter. If both are provided, index takes precedence.
+         The method ensures consistent handling of different dataset output formats and integrates tag-based labeling when configured.
+        """
         if index is None and id is not None:
             index = self.unique_id_to_index[id]
         data = self.wrapped_dataset[index]  # Get format (data, uids, targets, **metadata)
@@ -394,7 +405,7 @@ class DataSampleTrackingWrapper(Dataset):
             raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
         elif len(data) == 1:  # For single element (unsupervised): return (item, id)
             return data[0], id
-        elif len(data) == 2:  # For (data, label) format: return (data, id, label)
+        elif len(data) == 2:  # For unsupervised (data, id) format: return (data, id)
             return data[0], data[1]
         
         # Element extraction
@@ -485,8 +496,8 @@ class DataSampleTrackingWrapper(Dataset):
             logger.debug(f"Generated {len(self.unique_ids)} unique IDs in {elapsed_time:.2f} seconds ({len(self.unique_ids)/elapsed_time:.1f} samples/sec)")
         else:
             # Use simple indexing instead of hash generation
-            self.unique_ids = np.arange(_UID_CNT, _UID_CNT + n_samples, dtype=np.int32)
-            self.unique_id_to_index = {int(self.unique_ids[i]): i for i in range(n_samples)}
+            self.unique_ids = np.array([str(i) for i in range(_UID_CNT, _UID_CNT + n_samples)], dtype=object)
+            self.unique_id_to_index = {str(self.unique_ids[i]): i for i in range(n_samples)}
             elapsed_time = time.time() - start_time + 1e-8
             logger.debug(f"Using index-based UIDs for {n_samples} samples (skipped hash generation, took {elapsed_time:.4f}s)")
 
@@ -541,7 +552,6 @@ class DataSampleTrackingWrapper(Dataset):
         Generate unique IDs for all samples in parallel using array_id_2bytes.
         Returns a numpy array of uint64 IDs.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         dataset = self.wrapped_dataset if dataset is None else dataset
 
@@ -582,6 +592,7 @@ class DataSampleTrackingWrapper(Dataset):
             # Collect results as they complete
             for future in as_completed(futures):
                 idx, uid = future.result()
+                uid = str(uid)  # Ensure UID is a string for consistent handling
                 unique_ids[idx] = uid
                 unique_id_to_index[uid] = idx if uid not in unique_id_to_index else unique_id_to_index[uid]
 
@@ -1019,7 +1030,7 @@ class DataSampleTrackingWrapper(Dataset):
         global _GLOBAL_UID_REGISTRY
 
         with _REGISTRY_LOCK:
-            current_uids = set(str(uid) for uid in self.unique_ids)
+            current_uids = set(uid for uid in self.unique_ids)
             _GLOBAL_UID_REGISTRY[origin] = current_uids
             logger.debug(
                 f"[DataSampleTrackingWrapper] Registered {len(current_uids)} UIDs "
