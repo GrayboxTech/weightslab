@@ -969,9 +969,16 @@ class DataService:
             if request.include_raw_data and dataset is not None:
                 from weightslab.data.data_utils import load_raw_image_array
                 
-                np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(
-                    dataset, dataset.get_index_from_sample_id(sample_id)
-                )
+                try:
+                    ds_idx = dataset.get_index_from_sample_id(sample_id)
+                except KeyError:
+                    ds_idx = None
+                    logger.debug(f"Missing sample_id={sample_id} in dataset mapping.")
+                
+                if ds_idx is not None:
+                    np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(dataset, ds_idx)
+                else:
+                    np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
                 if middle_pil is not None:
                     original_size = middle_pil.size

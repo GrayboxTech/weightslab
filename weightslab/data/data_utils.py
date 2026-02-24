@@ -300,11 +300,12 @@ def load_metadata(dataset, sample_id):
             elif len(data) == 3:  # if len==3, data, uids, label, no extra info
                 return None  # No metadata, only data, uid, and label
             elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
-                if len(data) == 4:
-                    metadata = data[3]
-                else:
-                    metadata = data[3:]
-            return metadata
+                metadata = {}
+                for item in data[3:]:
+                    if isinstance(item, dict):
+                        metadata.update(item)
+                return metadata if metadata else None
+            return None
     return None
 
 
