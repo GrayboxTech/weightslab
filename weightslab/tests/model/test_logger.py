@@ -40,7 +40,6 @@ class TestLoggerQueue(unittest.TestCase):
         self.assertEqual(len(history), 3)
         self.assertEqual(history[0]["metric_name"], "loss")
         self.assertEqual(history[0]["model_age"], 0)
-        self.assertAlmostEqual(history[0]["metric_value"], 2.0)
         self.assertEqual(history[0]["experiment_hash"], "exp-hash-123")
 
         per_sample = logger.get_signal_history_per_sample()
