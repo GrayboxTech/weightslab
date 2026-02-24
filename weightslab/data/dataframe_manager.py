@@ -19,11 +19,11 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_DEFAULTS_TYPES,
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
-from weightslab.backend.ledgers import get_hyperparams, register_dataframe
+from weightslab.backend.ledgers import get_hyperparams
 
 
-# Set up logger
-logger = logging.getLogger(__name__)
+pd.set_option('future.no_silent_downcasting', True)
+logger = logging.getLogger(__name__)  # Set up logger
 
 
 class LedgeredDataFrameManager:

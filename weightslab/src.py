@@ -778,8 +778,6 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
             compute_every = getattr(func, '_wl_signal_meta', {}).get('compute_every', 0)
             if not compute_every:
                 signal_fns[name] = func
-        else:
-            logger.warning(f"Signal '{name}' not found in registry.")
 
     if not signal_fns:
         logger.info("No signals to compute.")

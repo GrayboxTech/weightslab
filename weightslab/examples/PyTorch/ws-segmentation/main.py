@@ -17,7 +17,7 @@ from PIL import Image
 
 import weightslab as wl
 
-from weightslab.utils.logger import LoggerQueue as Logger
+from weightslab.utils.logger import LoggerQueue
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context,
@@ -60,6 +60,9 @@ class SmallUNet(nn.Module):
         # For WeightsLab
         self.task_type = "segmentation"
         self.num_classes = num_classes
+        self.class_names = ["Background", "Ego Road", "Driveable Area", "Lane Line 1", "Lane Line 2", "Lane Line 3"]
+        self.seen_samples = 0
+        self.current_step = 0
         self.input_shape = (1, in_channels, image_size, image_size)
 
         self.enc1 = DoubleConv(in_channels, 32)
@@ -126,7 +129,6 @@ class BDD100kSegDataset(Dataset):
         num_classes=6,
         ignore_index=255,
         image_size=256,
-        max_samples=None,
     ):
         super().__init__()
         self.root = root
@@ -134,19 +136,16 @@ class BDD100kSegDataset(Dataset):
         self.num_classes = num_classes
         self.ignore_index = ignore_index
         self.task_type = "segmentation"
-        self.max_samples = max_samples
 
-        # Directories for images and labels
         img_dir = os.path.join(root, "images", split)
         lbl_dir = os.path.join(root, "labels", split)
 
-        # Find files
         image_files = [
             f
             for f in os.listdir(img_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
-        image_files = sorted(set(image_files))[: max_samples] if max_samples is not None else sorted(set(image_files))
+        image_files = sorted(set(image_files))
 
         self.images = []
         self.masks = []
@@ -193,21 +192,20 @@ class BDD100kSegDataset(Dataset):
         mask_path = self.masks[idx]
 
         img = Image.open(img_path).convert("RGB")
-        uid = '.'.join(os.path.basename(img_path).split(".")[:-1])
         mask = Image.open(mask_path)
 
         img_t = self.image_transform(img)
+
         mask_r = self.mask_resize(mask)
         mask_np = np.array(mask_r, dtype=np.int64)
         mask_t = torch.from_numpy(mask_np)  # [H, W] int64
-        
-        return img_t, uid, mask_t
+
+        return img_t, mask_t
 
 
 # =============================================================================
 # Train / Test loops (segmentation, using watcher-wrapped loaders)
 # =============================================================================
-
 def train(loader, model, optimizer, criterion_mlt, device):
     """
     Single training step using the tracked dataloader + watched loss.
@@ -236,6 +234,7 @@ def train(loader, model, optimizer, criterion_mlt, device):
         optimizer.step()
 
     return float(loss.detach().cpu().item())
+
 
 def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the val loader."""
@@ -313,12 +312,13 @@ if __name__ == "__main__":
     tqdm_display = parameters.get("tqdm_display", True)
 
     # --- 4) Register logger + hyperparameters ---
-    logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", log_dir=log_dir)
+    logger = LoggerQueue()
+    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
 
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
+        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
@@ -338,7 +338,6 @@ if __name__ == "__main__":
         num_classes=num_classes,
         ignore_index=ignore_index,
         image_size=image_size,
-        max_samples=100
     )
     _val_dataset = BDD100kSegDataset(
         root=data_root,
@@ -346,7 +345,6 @@ if __name__ == "__main__":
         num_classes=num_classes,
         ignore_index=ignore_index,
         image_size=image_size,
-        max_samples=100
     )
 
     train_loader = wl.watch_or_edit(
@@ -360,8 +358,7 @@ if __name__ == "__main__":
         array_autoload_arrays=False,
         array_return_proxies=True,
         array_use_cache=True,
-        preload_labels=True,
-        preload_uids=True,  # use file names as unique IDs for tracking
+        preload_labels = False,
     )
     test_loader = wl.watch_or_edit(
         _val_dataset,
@@ -374,8 +371,7 @@ if __name__ == "__main__":
         array_autoload_arrays=False,
         array_return_proxies=True,
         array_use_cache=True,
-        preload_labels=True,
-        preload_uids=True,  # use file names as unique IDs for tracking
+        preload_labels = False
     )
 
     # --- 6) Model, optimizer, losses, metric ---
@@ -385,91 +381,34 @@ if __name__ == "__main__":
     model = wl.watch_or_edit(
         model,
         flag="model",
-        device=device,
-        compute_dependencies=False
+        device=device
     )
-
     lr = parameters.get("optimizer", {}).get("lr", 1e-3)
-    optimizer = wl.watch_or_edit(
-        optim.Adam(model.parameters(), lr=lr),
-        flag="optimizer",
-    )
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # --- Compute class weights to handle class imbalance ---
     print("\n" + "=" * 60)
     print("Computing class weights to address class imbalance...")
     print("=" * 60)
 
-    def compute_class_weights(dataset, num_classes, max_samples=1000):
-        """
-        Compute class weights based on inverse pixel frequency.
-        Rare classes get higher weights to balance the loss.
-        """
-        class_counts = np.zeros(num_classes, dtype=np.float64)
-
-        # Sample up to max_samples images to compute statistics
-        num_samples = min(len(dataset), max_samples)
-        print(f"Analyzing {num_samples} samples from dataset...")
-
-        for idx in range(num_samples):
-            try:
-                # The dataset returns (img_t, mask_t)
-                _, _, label = dataset[idx]
-                label_np = label.numpy() if hasattr(label, 'numpy') else np.array(label)
-
-                # Count pixels for each class
-                for c in range(num_classes):
-                    class_counts[c] += (label_np == c).sum()
-            except Exception as e:
-                print(f"Warning: Could not process sample {idx}: {e}")
-                continue
-
-        # Avoid division by zero
-        class_counts = np.maximum(class_counts, 1)
-
-        # Compute inverse frequency weights
-        total_pixels = class_counts.sum()
-        class_weights = total_pixels / (num_classes * class_counts)
-
-        # Normalize so mean weight is 1.0
-        class_weights = class_weights / class_weights.mean()
-
-        print("\nClass distribution and weights:")
-        print("-" * 60)
-        for c in range(num_classes):
-            percentage = (class_counts[c] / total_pixels) * 100
-            print(f"  Class {c}: {percentage:6.2f}% of pixels → weight: {class_weights[c]:.3f}")
-        print("-" * 60)
-
-        return torch.FloatTensor(class_weights)
-
-    # Compute weights from training dataset
-    class_weights = compute_class_weights(_train_dataset, num_classes, max_samples=500)
-    class_weights = class_weights.to(device)
-
-    print(f"\nApplying class weights: {class_weights.cpu().numpy()}")
-    print("=" * 60 + "\n")
-
     # Create weighted loss functions
     train_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(
             reduction="none",
             ignore_index=ignore_index,
-            weight=class_weights  # ← Class weights applied!
         ),
         flag="loss",
+        name="train_mlt_loss/CE",
         per_sample=True,
         log=True,
-        name="train_loss/CE",
     )
     test_criterion_mlt = wl.watch_or_edit(
         nn.CrossEntropyLoss(
             reduction="none",
             ignore_index=ignore_index,
-            weight=class_weights  # ← Class weights applied!
         ),
-        name="test_loss/CE",
         flag="loss",
+        name="test_mlt_loss/CE",
         per_sample=True,
         log=True,
     )
@@ -479,8 +418,8 @@ if __name__ == "__main__":
             num_classes=num_classes,
             ignore_index=ignore_index,
         ).to(device),
-        name="test_metric/Jaccard",
         flag="metric",
+        name="test_metric/JaccardIndex",
         log=True,
     )
 
@@ -501,7 +440,6 @@ if __name__ == "__main__":
     # ================
     # 7. Training Loop
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
-    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
     test_loss, test_metric = None, None
     start_time = time.time()
     for train_step in train_range:
@@ -509,9 +447,10 @@ if __name__ == "__main__":
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Test
-        if train_step % eval_every == 0:
-            test_loader = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
-            test_loss, test_metric = test(test_loader, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
+        if train_step == 0 or train_step % eval_every == 0:
+            test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+            test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
+            test_loss, test_metric = test(test_loader_it, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
 
         # Verbose
         if verbose and not tqdm_display:

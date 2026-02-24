@@ -405,8 +405,8 @@ class DataSampleTrackingWrapper(Dataset):
             raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
         elif len(data) == 1:  # For single element (unsupervised): return (item, id)
             return data[0], id
-        elif len(data) == 2:  # For unsupervised (data, id) format: return (data, id)
-            return data[0], data[1]
+        elif len(data) == 2:  # For (data, label) format: return (data, id, label)
+            return data[0], id, data[1]
         
         # Element extraction
         # # First, always the input data

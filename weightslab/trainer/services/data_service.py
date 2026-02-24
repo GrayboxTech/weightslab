@@ -119,6 +119,12 @@ class DataService:
         self._h5_path = self._resolve_h5_path()
         self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
 
+        # Check hyperparameters for compute_natural_sort flag (default: False)
+        # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
+        hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
+        hp_dict = hp.get() if (hp is not None and hasattr(hp, "get")) else (hp if isinstance(hp, dict) else {})
+        self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
+
         # In-memory dataframe view of all datasets combined (streamed to UI)
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
@@ -134,12 +140,6 @@ class DataService:
         )
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
-
-        # Check hyperparameters for compute_natural_sort flag (default: False)
-        # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
-        hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
-        hp_dict = hp.get() if (hp is not None and hasattr(hp, "get")) else (hp if isinstance(hp, dict) else {})
-        self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
 
         if self._compute_natural_sort:
             # Always ensure natural sort stats are computed on startup
@@ -317,7 +317,7 @@ class DataService:
                 pass
         
         # Ensure natural_sort_score exists (init with NaN if missing)
-        if "natural_sort_score" not in self._all_datasets_df.columns:
+        if self._compute_natural_sort and "natural_sort_score" not in self._all_datasets_df.columns:
             try:
                 self._all_datasets_df["natural_sort_score"] = np.nan
             except Exception:
@@ -597,38 +597,79 @@ class DataService:
             dataset = self._get_dataset(origin)
 
             # ====== Step 2: Determine task type ======
-            # ====== Step 2: Determine task type ======
             label = row.get(SampleStatsEx.TARGET.value)
-            if (label is None or (isinstance(label, list) and label == [])) and dataset:
+            is_label_empty = False
+            if label is None:
+                is_label_empty = True
+            elif isinstance(label, list) and not label:
+                is_label_empty = True
+            elif isinstance(label, float):
+                import math
+                if math.isnan(label):
+                    is_label_empty = True
+
+            if is_label_empty and dataset:
                 label = load_label(dataset, sample_id)
 
-            # Scalar / single element -> treat as classification
-            label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
-
-            # Enccode task type based on label shape heuristics
-            # Maybe we should not care and send data.
-            label_ndim = label.ndim if hasattr(label, 'ndim') else len(getattr(label, 'shape', []))
-            if label_ndim >= 2 and label.shape[-2] >= 28 and label.shape[-1] >= 28:  # if label ndim superior to 3, it should be segmentation, otherwise classification or other scalar-like task (interpreted as cls)
-                task_type = 'segmentation'
+            ds = getattr(dataset, "wrapped_dataset", dataset)
+            model = self._ctx.components.get("model") if self._ctx else None
+            
+            # Robust Task Type Detection
+            # 1. DB Row takes precedence if valid string
+            db_task_type = row.get(SampleStatsEx.TASK_TYPE.value)
+            if db_task_type and isinstance(db_task_type, str) and db_task_type.strip().lower() not in ["none", "nan", "unknown", ""]:
+                task_type = db_task_type.strip().lower()
+            # 2. Explicit property on Dataset
+            elif hasattr(ds, "task_type") and getattr(ds, "task_type"):
+                task_type = str(getattr(ds, "task_type")).strip().lower()
+            # 3. Explicit property on Model
+            elif model and hasattr(model, "task_type") and getattr(model, "task_type"):
+                task_type = str(getattr(model, "task_type")).strip().lower()
             else:
-                task_type = "classification"
+                # 4. Safe Heuristic evaluation
+                task_type = "classification"  # Default fallback
+                if label is not None:
+                    if isinstance(label, dict):
+                        if 'boxes' in label or 'bboxes' in label:
+                            task_type = 'detection'
+                    else:
+                        from weightslab.data.data_utils import to_numpy_safe
+                        l_arr = to_numpy_safe(label)
+                        if l_arr is not None:
+                            try:
+                                ndim = l_arr.ndim
+                                shape = l_arr.shape
+                                if ndim >= 2:
+                                    # Detection: shape like (N, 4), (N, 5), (N, 6)
+                                    if ndim == 2 and shape[-1] in [4, 5, 6] and shape[-2] > 0:
+                                        task_type = 'detection'
+                                    # Segmentation: check spatial dims
+                                    elif len(shape) >= 2 and shape[-2] >= 16 and shape[-1] >= 16:
+                                        task_type = 'segmentation'
+                            except Exception:
+                                pass
 
             # ====== Step 5a: Process stats ======
             stats_to_retrieve = list(request.stats_to_retrieve)
+            
+            # These columns are handled explicitly later in the pipeline
+            exclude_cols = {
+                SampleStatsEx.SAMPLE_ID.value,
+                SampleStatsEx.ORIGIN.value,
+                SampleStatsEx.TARGET.value,
+                SampleStatsEx.PREDICTION.value,
+                SampleStatsEx.TASK_TYPE.value,
+            }
+
             if not stats_to_retrieve:
-                # Use set for O(1) lookup instead of O(n) list lookup
-                exclude_cols = {
-                    SampleStatsEx.SAMPLE_ID.value,
-                    SampleStatsEx.ORIGIN.value,
-                    SampleStatsEx.TARGET.value,
-                    SampleStatsEx.PREDICTION.value,
-                    # SampleStatsEx.PREDICTION_RAW.value,  # Show prediction raw in metatadata
-                    SampleStatsEx.TASK_TYPE.value,
-                }
                 stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
 
             # Optimized bulk processing of stats
             for stat_name in stats_to_retrieve:
+                # Never re-process core fields generically (prevents duplicates/bad db state overwriting calculated state)
+                if stat_name in exclude_cols:
+                    continue
+
                 value = row.get(stat_name)
 
                 # Skip prediction raw array
@@ -1488,7 +1529,7 @@ class DataService:
         # Ensure default columns exist (persists them across updates even if not in H5 yet)
         if SampleStatsEx.TAG.value not in updated_df.columns:
              updated_df[SampleStatsEx.TAG.value] = ""
-        if "natural_sort_score" not in updated_df.columns:
+        if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
              updated_df["natural_sort_score"] = np.nan
         if "deny_listed" not in updated_df.columns:
              updated_df["deny_listed"] = False
