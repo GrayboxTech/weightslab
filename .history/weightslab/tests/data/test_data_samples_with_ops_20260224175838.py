@@ -300,6 +300,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         )
 
         sample_id_0 = wrapper.unique_ids[0]
+        sample_id_1 = wrapper.unique_ids[1]
 
         # Set target_tag on sample 0
         wrapper.set(sample_id=sample_id_0, stat_name="tags", value='target_tag')

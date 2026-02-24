@@ -232,7 +232,7 @@ class CheckpointSystemTests(unittest.TestCase):
                 # Data Processing
                 (inputs, ids, labels) = next(loader)
                 inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-                uids_trained.extend(ids)
+                uids_trained.extend(ids.tolist())
 
                 # Inference
                 optimizer.zero_grad()

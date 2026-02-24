@@ -7,15 +7,11 @@ Expose commonly used helpers at package level so users can do::
 
 This file re-exports selected symbols from `weightslab.src`.
 """
-from .src import watch_or_edit, serve, keep_serving, save_signals, signal, compute_signals
-from .art import _BANNER
-from .utils.logs import setup_logging
-
 import os
 import logging
 import threading
 
-from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples
+from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, compute_signals
 from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory
 
@@ -64,6 +60,10 @@ __all__ = [
     "signal",
     "compute_signals",
     "set_log_directory",
+	"tag_samples", 
+	"discard_samples", 
+	"get_samples_by_tag",
+    "get_discarded_samples",
 
     "_BANNER__",
     "__version__",

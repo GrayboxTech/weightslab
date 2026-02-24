@@ -778,8 +778,6 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
             compute_every = getattr(func, '_wl_signal_meta', {}).get('compute_every', 0)
             if not compute_every:
                 signal_fns[name] = func
-        else:
-            logger.warning(f"Signal '{name}' not found in registry.")
 
     if not signal_fns:
         logger.info("No signals to compute.")
@@ -1118,7 +1116,7 @@ def save_signals(
             return
         
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
+    batch_ids_np = batch_ids.detach().cpu().numpy().astype(str) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids)
     if preds is not None:
         pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
         if np.issubdtype(pred_np.dtype, np.floating):

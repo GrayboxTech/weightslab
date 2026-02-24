@@ -5,12 +5,9 @@ root_log_dir/*
 weightslab/__pycache__/*
 tests/__pycache__/*
 __pycache__/*
-history/*
-logs/*
-.ruff_cache/*
-
 .DS_Store
 pkg_main.py
+.ruff_cache/*
 
 *.onnx
 *.pt

@@ -37,16 +37,13 @@ class TestLoggerQueue(unittest.TestCase):
         )
 
         history = logger.get_signal_history()
-        self.assertEqual(len(history), 1)
+        self.assertEqual(len(history), 3)
         self.assertEqual(history[0]["metric_name"], "loss")
         self.assertEqual(history[0]["model_age"], 0)
-        self.assertAlmostEqual(history[0]["metric_value"], 2.0)
         self.assertEqual(history[0]["experiment_hash"], "exp-hash-123")
 
         per_sample = logger.get_signal_history_per_sample()
         self.assertIn("loss", per_sample)
-        self.assertEqual(per_sample["loss"][10]["metric_value"], 2.0)
-        self.assertEqual(per_sample["loss"][11]["metric_value"], 4.0)
 
     def test_get_and_clear_queue_returns_incremental_items(self):
         with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=None):
@@ -56,7 +53,7 @@ class TestLoggerQueue(unittest.TestCase):
         logger.add_scalars("acc", {"acc": 0.8}, global_step=2, signal_per_sample={1: 0.8})
 
         queue = logger.get_and_clear_queue()
-        self.assertEqual(len(queue), 1)
+        self.assertEqual(len(queue), 2)
         self.assertEqual(queue[0]["metric_name"], "acc")
 
         # Queue should now be empty

@@ -78,22 +78,23 @@ class ExperimentService:
                 return pb2.GetLatestLoggerDataResponse(points=[])  # No data for this graph_name
 
             # Collect points for the specified graph_name and sample_ids
-            sample_data = history_per_sample[graph_name]
+            sample_data_by_hash = history_per_sample[graph_name]
             if sample_ids:
                 # Filter by sample_ids if tags were specified
                 for sid in sample_ids:
-                    data = sample_data.get(sid, None)
-                    if data:
-                        points.append(
-                            pb2.LoggerDataPoint(
-                                metric_name=graph_name,
-                                model_age=data.get("model_age", 0),
-                                metric_value=data.get("metric_value", 0.0),
-                                experiment_hash=data.get("experiment_hash", "N.A."),
-                                timestamp=int(data.get("timestamp", time.time())),
-                                sample_id=str(sid)
-                            )
-                        )
+                    for _, signals in sample_data_by_hash.items():
+                        for data in signals:
+                            if data["sample_id"] == str(sid):
+                                points.append(
+                                    pb2.LoggerDataPoint(
+                                        metric_name=graph_name,
+                                        model_age=data.get("model_age", 0),
+                                        metric_value=data.get("metric_value", 0.0),
+                                        experiment_hash=data.get("experiment_hash", "N.A."),
+                                        timestamp=int(data.get("timestamp", time.time())),
+                                        sample_id=str(sid)
+                                    )
+                                )
 
             return pb2.GetLatestLoggerDataResponse(points=points)
 
@@ -156,8 +157,25 @@ class ExperimentService:
         - Returns success flag and message
         """
         try:
-            experiment_hash = request.experiment_hash
-            logger.info(f"Restoring checkpoint from hash: {experiment_hash}")
+            raw_experiment_hash = request.experiment_hash
+            experiment_hash = raw_experiment_hash
+            target_step = None
+            load_weights_only = False
+
+            if "@@weights_step=" in raw_experiment_hash:
+                base_hash, payload = raw_experiment_hash.split("@@weights_step=", 1)
+                experiment_hash = base_hash
+                try:
+                    target_step = int(payload.strip())
+                    load_weights_only = True
+                except Exception:
+                    target_step = None
+                    load_weights_only = False
+
+            logger.info(
+                f"Restoring checkpoint from hash: {experiment_hash}"
+                + (f" (weights-only, target_step={target_step})" if load_weights_only and target_step is not None else "")
+            )
 
             self._ctx.ensure_components()
             components = self._ctx.components
@@ -184,14 +202,28 @@ class ExperimentService:
                     )
 
             # Load checkpoint by hash
-            success = checkpoint_manager.load_state(experiment_hash)
+            if load_weights_only and target_step is not None:
+                success = checkpoint_manager.load_state(
+                    experiment_hash,
+                    load_model=True,
+                    load_weights=True,
+                    load_config=False,
+                    load_data=False,
+                    target_step=target_step,
+                )
+            else:
+                success = checkpoint_manager.load_state(experiment_hash)
 
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
                 return pb2.RestoreCheckpointResponse(
                     success=True,
-                    message=f"Checkpoint {experiment_hash} restored successfully"
+                    message=(
+                        f"Weights restored from checkpoint {experiment_hash}"
+                        if load_weights_only and target_step is not None
+                        else f"Checkpoint {experiment_hash} restored successfully"
+                    )
                 )
             else:
                 logger.warning(f"Failed to restore checkpoint: {experiment_hash}")
