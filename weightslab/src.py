@@ -1120,15 +1120,25 @@ def save_signals(
     # Convert tensors to numpy for lightweight buffering
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(int) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids).astype(int)
     if preds is not None:
-        pred_np = preds.detach().cpu().numpy().astype(np.uint16) if isinstance(preds, th.Tensor) else np.asarray(preds).astype(np.uint16)
+        pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
+        if np.issubdtype(pred_np.dtype, np.floating):
+             pred_np = pred_np.astype(np.float32)
+        else:
+             pred_np = pred_np.astype(np.uint16)
     else:
         pred_np = None
+
     if preds_raw is not None:
         pred_raw_np = preds_raw.detach().cpu().numpy() if isinstance(preds_raw, th.Tensor) else np.asarray(preds_raw) 
     else: 
         pred_raw_np = None
+
     if targets is not None:
-        target_np = targets.detach().cpu().numpy().astype(np.uint16) if isinstance(targets, th.Tensor) else np.asarray(targets).astype(np.uint16)
+        target_np = targets.detach().cpu().numpy() if isinstance(targets, th.Tensor) else np.asarray(targets)
+        if np.issubdtype(target_np.dtype, np.floating):
+             target_np = target_np.astype(np.float32)
+        else:
+             target_np = target_np.astype(np.uint16)
     else: 
         target_np = None
 
