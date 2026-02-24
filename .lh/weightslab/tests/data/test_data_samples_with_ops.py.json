@@ -3,7 +3,7 @@
     "activeCommit": 0,
     "commits": [
         {
-            "activePatchIndex": 1,
+            "activePatchIndex": 2,
             "patches": [
                 {
                     "date": 1771952261922,
@@ -12,6 +12,10 @@
                 {
                     "date": 1771952318398,
                     "content": "Index: \n===================================================================\n--- \n+++ \n@@ -519,9 +519,9 @@\n         )\r\n \r\n         # Get sample ID at index 0\r\n         sample_id = wrapper.get_sample_id_at_index(0)\r\n-        self.assertEqual(sample_id, int(wrapper.unique_ids[0]))\r\n+        self.assertEqual(sample_id, wrapper.unique_ids[0])\r\n \r\n     def test_get_index_from_sample_id(self):\r\n         \"\"\"Test retrieving index from sample ID.\"\"\"\r\n \r\n@@ -532,9 +532,9 @@\n             compute_hash=False,\r\n         )\r\n \r\n         # Get index from first sample ID\r\n-        sample_id = int(wrapper.unique_ids[0])\r\n+        sample_id = wrapper.unique_ids[0]\r\n         index = wrapper.get_index_from_sample_id(sample_id)\r\n         self.assertEqual(index, 0)\r\n \r\n     def test_infer_num_classes_from_dataset(self):\r\n"
+                },
+                {
+                    "date": 1771952731609,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -299,9 +299,8 @@\n             tags_mapping=tags_mapping,\r\n         )\r\n \r\n         sample_id_0 = wrapper.unique_ids[0]\r\n-        sample_id_1 = wrapper.unique_ids[1]\r\n \r\n         # Set target_tag on sample 0\r\n         wrapper.set(sample_id=sample_id_0, stat_name=\"tags\", value='target_tag')\r\n \r\n"
                 }
             ],
             "date": 1771952261922,
