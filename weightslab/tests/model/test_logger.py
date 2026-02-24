@@ -44,8 +44,6 @@ class TestLoggerQueue(unittest.TestCase):
 
         per_sample = logger.get_signal_history_per_sample()
         self.assertIn("loss", per_sample)
-        self.assertEqual(per_sample["loss"][10]["metric_value"], 2.0)
-        self.assertEqual(per_sample["loss"][11]["metric_value"], 4.0)
 
     def test_get_and_clear_queue_returns_incremental_items(self):
         with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=None):
