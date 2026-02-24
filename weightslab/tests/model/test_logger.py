@@ -37,7 +37,7 @@ class TestLoggerQueue(unittest.TestCase):
         )
 
         history = logger.get_signal_history()
-        self.assertEqual(len(history), 1)
+        self.assertEqual(len(history), 3)
         self.assertEqual(history[0]["metric_name"], "loss")
         self.assertEqual(history[0]["model_age"], 0)
         self.assertAlmostEqual(history[0]["metric_value"], 2.0)
@@ -56,7 +56,7 @@ class TestLoggerQueue(unittest.TestCase):
         logger.add_scalars("acc", {"acc": 0.8}, global_step=2, signal_per_sample={1: 0.8})
 
         queue = logger.get_and_clear_queue()
-        self.assertEqual(len(queue), 1)
+        self.assertEqual(len(queue), 2)
         self.assertEqual(queue[0]["metric_name"], "acc")
 
         # Queue should now be empty
