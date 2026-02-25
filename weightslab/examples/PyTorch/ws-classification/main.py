@@ -336,7 +336,6 @@ if __name__ == "__main__":
     wl.serve(
         serving_grpc=parameters.get("serving_grpc", False),
         serving_cli=parameters.get("serving_cli", False),
-        serving_ui=parameters.get("serving_ui", False),
     )
 
     print("=" * 60)

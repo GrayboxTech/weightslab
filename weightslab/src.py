@@ -659,25 +659,16 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
 
-def serve(serving_ui: bool = False, serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
+def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """ Serve the trainer services.
 
     Args:
-        serving_ui (bool): Whether to serve the UI.
         serving_cli (bool): Whether to use the CLI.
         serving_grpc (bool): Whether to serve gRPC.
     """
 
-    # Sanity check
-    if serving_ui and not serving_grpc:
-        logger.error("UI server requires gRPC server to be enabled.")
-        sys.exit(1)
-
     if serving_grpc:
         grpc_serve(**kwargs)
-
-    if serving_ui and serving_grpc:
-        ui_serve(**kwargs)
 
     if serving_cli:
         cli_serve(**kwargs)
