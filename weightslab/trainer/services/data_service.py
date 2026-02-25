@@ -188,6 +188,7 @@ class DataService:
              self._load_existing_tags()
              self._last_internals_update_time = time.time()
 
+
     def _resolve_root_log_dir(self) -> Path:
         """Resolve root log directory from hyperparams/env, fallback to ./logs."""
         root = None
@@ -265,13 +266,31 @@ class DataService:
                 if df.empty:
                     return df
 
-                # Ensure sample_id is in index for consistency
-                df = df.reset_index().set_index(["sample_id"])
+                # Ensure sample_id is a column if it was the index
+                if df.index.name == SampleStatsEx.SAMPLE_ID.value:
+                    df = df.reset_index()
 
+                # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
+                # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without 
+                # exploding the dataframe size due to duplicate sample_id index labels.
+                if SampleStatsEx.ORIGIN.value in df.columns:
+                    df = df.set_index([SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value], drop=False)
+                else:
+                    # Fallback to single index if origin is missing, though manager should provide it
+                    df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=False)
+
+                # DEDUPLICATE: Ensure index is unique before returning. 
+                # If duplicates exist, reindex() will fail later.
+                if df.index.has_duplicates:
+                    logger.debug(f"[DataService] Dropping {df.index.duplicated().sum()} duplicate index labels from data view.")
+                    df = df[~df.index.duplicated(keep='last')]
+                
                 return df
-            except Exception:
-                logger.debug("[DataService] Falling back to cached snapshot of dataframe")
-                return self._all_datasets_df if self._all_datasets_df is not None else pd.DataFrame()
+            except Exception as e:
+                logger.debug(f"[DataService] Error pulling data view: {e}")
+                # Use getattr to safely check for attribute during __init__
+                current_df = getattr(self, "_all_datasets_df", None)
+                return current_df if current_df is not None else pd.DataFrame()
 
     def _get_origin_filter(self, request):
         """Extract requested origins if present on request (backward compatible)."""
@@ -1543,71 +1562,57 @@ class DataService:
 
         if self._is_filtered and self._all_datasets_df is not None:
             # The user has applied a custom view (Filter, Sort, or Aggregation).
-            # We want to support Live Updates of values where possible (e.g. "Keep highest loss"),
-            # but prevent overwriting the structure with the raw dataset.
-
-            # Check if the current view's index is compatible with the raw source (Sample IDs)
-            # If there is overlap, it's likely a Filter/Subset operation -> Update values, keep rows.
-            # If no overlap, it's likely an Aggregation (Index changed) -> Freeze view (can't update from raw).
-
             try:
-                # Use intersection to detect compatibility
-                # We need to handle MultiIndex vs Index comparisons carefully, generally simplistic check is enough
+                # Use intersection to detect rows we are currently watching in the filtered view
                 common_indices = self._all_datasets_df.index.intersection(updated_df.index)
 
                 if len(common_indices) > 0:
-                     # Case A: Filter/Subset. Indices match.
-                     # We force the new data to conform to the USER'S current view (rows/order).
+                     # Force the new data to conform to the USER'S current view (rows/order).
                      # providing live updates for the specific samples they are watching.
-                     updated_df = updated_df.reindex(self._all_datasets_df.index)
+                     # We use loc with a slice of unique indices to avoid duplicate axis errors.
+                     target_order = self._all_datasets_df.index
+                     updated_df = updated_df.reindex(target_order)
                 else:
-                     # Case B: Aggregation/Transformation. Indices don't match.
-                     # We cannot update an aggregated view (e.g. "Mean Loss by Class") from raw samples
-                     # without re-running the aggregation query.
-                     # Best behavior: Freeze the view (keep current df) so the user doesn't lose their chart.
+                     # Aggregation/Transformation - skip auto-update.
                      return
             except Exception as e:
                 logger.debug(f"[_slowUpdateInternals] Error matching indices for filtered view: {e}")
                 return
 
-        elif hasattr(self, "_all_datasets_df") and self._all_datasets_df is not None and not self._all_datasets_df.empty:
+        elif self._all_datasets_df is not None and not self._all_datasets_df.empty:
             # Case C: Standard/Unfiltered View.
-            # Preserves Sticky Sort if user manually sorted the full list.
+            # Preserves sticky sort and appends new samples.
 
-            # Simple heuristic: if the index has changed (reordered), re-apply it.
-
-            # 1. Update the new DF with the new data
-            # 2. Reindex the new DF to match the old DF's index order (intersection)
-            # This keeps the user's sort valid for existing items.
-
-            # Check if we have a custom sort (index is not strictly increasing monotonic)
-            # AND if the index types are compatible (both numeric)
+            # We check if the user has a custom sort active (not strictly increasing).
+            # Note: We use idx.is_monotonic_increasing as a proxy for "raw default order"
             if not self._all_datasets_df.index.is_monotonic_increasing:
-                 # We have a custom sort.
-                 # 1. Check strict equality first (fastest)
-                 if self._all_datasets_df.index.equals(updated_df.index):
-                     pass  # Index match, just use updated_df as is
+                 # Try to maintain this sort for existing records and append new ones.
+                 old_index = self._all_datasets_df.index
+                 new_index = updated_df.index
 
-                 else:
-                     # We have a custom sort or mismatch.
-                     old_index = self._all_datasets_df.index
-                     new_index = updated_df.index
+                 # Intersection preserves the ORDER of old_index
+                 # We use a set for O(1) matching but preserve list order of old_index
+                 new_index_set = set(new_index)
+                 kept_indices = [x for x in old_index if x in new_index_set]
 
-                     # Optimize intersection using set for O(1) lookups
-                     new_index_set = set(new_index)
-                     kept_indices = [x for x in old_index if x in new_index_set]
+                 # Newly added samples (e.g. from live training) go to the end
+                 old_index_set = set(old_index)
+                 newly_added_indices = [x for x in new_index if x not in old_index_set]
 
-                     # Identify rows that are NEW
-                     old_index_set = set(old_index)
-                     newly_added_indices = [x for x in new_index if x not in old_index_set]
+                 full_order = kept_indices + newly_added_indices
+                 
+                 try:
+                     # Ensure full_order is unique (it should be, but be defensive)
+                     # pd.Index(full_order).unique() preserves order.
+                     unique_order = pd.Index(full_order).unique()
+                     updated_df = updated_df.reindex(unique_order)
+                 except Exception as e:
+                     logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
+                     # If reindex fails, keep the old dataframe to avoid losing the sort
+                     # and just return (don't update self._all_datasets_df)
+                     return
 
-                     # Construct full order
-                     full_order = kept_indices + newly_added_indices
-
-                     # Reindex using this full order.
-                     updated_df = updated_df.reindex(full_order)
-
-        self._all_datasets_df = updated_df  # Update view with new data (filtered or unfiltered)
+        self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
 
     def _process_get_data_samples(self, request, context):
@@ -1636,7 +1641,7 @@ class DataService:
 
             with self._lock:
                 self._slowUpdateInternals()  # Update global dataframe with latest data before slicing
-                df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()  # Reset index for proper row access with sample_id column
+                df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].copy()  # Use iloc for stable slicing, preserved origin/sample_id columns available for processing
 
             if df_slice.empty:
                 logger.warning(f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}")
