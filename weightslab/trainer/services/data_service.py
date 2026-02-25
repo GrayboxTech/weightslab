@@ -265,10 +265,12 @@ class DataService:
                 # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without 
                 # exploding the dataframe size due to duplicate sample_id index labels.
                 if SampleStatsEx.ORIGIN.value in df.columns:
-                    df = df.set_index([SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value], drop=False)
+                    # Use drop=True to ensure origin is NOT in both index and columns (avoids ambiguity)
+                    # GetDataSamples calls reset_index() before processing rows, which restores them as columns
+                    df = df.set_index([SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value], drop=True)
                 else:
                     # Fallback to single index if origin is missing, though manager should provide it
-                    df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=False)
+                    df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=True)
 
                 # DEDUPLICATE: Ensure index is unique before returning. 
                 # If duplicates exist, reindex() will fail later.
@@ -501,7 +503,7 @@ class DataService:
 
         # Prepare tasks
         tasks = []
-        for idx, row in self._all_datasets_df.iterrows():
+        for idx, row in self._all_datasets_df.reset_index().iterrows():
              tasks.append((idx, row))
 
         logger.info(f"[DataService] Computing sort stats for {len(tasks)} samples...")
@@ -1379,10 +1381,24 @@ class DataService:
                     # Params are already cleaned by the Agent's SortHandler
                     try:
                         df.sort_values(inplace=True, **params)
-                    except TypeError as e:
+                    except (TypeError, ValueError, KeyError) as e:
+                        # Fallback for ambiguity or missing column (if it's in the index)
+                        if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
+                             # If ambiguous or missing from columns, and it's a simple sort by one field, try sorting index level
+                             by = params.get("by")
+                             if isinstance(by, str) and by in getattr(df.index, 'names', []):
+                                 ascending = params.get("ascending", True)
+                                 df.sort_index(level=by, inplace=True, ascending=ascending)
+                             elif isinstance(e, KeyError):
+                                 # It's actually missing, raise the original error
+                                 raise e
+                             else:
+                                 # Multi-column sort or other ambiguity, fallback to converting columns
+                                 df.sort_values(inplace=True, **params, key=lambda x: x)
+                        
                         # Fallback for mixed types (e.g. lists vs strings/floats): sort by string representation
-                        logger.warning(f"Sort failed due to type mismatch ({e}). Retrying with string conversion...")
-                        if "key" not in params:
+                        elif "key" not in params and isinstance(e, TypeError):
+                            logger.warning(f"Sort failed due to type mismatch ({e}). Retrying with string conversion...")
                             params["key"] = lambda x: x.astype(str)
                             df.sort_values(inplace=True, **params)
                         else:
@@ -1513,13 +1529,23 @@ class DataService:
                  try:
                      # Ensure full_order is unique (it should be, but be defensive)
                      # pd.Index(full_order).unique() preserves order.
-                     unique_order = pd.Index(full_order).unique()
+                     if isinstance(old_index, pd.MultiIndex):
+                         # pd.Index(full_order) on a list of tuples might lose MultiIndex metadata
+                         unique_order = pd.MultiIndex.from_tuples(full_order, names=old_index.names)
+                         # MultiIndex.unique() preserves order
+                         unique_order = unique_order.unique()
+                     else:
+                         unique_order = pd.Index(full_order).unique()
+
                      updated_df = updated_df.reindex(unique_order)
                  except Exception as e:
                      logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
                      # If reindex fails, keep the old dataframe to avoid losing the sort
-                     # and just return (don't update self._all_datasets_df)
                      return
+
+        # Deduplicate before saving back to prevent index corruption
+        if updated_df.index.has_duplicates:
+             updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
 
         self._all_datasets_df = updated_df
         self._last_internals_update_time = current_time
@@ -1550,7 +1576,8 @@ class DataService:
 
             with self._lock:
                 self._slowUpdateInternals()  # Update global dataframe with latest data before slicing
-                df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].copy()  # Use iloc for stable slicing, preserved origin/sample_id columns available for processing
+                # Use reset_index() to ensure origin and sample_id are available as columns for processing
+                df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()
 
             if df_slice.empty:
                 logger.warning(f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}")
@@ -1706,6 +1733,7 @@ class DataService:
 
                 # Apply operations with lock
                 with self._lock:
+                    self._slowUpdateInternals(force=True)  # Refresh to catch new columns/samples
                     df = self._all_datasets_df
                     messages = []
 
@@ -1717,6 +1745,11 @@ class DataService:
                         messages.append(msg)
 
                     final_message = " | ".join(messages) if messages else "No operation performed"
+                    
+                    # Deduplicate before saving back
+                    if df.index.has_duplicates:
+                         df = df[~df.index.duplicated(keep='last')]
+                         
                     self._all_datasets_df = df
 
                     # Direct queries are manipulations -> Freeze the view
@@ -1745,11 +1778,12 @@ class DataService:
                         intent_type=pb2.INTENT_FILTER
                     )
                 elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@reset") or request.query.lower().replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@clear"):
-                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset operation: {request.query[:100]}...")
+                    logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset/clear operation: {request.query[:100]}...")
                     # Force view reset
                     with self._lock:
-                        self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data for plotting
-                        logger.info(f"[ApplyDataQuery] Force view reset.")
+                        self._is_filtered = False  # Unfreeze view first
+                        self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data
+                        logger.info(f"[ApplyDataQuery] Force view reset and unfrozen.")
                         return pb2.DataQueryResponse(
                             success=True,
                             message="View has been reset successfully.",
@@ -1792,6 +1826,7 @@ class DataService:
 
                     # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
                     with self._lock:
+                        self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
                         # Start with the current authoritative DF
                         df = self._all_datasets_df
                         messages = []
@@ -1844,6 +1879,9 @@ class DataService:
                         # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
                         # Only update if it was a manipulation query, not analysis
                         if intent_type == pb2.INTENT_FILTER:
+                            # Deduplicate before saving back
+                            if df.index.has_duplicates:
+                                df = df[~df.index.duplicated(keep='last')]
                             self._all_datasets_df = df
                             # If we modified the DF, we should freeze it (unless it was a Reset which handled above)
                             # We check if *any* operation was effectively applied.
