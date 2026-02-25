@@ -1,0 +1,34 @@
+experiment_name: det_usecase
+device: cuda
+
+eval_full_to_train_steps_ratio: 1500
+experiment_dump_to_train_steps_ratio: 200
+num_classes: 6
+image_size: 128
+tqdm_display: true
+
+# start training immediately or not
+is_training: false
+
+# Configure global dataframe storage
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 250
+ledger_flush_interval: 10.0
+
+# Serving
+serving_grpc: true
+serving_cli: true
+
+data:
+  train_loader:
+    batch_size: 1
+    shuffle: false
+    images_dir: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/images/val2017
+    annotations_file: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/annotations/instances_val2017.json
+  test_loader:
+    batch_size: 1
+    shuffle: false
+    images_dir: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/images/val2017
+    annotations_file: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/annotations/instances_val2017.json
+
