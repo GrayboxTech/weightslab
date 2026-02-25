@@ -1,10 +1,18 @@
-# List the packages and their exact versions
-torch==2.1.2
-torchvision==0.16.2
-torchaudio==2.1.2
+# #######################
+# List the dependencies #
+# #######################
+
+# Torch and related libraries
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.1.2+cu121
+torchvision==0.16.2+cu121
+torchaudio==2.1.2+cu121
 torchinfo==1.8.0
 torchmetrics==1.8.2
 tensorboard==2.20
+pytorch-lightning==2.6.1
+
+# Python libraries
 filelock==3.15.4
 fsspec==2024.6.0
 Jinja2==3.1.4
@@ -30,12 +38,6 @@ httpx==0.28.1
 pydantic==2.11.10
 dotenv==0.9.9
 h5py==3.15.1
-pytorch-lightning==2.6.1
-
-# UI - List the packages and their exact versions
-dash==2.17.1
-dash_bootstrap_components==1.6.0
-dash_daq==0.5.0
 Pillow==11.0.0
 
 # LangChain dependencies for Agent
