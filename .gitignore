@@ -1,13 +1,18 @@
 weightslab.egg-info/*
 build/*
 dist/*
+logs/*
 root_log_dir/*
 weightslab/__pycache__/*
 tests/__pycache__/*
+
 __pycache__/*
 history/*
-logs/*
+.lh/*
+.pytest_cache/*
 .ruff_cache/*
+.venv/*
+.vscode/*
 
 .DS_Store
 pkg_main.py
