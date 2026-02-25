@@ -81,7 +81,7 @@ class ExperimentHashGenerator:
         self._last_model_hash = model_hash
         self._last_data_hash = data_hash
 
-        logger.info(f"Generated experiment hash: {final_hash}")
+        logger.info(f"Generated experiment hash: {final_hash}- (HP: {hp_hash}, Model: {model_hash}, Data: {data_hash})")
         logger.debug(f"  HP hash: {hp_hash}")
         logger.debug(f"  Model hash: {model_hash}")
         logger.debug(f"  Data hash: {data_hash}")

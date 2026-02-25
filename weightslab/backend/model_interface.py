@@ -415,7 +415,6 @@ class ModelInterface(NetworkWithOps):
                     # Save model weights checkpoint (no pending dump here)
                     existing_manager.save_model_checkpoint(
                         save_optimizer=True,
-                        step=batched_age,
                         force_dump_pending=False,
                         update_manifest=False
                     )

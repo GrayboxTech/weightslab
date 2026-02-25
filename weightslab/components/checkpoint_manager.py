@@ -289,7 +289,7 @@ class CheckpointManager:
         if create_data_dir:
             data_hash_dir.mkdir(exist_ok=True)
 
-        logger.debug(f"Created checkpoint directories for {exp_hash}")
+        logger.debug(f"Created checkpoint directories for {exp_hash}: hp_dir={hp_hash_dir}, model_dir={model_hash_dir}, data_dir={data_hash_dir}")
         self._update_manifest(exp_hash)
 
     def _update_manifest(self, exp_hash: str):
@@ -615,7 +615,7 @@ class CheckpointManager:
         is_new = (new_hash != self.current_exp_hash) or (force or dump_immediately)
 
         if is_new:
-            logger.info(f"New experiment hash: {new_hash} (previous: {self.current_exp_hash})")
+            logger.info(f"New experiment hash: {new_hash[:8]}-{new_hash[8:-8]}-{new_hash[-8:]} (previous: {self.current_exp_hash[:8]}-{self.current_exp_hash[8:-8]}-{self.current_exp_hash[-8:]})")
             logger.info(f"Changed components: {changed_components}")
 
             # Update hash
@@ -836,7 +836,10 @@ class CheckpointManager:
 
                 if weights_model is not None:
                     logger.info("Saving model weights checkpoint with component changes...")
-                    self.save_model_checkpoint(save_optimizer=dump_optimizer_state, save_model_checkpoint=dump_model_state)
+                    self.save_model_checkpoint(
+                        save_optimizer=dump_optimizer_state,
+                        save_model_checkpoint=dump_model_state
+                    )
                 else:
                     logger.warning("Could not save weights: no model available")
             except Exception as e:
@@ -849,12 +852,12 @@ class CheckpointManager:
     def save_model_checkpoint(
         self,
         model: Optional[th.nn.Module] = None,
-        step: Optional[int] = None,
         save_optimizer: bool = True,
         save_model_checkpoint: bool = True,
         metadata: Optional[Dict[str, Any]] = None,
         force_dump_pending: bool = False,
-        update_manifest: bool = True
+        update_manifest: bool = True,
+        step: Optional[int] = None
     ) -> Optional[Path]:
         """Save model weights checkpoint.
 
@@ -863,7 +866,6 @@ class CheckpointManager:
 
         Args:
             model: PyTorch model (or get from ledger if None)
-            step: Training step number (uses internal counter if None)
             save_optimizer: Whether to also save optimizer state
             metadata: Additional metadata to save
             force_dump_pending: If True, dump any pending changes before saving checkpoint
@@ -889,13 +891,11 @@ class CheckpointManager:
             return None
 
         # Determine step
-        if step is None:
-            step = self._step_counter if self._step_counter is not None else model.get_age()
-        self._step_counter = min(self._step_counter, step) if self._step_counter is not None else step
+        self._step_counter = model.get_age() if step is None else step
 
         # Prepare checkpoint data
         checkpoint = {
-            'step': step,
+            'step': self._step_counter,
             'model_state_dict': model.state_dict(),
             'timestamp': datetime.now().isoformat(),
             'exp_hash': self.current_exp_hash,
@@ -938,7 +938,7 @@ class CheckpointManager:
         model_dir = self.models_dir / self.current_exp_hash[8:-8]
         os.makedirs(model_dir, exist_ok=True)
         # Use full exp_hash in filename for clarity and uniqueness
-        checkpoint_file = model_dir / f"{self.current_exp_hash}_step_{step:06d}.pt"
+        checkpoint_file = model_dir / f"{self.current_exp_hash}_step_{self._step_counter:06d}.pt"
 
         try:
             th.save(checkpoint, checkpoint_file)
@@ -946,7 +946,7 @@ class CheckpointManager:
 
             # Update manifest with latest weight checkpoint for this experiment
             if update_manifest:
-                self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name, step)
+                self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name, self._step_counter)
 
             # If model architecture doesn't exist in this hash directory, save a reference to where it is
             self._save_architecture_reference_if_needed()
