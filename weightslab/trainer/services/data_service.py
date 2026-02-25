@@ -1,22 +1,18 @@
 import io
-from typing import List
 import time
 import logging
 import os
 import traceback
 import threading
-from hashlib import md5
 import json
 
 import numpy as np
 import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
-from weightslab.proto.experiment_service_pb2 import SampleEditType
 
 from PIL import Image
 from tqdm import tqdm
-from typing import List
 from typing import List
 from pathlib import Path
 from datetime import datetime
@@ -24,6 +20,7 @@ from concurrent import futures
 
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
+from weightslab.proto.experiment_service_pb2 import SampleEditType
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
@@ -652,7 +649,6 @@ class DataService:
                         if 'boxes' in label or 'bboxes' in label:
                             task_type = 'detection'
                     else:
-                        from weightslab.data.data_utils import to_numpy_safe
                         l_arr = to_numpy_safe(label)
                         if l_arr is not None:
                             try:

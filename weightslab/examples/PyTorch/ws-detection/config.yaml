@@ -1,14 +1,15 @@
+# Global configuration
+device: auto
 experiment_name: det_usecase
-device: cuda
 
+# Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
+compute_natural_sort: false
+
+# Experiment parameters
 eval_full_to_train_steps_ratio: 1500
 experiment_dump_to_train_steps_ratio: 200
-num_classes: 6
-image_size: 128
 tqdm_display: true
-
-# start training immediately or not
-is_training: false
+is_training: false  # Start training immediately or not
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
@@ -20,15 +21,17 @@ ledger_flush_interval: 10.0
 serving_grpc: true
 serving_cli: true
 
+# Data
+num_classes: 6
+image_size: 128
 data:
   train_loader:
     batch_size: 1
     shuffle: false
-    images_dir: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/images/val2017
-    annotations_file: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/annotations/instances_val2017.json
+    images_dir: ../datasets/coco/images/val2017
+    annotations_file: ../datasets/coco/annotations/instances_val2017.json
   test_loader:
     batch_size: 1
     shuffle: false
-    images_dir: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/images/val2017
-    annotations_file: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/coco/annotations/instances_val2017.json
-
+    images_dir: ../datasets/coco/images/val2017
+    annotations_file: ../datasets/coco/annotations/instances_val2017.json

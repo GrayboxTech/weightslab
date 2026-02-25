@@ -556,7 +556,7 @@ class DataSampleTrackingWrapper(Dataset):
         dataset = self.wrapped_dataset if dataset is None else dataset
 
         n_samples = len(dataset)
-        unique_ids = np.zeros(n_samples, dtype=np.int32)
+        unique_ids = [i for i in range(n_samples)]  # Initialize with indices as fallback IDs
         unique_id_to_index = {}
 
         def compute_id(idx):
@@ -595,7 +595,7 @@ class DataSampleTrackingWrapper(Dataset):
                 uid = str(uid)  # Ensure UID is a string for consistent handling
                 unique_ids[idx] = uid
                 unique_id_to_index[uid] = idx if uid not in unique_id_to_index else unique_id_to_index[uid]
-
+        unique_ids = np.asanyarray(unique_ids, dtype=object)  # Use object dtype for string UIDs
         return unique_ids, unique_id_to_index
 
     def _get_df_view(self, limit: int = -1) -> pd.DataFrame:

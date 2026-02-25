@@ -95,7 +95,14 @@ class MNISTCustomDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
+<<<<<<< Updated upstream
         return image, idx, label
+=======
+        # Get the filepath for this sample
+        metadata = {'filepath': self.filepaths.get(idx, 'unknown')}
+        
+        return image, idx, label, metadata
+>>>>>>> Stashed changes
 
 
 # -----------------------------------------------------------------------------
@@ -250,30 +257,13 @@ if __name__ == "__main__":
     )
 
     # Data (MNIST train/val/test)
-    # Use data_dir from config if provided, otherwise fall back to log_dir/data
-    if parameters.get("data_dir"):
-        user_path = parameters["data_dir"]
-        # Check if files are directly in user_path (e.g. data_dir ends in .../MNIST/raw)
-        files_here = os.path.exists(os.path.join(user_path, "train-images-idx3-ubyte")) or \
-                     os.path.exists(os.path.join(user_path, "train-images-idx3-ubyte.gz"))
-
-        if files_here:
-            data_root = os.path.dirname(os.path.dirname(user_path))
-            should_download = False
-            print(f"Using existing data from {user_path}")
-        else:
-            check_child = os.path.join(user_path, "MNIST", "raw")
-            files_child = os.path.exists(os.path.join(check_child, "train-images-idx3-ubyte")) or \
-                          os.path.exists(os.path.join(check_child, "train-images-idx3-ubyte.gz"))
-            if files_child:
-                data_root = user_path
-                should_download = False
-                print(f"Using existing data found in {check_child}")
-            else:
-                # Not found, download to the specified directory (acting as root)
-                data_root = user_path
-                should_download = True
-                print(f"Data not found, will download to {data_root}")
+    # Use data_root from config if provided, otherwise fall back to log_dir/data
+    if parameters.get("data_root"):
+        should_download = False
+        if not os.path.exists(parameters["data_root"]):
+            print(f"Warning: data_root {parameters['data_root']} does not exist. Will attempt to download to this location.")
+            should_download = True
+        data_root = parameters["data_root"]
     else:
         data_root = os.path.join(parameters["root_log_dir"], "data")
         should_download = True

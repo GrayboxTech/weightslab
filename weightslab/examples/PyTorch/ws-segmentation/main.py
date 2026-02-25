@@ -184,12 +184,14 @@ class BDD100kSegDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        IMPORTANT: returns (item, target) only.
-        DataSampleTrackingWrapper (from watch_or_edit) will wrap this and
-        produce (inputs, ids, labels) and _getitem_raw for you.
+            IMPORTANT: returns (item, uid, target) only.
+                - item: transformed input (e.g. image tensor)
+                - uid: unique identifier for the sample (e.g. filename)
+                - target: transformed label/target (e.g. mask tensor)
         """
         img_path = self.images[idx]
         mask_path = self.masks[idx]
+        uid = os.path.basename(img_path)
 
         img = Image.open(img_path).convert("RGB")
         mask = Image.open(mask_path)
@@ -200,7 +202,7 @@ class BDD100kSegDataset(Dataset):
         mask_np = np.array(mask_r, dtype=np.int64)
         mask_t = torch.from_numpy(mask_np)  # [H, W] int64
 
-        return img_t, mask_t
+        return img_t, uid, mask_t
 
 
 # =============================================================================

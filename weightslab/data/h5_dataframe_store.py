@@ -167,7 +167,6 @@ class H5DataFrameStore:
 
         # Force any remaining object columns to string to prevent PyTables serialization errors with mixed types
         for col in df.select_dtypes(include=['object']).columns:
-            if col not in cols_to_serialize:
                 df[col] = df[col].astype(str)
 
         return df
@@ -436,10 +435,8 @@ class H5DataFrameStore:
                         # Final safety pass: force any remaining scalar object columns to string 
                         # to prevent PyTables serialization errors caused by merging different dtypes 
                         # (e.g. initializing a new column with bool False, then updating with string 'True')
-                        cols_to_serialize = SampleStats.MODEL_INOUT_LIST
                         for col in existing.select_dtypes(include=['object']).columns:
-                            if col not in cols_to_serialize:
-                                existing[col] = existing[col].astype(str)
+                            existing[col] = existing[col].astype(str)
 
                         # Remove old key
                         if key in store:

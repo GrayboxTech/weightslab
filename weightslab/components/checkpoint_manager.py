@@ -189,31 +189,28 @@ class CheckpointManager:
         except Exception:
             return None
 
-    def _get_logger_snapshot_dir(self, exp_hash: Optional[str] = None) -> Path:
-        exp = exp_hash or self.current_exp_hash
-        if exp:
-            return self.loggers_dir / exp
+    def _get_logger_snapshot_dir(self) -> Path:
         return self.loggers_dir
 
-    def _get_logger_snapshot_path(self, exp_hash: Optional[str] = None) -> Path:
-        return self._get_logger_snapshot_dir(exp_hash) / "loggers.json"
+    def _get_logger_snapshot_path(self) -> Path:
+        return self._get_logger_snapshot_dir() / "loggers.json"
 
-    def _get_logger_snapshot_manifest_path(self, exp_hash: Optional[str] = None) -> Path:
-        return self._get_logger_snapshot_dir(exp_hash) / self.LOGGER_SNAPSHOT_MANIFEST_FILE
+    def _get_logger_snapshot_manifest_path(self) -> Path:
+        return self._get_logger_snapshot_dir() / self.LOGGER_SNAPSHOT_MANIFEST_FILE
 
-    def _get_logger_snapshot_chunk_path(self, chunk_index: int, exp_hash: Optional[str] = None) -> Path:
+    def _get_logger_snapshot_chunk_path(self, chunk_index: int) -> Path:
         fname = f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}{chunk_index:04d}{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"
-        return self._get_logger_snapshot_dir(exp_hash) / fname
+        return self._get_logger_snapshot_dir() / fname
 
-    def _list_logger_snapshot_chunks(self, exp_hash: Optional[str] = None) -> List[Path]:
-        snapshot_dir = self._get_logger_snapshot_dir(exp_hash)
+    def _list_logger_snapshot_chunks(self) -> List[Path]:
+        snapshot_dir = self._get_logger_snapshot_dir()
         if not snapshot_dir.exists():
             return []
         return sorted(snapshot_dir.glob(f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}*{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"))
 
-    def _load_logger_snapshot_payload(self, exp_hash: str) -> Dict[str, Any]:
-        snapshot_dir = self._get_logger_snapshot_dir(exp_hash)
-        manifest_path = self._get_logger_snapshot_manifest_path(exp_hash)
+    def _load_logger_snapshot_payload(self) -> Dict[str, Any]:
+        snapshot_dir = self._get_logger_snapshot_dir()
+        manifest_path = self._get_logger_snapshot_manifest_path()
 
         chunk_paths: List[Path] = []
         if manifest_path.exists():
@@ -223,13 +220,13 @@ class CheckpointManager:
                 chunk_names = manifest.get("chunks", [])
                 chunk_paths = [snapshot_dir / name for name in chunk_names if name]
             except Exception as e:
-                logger.warning(f"Failed to read logger snapshot manifest for {exp_hash}: {e}")
+                logger.warning(f"Failed to read logger snapshot manifest for {manifest_path}: {e}")
 
         if not chunk_paths:
-            chunk_paths = self._list_logger_snapshot_chunks(exp_hash)
+            chunk_paths = self._list_logger_snapshot_chunks()
 
         if chunk_paths:
-            snapshot = {"exp_hash": exp_hash, "timestamp": datetime.now().isoformat(), "loggers": {}}
+            snapshot = {"timestamp": datetime.now().isoformat(), "loggers": {}}
             dctx = zstd.ZstdDecompressor()
             for path in chunk_paths:
                 if not path.exists():
@@ -253,7 +250,7 @@ class CheckpointManager:
 
         # Legacy layout fallback (new per-exp first, then old global file)
         legacy_candidates = [
-            self._get_logger_snapshot_path(exp_hash),
+            self._get_logger_snapshot_path(),
             self.loggers_dir / "loggers.json",
         ]
         for legacy_path in legacy_candidates:
@@ -1172,12 +1169,12 @@ class CheckpointManager:
             if not snapshot["loggers"]:
                 return None
 
-            snapshot_dir = self._get_logger_snapshot_dir(exp)
+            snapshot_dir = self._get_logger_snapshot_dir()
             snapshot_dir.mkdir(parents=True, exist_ok=True)
 
             # Merge existing payload to avoid dropping loggers not currently registered
             try:
-                existing = self._load_logger_snapshot_payload(exp)
+                existing = self._load_logger_snapshot_payload()
                 existing_loggers = existing.get("loggers", {}) if isinstance(existing, dict) else {}
                 if existing_loggers:
                     existing_loggers.update(snapshot.get("loggers", {}))
@@ -1200,7 +1197,7 @@ class CheckpointManager:
             if current_chunk:
                 chunks.append(bytes(current_chunk))
 
-            old_chunks = self._list_logger_snapshot_chunks(exp)
+            old_chunks = self._list_logger_snapshot_chunks()
             for old_chunk in old_chunks:
                 try:
                     old_chunk.unlink()
@@ -1210,7 +1207,7 @@ class CheckpointManager:
             compressor = zstd.ZstdCompressor(level=3)
             chunk_names: List[str] = []
             for idx, raw_chunk in enumerate(chunks, start=1):
-                chunk_path = self._get_logger_snapshot_chunk_path(idx, exp)
+                chunk_path = self._get_logger_snapshot_chunk_path(idx)
                 tmp_chunk_path = chunk_path.with_name(chunk_path.name + ".tmp")
                 with open(tmp_chunk_path, "wb") as f:
                     f.write(compressor.compress(raw_chunk))
@@ -1224,7 +1221,7 @@ class CheckpointManager:
                 "max_file_size_bytes": self.LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES,
                 "chunks": chunk_names,
             }
-            manifest_path = self._get_logger_snapshot_manifest_path(exp)
+            manifest_path = self._get_logger_snapshot_manifest_path()
             tmp_manifest_path = manifest_path.with_name(manifest_path.name + ".tmp")
             with open(tmp_manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2)
@@ -1330,15 +1327,13 @@ class CheckpointManager:
         """Load all logger snapshots found under loggers/ for visibility when starting."""
         if not self.loggers_dir.exists():
             return
-        for exp_dir in self.loggers_dir.iterdir():
-            if exp_dir.is_dir():
-                has_snapshot = (
-                    (exp_dir / self.LOGGER_SNAPSHOT_MANIFEST_FILE).exists()
-                    or (exp_dir / "loggers.json").exists()
-                    or any(exp_dir.glob(f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}*{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"))
-                )
-                if has_snapshot:
-                    self.load_logger_snapshot(exp_dir.name)
+        has_snapshot = (
+            (self.loggers_dir / self.LOGGER_SNAPSHOT_MANIFEST_FILE).exists()
+            or (self.loggers_dir / "loggers.json").exists()
+            or any(self.loggers_dir.glob(f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}*{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"))
+        )
+        if has_snapshot:
+            self.load_logger_snapshot(self.loggers_dir.name)
 
     def _load_manifest(self) -> Dict[str, Any]:
         """Load manifest file."""
@@ -1487,7 +1482,7 @@ class CheckpointManager:
     def load_logger_snapshot(self, exp_hash: str) -> bool:
         """Load logger queues from snapshot for a specific experiment hash."""
         try:
-            snapshot = self._load_logger_snapshot_payload(exp_hash)
+            snapshot = self._load_logger_snapshot_payload()
             if not snapshot:
                 return False
 
