@@ -84,11 +84,11 @@ def _get_step(step: int | None = None) -> int:
         if hasattr(m, 'get_age'):
             val = m.get_age()
             if val is not None:
-                step = int(val) -1
+                step = int(val)
         elif hasattr(m, 'current_step'):
             val = m.current_step
             if val is not None:
-                step = int(val) -1
+                step = int(val)
             elif step is not None:
                 # step = step # fallback to provided step
                 m.current_step = step  # add current_step attribute to model for future tracking

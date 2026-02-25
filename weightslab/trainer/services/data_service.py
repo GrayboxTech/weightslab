@@ -790,7 +790,6 @@ class DataService:
                             thumbnail=b""
                         )
                     )
-
             elif label is not None:
                 # Classification / other scalar-like labels
                 

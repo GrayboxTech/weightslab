@@ -95,6 +95,9 @@ class NetworkWithOps(nn.Module):
     def get_age(self):
         return self.current_step
 
+    def increase_age(self):
+        self.current_step += 1
+
     def get_name(self):
         return self.name
 
