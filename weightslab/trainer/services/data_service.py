@@ -2053,10 +2053,10 @@ class DataService:
                                 if column_name in self._all_datasets_df.columns:
                                     self._all_datasets_df = self._all_datasets_df.drop(columns=[column_name])
                     
-                    # Reload dataframe to reflect all changes
-                    self._all_datasets_df = self._pull_into_all_data_view_df()
-            
-                # Prevent _slowUpdateInternals from overwriting our edits with stale data
+                    # Reload dataframe to reflect all changes without destroying current sort/view
+                    self._slowUpdateInternals(force=True)
+                
+                # Prevent _slowUpdateInternals from automatically overwriting our edits with stale data
                 self._last_internals_update_time = time.time()
                 
                 return pb2.DataEditsResponse(
