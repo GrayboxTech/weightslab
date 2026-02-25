@@ -87,7 +87,7 @@ class MNISTCustomDataset(Dataset):
     def __getitem__(self, idx):
         """
         Returns:
-            tuple: (image, label, filepath)
+            tuple: (image, idx, label)
         """
         image, label = self.mnist[idx]
         
@@ -95,11 +95,7 @@ class MNISTCustomDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        # Get the filepath for this sample
-        metadata = {
-            'filepath': self.filepaths.get(idx, 'unknown')}
-        
-        return image, idx, label, metadata
+        return image, idx, label
 
 
 # -----------------------------------------------------------------------------
@@ -108,7 +104,7 @@ class MNISTCustomDataset(Dataset):
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:    
-        (inputs, ids, labels, _) = next(loader)
+        (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)
 
@@ -142,7 +138,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     """Full evaluation pass over the test loader."""
     losses = torch.tensor(0.0, device=device)
 
-    for (inputs, ids, labels, _) in loader:
+    for (inputs, ids, labels) in loader:
         with guard_testing_context, torch.no_grad():
             inputs = inputs.to(device)
             labels = labels.to(device)
@@ -207,7 +203,7 @@ if __name__ == "__main__":
     # ---- sensible defaults / normalization ----
     parameters.setdefault("experiment_name", "mnist_cnn")
     parameters.setdefault("device", "auto")
-    parameters.setdefault("training_steps_to_do", 1000)
+    parameters.setdefault("training_steps_to_do", 1000000)
     parameters.setdefault("eval_full_to_steps_ratio", 50)
 
     # Experiment name
@@ -323,8 +319,8 @@ if __name__ == "__main__":
         batch_size=train_bs,
         shuffle=train_shuffle,
         is_training=True,
-        compute_hash=True,
-        preload_labels=False,
+        compute_hash=False,
+        preload_labels=True,
         preload_metadata=False,
         enable_h5_persistence=enable_h5_persistence
     )
@@ -335,8 +331,8 @@ if __name__ == "__main__":
         batch_size=test_bs,
         shuffle=test_shuffle,
         is_training=False,
-        compute_hash=True,
-        preload_labels=False,
+        compute_hash=False,
+        preload_labels=True,
         preload_metadata=False,
         enable_h5_persistence=enable_h5_persistence
     )
