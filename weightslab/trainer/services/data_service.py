@@ -147,6 +147,7 @@ class DataService:
         
         # Automatically compute registered custom signals
         self._compute_custom_signals()
+        self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         logger.info("DataService initialized.")
 
