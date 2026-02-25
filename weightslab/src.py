@@ -18,7 +18,6 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
-from weightslab.ui.weightslab_ui import ui_serve
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
