@@ -802,64 +802,15 @@ class DataService:
                 
                 # Handle dictionary labels (e.g. detection targets)
                 if isinstance(label, dict):
-                    # Check for Lidar Config to render BEV mask
-                    # Need to unwrap dataset to find config
-                    curr_ds = dataset
-                    lidar_config = {}
-                    while True:
-                         if hasattr(curr_ds, "viz_config"):
-                             lidar_config = curr_ds.viz_config
-                             break
-                         if hasattr(curr_ds, "dataset"):
-                             curr_ds = curr_ds.dataset
-                         elif hasattr(curr_ds, "wrapped_dataset"):
-                             curr_ds = curr_ds.wrapped_dataset
-                         else:
-                             break
-                    
-                    if lidar_config and 'boxes' in label:
-                        logger.info(f"[DataService] Rendering BEV mask. Boxes: {len(label['boxes'])}")
-                        boxes = to_numpy_safe(label['boxes'])
-                        labels_ = to_numpy_safe(label['labels'])
-                        
-                        id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
-                        fmt_labels = []
-                        if boxes is not None and labels_ is not None:
-                            for i in range(len(boxes)):
-                                c_id = int(labels_[i])
-                                cls_name = id_to_cls.get(c_id, "Car")
-                                fmt_labels.append({
-                                    'cls': cls_name,
-                                    'box': boxes[i]
-                                })
-                        
-                        bev_conf = lidar_config.get("bev", {})
-                        mask = render_bev_mask(
-                            fmt_labels,
-                            res=bev_conf.get("resolution", 0.1),
-                            size=bev_conf.get("image_size", 800),
-                            cx=bev_conf.get("center_x", 400),
-                            cy=bev_conf.get("center_y", 400)
+                    data_stats.append(
+                        create_data_stat(
+                            name='label',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=str(label), # Simplified visualization
+                            thumbnail=b""
                         )
-                        data_stats.append(
-                            create_data_stat(
-                                name='label_mask', # Use label_mask convention for segmentation overlay
-                                stat_type='array',
-                                shape=list(mask.shape),
-                                value=mask.astype(float).ravel().tolist(),
-                                thumbnail=b""
-                            )
-                        )
-                    else:
-                        data_stats.append(
-                            create_data_stat(
-                                name='label',
-                                stat_type='string',
-                                shape=[1],
-                                value_string=str(label), # Simplified visualization
-                                thumbnail=b""
-                            )
-                        )
+                    )
                 else:
                     # Check if label is NaN (handle both scalars and arrays)
                     if self._is_nan_value(label):
@@ -895,57 +846,21 @@ class DataService:
 
             # ====== Step 8: Process predictions ======
             pred = row.get(SampleStatsEx.PREDICTION.value)
-            if task_type != "classification":
-                # Handle Dict Prediction (Detection -> BEV Mask)
-                if isinstance(pred, dict) and lidar_config and 'boxes' in pred:
-                     # Render Prediction Mask similar to Ground Truth
-                     boxes = to_numpy_safe(pred['boxes'])
-                     labels_ = to_numpy_safe(pred['labels'])
-                     
-                     # Map IDs
-                     id_to_cls = {0: "Car", 1: "Pedestrian", 2: "Cyclist"}
-                     fmt_labels = []
-                     if boxes is not None and labels_ is not None:
-                         for i in range(len(boxes)):
-                             c_id = int(labels_[i])
-                             cls_name = id_to_cls.get(c_id, "Car")
-                             fmt_labels.append({
-                                 'cls': cls_name,
-                                 'box': boxes[i]
-                             })
-                             
-                     bev_conf = lidar_config.get("bev", {})
-                     mask = render_bev_mask(
-                         fmt_labels,
-                         res=bev_conf.get("resolution", 0.1),
-                         size=bev_conf.get("image_size", 800),
-                         cx=bev_conf.get("center_x", 400),
-                         cy=bev_conf.get("center_y", 400)
-                     )
-                     data_stats.append(
-                         create_data_stat(
-                             name='pred_mask',
-                             stat_type='array',
-                             shape=list(mask.shape),
-                             value=mask.astype(float).ravel().tolist(),
-                             thumbnail=b""
-                         )
-                     )
-                elif pred is not None:
-                    try:
-                        pred_arr = np.asarray(pred)
-                        # Add predicted mask stat
-                        data_stats.append(
-                            create_data_stat(
-                                name='pred_mask',
-                                stat_type='array',
-                                shape=list(pred_arr.shape),
-                                value=pred_arr.astype(float).ravel().tolist(),
-                                thumbnail=b""
-                            )
+            if task_type != "classification" and pred is not None:
+                try:
+                    pred_arr = np.asarray(pred)
+                    # Add predicted mask stat
+                    data_stats.append(
+                        create_data_stat(
+                            name='pred_mask',
+                            stat_type='array',
+                            shape=list(pred_arr.shape),
+                            value=pred_arr.astype(float).ravel().tolist(),
+                            thumbnail=b""
                         )
-                    except Exception:
-                         pass
+                    )
+                except Exception:
+                    pass
             else:
                 # Classification: get prediction from row or dataset
                 if pred is None:
