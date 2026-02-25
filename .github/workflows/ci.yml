@@ -108,11 +108,17 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Generate requirements hash
+        id: req-hash
+        run: |
+          REQ_HASH=$(tail -n +2 requirements.txt | sha256sum | cut -d' ' -f1)
+          echo "hash=$REQ_HASH" >> $GITHUB_OUTPUT
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ steps.req-hash.outputs.hash }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -137,11 +143,17 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Generate requirements hash
+        id: req-hash
+        run: |
+          REQ_HASH=$(tail -n +2 requirements.txt | sha256sum | cut -d' ' -f1)
+          echo "hash=$REQ_HASH" >> $GITHUB_OUTPUT
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ steps.req-hash.outputs.hash }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
