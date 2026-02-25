@@ -95,14 +95,7 @@ class MNISTCustomDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-<<<<<<< Updated upstream
         return image, idx, label
-=======
-        # Get the filepath for this sample
-        metadata = {'filepath': self.filepaths.get(idx, 'unknown')}
-        
-        return image, idx, label, metadata
->>>>>>> Stashed changes
 
 
 # -----------------------------------------------------------------------------
