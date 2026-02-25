@@ -20,10 +20,9 @@ from .utils.logs import setup_logging, set_log_directory
 threading.current_thread().name = "WL-MainThread"
 
 # Track if initialization has already happened
-_initialized = False
 
 # Auto-initialize logging if not already configured
-if not _initialized:
+if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
 	# Check for environment variable to control log level
 	log_level = os.getenv(
 		'WEIGHTSLAB_LOG_LEVEL',
@@ -43,8 +42,7 @@ if not _initialized:
 	logger = logging.getLogger(__name__)
 	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
 	logger.info(_BANNER)
-	
-	_initialized = True
+	os.environ['WEIGHTSLAB_initialized'] = 'true'  # Ensure WL init once
 
 # Get Package Metadata
 __version__ = "0.0.0"

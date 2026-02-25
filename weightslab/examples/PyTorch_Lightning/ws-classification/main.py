@@ -5,12 +5,14 @@ import tempfile
 import yaml
 import torch
 import torch.nn as nn
-from torchvision import datasets, transforms
-
 import pytorch_lightning as pl
-from torchmetrics.classification import Accuracy
 
 import weightslab as wl
+
+from torchvision import datasets, transforms
+from torch.utils.data import Dataset
+from torchmetrics.classification import Accuracy
+
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.components.global_monitoring import (
     guard_training_context,
@@ -18,15 +20,86 @@ from weightslab.components.global_monitoring import (
 )
 
 
+# =============================================================================
+# Custom MNIST Dataset with Filepath Metadata
+# =============================================================================
+class MNISTCustomDataset(Dataset):
+    """
+    Custom MNIST dataset that includes filepath metadata for each image.
+    
+    Returns tuples of (image, label, filepath) where filepath is stored
+    as metadata that can be tracked by WeightsLab.
+    """
+    
+    def __init__(self, root, train=True, download=False, transform=None):
+        """
+        Args:
+            root (str): Root directory where MNIST data is stored
+            train (bool): If True, use training data; else use test data
+            download (bool): If True, download the data if not present
+            transform (callable, optional): Optional transform to be applied on images
+        """
+        # Load the standard MNIST dataset
+        self.mnist = datasets.MNIST(
+            root=root,
+            train=train,
+            download=download,
+            transform=None  # We'll apply transform manually to track filepath
+        )
+        self.transform = transform
+        self.train = train
+        self.root = root
+        
+        # Build filepath mapping for each sample
+        self._build_filepath_mapping()
+    
+    def _build_filepath_mapping(self):
+        """Build a mapping of sample index to filepath."""
+        self.filepaths = {}
+        
+        # For each index, construct a meaningful filepath
+        # MNIST doesn't have original individual files, so we create virtual paths
+        for idx in range(len(self.mnist)):
+            label = self.mnist.targets[idx].item() if hasattr(self.mnist.targets[idx], 'item') else self.mnist.targets[idx]
+            split = 'train' if self.train else 'test'
+            
+            # Create a virtual filepath that identifies the image
+            virtual_path = os.path.join(
+                'MNIST',
+                'processed',
+                split,
+                f'class_{label}',
+                f'sample_{idx:05d}.pt'
+            )
+            self.filepaths[idx] = virtual_path
+    
+    def __len__(self):
+        return len(self.mnist)
+    
+    def __getitem__(self, idx):
+        """
+        Returns:
+            tuple: (image, idx, label)
+        """
+        image, label = self.mnist[idx]
+        
+        # Apply transform if provided
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, idx, label
+    
+    
 class LitMNIST(pl.LightningModule):
-    def __init__(self, model, optim, criterion_wl=None, metric_wl=None):
+    def __init__(self, model, optim, train_criterion_wl=None, val_criterion_wl=None, metric_wl=None):
         super().__init__()
 
         # Model hyperparameters
         self.model = model
 
         # WeightsLab tracked loss and metrics
-        self.criterion_wl = criterion_wl
+        self.train_criterion_wl = train_criterion_wl
+        self.val_criterion_wl = val_criterion_wl
         self.metric_wl = metric_wl
 
         # Training hyperparameters
@@ -42,8 +115,8 @@ class LitMNIST(pl.LightningModule):
             preds = torch.argmax(logits, dim=1)
             
             # WeightsLab tracked loss
-            if self.criterion_wl is not None:
-                loss_batch = self.criterion_wl(
+            if self.train_criterion_wl is not None:
+                loss_batch = self.train_criterion_wl(
                     logits.float(),
                     y.long(),
                     batch_ids=ids,
@@ -60,8 +133,8 @@ class LitMNIST(pl.LightningModule):
             preds = torch.argmax(logits, dim=1)
             
             # WeightsLab tracked loss - auto logs wi. WL SDK
-            if self.criterion_wl is not None:
-                self.criterion_wl(
+            if self.val_criterion_wl is not None:
+                self.val_criterion_wl(
                     logits.float(),
                     y.long(),
                     batch_ids=ids,
@@ -160,18 +233,39 @@ def main():
 
     os.makedirs(data_root, exist_ok=True)
 
-    # Create datasets
-    _train_dataset = datasets.MNIST(
+    # Data (MNIST train/val/test)
+    # Use data_root from config if provided, otherwise fall back to log_dir/data
+    if parameters.get("data_root"):
+        should_download = False
+        if not os.path.exists(parameters["data_root"]):
+            print(f"Warning: data_root {parameters['data_root']} does not exist. Will attempt to download to this location.")
+            should_download = True
+        data_root = parameters["data_root"]
+    else:
+        data_root = os.path.join(parameters["root_log_dir"], "data")
+        should_download = True
+        print(f"Downloading data to {data_root}")
+    os.makedirs(data_root, exist_ok=True)
+
+    _train_dataset = MNISTCustomDataset(
         root=data_root,
         train=True,
-        download=True,
-        transform=transforms.Compose([transforms.ToTensor()])
+        download=should_download,
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+            ]
+        ),
     )
-    _val_dataset = datasets.MNIST(
+    _val_dataset = MNISTCustomDataset(
         root=data_root,
         train=False,
-        download=True,
-        transform=transforms.Compose([transforms.ToTensor()])
+        download=should_download,
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+            ]
+        ),
     )
 
     # Read data config
@@ -209,10 +303,12 @@ def main():
     )
 
     # WeightsLab tracked loss and metrics
-    criterion = wl.watch_or_edit(
+    train_criterion = wl.watch_or_edit(
         nn.CrossEntropyLoss(reduction="none"),
-        flag="loss", signal_name="loss-CE", log=True)
-
+        flag="loss", signal_name="train-loss-CE", log=True)
+    val_criterion = wl.watch_or_edit(
+        nn.CrossEntropyLoss(reduction="none"),
+        flag="loss", signal_name="val-loss-CE", log=True)
     metric = wl.watch_or_edit(
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric", signal_name="metric-ACC", log=True
@@ -228,7 +324,7 @@ def main():
     )
 
     # Generate the lightning module
-    L_model = LitMNIST(model=model_wl, optim=optimizer, criterion_wl=criterion, metric_wl=metric)
+    L_model = LitMNIST(model=model_wl, optim=optimizer, train_criterion_wl=train_criterion, val_criterion_wl=val_criterion, metric_wl=metric)
     
     # Start WeightsLab services
     wl.serve(
