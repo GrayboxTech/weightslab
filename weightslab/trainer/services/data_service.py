@@ -177,13 +177,7 @@ class DataService:
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
 
-    def _slowUpdateInternals(self, force=False):
-        """Force refresh of internal dataframe view."""
-        # Simple alias for now if not defined
-        if time.time() - self._last_internals_update_time > 15.0 or force:
-             self._all_datasets_df = self._pull_into_all_data_view_df()
-             self._load_existing_tags()
-             self._last_internals_update_time = time.time()
+
 
 
     def _resolve_root_log_dir(self) -> Path:
@@ -1358,16 +1352,20 @@ class DataService:
                          # We use .values to ensure we just paste the sorted data into these slots
                          df.iloc[start:end] = sub_df.values
                          
-                         # CRITICAL: We must also update the index (Sample IDs) to match the moved data,
+                         # CRITICAL: We must also update the index to match the moved data,
                          # otherwise Sample ID X will point to data from Sample ID Y (corruption).
                          try:
-                             idx_name = df.index.name
-                             new_index = df.index.to_numpy().copy()
-                             new_index[start:end] = sub_df.index.to_numpy()
-                             df.index = pd.Index(new_index, name=idx_name)
+                             if isinstance(df.index, pd.MultiIndex):
+                                 new_index_values = df.index.to_numpy().copy()
+                                 new_index_values[start:end] = sub_df.index.to_numpy()
+                                 df.index = pd.MultiIndex.from_tuples(new_index_values, names=df.index.names)
+                             else:
+                                 idx_name = df.index.name
+                                 new_index = df.index.to_numpy().copy()
+                                 new_index[start:end] = sub_df.index.to_numpy()
+                                 df.index = pd.Index(new_index, name=idx_name)
                          except Exception as e:
                              logger.error(f"Failed to update index in sort_view_slice: {e}")
-                             # Fallback: try to reconstruct if possible or fail gracefully
                              raise e
                      
                      return f"Applied operation: sort_view_slice({start}:{end})"
