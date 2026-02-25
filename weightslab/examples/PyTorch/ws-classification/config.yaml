@@ -1,7 +1,6 @@
 # Global configuration
 device: auto
 experiment_name: cls_usecase
-root_log_dir: C:\Users\GUILLA~1\AppData\Local\Temp\tmpixsd730r
 
 # Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
 compute_natural_sort: false
