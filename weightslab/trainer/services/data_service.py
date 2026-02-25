@@ -1328,6 +1328,7 @@ class DataService:
                      end = min(start + count, len(df))
 
                      if start < len(df):
+                         logger.debug(f"[sort_view_slice] Sorting slice {start}:{end}")
                          # Extract and sort slice
                          sub_df = df.iloc[start:end].copy()
 
@@ -1344,11 +1345,42 @@ class DataService:
                          else:
                              try:
                                  sub_df.sort_values(inplace=True, **sort_params)
-                             except TypeError:
+                             except (TypeError, ValueError, KeyError) as e:
+                                 # Fallback for ambiguity or missing column (if it's in the index)
+                                 # Most common case: 'origin' or 'sample_id' are in the index but not columns
+                                 if "ambiguous" in str(e).lower() or isinstance(e, KeyError) or "not in index" in str(e).lower():
+                                      by = sort_params.get("by")
+                                      by_list = [by] if isinstance(by, str) else by
+                                      
+                                      # Check if ANY of the sort columns are in the index levels
+                                      index_names = getattr(sub_df.index, 'names', [])
+                                      needs_index_sort = any(col in index_names for col in by_list)
+                                      
+                                      if needs_index_sort:
+                                          # Robust fallback: temporarily reset index so we can sort by everything at once
+                                          # then restore the index. This handles mixed index/column multi-sorts.
+                                          try:
+                                              # Save index names to restore later
+                                              orig_index_names = sub_df.index.names
+                                              temp_df = sub_df.reset_index()
+                                              
+                                              # Adjust 'by' if needed (e.g. if 'index' was used, it's now 'sample_id' etc)
+                                              # but here columns usually match.
+                                              temp_df.sort_values(inplace=True, **sort_params)
+                                              
+                                              # Restore index and update sub_df
+                                              sub_df = temp_df.set_index(list(orig_index_names))
+                                          except Exception as inner_e:
+                                              logger.error(f"Mixed sort fallback failed: {inner_e}")
+                                              # If that failed, try forcing string keys as last ditch
+                                              sub_df.sort_values(inplace=True, **sort_params, key=lambda x: x.astype(str))
+                                 
                                  # Fallback for mixed types
-                                 if "key" not in sort_params:
+                                 elif "key" not in sort_params and isinstance(e, TypeError):
                                      sort_params["key"] = lambda x: x.astype(str)
                                      sub_df.sort_values(inplace=True, **sort_params)
+                                 else:
+                                     raise e
 
                          # Reassign values (ignoring index alignment to swap rows in place)
                          # We use .values to ensure we just paste the sorted data into these slots
@@ -1733,7 +1765,11 @@ class DataService:
 
                 # Apply operations with lock
                 with self._lock:
-                    self._slowUpdateInternals(force=True)  # Refresh to catch new columns/samples
+                    # If this is JUST a view-sort for a specific page, DO NOT force an internal refresh
+                    # as that wipes out the existing slice/sort state before we try to modify the next slice.
+                    is_only_view_sort = len(operations) == 1 and operations[0].get("function") == "df.sort_view_slice"
+                    if not is_only_view_sort:
+                        self._slowUpdateInternals(force=True)  # Refresh to catch new columns/samples
                     df = self._all_datasets_df
                     messages = []
 
@@ -1746,10 +1782,6 @@ class DataService:
 
                     final_message = " | ".join(messages) if messages else "No operation performed"
                     
-                    # Deduplicate before saving back
-                    if df.index.has_duplicates:
-                         df = df[~df.index.duplicated(keep='last')]
-                         
                     self._all_datasets_df = df
 
                     # Direct queries are manipulations -> Freeze the view
