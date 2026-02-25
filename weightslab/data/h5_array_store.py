@@ -19,7 +19,10 @@ from collections import OrderedDict
 import h5py
 import numpy as np
 
+
+# Config global logger
 logger = logging.getLogger(__name__)
+UINT_DEFAULT = 8  # Default to uint8 for array normalization
 
 
 class LRUArrayCache:
@@ -245,7 +248,7 @@ class _InterProcessFileLock:
                 self._fh = None
 
 
-def normalize_array_to_uint16(arr: np.ndarray, preserve_original: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
+def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, uint: int = 8) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     Normalize array to uint16 for efficient storage.
 
@@ -263,7 +266,8 @@ def normalize_array_to_uint16(arr: np.ndarray, preserve_original: bool = False) 
         'normalized': False
     }
 
-    if preserve_original or arr.dtype == np.uint16 or arr.dtype == np.uint8:
+    uint_dtype = np.uint8 if uint == 8 and arr.max() <= 255 else np.uint16
+    if preserve_original or arr.dtype == uint_dtype:
         return arr, metadata
 
     # Normalize to uint16 range [0, 65535]
@@ -276,23 +280,24 @@ def normalize_array_to_uint16(arr: np.ndarray, preserve_original: bool = False) 
 
     if arr_max == arr_min:
         # Constant array
-        return np.full(arr.shape, 32768, dtype=np.uint16), metadata
-    elif arr_min >= 0 and arr_max <= 65535:
-        # Already in uint16 range
-        return arr.astype(np.uint16), metadata
+        return np.full(arr.shape, 2**(uint - 1), dtype=uint_dtype), metadata
+    elif arr_min >= 0 and arr_max <= 2**uint - 1:
+        # Already in uint range
+        return arr.astype(uint_dtype), metadata
 
     # Scale to 0-65535
-    normalized = ((arr - arr_min) / (arr_max - arr_min) * 65535).astype(np.uint16)
+    normalized = ((arr - arr_min) / (arr_max - arr_min) * (2**uint - 1)).astype(uint_dtype)
     return normalized, metadata
 
 
-def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any]) -> np.ndarray:
+def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any], uint: int = 8) -> np.ndarray:
     """
     Reconstruct original array from normalized uint16 version using metadata.
 
     Args:
-        arr: Normalized uint16 array
+        arr: Normalized uint array
         metadata: Metadata dict containing normalization parameters
+        uint: Bit width of the normalized array (8 or 16)
 
     Returns:
         Denormalized array in original dtype
@@ -302,13 +307,13 @@ def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any]) -> np.ndarray:
         original_dtype = np.dtype(metadata['original_dtype'])
         return arr.astype(original_dtype)
 
-    # Denormalize from uint8 range
+    # Denormalize from uint range
     arr_min = metadata['min']
     arr_max = metadata['max']
     original_dtype = np.dtype(metadata['original_dtype'])
 
     # Scale back from 0-65535 to original range
-    denormalized = (arr.astype(np.float32) / 65535.0) * (arr_max - arr_min) + arr_min
+    denormalized = (arr.astype(np.float32) / (2**uint - 1)) * (arr_max - arr_min) + arr_min
     return denormalized.astype(original_dtype)
 
 
@@ -405,13 +410,13 @@ class H5ArrayStore:
         if len(parts) != 2:
             raise ValueError(f"Invalid path reference format: {path_ref}")
 
-        sample_id = int(parts[0])
+        sample_id = str(parts[0])
         key_name = parts[1]
         return sample_id, key_name
 
     def save_array(
         self,
-        sample_id: int,
+        sample_id: str,
         key_name: str,
         array: np.ndarray,
         preserve_original: bool = False
@@ -448,9 +453,9 @@ class H5ArrayStore:
         # Normalize array if requested
         should_normalize = self._auto_normalize and not preserve_original
         if should_normalize:
-            array, metadata = normalize_array_to_uint16(array, preserve_original=False)
+            array, metadata = normalize_array_to_uint(array, preserve_original=False, uint=UINT_DEFAULT)
         else:
-            _, metadata = normalize_array_to_uint16(array, preserve_original=True)
+            _, metadata = normalize_array_to_uint(array, preserve_original=True, uint=UINT_DEFAULT)
 
         self._ensure_parent()
 
@@ -533,9 +538,9 @@ class H5ArrayStore:
 
                                 should_normalize = self._auto_normalize and not preserve_original
                                 if should_normalize:
-                                    array, metadata = normalize_array_to_uint16(array, preserve_original=False)
+                                    array, metadata = normalize_array_to_uint(array, preserve_original=False, uint=UINT_DEFAULT)
                                 else:
-                                    _, metadata = normalize_array_to_uint16(array, preserve_original=True)
+                                    _, metadata = normalize_array_to_uint(array, preserve_original=True, uint=UINT_DEFAULT)
 
                                 # Remove existing
                                 if key_name in sample_group:
@@ -609,7 +614,7 @@ class H5ArrayStore:
 
                     # Denormalize if needed
                     if metadata.get('normalized', False):
-                        array = denormalize_array(array, metadata)
+                        array = denormalize_array(array, metadata, uint=UINT_DEFAULT)
 
                     # Cache the loaded array
                     self._cache.put(path_ref, array)

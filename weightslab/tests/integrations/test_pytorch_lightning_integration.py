@@ -7,12 +7,9 @@ that WeightsLab tracking works correctly within Lightning's training loop.
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset
-from torchmetrics.classification import Accuracy
 
 try:
     import pytorch_lightning as pl
@@ -21,6 +18,10 @@ except ImportError:
     PYTORCH_LIGHTNING_AVAILABLE = False
 
 import weightslab as wl
+
+from torch.utils.data import TensorDataset
+from torchmetrics.classification import Accuracy
+
 from weightslab.backend.ledgers import GLOBAL_LEDGER, Proxy
 from weightslab.components.global_monitoring import (
     guard_training_context,
@@ -137,10 +138,11 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
         
         torch.manual_seed(42)
         x_data = torch.randn(self.n_samples, 1, self.img_size, self.img_size)
+        uids = torch.randint(0, self.n_classes, (self.n_samples,))
         y_data = torch.randint(0, self.n_classes, (self.n_samples,))
         
-        self.train_dataset = TensorDataset(x_data[:80], y_data[:80])
-        self.val_dataset = TensorDataset(x_data[80:], y_data[80:])
+        self.train_dataset = TensorDataset(x_data[:80], uids[:80], y_data[:80])
+        self.val_dataset = TensorDataset(x_data[80:], uids[80:], y_data[80:])
 
     def tearDown(self):
         """Clean up after each test."""
@@ -153,6 +155,7 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
     def test_proxy_hashable_in_lightning(self):
         """Test that Proxy objects are hashable and work with Lightning's module system."""
         model = SimpleCNN()
+        print(wl.__file__)
         model_wl = wl.watch_or_edit(model, flag="model", device=self.device)
         
         # Test that proxy can be used in sets (requires __hash__)
@@ -285,17 +288,17 @@ class TestPyTorchLightningIntegration(unittest.TestCase):
                 with guard_training_context:
                     context = get_current_context()
                     context_log.append(("train", context))
-                    x, y = batch
-                    logits = self(x)
-                    loss = nn.functional.cross_entropy(logits, y)
+                    a = batch
+                    logits = self(a[0])
+                    loss = nn.functional.cross_entropy(logits, a[2])
                     return loss
             
             def validation_step(self, batch):
                 with guard_testing_context:
                     context = get_current_context()
                     context_log.append(("val", context))
-                    x, y = batch
-                    self(x)
+                    a = batch
+                    self(a[0])
             
             def configure_optimizers(self):
                 return torch.optim.Adam(self.parameters(), lr=0.001)

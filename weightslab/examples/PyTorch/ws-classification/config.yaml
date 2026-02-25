@@ -1,13 +1,16 @@
+# Global configuration
+device: auto
 experiment_name: cls_usecase
-device: cuda
 
-eval_full_to_train_steps_ratio: 1500
-experiment_dump_to_train_steps_ratio: 200
+# Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
+compute_natural_sort: false
+
+# Experiment parameters
+eval_full_to_train_steps_ratio: 50
+experiment_dump_to_train_steps_ratio: 10
 skip_checkpoint_load: true
 tqdm_display: true
-
-# start training immediately or not
-is_training: true
+is_training: false  # Start training immediately or not
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
@@ -20,6 +23,7 @@ serving_grpc: true
 serving_cli: true
 
 # DataLoader parameters
+data_root: ../datasets/mnist
 data:
   train_loader:
     shuffle: false

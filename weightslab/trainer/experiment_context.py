@@ -53,6 +53,8 @@ class ExperimentContext:
             get_logger,
             list_loggers,
             resolve_hp_name,
+            list_dataframes,
+            get_dataframe,
         )
 
         # resolve model
@@ -63,6 +65,8 @@ class ExperimentContext:
                 model = get_model(self._exp_name)
             elif "experiment" in names:
                 model = get_model("experiment")
+            elif "main" in names:
+                model = get_model("main")
             elif len(names) == 1:
                 model = get_model()
         except Exception:
@@ -124,13 +128,25 @@ class ExperimentContext:
         except Exception:
             checkpoint_manager = None
 
+        # resolve dataframe manager
+        df_manager = None
+        try:
+            dfnames = list_dataframes()
+            if len(dfnames) == 1:
+                df_manager = get_dataframe()
+            elif "main" in dfnames:
+                df_manager = get_dataframe("main")
+        except Exception:
+            df_manager = None
+
         self._components = {
             "model": model,
             "optimizer": optimizer,
             "hyperparams": hyperparams,
             "signal_logger": signal_logger,
             "trainer": pause_controller,
-            "checkpoint_manager": checkpoint_manager
+            "checkpoint_manager": checkpoint_manager,
+            "df_manager": df_manager
         }
         self._components.update(data_loaders)  # add all dataloaders found
 
@@ -178,7 +194,7 @@ class ExperimentContext:
 
                 return current + int(remaining)
             except Exception:
-                return 1000
+                return 0
 
         # TODO (GP): expand hyper-parameters exposed here
         self.hyper_parameters = {
@@ -190,4 +206,5 @@ class ExperimentContext:
             ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
             ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 8)),
             ("Is Training", "is_training", "number", _hp_getter("is_training", 0)),
+            ("Auditor Mode", "auditor_mode", "number", _hp_getter("auditor_mode", 0)),
         }

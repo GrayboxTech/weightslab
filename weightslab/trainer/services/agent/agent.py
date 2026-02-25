@@ -18,12 +18,16 @@ from pydantic import BaseModel, Field
 # Ensure intent_prompt is accessible
 from .intent_prompt import INTENT_PROMPT
 
+
+# Set up logging
 _LOGGER = logging.getLogger(__name__)
+
 
 # Try to find .env in weightslab/ or parent root
 env_path = Path(__file__).resolve().parents[3] / '.env'
 load_dotenv(dotenv_path=env_path)
 load_dotenv()
+
 
 # ==========================================
 # 1. PYDANTIC MODELS (Robust & Flexible)
@@ -438,7 +442,7 @@ class DataManipulationAgent:
 
     def _build_column_index(self):
         self._cols = list(self.df_schema['columns'])
-        self._col_tokens = {c: set(t for t in re.split(r"[ _/\.]+", c.lower()) if t) for c in self._cols}
+        self._col_tokens = {c: set(t for t in re.split(r"[ _/\.]+", str(c).lower()) if t) for c in self._cols}
         self._column_synonyms = {
             "loss": {"loss", "error", "score"}, "score": {"score", "loss", "error"},
             "age": {"age"}, "label": {"label", "class", "target"},

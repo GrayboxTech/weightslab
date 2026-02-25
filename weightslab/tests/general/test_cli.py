@@ -19,8 +19,8 @@ from weightslab.backend.cli import (
     _handle_command,
     _sanitize_for_json,
     cli_serve,
-    _server_sock
 )
+import weightslab.backend.cli as cli_backend
 from weightslab.backend.ledgers import GLOBAL_LEDGER, Proxy
 
 
@@ -58,15 +58,14 @@ class TestCLISanitization(unittest.TestCase):
 
     def test_sanitize_proxy(self):
         """Test Proxy object sanitization."""
-        mock_target = MagicMock()
-        mock_target.value = 42
-
-        proxy = MagicMock(spec=Proxy)
-        proxy.get.return_value = mock_target
+        # Create a real Proxy wrapping a dict
+        target_dict = {'value': 42, 'name': 'test'}
+        proxy = Proxy(target_dict)
 
         result = _sanitize_for_json(proxy)
-        # Should unwrap the proxy
+        # Should unwrap the proxy and return the underlying dict
         self.assertIsInstance(result, dict)
+        self.assertEqual(result, {'value': 42, 'name': 'test'})
 
 
 class TestCLICommands(unittest.TestCase):
@@ -272,42 +271,66 @@ class TestCLICommands(unittest.TestCase):
 class TestCLIServer(unittest.TestCase):
     """Test CLI server functionality."""
 
-    def tearDown(self):
-        """Clean up after tests."""
-        global _server_thread, _server_sock
-        if _server_sock:
+    def setUp(self):
+        """Ensure no previous test server is still running."""
+        self._stop_cli_server()
+
+    def _stop_cli_server(self):
+        """Stop CLI server socket and thread from backend module globals."""
+        sock = getattr(cli_backend, '_server_sock', None)
+        thread = getattr(cli_backend, '_server_thread', None)
+
+        if sock is not None:
             try:
-                _server_sock.close()
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                sock.close()
             except Exception:
                 pass
-            _server_sock = None
-        _server_thread = None
+
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+        cli_backend._server_sock = None
+        cli_backend._server_thread = None
+
+    def tearDown(self):
+        """Clean up after tests."""
+        self._stop_cli_server()
 
     def test_cli_serve_starts(self):
         """Test that CLI server starts successfully."""
-        result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
-        time.sleep(10)  # Give server time to start
-
+        result = cli_serve(cli_host='127.0.0.4', cli_port=2, spawn_client=False)
         self.assertTrue(result['ok'])
+            
         self.assertIn('host', result)
         self.assertIn('port', result)
         self.assertGreater(result['port'], 0)
 
-        # Test connection
-        try:
-            sock = socket.create_connection((result['host'], result['port']), timeout=2)
-            sock.close()
-        except Exception as e:
-            self.fail(f"Could not connect to server: {e}")
+        # Wait for port to accept connections
+        connected = False
+        for _ in range(50):
+            try:
+                with socket.create_connection((result['host'], result['port']), timeout=0.2):
+                    connected = True
+                    break
+            except Exception:
+                time.sleep(0.1)
+        self.assertTrue(connected, f"Could not connect to server at {result['host']}:{result['port']}")
 
     def test_cli_serve_port_binding(self):
         """Test server binds to specified port."""
         # Use port 0 to let OS assign
         result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
+        
         self.assertTrue(result['ok'])
         self.assertGreater(result['port'], 0)
 
-# Integration tests are commented out to avoid complexity in test runs. 
+
+# TODO (GP): Fix CLI initialization takes too long for integration tests - need to ensure server is fully ready before client tests run, and possibly optimize server startup time for testing purposes
+# Not working yet - needs check first initialization and teardown of server between tests, and some tweaks to client connection logic to ensure it waits for server to be ready before connecting
 # class TestCLIIntegration(unittest.TestCase):
 #     """Integration tests for CLI server-client communication."""
 
@@ -317,7 +340,7 @@ class TestCLIServer(unittest.TestCase):
 #         cls.server_info = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
 #         if not cls.server_info['ok']:
 #             raise RuntimeError("Failed to start CLI server for integration tests")
-#         time.sleep(10)  # Give server time to fully start
+#         time.sleep(0.2)  # Give server time to fully start
 
 #     @classmethod
 #     def tearDownClass(cls):
@@ -335,13 +358,11 @@ class TestCLIServer(unittest.TestCase):
 #             (self.server_info['host'], self.server_info['port']),
 #             timeout=5
 #         )
-#         time.sleep(5)  # Give server time to start
 #         f = sock.makefile('rwb')
 
 #         # Send command
 #         f.write((cmd + '\n').encode('utf8'))
 #         f.flush()
-#         time.sleep(3)  # Give server time to start
 
 #         # Read response
 #         response_line = f.readline()
@@ -387,7 +408,6 @@ class TestCLIServer(unittest.TestCase):
 #         # Send quit
 #         f.write(b'quit\n')
 #         f.flush()
-#         time.sleep(1)  # Give server time to start
 
 #         # Read goodbye
 #         response = json.loads(f.readline().decode('utf8'))

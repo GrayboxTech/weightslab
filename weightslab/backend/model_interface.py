@@ -31,13 +31,14 @@ class ModelInterface(NetworkWithOps):
     def __init__(
             self,
             model: th.nn.Module,
-            dummy_input: th.Tensor = None,
+            dummy_input: th.Tensor | dict = None,
             device: str = 'cpu',
             print_graph: bool = False,
             print_graph_filename: str = None,
             name: str = None,
             register: bool = True,
             use_onnx: bool = False,
+            compute_dependencies: bool = False,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
             **_
@@ -66,11 +67,12 @@ class ModelInterface(NetworkWithOps):
                 registered in the global ledger. Defaults to True.
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
+            compute_dependencies (bool, optional): If True, computes the graph
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
                 of previous checkpoints during initialization. Defaults to False.
-
+            
         Returns:
             None: This method initializes the object and does not return any value.
         """
@@ -78,21 +80,84 @@ class ModelInterface(NetworkWithOps):
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
+        
+        # Proxy class_names if available on the wrapped model
+        if hasattr(model, 'class_names'):
+             self.class_names = model.class_names
 
         # Define variables
         # # Disable tracking for implementation
         self.tracking_mode = TrackingMode.DISABLED
         self.name = "Default Name" if name is None else name
         self.device = device
-        self.model = model.to(device)
+        self.model = model.to(device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
-        if dummy_input is not None:
-            self.dummy_input = dummy_input.to(device)
-        else:
-            self.dummy_input = th.randn(model.input_shape).to(device)
+
+        # Generate dummy input if not provided and sanity check
+        if compute_dependencies:
+            # First ensure that the model has module input_shape
+            if not hasattr(model, 'input_shape'):
+                if dummy_input is None:
+                    raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
+                else:
+                    self.model.input_shape = tuple(dummy_input.shape[1:])  # Exclude batch dimension
+                    
+            # Move dummy input to the correct device, or create a default one if not provided
+            if dummy_input is not None:
+                self.dummy_input = dummy_input.to(device)
+            else:
+                self.dummy_input = th.randn(model.input_shape).to(device)
+
+        if compute_dependencies and not use_onnx:
+            self.print_graph = print_graph
+            self.print_graph_filename = print_graph_filename
+            self.traced_model = symbolic_trace(self.model)
+            self.traced_model.name = "N.A."
+        self.guard_training_context = guard_training_context
+        self.guard_testing_context = guard_testing_context
+
+        # Init attributes from super object (i.e., self.model)
+        self.init_attributes(self.model)
+
+        # Compute dependencies and generate graph visualization if enabled
+        if compute_dependencies: 
+            if not use_onnx:
+                # Only propagate shapes if we need them for visualization
+                if self.print_graph:
+                    self.shape_propagation()
+                    # Clean up any leftover threads from shape propagation
+                    # import gc
+                    # gc.collect()
+
+                # Generate the graph vizualisation
+                self.generate_graph_vizu()
+
+            # Generate the graph dependencies
+            self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
+
+        # Clean - Optionally register wrapper in global ledger
+        if register:
+            self._registration(
+                weak=weak
+            )
+        
+        # Set the optimizer hook for model architecture changes if we
+        # are computing dependencies (i.e., we have the graph info to
+        # know when they happen)
+        if compute_dependencies:
+            if not use_onnx:
+                del self.traced_model
+
+            # Hook optimizer update on architecture change
+            self.register_hook_fn_for_architecture_change(
+                lambda model: self._update_optimizer(model)
+            )
+
+        # Set Model Training Guard
+        self.guard_training_context.model = self
+        self.guard_testing_context.model = self
 
         # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
-        self._checkpoint_manager = None
         _checkpoint_auto_every_steps = 0
         _root_log_dir = None
         try:
@@ -123,120 +188,70 @@ class ModelInterface(NetworkWithOps):
 
         # Initialize CheckpointManager if we have a root dir (fallback to default root)
         root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
-        try:
-            # Check if a checkpoint manager is already registered in ledger
-            try:
-                existing_manager = ledgers.get_checkpoint_manager()
-                if existing_manager != None and not isinstance(existing_manager, ledgers.Proxy):
-                    self._checkpoint_manager = existing_manager
-                    logger.info("Using checkpoint manager from ledger")
-                else:
-                    raise KeyError("No manager in ledger")
-            except (KeyError, AttributeError):
-                # Create new manager and register it
-                self._checkpoint_manager = CheckpointManager(root_log_dir=root_log_dir)
-                try:
-                    ledgers.register_checkpoint_manager(self._checkpoint_manager)
-                    logger.info("Registered new checkpoint manager in ledger")
-                except Exception:
-                    pass
-        except Exception:
-            self._checkpoint_manager = None
+        
+        # Check if a checkpoint manager is already registered in ledger
+        existing_manager = ledgers.get_checkpoint_manager()
+        if existing_manager != None and isinstance(existing_manager, ledgers.Proxy):
+            existing_manager = existing_manager
+            logger.info("Using checkpoint manager from ledger")
 
             # Early auto-load latest model architecture and weights if checkpoints exist
-            if self._checkpoint_manager != None and not self.skip_previous_auto_load:
-                try:
-                    # Try to get the latest experiment hash
-                    latest_hash = None
-                    if hasattr(self._checkpoint_manager, 'current_exp_hash') and self._checkpoint_manager.current_exp_hash:
-                        latest_hash = self._checkpoint_manager.current_exp_hash
-                    elif hasattr(self._checkpoint_manager, 'manifest') and self._checkpoint_manager.manifest:
-                        manifest = self._checkpoint_manager.manifest
-                        latest_hash = getattr(manifest, 'latest_hash', None)
+            try:
+                # Try to get the latest experiment hash
+                latest_hash = None
+                if hasattr(existing_manager, 'current_exp_hash') and existing_manager.current_exp_hash:
+                    latest_hash = existing_manager.current_exp_hash
+                elif hasattr(existing_manager, 'manifest') and existing_manager.manifest:
+                    manifest = existing_manager.manifest
+                    latest_hash = getattr(manifest, 'latest_hash', None)
 
-                    if latest_hash:
-                        # Use checkpoint manager's load_checkpoint to get architecture and weights
-                        checkpoint_data = self._checkpoint_manager.load_checkpoint(
-                            exp_hash=latest_hash,
-                            load_model=True,
-                            load_weights=True,
-                            load_config=False,
-                            load_data=False,
-                            force=True
+                if latest_hash:
+                    # Use checkpoint manager's load_checkpoint to get architecture and weights
+                    checkpoint_data = existing_manager.load_checkpoint(
+                        exp_hash=latest_hash,
+                        load_model=True,
+                        load_weights=True,
+                        load_config=False,
+                        load_data=False,
+                        force=True
+                    )
+
+                    # Apply loaded model if architecture was loaded
+                    if checkpoint_data.get('model'):
+                        self = checkpoint_data['model']
+                        weights = checkpoint_data.get('weights')
+                        checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
+
+                        # Restore RNG state if available
+                        restore_rng_state(checkpoint_rng_state)
+                        logger.debug(f"Restored RNG state from checkpoint")
+
+                    if checkpoint_data.get('weights'):
+                        # Only weights available, load into existing model
+                        weights = checkpoint_data['weights']
+                        if 'model_state_dict' in weights:
+                            self.load_state_dict(weights['model_state_dict'], strict=True)
+                            self.current_step = weights.get('step', -1)
+                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
+
+                    # As model architecture as has been loaded, and it's an instance of the ModelInterface,
+                    # we can set its current step if available in weights
+                    if isinstance(self.model, self.__class__):
+                        self._registration(
+                            weak=weak
                         )
+                        return
 
-                        # Apply loaded model if architecture was loaded
-                        if checkpoint_data.get('model'):
-                            self = checkpoint_data['model']
-                            weights = checkpoint_data.get('weights')
-                            checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
+            except Exception as e:
+                logger.debug(f"Could not auto-load model checkpoint: {e}")
 
-                            # Restore RNG state if available
-                            restore_rng_state(checkpoint_rng_state)
-                            logger.debug(f"Restored RNG state from checkpoint")
-
-                        elif checkpoint_data.get('weights'):
-                            # Only weights available, load into existing model
-                            weights = checkpoint_data['weights']
-                            if 'model_state_dict' in weights:
-                                self.load_state_dict(weights['model_state_dict'], strict=True)
-                                self.current_step = weights.get('step', -1)
-                                logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
-
-                        # As model architecture as has been loaded, and it's an instance of the ModelInterface,
-                        # we can set its current step if available in weights
-                        if isinstance(self.model, self.__class__):
-                            self._registration(
-                                weak=weak
-                            )
-                            return
-
-                except Exception as e:
-                    logger.debug(f"Could not auto-load model checkpoint: {e}")
-
-        if not use_onnx:
-            self.print_graph = print_graph
-            self.print_graph_filename = print_graph_filename
-            self.traced_model = symbolic_trace(self.model)
-            self.traced_model.name = "N.A."
-        self.guard_training_context = guard_training_context
-        self.guard_testing_context = guard_testing_context
-
-        # Init attributes from super object (i.e., self.model)
-        self.init_attributes(self.model)
-
-        if not use_onnx:
-            # Only propagate shapes if we need them for visualization
-            if self.print_graph:
-                self.shape_propagation()
-                # Clean up any leftover threads from shape propagation
-                # import gc
-                # gc.collect()
-
-            # Generate the graph vizualisation
-            self.generate_graph_vizu()
-
-        # Generate the graph dependencies
-        self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
-
-        # Clean
-        # Optionally register wrapper in global ledger
-        if register:
-            self._registration(
-                weak=weak
-            )
-
-        if not use_onnx:
-            del self.traced_model
-
-        # Hook optimizer update on architecture change
-        self.register_hook_fn_for_architecture_change(
-            lambda model: self._update_optimizer(model)
-        )
-
-        # Set Model Training Guard
-        self.guard_training_context.model = self
-        self.guard_testing_context.model = self
+        else:
+            existing_manager = CheckpointManager(root_log_dir=root_log_dir, load_model=True, load_config=False, load_data=False)
+            try:
+                ledgers.register_checkpoint_manager(existing_manager)
+                logger.info("Registered new checkpoint manager in ledger")
+            except Exception:
+                pass
 
     def _registration(self, weak: bool = False):
         register_model(self, weak=weak)
@@ -377,30 +392,29 @@ class ModelInterface(NetworkWithOps):
             wl.watch_or_edit(_optimizer, flag='optimizer', name=opt_name)
 
     def _maybe_auto_dump(self):
-        # Called from base class hook after seen_samples updates.
+        # Called from base class hook after step update.
         # Auto-dump: save model weights only (and architecture if changed).
+        existing_manager = ledgers.get_checkpoint_manager()
         try:
-            if not self.is_training() or self._checkpoint_manager == None or self._checkpoint_auto_every_steps <= 0:
+            if not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
-            batched_age = int(self.get_batched_age())
+            batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
                     # Update hash for current experiment state (marks changes as pending, doesn't dump)
-                    _, _, changed_components = self._checkpoint_manager.update_experiment_hash()
+                    _, _, changed_components = existing_manager.update_experiment_hash()
                     # If model architecture changed, save it
                     if 'model' in changed_components:
                         try:
-                            self._checkpoint_manager.save_model_architecture(self.model)
+                            existing_manager.save_model_architecture()
                         except Exception:
                             pass
                 except Exception:
                     pass
                 try:
                     # Save model weights checkpoint (no pending dump here)
-                    self._checkpoint_manager.save_model_checkpoint(
-                        model=self.model,
+                    existing_manager.save_model_checkpoint(
                         save_optimizer=True,
-                        step=batched_age,
                         force_dump_pending=False,
                         update_manifest=False
                     )

@@ -1,20 +1,63 @@
 import io
 import sys
 import io
-import numpy as np
 import torch
 import logging
 import subprocess
 import numpy as np
+import pandas as pd
+
 import weightslab.proto.experiment_service_pb2 as pb2
 
 from PIL import Image
 from torchvision import transforms
 from typing import List, Tuple, Iterable
 
+from weightslab.data.sample_stats import SampleStatsEx
+
 
 # Get Global Logger
 logger = logging.getLogger(__name__)
+
+
+def generate_overview(df, n=3):
+    """Get detailed overview of DataFrame"""
+    try:
+        overview = f"Shape: {df.shape} (rows, columns)\n"
+        overview += f"Columns: {list(df.columns)}\n"
+        overview += f"\nFirst {n} rows:\n"
+        overview += df.head(n).to_string()
+        return overview
+    except Exception as e:
+        logger.error(f"Error generating overview: {e}", exc_info=True)
+        return "Error generating overview."
+
+def execute_df_operation(df, operation_str):
+    """
+    Execute a pandas operation from a string and return the result.
+    
+    Args:
+        df: The pandas DataFrame
+        operation_str: String like "df.sort_index(inplace=True)"
+    
+    Returns:
+        DataFrame or None (if inplace=True)
+    """
+    try:
+        # Format operation first
+        operation_str = operation_str.replace("'''", "\"\"\"").replace("@\"\"\"", "").replace("\"\"\"", "").replace("@\'\'\'", "").replace("\'\'\'", "")
+
+        # Execute the operation
+        exec(operation_str, {"df": df, "pd": pd})
+        
+        # If result is None, the operation was inplace, return the modified df
+        success_message = f"Operation '{operation_str}' executed successfully."
+        return df, success_message
+
+    except Exception as e:
+        error_msg = f"Error executing DataFrame operation '{operation_str}': {e}"
+        logger.error(error_msg, exc_info=True)
+        return df, error_msg  # Return original df on error
 
 
 def get_hyper_parameters_pb(
@@ -59,6 +102,9 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
     tensor_name = 'weight'
     layer_id = layer.get_module_id()
     neuron_representations = []
+    if not layer:
+        return None
+    
     for neuron_idx in range(layer.out_neurons):
         # SAFEGUARD: Ensure trackers are available
         if layer.train_dataset_tracker is None:
@@ -262,7 +308,7 @@ def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
         record = pb2.RecordMetadata(
             sample_id=row.get('sample_id', sample_id),
             sample_last_loss=float(row.get('prediction_loss', -1)),
-            sample_discarded=bool(row.get('deny_listed', False)),
+            sample_discarded=bool(row.get(SampleStatsEx.DISCARDED.value, False)),
             task_type=sample_stats.task_type,
         )
 

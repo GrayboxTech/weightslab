@@ -33,6 +33,19 @@ from weightslab.components.global_monitoring import weightslab_rlock, pause_cont
 logger = logging.getLogger(__name__)
 
 
+def _safe_repr(obj) -> str:
+    try:
+        return str(obj)
+    except Exception:
+        try:
+            return repr(obj)
+        except Exception:
+            try:
+                return object.__repr__(obj)
+            except Exception:
+                return f"<{type(obj).__name__}>"
+
+
 def _sanitize_for_json(obj):
     """Recursively convert objects that are not JSON-serializable into
     serializable representations. In particular, handle `Proxy` objects by
@@ -41,32 +54,31 @@ def _sanitize_for_json(obj):
     # primitives
     if obj is None or isinstance(obj, (str, bool, int, float)):
         return obj
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode('utf-8', errors='replace')
     # Proxy handling
     if isinstance(obj, Proxy):
         try:
             inner = obj.get()
             return _sanitize_for_json(inner)
         except Exception:
-            return repr(obj)
+            return _safe_repr(obj)
     # dict -> sanitize values
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            try:
-                key = k if isinstance(k, str) else str(k)
-            except Exception:
-                key = str(k)
+            key = k if isinstance(k, str) else _safe_repr(k)
             out[key] = _sanitize_for_json(v)
         return out
     # list/tuple/set -> list
     if isinstance(obj, (list, tuple, set)):
         return [_sanitize_for_json(x) for x in obj]
-    # fallback: try to stringify
+    # fallback: attempt JSON, else safe string
     try:
         json.dumps(obj)
         return obj
     except Exception:
-        return {str(obj): obj}
+        return _safe_repr(obj)
 
 
 # Globals for the running server
@@ -541,6 +553,7 @@ def _handle_command(cmd: str) -> Any:
 
         if verb in ('add_tag', 'tag'):
             # Syntax: add_tag <uid> <tag> [--loader loader_name]
+            # Tags are now stored as individual boolean columns (tags_<tagname>)
 
             if len(parts) < 3:
                 return {'ok': False, 'error': 'usage: add_tag <uid> <tag> [--loader loader_name]'}
@@ -579,12 +592,19 @@ def _handle_command(cmd: str) -> Any:
                         continue
 
                     try:
-                        # Try different methods to add tags
-                        if hasattr(dataset, 'add_tag'):
+                        # Try different methods to add tags - with new tag system, use set() method
+                        sample_id = str(uid) if uid.isdigit() else uid
+                        
+                        if hasattr(dataset, 'set') and callable(dataset.set):
+                            # New tag system: use set() to create tags_<tagname> column
+                            dataset.set(sample_id=sample_id, stat_name="tags", value=tag)
+                            results['updated'][lname] = f'Tagged sample {uid} with "{tag}"'
+                        elif hasattr(dataset, 'add_tag'):
+                            # Fallback: legacy add_tag method
                             dataset.add_tag(uid, tag)
                             results['updated'][lname] = f'Added tag "{tag}" to {uid}'
                         elif hasattr(dataset, 'sample_tags'):
-                            # Direct dict manipulation
+                            # Fallback: direct dict manipulation
                             if uid not in dataset.sample_tags:
                                 dataset.sample_tags[uid] = []
                             if tag not in dataset.sample_tags[uid]:
@@ -741,24 +761,17 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
             cli_host: Host to bind the server to (default: localhost).
     """
 
-    # Lazy import of banner to avoid importing the top-level
-    # package (and thus torch) when CUDA DLLs are unavailable.
-    # On some Windows setups, importing torch can fail with
-    # WinError 1455; the CLI should still be able to start.
-    _BANNER = None
-    try:
-        from weightslab import _BANNER as _WB
-        _BANNER = _WB
-    except Exception:
-        # Skip banner if importing the package fails
-        _BANNER = None
-
     global _server_thread, _server_port, _server_host
     cli_host = os.environ.get('CLI_HOST', cli_host)
     cli_port = int(os.environ.get('CLI_PORT', cli_port))
 
     if _server_thread is not None and _server_thread.is_alive():
-        return {'ok': False, 'error': 'server_already_running'}
+        return {
+            'ok': True,
+            'host': _server_host or cli_host,
+            'port': int(_server_port or cli_port),
+            'already_running': True,
+        }
 
     # start server thread on a pre-bound socket to avoid races
     # Try binding to the requested port, and if it fails (port in use),
@@ -819,12 +832,6 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
     })
     # wait briefly for server to come up
     time.sleep(0.05)
-
-    if _BANNER:
-        try:
-            print(_BANNER)
-        except Exception:
-            pass
 
     # optionally spawn a new console running the client REPL
     if spawn_client:

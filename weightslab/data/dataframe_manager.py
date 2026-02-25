@@ -11,7 +11,7 @@ from typing import Dict, Sequence, Any, List
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
-from weightslab.data.data_utils import _filter_columns_by_patterns
+from weightslab.data.data_utils import _filter_columns_by_patterns, get_mask
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -19,12 +19,11 @@ from weightslab.data.sample_stats import (
     SAMPLES_STATS_DEFAULTS_TYPES,
     SAMPLES_STATS_TO_SAVE_TO_H5,
 )
-from weightslab.backend.ledgers import get_hyperparams, register_dataframe
-from weightslab.trainer.services.service_utils import get_mask
+from weightslab.backend.ledgers import get_hyperparams
 
 
-# Set up logger
-logger = logging.getLogger(__name__)
+pd.set_option('future.no_silent_downcasting', True)
+logger = logging.getLogger(__name__)  # Set up logger
 
 
 class LedgeredDataFrameManager:
@@ -75,6 +74,38 @@ class LedgeredDataFrameManager:
                     # data.h5 is already in checkpoints/data/, so arrays.h5 goes there too
                     array_path = store.get_path().parent / "arrays.h5"
                     self._array_store = H5ArrayStore(array_path)
+
+    def _normalize_sample_id(self, sample_id: Any) -> Any:
+        """Normalize incoming sample IDs while preserving numeric IDs when possible."""
+        try:
+            if isinstance(sample_id, np.generic):
+                sample_id = sample_id.item()
+        except Exception:
+            pass
+
+        if isinstance(sample_id, bytes):
+            try:
+                sample_id = sample_id.decode("utf-8")
+            except Exception:
+                pass
+
+        return str(sample_id)
+
+    def _coerce_sample_id_for_index(self, sample_id: Any) -> Any:
+        """Coerce sample_id to match current dataframe index representation."""
+        sid = self._normalize_sample_id(sample_id)
+
+        if self._df.empty:
+            return sid
+
+        if sid in self._df.index:
+            return sid
+
+        sid_str = str(sid)
+        if sid_str in self._df.index:
+            return sid_str
+        
+        return sid
 
     def set_array_store(self, array_store: H5ArrayStore):
         """Explicitly set the array store."""
@@ -150,7 +181,7 @@ class LedgeredDataFrameManager:
         if origin is not None and "origin" not in df_norm.columns:
             df_norm["origin"] = origin
 
-        # Ensure sample_id index
+        # Ensure sample_id index matches existing frame type or coerces to int
         if "sample_id" in df_norm.columns:
             try:
                 df_norm = df_norm.set_index("sample_id")
@@ -164,6 +195,12 @@ class LedgeredDataFrameManager:
                 except Exception:
                     pass
 
+        # Normalize index values to avoid int/str mismatches for sample IDs
+        try:
+            df_norm.index = pd.Index([self._normalize_sample_id(v) for v in df_norm.index], name="sample_id")
+        except Exception:
+            pass
+
         with self._lock:
             # Align columns
             all_cols = df_norm.columns
@@ -174,6 +211,7 @@ class LedgeredDataFrameManager:
             # Right-preferred upsert: df_norm overrides existing, adds new rows
             # Only update columns present in df_norm, keep other columns/values from self._df
             existing_idx = df_norm.index.intersection(self._df.index)
+            missing_cols = df_norm.columns.difference(self._df.columns)
             if len(existing_idx) > 0:
                 self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
@@ -182,12 +220,24 @@ class LedgeredDataFrameManager:
             if len(missing_idx) > 0:
                 self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
 
+            # Set missing cols value for bool
+            for col in missing_cols:
+                if df_norm[col].dtype == bool:
+                    self._df[col] = self._df[col].fillna(False).astype(bool)
+
+            # Flag index to be flushed later (outside lock) to minimize lock time
             self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
 
     def mark_dirty(self, sample_id: int):
         with self._lock:
-            self._pending.add(int(sample_id))
+            self._pending.add(self._coerce_sample_id_for_index(sample_id))
 
+    def drop_column(self, column: str):
+        with self._lock:
+            if column in self._df.columns:
+                return self._df.pop(column)
+            return None
+        
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
             self._pending.update(set(sample_ids))
@@ -307,6 +357,7 @@ class LedgeredDataFrameManager:
         preds: np.ndarray | None,
         losses: Dict[str, Any] | None,
         targets: np.ndarray | None = None,
+        step: int | None = None
     ):
         """
             Enqueue a batch of sample stats for later flush.
@@ -326,10 +377,10 @@ class LedgeredDataFrameManager:
                 return True
 
         # Build all records BEFORE acquiring lock (faster)
-        records_to_add = []
+        records_to_add = {}
         normalized_preds_raw = self._normalize_preds_raw_uint16(preds_raw) if preds_raw is not None else None
         for i, sid in enumerate(sample_ids):
-            sample_id = int(sid) if not isinstance(sid, np.ndarray) else int(sid[0])
+            sample_id = sid if not isinstance(sid, (np.ndarray, list)) else sid[0]
 
             # Build record incrementally - keep numpy arrays as-is for speed
             rec: Dict[str, Any] = {
@@ -337,43 +388,28 @@ class LedgeredDataFrameManager:
             }
 
             # Store arrays directly without conversion (FAST)
-            if targets is not None:
-                try:
-                    rec[SampleStats.Ex.TARGET.value] = targets[i]
-                except Exception:
-                    pass
+            if targets is not None and is_meaningful(targets[i]):
+                rec[SampleStats.Ex.TARGET.value] = targets[i]
+            if preds_raw is not None and is_meaningful(preds_raw[i]):
+                rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i]
+            if preds is not None and is_meaningful(preds[i]):
+                rec[SampleStats.Ex.PREDICTION.value] = preds[i]
+            if step is not None and is_meaningful(step):
+                rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
 
-            if preds_raw is not None:
-                try:
-                    rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i]
-                except Exception:
-                    pass
-
-            if preds is not None:
-                try:
-                    rec[SampleStats.Ex.PREDICTION.value] = preds[i]
-                except Exception:
-                    pass
-
+            # Save losses with safe conversion (handles scalars, arrays, NaNs)
             loss_dict = self._safe_loss_dict(losses, i)
             if loss_dict is not None:
                 rec.update(loss_dict)
-
-            records_to_add.append((sample_id, rec))
+            records_to_add[sample_id] = rec
 
         # Single lock acquisition for entire batch (minimize lock time)
         with self._buffer_lock:
-            for sample_id, rec in records_to_add:
-                if sample_id in self._buffer:
-                    # Update only meaningful (non-NaN) values
-                    updates = {k: v for k, v in rec.items() if is_meaningful(v)}
-                    self._buffer[sample_id].update(updates)
-                else:
-                    self._buffer[sample_id] = rec
+            # Merge nested dicts: update existing sample_id records, add new ones
+            for sample_id, record in records_to_add.items():
+                self._buffer.setdefault(sample_id, {}).update(record)
             logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
-
-            # Check buffer size and trigger flush if needed
-            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init
+            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
 
         # Trigger flush outside lock
         if should_flush:
@@ -383,10 +419,10 @@ class LedgeredDataFrameManager:
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
         if not updates:
             return
-        idx = int(sample_id)
         with self._lock:
+            idx = self._coerce_sample_id_for_index(sample_id)
             if self._df.empty:
-                row_data = {"origin": origin, "sample_id": int(sample_id), **updates}
+                row_data = {"origin": origin, "sample_id": idx, **updates}
                 self._df = pd.DataFrame([row_data]).set_index("sample_id")
             else:
                 all_cols = self._df.columns.union(updates.keys())
@@ -398,15 +434,22 @@ class LedgeredDataFrameManager:
                 else:
                     mask = (self._df.index == idx)
                 if mask.any():
-                    # Format values properly to batch of values only
-                    values = np.asanyarray(list(updates.values())[0])
-                    if values.ndim == 0:
-                        values = np.asanyarray([values])
-                    elif values.ndim == 1:
-                        pass
+                    # Handle multiple column updates by constructing Series
+                    # This supports both single-valued updates and array-valued updates
+                    if len(updates) == 1:
+                        # Single column update - use original logic
+                        values = np.asanyarray(list(updates.values())[0])
+                        if values.ndim == 0:
+                            values = np.asanyarray([values])
+                        elif values.ndim == 1:
+                            pass
+                        else:
+                            values = values.squeeze(tuple(range(values.ndim-1)))
+                        self._df.loc[mask, list(updates.keys())] = values
                     else:
-                        values = values.squeeze(tuple(range(values.ndim-1)))
-                    self._df.loc[mask, list(updates.keys())] = values
+                        # Multiple column updates - use Series for proper alignment
+                        update_series = pd.Series(updates)
+                        self._df.loc[mask, update_series.index] = update_series.values
                 else:
                     # Create new row
                     row_data = {"origin": origin, **updates}
@@ -422,8 +465,9 @@ class LedgeredDataFrameManager:
         with self._lock:
             if self._df.empty:
                 return None
+            idx = self._coerce_sample_id_for_index(sample_id)
             try:
-                row = self._df.loc[int(sample_id)]
+                row = self._df.loc[idx]
                 if isinstance(row, pd.DataFrame):
                     # Multiple rows with same sample_id; filter by origin
                     if "origin" in row.columns:
@@ -457,7 +501,7 @@ class LedgeredDataFrameManager:
 
     def set_dense(self, key: str, sample_id: int, value: np.ndarray):
         with self._lock:
-            self._dense_store.setdefault(key, {})[int(sample_id)] = value
+            self._dense_store.setdefault(key, {})[str(sample_id)] = value
 
     def get_dense_map(self, origin: str) -> Dict[str, Dict[int, np.ndarray]]:
         with self._lock:
@@ -509,8 +553,11 @@ class LedgeredDataFrameManager:
                 if dataset is None:
                     loader = self._get_loader_by_origin(row.get("origin"))
                     dataset = getattr(loader, "wrapped_dataset", None)
-                dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
-                row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
+                try:
+                    dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
+                    row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
+                except Exception as e:
+                    logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={row.name}: {e}")
         return row
 
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
@@ -580,7 +627,10 @@ class LedgeredDataFrameManager:
             missing_idx = df_updates.index.difference(self._df.index)
             if len(missing_idx) > 0:
                 self._df = pd.concat(
-                    [self._df, pd.DataFrame(index=missing_idx, columns=self._df.columns)],
+                    [
+                        self._df,
+                        pd.DataFrame(index=missing_idx, columns=self._df.columns)
+                    ],
                     copy=False,
                 )
 
@@ -593,7 +643,12 @@ class LedgeredDataFrameManager:
 
         # Det to seg conversion - pre-fetch dataset once for efficiency
         if df_updates.index.size > 0:
-            self._df.loc[df_updates.index] = self._df.loc[df_updates.index].apply(lambda row: self._normalize_arrays_for_storage(row), axis=1)
+            normalized_rows = self._df.loc[df_updates.index].apply(
+                lambda row: self._normalize_arrays_for_storage(row),
+                axis=1
+            )
+            cols_to_update = df_updates.columns.intersection(self._df.columns)
+            self._df.loc[df_updates.index, cols_to_update] = normalized_rows[cols_to_update]
 
         # Mark dirty outside lock
         self.mark_dirty_batch(sample_ids)
@@ -901,7 +956,7 @@ class LedgeredDataFrameManager:
 
 
 # Create global instance with config-driven parameters
-def _create_ledger_manager():
+def create_ledger_manager():
     """Create LedgeredDataFrameManager with parameters from config if available."""
     flush_interval = 3.0
     flush_max_rows = 100
@@ -929,8 +984,8 @@ def _create_ledger_manager():
 
 # Global LedgeredDataFrameManager instance
 # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
-LM = _create_ledger_manager()
-try:
-    register_dataframe(LM)
-except Exception as e:
-    logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")
+# LM = create_ledger_manager()
+# try:
+#     register_dataframe(LM)
+# except Exception as e:
+#     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

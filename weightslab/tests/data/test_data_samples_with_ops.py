@@ -27,9 +27,8 @@ from weightslab.data.data_samples_with_ops import (
 class SimpleDataset(Dataset):
     """Simple dataset for testing."""
 
-    def __init__(self, size=10, return_labels=True):
+    def __init__(self, size=10):
         self.size = size
-        self.return_labels = return_labels
         self.__name__ = "simple_dataset"
 
     def __len__(self):
@@ -38,10 +37,9 @@ class SimpleDataset(Dataset):
     def __getitem__(self, idx):
         # Return random data with shape (3, 32, 32) to simulate images
         data = np.random.randn(3, 32, 32).astype(np.float32)
-        if self.return_labels:
-            label = idx % 10  # Simulate 10 classes
-            return data, label
-        return data
+        uid = np.random.randn(1)
+        label = idx % 10  # Simulate 10 classes
+        return data, uid, label
 
 
 class TestHelperFunctions(unittest.TestCase):
@@ -164,7 +162,7 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
     def setUp(self):
         """Create a temporary directory for logs."""
         self.temp_dir = tempfile.mkdtemp()
-        self.dataset = SimpleDataset(size=10, return_labels=True)
+        self.dataset = SimpleDataset(size=10)
 
         # Initialize HP
         parameters = {
@@ -208,25 +206,7 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         self.assertTrue(isinstance(result[0], (np.ndarray, torch.Tensor)))
 
         # Second element should be a numeric UID
-        self.assertTrue(isinstance(result[1], (int, np.integer)))
-
-    def test_getitem_with_single_element_dataset(self):
-        """Test __getitem__ with unsupervised dataset (no labels)."""
-
-        dataset = SimpleDataset(size=5, return_labels=False)
-        wrapper = DataSampleTrackingWrapper(
-            wrapped_dataset=dataset,
-            root_log_dir=self.temp_dir,
-            enable_h5_persistence=False,
-            compute_hash=False,
-            use_tags=False,
-        )
-
-        result = wrapper[0]
-
-        # Should return (data, id)
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
+        self.assertTrue(isinstance(result[1], (str, int)))
 
 
 class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
@@ -235,7 +215,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
     def setUp(self):
         """Create a temporary directory for logs."""
         self.temp_dir = tempfile.mkdtemp()
-        self.dataset = SimpleDataset(size=10, return_labels=True)
+        self.dataset = SimpleDataset(size=10)
 
         # Initialize HP
         parameters = {
@@ -258,7 +238,12 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
             shutil.rmtree(self.temp_dir)
 
     def test_binary_tag_labeling(self):
-        """Test binary tag-based labeling."""
+        """Test tag-based labeling with individual boolean tag columns.
+        
+        Tags are now stored as individual boolean columns (tags_tagname) instead of
+        a single comma-separated string. This test verifies that tagging creates the
+        appropriate columns and that the tags are correctly stored and retrieved.
+        """
 
         tags_mapping = {"target_tag": 1, "non_target_tag": 0}
         wrapper = DataSampleTrackingWrapper(
@@ -270,29 +255,95 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
             tags_mapping=tags_mapping,
         )
 
-        # Get item - should override label with tag-based label
-        result = wrapper[0]
-        target_label = result[2]
-        sample_id = result[1]
+        # Get sample IDs
+        sample_id_0 = wrapper.unique_ids[0]
+        sample_id_1 = wrapper.unique_ids[1]
 
-        # Check based on actual sample_id
-        self.assertEqual(target_label, 0)
+        # Verify no tag columns exist initially
+        df = wrapper.get_dataframe()
+        tag_columns_before = [col for col in df.columns if col.startswith("tag:")]
+        self.assertEqual(len(tag_columns_before), 0, "No tag columns should exist initially")
 
-        # Set tags for samples
-        wrapper.set(sample_id=sample_id, stat_name="tags", value='target_tag')
+        # Set target_tag for first sample
+        wrapper.set(sample_id=sample_id_0, stat_name="tags", value='target_tag')
+        
+        # Verify tag column was created
+        df = wrapper.get_dataframe()
+        self.assertIn('tag:target_tag', df.columns, "tag:target_tag column should exist")
+        self.assertEqual(df.loc[sample_id_0, 'tag:target_tag'], 1, "target_tag should be set to 1")
 
-        # Test another sample
-        result = wrapper[1]
-        sample_id = result[1]
+        # Set non_target_tag for second sample
+        wrapper.set(sample_id=sample_id_1, stat_name="tags", value='non_target_tag')
 
-        # Set tags for samples
-        wrapper.set(sample_id=sample_id, stat_name="tags", value='non_target_tag')
+        # Verify both tag columns exist
+        df = wrapper.get_dataframe()
+        self.assertIn('tag:target_tag', df.columns)
+        self.assertIn('tag:non_target_tag', df.columns)
+        self.assertEqual(df.loc[sample_id_1, 'tag:non_target_tag'], 1)
 
-        # Get labels
-        result = wrapper[1]
-        target_label = result[2]
-        self.assertEqual(target_label, 0)
+    def test_binary_tag_labeling_single_tag(self):
+        """Test binary tag-based labeling with a single target tag.
+        
+        When tags_mapping has only 1 tag, it's binary classification:
+        - tag matches → 1
+        - tag doesn't match (or no tags) → 0
+        """
 
+        tags_mapping = {"target_tag": 1}  # Binary: only 1 tag in mapping
+        wrapper = DataSampleTrackingWrapper(
+            wrapped_dataset=self.dataset,
+            root_log_dir=self.temp_dir,
+            enable_h5_persistence=False,
+            compute_hash=False,
+            use_tags=True,
+            tags_mapping=tags_mapping,
+        )
+
+        sample_id_0 = wrapper.unique_ids[0]
+
+        # Set target_tag on sample 0
+        wrapper.set(sample_id=sample_id_0, stat_name="tags", value='target_tag')
+
+        # Verify tags were set  
+        df = wrapper.get_dataframe()
+        self.assertIn('tag:target_tag', df.columns)
+        self.assertEqual(df.loc[sample_id_0, 'tag:target_tag'], 1)
+
+    def test_tag_parsing_comma_and_semicolon(self):
+        """Test that tags can be separated by commas, semicolons, or both.
+        
+        The tag parsing should handle:
+        - "tag1,tag2,tag3" → creates tag:tag1, tag:tag2, tag:tag3
+        - "tag1;tag2;tag3" → creates tag:tag1, tag:tag2, tag:tag3
+        - "tag1, tag2; tag3" → creates tag:tag1, tag:tag2, tag:tag3 (trims whitespace)
+        """
+
+        tags_mapping = {"tag1": 1, "tag2": 2, "tag3": 3}
+        wrapper = DataSampleTrackingWrapper(
+            wrapped_dataset=self.dataset,
+            root_log_dir=self.temp_dir,
+            enable_h5_persistence=False,
+            compute_hash=False,
+            use_tags=True,
+            tags_mapping=tags_mapping,
+        )
+
+        sample_id = wrapper.unique_ids[0]
+
+        # Test comma-separated tags
+        wrapper.set(sample_id=sample_id, stat_name="tags", value='tag1,tag2,tag3')
+        df = wrapper.get_dataframe()
+        self.assertEqual(df.loc[sample_id, 'tag:tag1'], 1)
+        self.assertEqual(df.loc[sample_id, 'tag:tag2'], 1)
+        self.assertEqual(df.loc[sample_id, 'tag:tag3'], 1)
+
+        # Test semicolon-separated tags on different sample
+        sample_id_2 = wrapper.unique_ids[2]
+        wrapper.set(sample_id=sample_id_2, stat_name="tags", value='tag1;tag2;tag3')
+        df = wrapper.get_dataframe()
+        self.assertEqual(df.loc[sample_id_2, 'tag:tag1'], 1)
+        self.assertEqual(df.loc[sample_id_2, 'tag:tag2'], 1)
+        self.assertEqual(df.loc[sample_id_2, 'tag:tag3'], 1)
 
 class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
     """Test denylisting and allowlisting functionality."""
@@ -468,7 +519,7 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
 
         # Get sample ID at index 0
         sample_id = wrapper.get_sample_id_at_index(0)
-        self.assertEqual(sample_id, int(wrapper.unique_ids[0]))
+        self.assertEqual(sample_id, wrapper.unique_ids[0])
 
     def test_get_index_from_sample_id(self):
         """Test retrieving index from sample ID."""
@@ -481,7 +532,7 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
         )
 
         # Get index from first sample ID
-        sample_id = int(wrapper.unique_ids[0])
+        sample_id = wrapper.unique_ids[0]
         index = wrapper.get_index_from_sample_id(sample_id)
         self.assertEqual(index, 0)
 

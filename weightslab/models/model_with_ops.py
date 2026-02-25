@@ -19,9 +19,7 @@ class NetworkWithOps(nn.Module):
         super(NetworkWithOps, self).__init__()
 
         # Initialize variables
-        self.seen_samples = 0
         self.current_step = 0
-        self.seen_batched_samples = 0
         self.visited_nodes = set()  # Memory trace of explored nodes
         self.visited_incoming_nodes = set()  # Memory trace of explored nodes
         self.name = self._get_name()  # Name of the model
@@ -37,17 +35,15 @@ class NetworkWithOps(nn.Module):
         return self.linearized_layers
 
     def __eq__(self, other: "NetworkWithOps") -> bool:
-        return other is not None and self.seen_samples == other.seen_samples and \
+        return other is not None and \
             self.tracking_mode == other.tracking_mode and \
             self.layers == other.layers
 
     def __hash__(self):
-        return hash(self.seen_samples) + \
-            hash(self.tracking_mode) + \
-            hash(self._dep_manager)
+        return hash(self.tracking_mode) + hash(self._dep_manager)
 
     def __repr__(self):
-        return super().__repr__() + f" age=({self.seen_samples})"
+        return super().__repr__() + f" age=({self.current_step})"
 
     def _same_ancestors(self, node_id: int) -> Set[int]:
         visited = set()
@@ -73,7 +69,23 @@ class NetworkWithOps(nn.Module):
         """
             Returns the reverse indexing of the layer based on the input shape.
         """
-        return (nb_layers + layer_id) if layer_id < 0 else layer_id
+        layer_ids = sorted(self._dep_manager.id_2_layer.keys()) if self._dep_manager.id_2_layer else list(range(nb_layers))
+
+        # Negative indexing: map from the end of actual module-id ordering
+        if layer_id < 0:
+            try:
+                return layer_ids[layer_id]
+            except Exception:
+                return nb_layers + layer_id
+
+        # Positive value can be either a real module_id OR a positional index
+        if layer_id in self._dep_manager.id_2_layer:
+            return layer_id
+
+        if 0 <= layer_id < len(layer_ids):
+            return layer_ids[layer_id]
+
+        return layer_id
 
     def set_tracking_mode(self, mode: TrackingMode):
         self.tracking_mode = mode
@@ -81,10 +93,10 @@ class NetworkWithOps(nn.Module):
             layer.tracking_mode = mode
 
     def get_age(self):
-        return self.seen_samples
+        return self.current_step
 
-    def get_batched_age(self):
-        return self.seen_batched_samples
+    def increase_age(self):
+        self.current_step += 1
 
     def get_name(self):
         return self.name
@@ -140,8 +152,6 @@ class NetworkWithOps(nn.Module):
             return
         if not hasattr(tracked_input, 'batch_size'):
             setattr(tracked_input, 'batch_size', tracked_input.shape[0])
-        self.seen_samples += tracked_input.batch_size
-        self.seen_batched_samples += 1
         self.current_step += 1
 
         # If an instance provides an auto-dump hook (e.g., ModelInterface), call it.
@@ -488,16 +498,14 @@ class NetworkWithOps(nn.Module):
 
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
         state_dict = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
-        state_dict[prefix + 'seen_samples'] = self.seen_samples
         state_dict[prefix + 'current_step'] = self.current_step
         state_dict[prefix + 'tracking_mode'] = self.tracking_mode
         return state_dict
 
     def load_state_dict(
             self, state_dict, strict=True, assign=True, **kwargs):
-        self.seen_samples = state_dict.pop('seen_samples', 0)
-        self.current_step = state_dict.pop('current_step', 0)
-        self.tracking_mode = state_dict.pop('tracking_mode', 0)
+        self.current_step = state_dict.pop('current_step', self.current_step)
+        self.tracking_mode = state_dict.pop('tracking_mode', self.tracking_mode)
 
         # Preprocess trackers
         # TODO (GP): better way to handle this? Maybe load the trackers
@@ -516,7 +524,7 @@ class NetworkWithOps(nn.Module):
                 if k.startswith('model.'):
                     remapped[k[len('model.'):]] = v
                 else:
-                    remapped[k] = v
+                    remapped['model.' + k] = v
             super().load_state_dict(
                 remapped, strict=strict, assign=assign, **kwargs)
 
