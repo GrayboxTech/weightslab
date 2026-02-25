@@ -108,16 +108,23 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Generate requirements hash
+        id: req-hash
+        run: |
+          REQ_HASH=$(tail -n +2 requirements.txt | sha256sum | cut -d' ' -f1)
+          echo "hash=$REQ_HASH" >> $GITHUB_OUTPUT
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ steps.req-hash.outputs.hash }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Install project dependencies
         run: |
+          sed -i '1d' requirements.txt
           python -m pip install --upgrade pip
           python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
 
@@ -137,17 +144,22 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Generate requirements hash
+        id: req-hash
+        run: |
+          REQ_HASH=$(tail -n +2 requirements.txt | sha256sum | cut -d' ' -f1)
+          echo "hash=$REQ_HASH" >> $GITHUB_OUTPUT
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ steps.req-hash.outputs.hash }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Install project dependencies
         run: |
-          sed -i '1d' requirements.txt
           python -m pip install --upgrade pip
           python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
 
