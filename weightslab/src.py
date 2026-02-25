@@ -145,18 +145,18 @@ def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Te
 def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int = 0, **kwargs) -> None:
     """
         Log the given scalar signal to the registered logger in the ledger, if available and logging is enabled.
-        
+
         Args:
-            scalar (float): The scalar value to log. 
+            scalar (float): The scalar value to log.
             signal_per_sample (dict): A dictionary containing per-sample signals.
-            reg_name (str): The registration name of the signal, used as the key in logging. 
-            step (int, optional): The current training step to log as global_step. Defaults to 0. 
+            reg_name (str): The registration name of the signal, used as the key in logging.
+            step (int, optional): The current training step to log as global_step. Defaults to 0.
             kwargs (dict, optional): Additional keyword arguments that may contain logging preferences. Defaults to {}.
     """
     # Check if logging is enabled
     if not kwargs.get('log', True):
         return
-    
+
     # log if requested and logger present
     if scalar is not None:
         try:
@@ -228,7 +228,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
              meta = getattr(func, '_wl_signal_meta', {})
              if meta.get('subscribe_to') == reg_name:
                  subscribers.append((name, func))
-        
+
          if subscribers:
              # Resolve generic value vector
              val_tensor = out
@@ -236,14 +236,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                   val_tensor = val_tensor.detach().cpu().numpy()
              else:
                   val_tensor = np.asarray(val_tensor)
-                  
+
              # Need (B,) vector for per-sample signals
              val_vec = None
              if val_tensor.ndim > 1:
                   val_vec = val_tensor.mean(axis=tuple(range(1, val_tensor.ndim)))
              elif val_tensor.ndim == 1:
                   val_vec = val_tensor
-             
+
              if val_vec is not None and len(val_vec) == len(ids_np):
                  # Attempt to get current step for frequency control
                  current_step = 0
@@ -252,7 +252,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                      m = None
                      if 'experiment' in list_models(): m = _gm('experiment')
                      elif 'main' in list_models(): m = _gm('main')
-                     
+
                      if m is not None:
                          val = getattr(m, 'current_step', None)
                          if val is not None: current_step = int(val)
@@ -269,11 +269,11 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                  for name, func in subscribers:
                      meta = getattr(func, '_wl_signal_meta', {})
                      compute_every = meta.get('compute_every_n_steps', 1)
-                     
+
                      # Frequency Check
                      if current_step % compute_every != 0:
                          continue
-    
+
                      try:
                          batch_res = []
                          for i, uid in enumerate(ids_np):
@@ -285,14 +285,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          dynamic_updates[name] = np.array(batch_res)
                      except Exception:
                          pass # User function error, skip
-    
+
     # Save statistics if requested and applicable
     if (batch_scalar is not None and ids is not None) or dynamic_updates:
         signals = {
             reg_name: list(batch_scalar.values()) if isinstance(batch_scalar, dict) else batch_scalar.detach().cpu().tolist()
         } if batch_scalar is not None else {}
         signals.update(dynamic_updates) # Merge dynamic signals
-        
+
         save_signals(
             batch_ids=ids,
             preds=preds,
@@ -320,7 +320,7 @@ def _update_log_directory(new_log_dir: str):
         set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
     except Exception as e:
         logger.debug(f"Could not update log directory: {e}")
-    
+
 
 # ##############################################################################################################
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
@@ -416,7 +416,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
         proxy.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
-        
+
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
@@ -614,10 +614,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
                         # return the ledger handle (proxy or dict)
                         return get_hyperparams()
-                    
+
                     elif isinstance(obj, dict):
                         register_hyperparams(obj)
-                        
+
                         # Update log directory if root_log_dir provided in hyperparameters or defaults
                         new_log_dir = None
                         if defaults and 'root_log_dir' in defaults:
@@ -690,7 +690,7 @@ def keep_serving(timeout: int = None) -> None:
 def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
     Decorator to register a custom signal function.
-    
+
     Usage:
         @wl.signal(name="blue_pixels")
         def compute_blue(sample, **kwargs): ...
@@ -703,19 +703,19 @@ def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: in
         if reg_name in _REGISTERED_SIGNALS:
             logger.warning(f"Overwriting already registered signal: {reg_name}")
         _REGISTERED_SIGNALS[reg_name] = func
-        
+
         # Attach metadata
         func._wl_signal_meta = kwargs
         func._wl_signal_meta['subscribe_to'] = subscribe_to
         func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
         func._wl_signal_name = reg_name
-        
+
         # Register in global ledger for visibility by backend services
         try:
             register_signal(func, name=reg_name)
         except Exception as e:
             logger.warning(f"Failed to register signal '{reg_name}' in ledger: {e}")
-            
+
         return func
     return decorator
 
@@ -739,7 +739,7 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
         dataset = dataset_or_loader.tracked_dataset
     elif hasattr(dataset_or_loader, "dataset"): # Loader
         dataset = dataset_or_loader.dataset
-    
+
     # GP: Do not unwrap wrapped_dataset (DataSampleTrackingWrapper) blindly,
     # as it holds the 'unique_ids' map when compute_hash=True.
     # Only unwrap if it's a wrapper that doesn't provide IDs but obscures the underlying data?
@@ -760,7 +760,7 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
     # Resolve signals to run
     signal_fns = {}
     target_names = signals or _REGISTERED_SIGNALS.keys()
-    
+
     for name in target_names:
         if name in _REGISTERED_SIGNALS:
             func = _REGISTERED_SIGNALS[name]
@@ -776,7 +776,7 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
     logger.info(f"Computing {len(signal_fns)} signals for {len(dataset)} samples in '{origin}'...")
 
     batch_updates = []
-    
+
     # helper for unpacking
     def _get_image(item):
         # Handle tuple (img, label) or dict/object
@@ -803,16 +803,16 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
                         sample_id = val
                 except Exception:
                     pass
-            
+
             # Retrieve raw item
             # We try to get the rawest form possible to avoid transforms if not needed,
             # but for consistency we often just use __getitem__
             if i == 0:
                 logger.info(f"DEBUG: compute_signals first sample_id: {sample_id} (type: {type(sample_id)}) for origin: {origin}")
-            
+
             raw_item = dataset[i]
             input_data = _get_image(raw_item)
-            
+
             row = {
                 "sample_id": str(sample_id),
                 "origin": origin,
@@ -827,7 +827,7 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
                     row[key] = val
                 except Exception as e:
                     pass # Fail silently for single signal failures
-            
+
             batch_updates.append(row)
 
         except Exception as e:
@@ -838,7 +838,7 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
         import pandas as pd
         df_new = pd.DataFrame(batch_updates)
         logger.info(f"Registering {len(df_new)} signal records to global ledger.")
-        
+
         # Use upsert with force_flush
         enqueue = getattr(DATAFRAME_M, 'upsert_df', None)
         if callable(enqueue):
@@ -852,61 +852,61 @@ def tag_samples(
 ) -> bool:
     """
     Add or remove tags from samples.
-    
+
     Args:
         sample_ids: List of sample IDs to tag
         tag: Tag name to add/remove (e.g., 'difficult', 'outlier')
         mode: Operation mode - 'add', 'remove', or 'set' (override all tags)
-    
+
     Returns:
         bool: True if successful
-    
+
     Examples:
         >>> # Tag difficult samples
         >>> tag_samples([0, 5, 12], 'difficult', mode='add')
-        
+
         >>> # Remove outlier tag
         >>> tag_samples([5, 12], 'outlier', mode='remove')
-        
+
         >>> # Set exclusive tag (removes other tags)
         >>> tag_samples([0], 'validated', mode='set')
     """
     import pandas as pd
     from weightslab.backend.ledgers import get_dataframe
-    
+
     df_manager = get_dataframe()
     if df_manager is None:
         logger.error("Dataframe manager not initialized. Call this after registering your dataloader.")
         return False
-    
+
     # Build tag column name
     tag_col = f"{SampleStatsEx.TAG.value}:{tag.strip()}"
-    
+
     try:
         if mode == 'add':
             # Set tag column to True for specified samples
-            rows = [{"sample_id": sid, tag_col: True} 
+            rows = [{"sample_id": sid, tag_col: True}
                     for sid in sample_ids]
         elif mode == 'remove':
             # Set tag column to False for specified samples
-            rows = [{"sample_id": sid, tag_col: False} 
+            rows = [{"sample_id": sid, tag_col: False}
                     for sid in sample_ids]
         elif mode == 'set':
             # Override: first clear all existing tags, then set new one
             # This would require more complex logic - for now just add
             logger.warning("Mode 'set' not fully implemented yet, using 'add' instead")
-            rows = [{"sample_id": sid, tag_col: True} 
+            rows = [{"sample_id": sid, tag_col: True}
                     for sid in sample_ids]
         else:
             logger.error(f"Invalid mode '{mode}'. Use 'add', 'remove', or 'set'")
             return False
-        
+
         df_update = pd.DataFrame(rows).set_index("sample_id")
         df_manager.upsert_df(df_update, force_flush=True)
-        
+
         logger.info(f"Tagged {len(sample_ids)} samples with '{tag}' (mode={mode})")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to tag samples: {e}", exc_info=True)
         return False
@@ -918,40 +918,40 @@ def discard_samples(
 ) -> bool:
     """
     Mark samples as discarded (excluded from training) or restore them.
-    
+
     Args:
         sample_ids: List of sample IDs to discard/restore
         discarded: True to discard, False to restore
-    
+
     Returns:
         bool: True if successful
-    
+
     Examples:
         >>> # Discard corrupted samples
         >>> discard_samples([3, 7, 19], discarded=True)
-        
+
         >>> # Restore previously discarded samples
         >>> discard_samples([3, 7], discarded=False)
     """
     import pandas as pd
     from weightslab.backend.ledgers import get_dataframe
-    
+
     df_manager = get_dataframe()
     if df_manager is None:
         logger.error("Dataframe manager not initialized. Call this after registering your dataloader.")
         return False
-    
+
     try:
-        rows = [{"sample_id": sid, SampleStatsEx.DISCARDED.value: bool(discarded)} 
+        rows = [{"sample_id": sid, SampleStatsEx.DISCARDED.value: bool(discarded)}
                 for sid in sample_ids]
-        
+
         df_update = pd.DataFrame(rows).set_index("sample_id")
         df_manager.upsert_df(df_update, force_flush=True)
-        
+
         action = "Discarded" if discarded else "Restored"
         logger.info(f"{action} {len(sample_ids)} samples ")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to update discard status: {e}", exc_info=True)
         return False
@@ -964,41 +964,41 @@ def get_samples_by_tag(
 ) -> list[int]:
     """
     Get sample IDs that have a specific tag.
-    
+
     Args:
         tag: Tag name to search for
         origin: Dataset split ('train', 'eval', etc.). Default: 'train'
         limit: Maximum number of sample IDs to return (None = all)
-    
+
     Returns:
         List of sample IDs with the specified tag
-    
+
     Examples:
         >>> # Get all difficult samples
         >>> difficult_ids = get_samples_by_tag('difficult', origin='train')
         >>> print(f"Found {len(difficult_ids)} difficult samples")
     """
     from weightslab.backend.ledgers import get_dataframe
-    
+
     df_manager = get_dataframe()
     if df_manager is None:
         logger.error("Dataframe manager not initialized.")
         return []
-    
+
     try:
         tag_col = f"{SampleStatsEx.TAG.value}:{tag.strip()}"
         df = df_manager.get_df_view(origin, limit=limit)
-        
+
         if tag_col not in df.columns:
             logger.warning(f"Tag '{tag}' not found in {origin} dataset")
             return []
-        
+
         # Filter samples where tag column is True
         tagged_df = df[df[tag_col] == True]
         sample_ids = tagged_df.index.tolist()
-        
+
         return sample_ids
-        
+
     except Exception as e:
         logger.error(f"Failed to get samples by tag: {e}", exc_info=True)
         return []
@@ -1010,7 +1010,7 @@ def get_discarded_samples(
 ) -> list[int]:
     """
     Get sample IDs that are marked as discarded.
-    
+
     Args:
         origin: Dataset split ('train', 'eval', etc.). Default: 'train'
         limit: Maximum number of sample IDs to return (None = all)
@@ -1022,26 +1022,26 @@ def get_discarded_samples(
         >>> print(f"Found {len(discarded_ids)} discarded samples")
     """
     from weightslab.backend.ledgers import get_dataframe
-    
+
     df_manager = get_dataframe()
     if df_manager is None:
         logger.error("Dataframe manager not initialized.")
         return []
-    
+
     try:
         discard_col = SampleStatsEx.DISCARDED.value
         df = df_manager.get_df_view(origin, limit=limit)
-        
+
         if discard_col not in df.columns:
             logger.warning(f"Discard column not found in {origin} dataset")
             return []
-        
+
         # Filter samples where discard column is True
         discarded_df = df[df[discard_col] == True]
         sample_ids = discarded_df.index.tolist()
-        
+
         return sample_ids
-        
+
     except Exception as e:
         logger.error(f"Failed to get discarded samples: {e}", exc_info=True)
         return []
@@ -1058,7 +1058,7 @@ def save_signals(
 ):
     """
         Save data statistics to the tracked dataset.
-        
+
         Args:
             signals (th.Tensor): The batch losses.
             preds_raw (th.Tensor, optional): The raw batch predictions. Defaults to None.
@@ -1067,7 +1067,7 @@ def save_signals(
             preds (th.Tensor, optional): The batch predictions. Defaults to None.
             step (int, optional): The current training step. Defaults to 0.
             log (bool, optional): Whether to log the signals. Defaults to True.
-        
+
         Examples:
             >>> # In your training loop, after computing losses and predictions:
             >>> for batch in train_loader:
@@ -1104,7 +1104,7 @@ def save_signals(
         if batch_ids is None or len(batch_ids) == 0:
             logger.warning("No batch IDs provided for signal saving; skipping logging and saving.")
             return
-        
+
     # Convert tensors to numpy for lightweight buffering
     batch_ids_np = batch_ids.detach().cpu().numpy().astype(str) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids)
     if preds is not None:
@@ -1117,8 +1117,8 @@ def save_signals(
         pred_np = None
 
     if preds_raw is not None:
-        pred_raw_np = preds_raw.detach().cpu().numpy() if isinstance(preds_raw, th.Tensor) else np.asarray(preds_raw) 
-    else: 
+        pred_raw_np = preds_raw.detach().cpu().numpy() if isinstance(preds_raw, th.Tensor) else np.asarray(preds_raw)
+    else:
         pred_raw_np = None
 
     if targets is not None:
@@ -1127,7 +1127,7 @@ def save_signals(
              target_np = target_np.astype(np.float32)
         else:
              target_np = target_np.astype(np.uint16)
-    else: 
+    else:
         target_np = None
 
     # Processing
@@ -1175,7 +1175,7 @@ if __name__ == "__main__":
     from weightslab import tag_samples, discard_samples, get_samples_by_tag
 
     # Init the global dataframe manager
-    # ...    
+    # ...
 
     # In your training script after registering dataloader:
     # Tag difficult samples
