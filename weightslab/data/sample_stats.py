@@ -12,7 +12,6 @@ __all__ = [
     "SAMPLES_STATS_DEFAULTS_TYPES",
     "SAMPLE_STATS_ALL",
 ]
-3
 
 class SampleStats:
     class Ex(str, Enum):
