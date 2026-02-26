@@ -68,6 +68,7 @@ class ModelInterface(NetworkWithOps):
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
             compute_dependencies (bool, optional): If True, computes the graph
+            compute_dependencies (bool, optional): If True, computes the graph
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
@@ -396,7 +397,17 @@ class ModelInterface(NetworkWithOps):
         # Auto-dump: save model weights only (and architecture if changed).
         existing_manager = ledgers.get_checkpoint_manager()
         try:
-            if not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
+            # Check for Audit Mode override to completely prevent checkpointing
+            is_audit = False
+            try:
+                hp_name = ledgers.resolve_hp_name()
+                hp = ledgers.get_hyperparams(hp_name)
+                if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
+                    is_audit = True
+            except Exception:
+                pass
+
+            if is_audit or not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
             batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
