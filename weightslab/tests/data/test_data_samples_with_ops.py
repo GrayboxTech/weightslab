@@ -206,7 +206,7 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
         self.assertTrue(isinstance(result[0], (np.ndarray, torch.Tensor)))
 
         # Second element should be a numeric UID
-        self.assertTrue(isinstance(result[1], (int, np.integer)))
+        self.assertTrue(isinstance(result[1], (str, int)))
 
 
 class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
@@ -300,7 +300,6 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         )
 
         sample_id_0 = wrapper.unique_ids[0]
-        sample_id_1 = wrapper.unique_ids[1]
 
         # Set target_tag on sample 0
         wrapper.set(sample_id=sample_id_0, stat_name="tags", value='target_tag')
@@ -520,7 +519,7 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
 
         # Get sample ID at index 0
         sample_id = wrapper.get_sample_id_at_index(0)
-        self.assertEqual(sample_id, int(wrapper.unique_ids[0]))
+        self.assertEqual(sample_id, wrapper.unique_ids[0])
 
     def test_get_index_from_sample_id(self):
         """Test retrieving index from sample ID."""
@@ -533,7 +532,7 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
         )
 
         # Get index from first sample ID
-        sample_id = int(wrapper.unique_ids[0])
+        sample_id = wrapper.unique_ids[0]
         index = wrapper.get_index_from_sample_id(sample_id)
         self.assertEqual(index, 0)
 

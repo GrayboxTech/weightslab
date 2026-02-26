@@ -64,10 +64,12 @@ class PauseController:
     def pause(self):
         self._event.clear()
         set_hyperparam(key_path='is_training', value=False)
+        set_hyperparam(key_path='is_training', value=False)
         logger.info('\nTraining paused.')
 
     def _resume(self):
         self._event.set()
+        set_hyperparam(key_path='is_training', value=True)
         set_hyperparam(key_path='is_training', value=True)
         
     def resume(self):
@@ -78,7 +80,8 @@ class PauseController:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager != None:
             self.checkpoint_manager.update_experiment_hash(firsttime=True)
-            self.checkpoint_manager.dump_pending_changes()
+            self.checkpoint_manager.save_pending_changes()
+            self.checkpoint_manager.save_pending_changes()
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:
             logger.warning('Cannot access checkpoint manager on resume.')
@@ -170,16 +173,49 @@ class GuardContext:
 
         # The exact logic requested by the user:
         if self.model is not None:
-            if self.for_training:
+            # Save current mode to restore on exit
+            self._prev_training_mode = getattr(self.model, 'training', True)
+
+            # Check for Audit Mode override
+            is_audit = False
+            try:
+                hp_name = resolve_hp_name()
+                hp = get_hyperparams(hp_name)
+                if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
+                    is_audit = True
+            except Exception:
+                pass
+
+            if self.for_training and not is_audit:
                 self.model.set_tracking_mode(TrackingMode.TRAIN)
+                self.model.train()
+            elif self.for_training and is_audit:
+                # In audit mode: keep TRAIN tracking so current_step increments
+                # and the signal logger can flush its buffer on each step change.
+                # Weight updates are already blocked by OptimizerInterface.step().
+                # We also set the model to eval() mode to freeze BN stats and Dropout.
+                self.model.set_tracking_mode(TrackingMode.TRAIN)
+                self.model.eval()
+                
+                # Throttle logging
+                if not hasattr(self, '_last_audit_msg'):
+                    self._last_audit_msg = 0
+                if time.time() - self._last_audit_msg > 10.0:
+                    logger.info("[WeightsLab] Audit Mode active: Model set to eval() (BN stats frozen).")
+                    self._last_audit_msg = time.time()
             else:
                 self.model.set_tracking_mode(TrackingMode.EVAL)
+                self.model.eval()
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
         """
         Executed upon exiting the 'with' block (after user code runs).
         Reverts the model state.
         """
+        # Revert the model state
+        if self.model is not None and hasattr(self, '_prev_training_mode'):
+            self.model.train(self._prev_training_mode)
+
         # Reset context to unknown
         if self._context_token is not None:
             _current_context.reset(self._context_token)

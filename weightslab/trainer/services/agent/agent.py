@@ -442,7 +442,7 @@ class DataManipulationAgent:
 
     def _build_column_index(self):
         self._cols = list(self.df_schema['columns'])
-        self._col_tokens = {c: set(t for t in re.split(r"[ _/\.]+", c.lower()) if t) for c in self._cols}
+        self._col_tokens = {c: set(t for t in re.split(r"[ _/\.]+", str(c).lower()) if t) for c in self._cols}
         self._column_synonyms = {
             "loss": {"loss", "error", "score"}, "score": {"score", "loss", "error"},
             "age": {"age"}, "label": {"label", "class", "target"},

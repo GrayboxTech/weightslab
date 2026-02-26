@@ -33,6 +33,7 @@ from pathlib import Path
 
 # Import components directly to avoid full weightslab initialization
 from weightslab.components.checkpoint_manager import CheckpointManager
+from weightslab.components.experiment_hash import ExperimentHashGenerator
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend import ledgers
@@ -231,7 +232,7 @@ class CheckpointSystemTests(unittest.TestCase):
                 # Data Processing
                 (inputs, ids, labels) = next(loader)
                 inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-                uids_trained.extend(ids.tolist())
+                uids_trained.extend(ids)
 
                 # Inference
                 optimizer.zero_grad()
@@ -1281,16 +1282,72 @@ class CheckpointSystemTests(unittest.TestCase):
     def test_logger_queue_saved_with_weights(self):
         self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
 
-        snapshot_path = Path(self.chkpt_manager.loggers_dir) / self.chkpt_manager.current_exp_hash / "loggers.json"
-        self.assertTrue(snapshot_path.exists(), "Logger snapshot should be saved with checkpoint")
+        snapshot_dir = Path(self.chkpt_manager.loggers_dir) / self.chkpt_manager.current_exp_hash
+        manifest_path = snapshot_dir / "loggers.manifest.json"
+        legacy_snapshot_path = snapshot_dir / "loggers.json"
+        self.assertTrue(
+            manifest_path.exists() or legacy_snapshot_path.exists(),
+            "Logger snapshot should be saved with checkpoint"
+        )
 
-        with open(snapshot_path, "r") as f:
-            snapshot = json.load(f)
+        if manifest_path.exists():
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+            chunk_files = manifest.get("chunks", [])
+            self.assertGreaterEqual(len(chunk_files), 1, "Chunked logger snapshot should contain at least one chunk")
+            self.assertTrue(
+                all((snapshot_dir / chunk_name).exists() for chunk_name in chunk_files),
+                "All logger snapshot chunks referenced by manifest should exist"
+            )
+            self.assertTrue(self.chkpt_manager.load_logger_snapshot(self.chkpt_manager.current_exp_hash))
+            lg = ledgers.get_logger('main')
+            loggers = {'main': {'signal_history': lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []}}
+        else:
+            with open(legacy_snapshot_path, "r") as f:
+                snapshot = json.load(f)
+            loggers = snapshot.get("loggers", {})
 
-        loggers = snapshot.get("loggers", {})
         self.assertIn('main', loggers, "Logger entry should be present")
         signals = loggers['main'].get("signal_history", [])
         self.assertGreaterEqual(len(signals), 1, "Signal history should contain logged signals")
+
+
+class CheckpointStepAwareBehaviorTests(unittest.TestCase):
+    def test_model_hash_depends_on_init_step(self):
+        generator = ExperimentHashGenerator()
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+
+        hash_from_step_0 = generator.generate_hash(
+            model=model,
+            config={"learning_rate": 0.001},
+            data_state={},
+            model_init_step=0,
+        )
+        hash_from_step_52 = generator.generate_hash(
+            model=model,
+            config={"learning_rate": 0.001},
+            data_state={},
+            model_init_step=52,
+        )
+
+        self.assertNotEqual(
+            hash_from_step_0[8:16],
+            hash_from_step_52[8:16],
+            "Model hash segment should change when model_init_step changes",
+        )
+
+    def test_selects_closest_weights_checkpoint_for_target_step(self):
+        with tempfile.TemporaryDirectory(prefix="weights_step_select_") as temp_dir:
+            manager = CheckpointManager(root_log_dir=temp_dir, load_model=False, load_config=False, load_data=False)
+            manager.current_exp_hash = "12345678abcdef0199aabbcc"
+
+            model = nn.Sequential(nn.Linear(3, 3))
+            manager.save_model_checkpoint(model=model, step=0, save_optimizer=False)
+            manager.save_model_checkpoint(model=model, step=5, save_optimizer=False)
+
+            picked = manager._select_weight_checkpoint_file(manager.current_exp_hash, target_step=3)
+            self.assertIsNotNone(picked, "A checkpoint file should be selected")
+            self.assertIn("_step_000005.pt", picked.name)
 
 
 if __name__ == '__main__':
@@ -1316,6 +1373,9 @@ if __name__ == '__main__':
     suite.addTest(CheckpointSystemTests('test_11_restart_from_scratch_to_hash_d_and_verify_reproducibility'))
     # # Check that logger queue is saved and loaded
     suite.addTest(CheckpointSystemTests('test_logger_queue_saved_with_weights'))
+    # # Step-aware hash/checkpoint behavior
+    suite.addTest(CheckpointStepAwareBehaviorTests('test_model_hash_depends_on_init_step'))
+    suite.addTest(CheckpointStepAwareBehaviorTests('test_selects_closest_weights_checkpoint_for_target_step'))
 
     # Run the suite
     runner = unittest.TextTestRunner(verbosity=2)

@@ -1,13 +1,21 @@
 weightslab.egg-info/*
 build/*
 dist/*
+logs/*
 root_log_dir/*
 weightslab/__pycache__/*
 tests/__pycache__/*
+
 __pycache__/*
+.history/*
+.lh/*
+.pytest_cache/*
+.ruff_cache/*
+.venv/*
+.vscode/*
+
 .DS_Store
 pkg_main.py
-.ruff_cache/*
 
 *.onnx
 *.pt
@@ -19,7 +27,12 @@ pkg_main.py
 *.sqlite
 *.db
 *.ipynb_checkpoints
+*.code-workspace
 .vscode/
+venv/
+.venv/
+laumch.json
+settings.json
 
 __pycache__/
 

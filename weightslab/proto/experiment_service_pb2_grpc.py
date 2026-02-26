@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from weightslab.proto import experiment_service_pb2 as experiment__service__pb2
+from weightslab.proto import experiment_service_pb2 as weightslab_dot_proto_dot_experiment__service__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in experiment_service_pb2_grpc.py depends on'
+        + ' but the generated code in weightslab/proto/experiment_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -36,63 +36,63 @@ class ExperimentServiceStub(object):
         """
         self.GetLatestLoggerData = channel.unary_unary(
                 '/ExperimentService/GetLatestLoggerData',
-                request_serializer=experiment__service__pb2.GetLatestLoggerDataRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.GetLatestLoggerDataResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetLatestLoggerDataRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetLatestLoggerDataResponse.FromString,
                 _registered_method=True)
         self.ExperimentCommand = channel.unary_unary(
                 '/ExperimentService/ExperimentCommand',
-                request_serializer=experiment__service__pb2.TrainerCommand.SerializeToString,
-                response_deserializer=experiment__service__pb2.CommandResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.TrainerCommand.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.CommandResponse.FromString,
                 _registered_method=True)
         self.ManipulateWeights = channel.unary_unary(
                 '/ExperimentService/ManipulateWeights',
-                request_serializer=experiment__service__pb2.WeightsOperationRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.WeightsOperationResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationResponse.FromString,
                 _registered_method=True)
         self.GetWeights = channel.unary_unary(
                 '/ExperimentService/GetWeights',
-                request_serializer=experiment__service__pb2.WeightsRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.WeightsResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsResponse.FromString,
                 _registered_method=True)
         self.GetActivations = channel.unary_unary(
                 '/ExperimentService/GetActivations',
-                request_serializer=experiment__service__pb2.ActivationRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.ActivationResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ActivationRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ActivationResponse.FromString,
                 _registered_method=True)
         self.GetSamples = channel.unary_unary(
                 '/ExperimentService/GetSamples',
-                request_serializer=experiment__service__pb2.BatchSampleRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.BatchSampleResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.BatchSampleRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.BatchSampleResponse.FromString,
                 _registered_method=True)
         self.ApplyDataQuery = channel.unary_unary(
                 '/ExperimentService/ApplyDataQuery',
-                request_serializer=experiment__service__pb2.DataQueryRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.DataQueryResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataQueryRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataQueryResponse.FromString,
                 _registered_method=True)
         self.GetDataSamples = channel.unary_unary(
                 '/ExperimentService/GetDataSamples',
-                request_serializer=experiment__service__pb2.DataSamplesRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.DataSamplesResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.FromString,
                 _registered_method=True)
         self.EditDataSample = channel.unary_unary(
                 '/ExperimentService/EditDataSample',
-                request_serializer=experiment__service__pb2.DataEditsRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.DataEditsRequest.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.FromString,
                 _registered_method=True)
         self.GetDataSplits = channel.unary_unary(
                 '/ExperimentService/GetDataSplits',
-                request_serializer=experiment__service__pb2.Empty.SerializeToString,
-                response_deserializer=experiment__service__pb2.DataSplitsResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSplitsResponse.FromString,
                 _registered_method=True)
         self.CheckAgentHealth = channel.unary_unary(
                 '/ExperimentService/CheckAgentHealth',
-                request_serializer=experiment__service__pb2.Empty.SerializeToString,
-                response_deserializer=experiment__service__pb2.AgentHealthResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.AgentHealthResponse.FromString,
                 _registered_method=True)
         self.RestoreCheckpoint = channel.unary_unary(
                 '/ExperimentService/RestoreCheckpoint',
-                request_serializer=experiment__service__pb2.RestoreCheckpointRequest.SerializeToString,
-                response_deserializer=experiment__service__pb2.RestoreCheckpointResponse.FromString,
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.FromString,
                 _registered_method=True)
 
 
@@ -178,63 +178,63 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'GetLatestLoggerData': grpc.unary_unary_rpc_method_handler(
                     servicer.GetLatestLoggerData,
-                    request_deserializer=experiment__service__pb2.GetLatestLoggerDataRequest.FromString,
-                    response_serializer=experiment__service__pb2.GetLatestLoggerDataResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetLatestLoggerDataRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetLatestLoggerDataResponse.SerializeToString,
             ),
             'ExperimentCommand': grpc.unary_unary_rpc_method_handler(
                     servicer.ExperimentCommand,
-                    request_deserializer=experiment__service__pb2.TrainerCommand.FromString,
-                    response_serializer=experiment__service__pb2.CommandResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.TrainerCommand.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.CommandResponse.SerializeToString,
             ),
             'ManipulateWeights': grpc.unary_unary_rpc_method_handler(
                     servicer.ManipulateWeights,
-                    request_deserializer=experiment__service__pb2.WeightsOperationRequest.FromString,
-                    response_serializer=experiment__service__pb2.WeightsOperationResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationResponse.SerializeToString,
             ),
             'GetWeights': grpc.unary_unary_rpc_method_handler(
                     servicer.GetWeights,
-                    request_deserializer=experiment__service__pb2.WeightsRequest.FromString,
-                    response_serializer=experiment__service__pb2.WeightsResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.WeightsResponse.SerializeToString,
             ),
             'GetActivations': grpc.unary_unary_rpc_method_handler(
                     servicer.GetActivations,
-                    request_deserializer=experiment__service__pb2.ActivationRequest.FromString,
-                    response_serializer=experiment__service__pb2.ActivationResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ActivationRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ActivationResponse.SerializeToString,
             ),
             'GetSamples': grpc.unary_unary_rpc_method_handler(
                     servicer.GetSamples,
-                    request_deserializer=experiment__service__pb2.BatchSampleRequest.FromString,
-                    response_serializer=experiment__service__pb2.BatchSampleResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.BatchSampleRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.BatchSampleResponse.SerializeToString,
             ),
             'ApplyDataQuery': grpc.unary_unary_rpc_method_handler(
                     servicer.ApplyDataQuery,
-                    request_deserializer=experiment__service__pb2.DataQueryRequest.FromString,
-                    response_serializer=experiment__service__pb2.DataQueryResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataQueryRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataQueryResponse.SerializeToString,
             ),
             'GetDataSamples': grpc.unary_unary_rpc_method_handler(
                     servicer.GetDataSamples,
-                    request_deserializer=experiment__service__pb2.DataSamplesRequest.FromString,
-                    response_serializer=experiment__service__pb2.DataSamplesResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.SerializeToString,
             ),
             'EditDataSample': grpc.unary_unary_rpc_method_handler(
                     servicer.EditDataSample,
-                    request_deserializer=experiment__service__pb2.DataEditsRequest.FromString,
-                    response_serializer=experiment__service__pb2.DataEditsRequest.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.SerializeToString,
             ),
             'GetDataSplits': grpc.unary_unary_rpc_method_handler(
                     servicer.GetDataSplits,
-                    request_deserializer=experiment__service__pb2.Empty.FromString,
-                    response_serializer=experiment__service__pb2.DataSplitsResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSplitsResponse.SerializeToString,
             ),
             'CheckAgentHealth': grpc.unary_unary_rpc_method_handler(
                     servicer.CheckAgentHealth,
-                    request_deserializer=experiment__service__pb2.Empty.FromString,
-                    response_serializer=experiment__service__pb2.AgentHealthResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.AgentHealthResponse.SerializeToString,
             ),
             'RestoreCheckpoint': grpc.unary_unary_rpc_method_handler(
                     servicer.RestoreCheckpoint,
-                    request_deserializer=experiment__service__pb2.RestoreCheckpointRequest.FromString,
-                    response_serializer=experiment__service__pb2.RestoreCheckpointResponse.SerializeToString,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -262,8 +262,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/GetLatestLoggerData',
-            experiment__service__pb2.GetLatestLoggerDataRequest.SerializeToString,
-            experiment__service__pb2.GetLatestLoggerDataResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GetLatestLoggerDataRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GetLatestLoggerDataResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -289,8 +289,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/ExperimentCommand',
-            experiment__service__pb2.TrainerCommand.SerializeToString,
-            experiment__service__pb2.CommandResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.TrainerCommand.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.CommandResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -316,8 +316,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/ManipulateWeights',
-            experiment__service__pb2.WeightsOperationRequest.SerializeToString,
-            experiment__service__pb2.WeightsOperationResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.WeightsOperationResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -343,8 +343,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/GetWeights',
-            experiment__service__pb2.WeightsRequest.SerializeToString,
-            experiment__service__pb2.WeightsResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.WeightsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.WeightsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -370,8 +370,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/GetActivations',
-            experiment__service__pb2.ActivationRequest.SerializeToString,
-            experiment__service__pb2.ActivationResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ActivationRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ActivationResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -397,8 +397,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/GetSamples',
-            experiment__service__pb2.BatchSampleRequest.SerializeToString,
-            experiment__service__pb2.BatchSampleResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.BatchSampleRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.BatchSampleResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -424,8 +424,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/ApplyDataQuery',
-            experiment__service__pb2.DataQueryRequest.SerializeToString,
-            experiment__service__pb2.DataQueryResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataQueryRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataQueryResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -451,8 +451,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/GetDataSamples',
-            experiment__service__pb2.DataSamplesRequest.SerializeToString,
-            experiment__service__pb2.DataSamplesResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -478,8 +478,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/EditDataSample',
-            experiment__service__pb2.DataEditsRequest.SerializeToString,
-            experiment__service__pb2.DataEditsRequest.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.FromString,
             options,
             channel_credentials,
             insecure,
@@ -505,8 +505,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/GetDataSplits',
-            experiment__service__pb2.Empty.SerializeToString,
-            experiment__service__pb2.DataSplitsResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataSplitsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -532,8 +532,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/CheckAgentHealth',
-            experiment__service__pb2.Empty.SerializeToString,
-            experiment__service__pb2.AgentHealthResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.AgentHealthResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -559,8 +559,8 @@ class ExperimentService(object):
             request,
             target,
             '/ExperimentService/RestoreCheckpoint',
-            experiment__service__pb2.RestoreCheckpointRequest.SerializeToString,
-            experiment__service__pb2.RestoreCheckpointResponse.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -10,12 +10,15 @@ def get_requirements(file_path: pathlib.Path):
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            # Filter out empty lines and comments
-            return [
-                line.strip()
-                for line in f
-                if line.strip() and not line.startswith('#')
-            ]
+            requirements = []
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                if stripped.startswith(('--', '-')):
+                    continue
+                requirements.append(stripped)
+            return requirements
     except FileNotFoundError:
         # Return an empty list if the file does not exist
         return []

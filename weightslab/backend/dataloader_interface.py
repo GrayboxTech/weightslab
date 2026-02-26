@@ -492,6 +492,10 @@ class DataLoaderInterface:
             except Exception:
                 # Best-effort: skip if we cannot set the property
                 continue
+        
+        # Proxy class_names if available on the wrapped dataset
+        if hasattr(self.dataset, 'class_names'):
+             self.class_names = self.dataset.class_names
 
         # 2) Bind class-level callables (methods) of `obj` to this instance
         obj_cls_vars = getattr(obj.__class__, '__dict__', {})
@@ -596,7 +600,8 @@ class DataLoaderInterface:
             else:
                 # No config for this dataloader -> optional default
                 try:
-                    self.set_batch_size(64)
+                    logger.debug(f"No batch size config found for '{self._ledger_name}' in latest hyperparams:\n{data_cfg}; using default batch size of 8.")
+                    self.set_batch_size(8)
                 except RuntimeError:
                     pass
         except Exception:

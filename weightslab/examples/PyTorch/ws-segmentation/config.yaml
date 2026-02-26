@@ -1,32 +1,36 @@
-device: cuda
+# Global configuration
+device: auto
 experiment_name: seg_usecase
-data_root: C:/Users/GuillaumePELLUET/OneDrive/Documents/datasets/BDD100k_reduced
-# data_root: ../BDD100k_reduced
-root_log_dir: C:/Users/GuillaumePELLUET/AppData/Local/Temp/tmp0039_ur6
 
-eval_full_to_train_steps_ratio: 25
-experiment_dump_to_train_steps_ratio: 10
-num_classes: 6
-image_size: 128
+# Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
+compute_natural_sort: true
+
+# Experiment parameters
+eval_full_to_train_steps_ratio: 5
+experiment_dump_to_train_steps_ratio: 5
 tqdm_display: true
-
-# start training immediately or not
-is_training: false
+is_training: false  # Start training immediately or not
 
 # Serving
 serving_grpc: true
-serving_cli: false
+serving_cli: true
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
 ledger_enable_h5_persistence: true
-ledger_flush_max_rows: 500
-ledger_flush_interval: 30.0
+ledger_flush_max_rows: 2000
+ledger_flush_interval: 60.0
 
+# Data
+num_classes: 6
+image_size: 128
+data_root: ../datasets/BDD100k_reduced
 data:
   train_loader:
-    batch_size: 8
-    shuffle: false
+    batch_size: 32
+    shuffle: true
+    max_samples: 256
   test_loader:
-    batch_size: 8
+    batch_size: 32
     shuffle: false
+    max_samples: 100

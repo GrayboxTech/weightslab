@@ -68,11 +68,12 @@ class ModelInterface(NetworkWithOps):
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
             compute_dependencies (bool, optional): If True, computes the graph
+            compute_dependencies (bool, optional): If True, computes the graph
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
                 of previous checkpoints during initialization. Defaults to False.
-            
+
         Returns:
             None: This method initializes the object and does not return any value.
         """
@@ -80,6 +81,10 @@ class ModelInterface(NetworkWithOps):
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
+
+        # Proxy class_names if available on the wrapped model
+        if hasattr(model, 'class_names'):
+             self.class_names = model.class_names
 
         # Define variables
         # # Disable tracking for implementation
@@ -97,7 +102,7 @@ class ModelInterface(NetworkWithOps):
                     raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
                 else:
                     self.model.input_shape = tuple(dummy_input.shape[1:])  # Exclude batch dimension
-                    
+
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
                 self.dummy_input = dummy_input.to(device)
@@ -116,7 +121,7 @@ class ModelInterface(NetworkWithOps):
         self.init_attributes(self.model)
 
         # Compute dependencies and generate graph visualization if enabled
-        if compute_dependencies: 
+        if compute_dependencies:
             if not use_onnx:
                 # Only propagate shapes if we need them for visualization
                 if self.print_graph:
@@ -136,7 +141,7 @@ class ModelInterface(NetworkWithOps):
             self._registration(
                 weak=weak
             )
-        
+
         # Set the optimizer hook for model architecture changes if we
         # are computing dependencies (i.e., we have the graph info to
         # know when they happen)
@@ -144,10 +149,10 @@ class ModelInterface(NetworkWithOps):
             if not use_onnx:
                 del self.traced_model
 
-            # Hook optimizer update on architecture change
-            self.register_hook_fn_for_architecture_change(
-                lambda model: self._update_optimizer(model)
-            )
+        # Hook optimizer update on architecture change
+        self.register_hook_fn_for_architecture_change(
+            lambda model: self._update_optimizer(model)
+        )
 
         # Set Model Training Guard
         self.guard_training_context.model = self
@@ -184,7 +189,7 @@ class ModelInterface(NetworkWithOps):
 
         # Initialize CheckpointManager if we have a root dir (fallback to default root)
         root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
-        
+
         # Check if a checkpoint manager is already registered in ledger
         existing_manager = ledgers.get_checkpoint_manager()
         if existing_manager != None and isinstance(existing_manager, ledgers.Proxy):
@@ -374,7 +379,9 @@ class ModelInterface(NetworkWithOps):
             return False
         return False
 
-    def _update_optimizer(self, model):
+    def _update_optimizer(self, model=None):
+        if model is None:
+            model = self.model
         for opt_name in get_optimizers():
             # Overwrite the optimizer with the same class and lr, updated
             opt = get_optimizer(opt_name)
@@ -385,14 +392,24 @@ class ModelInterface(NetworkWithOps):
                 lr=lr
             )
 
-            wl.watch_or_edit(_optimizer, flag='optimizer', name=opt_name)
+            wl.watch_or_edit(_optimizer, flag='optimizer')
 
     def _maybe_auto_dump(self):
         # Called from base class hook after step update.
         # Auto-dump: save model weights only (and architecture if changed).
         existing_manager = ledgers.get_checkpoint_manager()
         try:
-            if not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
+            # Check for Audit Mode override to completely prevent checkpointing
+            is_audit = False
+            try:
+                hp_name = ledgers.resolve_hp_name()
+                hp = ledgers.get_hyperparams(hp_name)
+                if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
+                    is_audit = True
+            except Exception:
+                pass
+
+            if is_audit or not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
             batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
@@ -402,7 +419,7 @@ class ModelInterface(NetworkWithOps):
                     # If model architecture changed, save it
                     if 'model' in changed_components:
                         try:
-                            existing_manager.save_model_architecture(self.model)
+                            existing_manager.save_model_architecture()
                         except Exception:
                             pass
                 except Exception:
@@ -410,9 +427,7 @@ class ModelInterface(NetworkWithOps):
                 try:
                     # Save model weights checkpoint (no pending dump here)
                     existing_manager.save_model_checkpoint(
-                        model=self.model,
                         save_optimizer=True,
-                        step=batched_age,
                         force_dump_pending=False,
                         update_manifest=False
                     )
@@ -420,6 +435,12 @@ class ModelInterface(NetworkWithOps):
                     pass
         except Exception:
             pass
+
+    def update_optimizer(self):
+        try:
+            self._update_optimizer()
+        except Exception as e:
+            logger.warning(f"Could not update optimizer after architecture change: {e}")
 
     def eval(self):
         try:

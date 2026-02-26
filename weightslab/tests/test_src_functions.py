@@ -1,11 +1,12 @@
 import unittest
-from unittest.mock import MagicMock, patch
-
 import numpy as np
 import pandas as pd
 import torch as th
 
 import weightslab.src as src
+
+from unittest.mock import MagicMock, patch
+
 from weightslab.data.sample_stats import SampleStatsEx
 
 
@@ -116,7 +117,7 @@ class TestSrcSaveSignals(unittest.TestCase):
     def test_save_signals_enqueues_expected_payload(self):
         df_manager = MagicMock()
 
-        batch_ids = th.tensor([10, 11], dtype=th.int64)
+        batch_ids = np.array(['10', '11'])
         signals = {"loss": th.tensor([1.0, 3.0], dtype=th.float32)}
         preds_raw = th.tensor([[0.1, 0.9], [0.8, 0.2]], dtype=th.float32)
         targets = th.tensor([1, 0], dtype=th.int64)
@@ -139,7 +140,7 @@ class TestSrcSaveSignals(unittest.TestCase):
 
         kwargs = df_manager.enqueue_batch.call_args.kwargs
 
-        np.testing.assert_array_equal(kwargs["sample_ids"], np.array([10, 11]))
+        np.testing.assert_array_equal(kwargs["sample_ids"], np.array(['10', '11']))
         self.assertEqual(kwargs["preds"].shape, (2, 1))
         self.assertEqual(kwargs["targets"].shape, (2, 1))
         self.assertEqual(kwargs["preds_raw"].shape, (2, 2))

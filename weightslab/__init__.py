@@ -11,8 +11,8 @@ import os
 import logging
 import threading
 
-from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples
-from .art import _BANNER__
+from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, compute_signals
+from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory
 
 
@@ -20,10 +20,9 @@ from .utils.logs import setup_logging, set_log_directory
 threading.current_thread().name = "WL-MainThread"
 
 # Track if initialization has already happened
-_initialized = False
 
 # Auto-initialize logging if not already configured
-if not _initialized:
+if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
 	# Check for environment variable to control log level
 	log_level = os.getenv(
 		'WEIGHTSLAB_LOG_LEVEL',
@@ -42,9 +41,8 @@ if not _initialized:
 	# Setup and use logger
 	logger = logging.getLogger(__name__)
 	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
-	logger.info(_BANNER__)
-	
-	_initialized = True
+	logger.info(_BANNER)
+	os.environ['WEIGHTSLAB_initialized'] = 'true'  # Ensure WL init once
 
 # Get Package Metadata
 __version__ = "0.0.0"
@@ -57,7 +55,13 @@ __all__ = [
     "serve",
     "keep_serving",
     "save_signals",
+    "signal",
+    "compute_signals",
     "set_log_directory",
+	"tag_samples", 
+	"discard_samples", 
+	"get_samples_by_tag",
+    "get_discarded_samples",
 
     "_BANNER__",
     "__version__",
