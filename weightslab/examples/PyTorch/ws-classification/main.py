@@ -103,7 +103,7 @@ class MNISTCustomDataset(Dataset):
 # -----------------------------------------------------------------------------
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
-    with guard_training_context:
+    with guard_training_context:    
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
         labels = labels.to(device)

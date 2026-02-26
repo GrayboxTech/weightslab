@@ -1157,6 +1157,138 @@ class CheckpointManager:
                 signal_history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
                 signal_history_per_sample = lg.get_signal_history_per_sample() if hasattr(lg, "get_signal_history_per_sample") else {}
                 graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
+                
+                # Get final snapshot for this logger
+                snapshot["loggers"][lname] = {
+                    "signal_history": signal_history,
+                    "signal_history_per_sample": signal_history_per_sample,
+                    "graph_names": graphs,
+                }
+
+            if not snapshot["loggers"]:
+                return None
+
+            snapshot_dir = self._get_logger_snapshot_dir()
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+            # Merge existing payload to avoid dropping loggers not currently registered
+            try:
+                existing = self._load_logger_snapshot_payload()
+                existing_loggers = existing.get("loggers", {}) if isinstance(existing, dict) else {}
+                if existing_loggers:
+                    existing_loggers.update(snapshot.get("loggers", {}))
+                    snapshot["loggers"] = existing_loggers
+            except Exception as e:
+                logger.warning(f"Failed to merge existing logger snapshot: {e}")
+
+            records: List[bytes] = []
+            for lname, payload in snapshot["loggers"].items():
+                line = json.dumps({"logger_name": lname, "payload": payload}, default=str) + "\n"
+                records.append(line.encode("utf-8"))
+
+            chunks: List[bytes] = []
+            current_chunk = bytearray()
+            for record in records:
+                if current_chunk and (len(current_chunk) + len(record) > self.LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES):
+                    chunks.append(bytes(current_chunk))
+                    current_chunk = bytearray()
+                current_chunk.extend(record)
+            if current_chunk:
+                chunks.append(bytes(current_chunk))
+
+            old_chunks = self._list_logger_snapshot_chunks()
+            for old_chunk in old_chunks:
+                try:
+                    old_chunk.unlink()
+                except Exception:
+                    pass
+
+            compressor = zstd.ZstdCompressor(level=3)
+            chunk_names: List[str] = []
+            for idx, raw_chunk in enumerate(chunks, start=1):
+                chunk_path = self._get_logger_snapshot_chunk_path(idx)
+                tmp_chunk_path = chunk_path.with_name(chunk_path.name + ".tmp")
+                with open(tmp_chunk_path, "wb") as f:
+                    f.write(compressor.compress(raw_chunk))
+                os.replace(tmp_chunk_path, chunk_path)
+                chunk_names.append(chunk_path.name)
+
+            manifest = {
+                "exp_hash": exp,
+                "timestamp": datetime.now().isoformat(),
+                "format": "ndjson+zstd",
+                "max_file_size_bytes": self.LOGGER_SNAPSHOT_MAX_FILE_SIZE_BYTES,
+                "chunks": chunk_names,
+            }
+            manifest_path = self._get_logger_snapshot_manifest_path()
+            tmp_manifest_path = manifest_path.with_name(manifest_path.name + ".tmp")
+            with open(tmp_manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+            os.replace(tmp_manifest_path, manifest_path)
+
+            logger.info(f"Saved logger snapshot: {manifest_path} ({len(chunk_names)} chunks)")
+            return manifest_path
+        except Exception as e:
+            logger.warning(f"Failed to save logger snapshot: {e}")
+            return None
+
+    def save_pending_changes(self, force: bool = False) -> bool:
+        """Dump any pending changes to disk.
+
+        This is called when:
+        - Training resumes after model/config/data changes
+        - Manual checkpoint is requested with force=True
+
+        Args:
+            force: Force dump even if no pending changes
+
+        Returns:
+            bool: True if changes were dumped, False otherwise
+        """
+        if not self._has_pending_changes and not force:
+            logger.debug("No pending changes to dump")
+            return False
+
+        if self.current_exp_hash is None:
+            logger.warning("No experiment hash set. Cannot dump pending changes.")
+            return False
+
+        logger.info(f"Dumping pending changes: {self._pending_components}")
+
+            with open(json_file, 'w') as f:
+                json.dump(snapshot_data, f, indent=2, default=str)
+
+            logger.info(f"Saved data snapshot: {json_file.name} ({len(snapshot_df)} rows) with RNG state")
+            return json_file
+
+        except Exception as e:
+            logger.error(f"Failed to save data snapshot: {e}")
+        return None
+
+    def save_logger_snapshot(self, exp_hash: Optional[str] = None) -> Optional[Path]:
+        """Persist logger queues for the given experiment hash.
+
+        Uses the same hash as model/hp/data; does not affect hashing.
+        """
+        exp = exp_hash or self.current_exp_hash
+        if exp is None:
+            return None
+
+        try:
+            logger_names = ledgers.list_loggers()
+            if not logger_names:
+                return None
+
+            snapshot = {"exp_hash": exp, "timestamp": datetime.now().isoformat(), "loggers": {}}
+            for lname in logger_names:
+                lg = ledgers.get_logger(lname)
+                if lg is None:
+                    continue
+
+                # Expect LoggerQueue interface
+                signal_history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
+                signal_history_per_sample = lg.get_signal_history_per_sample() if hasattr(lg, "get_signal_history_per_sample") else {}
+                graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
 
                 # Get final snapshot for this logger
                 snapshot["loggers"][lname] = {

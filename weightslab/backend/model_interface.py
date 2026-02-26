@@ -81,6 +81,10 @@ class ModelInterface(NetworkWithOps):
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
+        
+        # Proxy class_names if available on the wrapped model
+        if hasattr(model, 'class_names'):
+             self.class_names = model.class_names
 
         # Proxy class_names if available on the wrapped model
         if hasattr(model, 'class_names'):
