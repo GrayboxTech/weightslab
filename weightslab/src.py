@@ -8,7 +8,7 @@ import logging
 import numpy as np
 import torch as th
 
-from typing import Callable
+from typing import Callable, Optional, List, Any
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -34,6 +34,90 @@ DATAFRAME_M = None
 # Global registry for custom signals
 _REGISTERED_SIGNALS = {}
 
+
+class SignalContext:
+    """
+    Unified context object for WeightsLab signals.
+    Carries all available metadata for a single sample during computation.
+    """
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, origin=None):
+        self.sample_id = sample_id
+        self.dataframe = dataframe
+        self.data = data
+        self.subscribed_value = subscribed_value
+        self.origin = origin
+
+    @property
+    def image(self) -> Optional[np.ndarray]:
+        """
+        Standardized access to image data.
+        Automatically converts 'ctx.data' (tensor, array, or path) to an HWC uint8 numpy image.
+        
+        Supports:
+            - PyTorch Tensors (any device)
+            - NumPy Arrays (CHW or HWC)
+            - Scaling from [0, 1] to [0, 255]
+        """
+        if self.data is None:
+            return None
+
+        # 1. Handle Tensors & Base Conversion
+        img = self.data
+        if hasattr(img, "cpu") and hasattr(img, "numpy"):
+            img = img.detach().cpu().numpy()
+        
+        img_np = np.asanyarray(img)
+        
+        # 2. Basic Shape Normalization
+        # If it's a single-channel image (H, W) -> (H, W, 1)
+        if img_np.ndim == 2:
+            img_np = img_np[:, :, np.newaxis]
+            
+        # 3. Transpose check: (C, H, W) -> (H, W, C)
+        # We assume if the first dim is 1 or 3 and it's much smaller than others, it's CHW
+        if img_np.ndim == 3 and img_np.shape[0] in [1, 3] and img_np.shape[0] < img_np.shape[1]:
+            img_np = img_np.transpose(1, 2, 0)
+            
+        # 4. Data Type & Scaling
+        if np.issubdtype(img_np.dtype, np.floating):
+            # Safe scale [0, 1] -> [0, 255]
+            if img_np.max() <= 1.05:
+                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+            else:
+                img_np = img_np.astype(np.uint8)
+        
+        return img_np
+
+    @property
+    def points(self) -> Optional[np.ndarray]:
+        """
+        Standardized access to point cloud data.
+        Returns (N, 3) or (N, 4) numpy array if ctx.data represents a point cloud.
+        """
+        if self.data is None:
+            return None
+            
+        data = self.data
+        if hasattr(data, "cpu") and hasattr(data, "numpy"):
+            data = data.detach().cpu().numpy()
+            
+        arr = np.asanyarray(data)
+        
+        # Heuristic for point cloud: 2D array where last dim is 3 (XYZ) or 4 (XYZI)
+        if arr.ndim == 2 and arr.shape[1] in [3, 4]:
+            return arr
+            
+        return None
+
+    @property
+    def is_static(self) -> bool:
+        """True if running in pre-computation/static mode."""
+        return self.data is not None
+
+    @property
+    def is_dynamic(self) -> bool:
+        """True if running during training (triggered by a metric)."""
+        return self.subscribed_value is not None
 
 # #####################################################################################################################
 # WEIGHTSLAB INTERNAL FUNCTIONS FOR LOGGING, SIGNAL EXTRACTION, WRAPPING, ETC. (not typically called directly by users)
@@ -293,11 +377,24 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          for i, uid in enumerate(ids_np):
                              # Generic 'value' argument
                              val = float(val_vec[i])
-                             # Inject dataframe so user function is pure-ish
-                             res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
+
+                             # Unified Context Pattern
+                             ctx = SignalContext(
+                                 sample_id=int(uid),
+                                 subscribed_value=val,
+                                 dataframe=df_proxy,
+                                 origin=kwargs.get('origin', 'train')
+                             )
+                             try:
+                                 res = func(ctx)
+                             except TypeError:
+                                 # Fallback for legacy subscriber functions
+                                 res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
+
                              batch_res.append(res)
                          dynamic_updates[name] = np.array(batch_res)
-                     except Exception:
+                     except Exception as e:
+                         logger.debug(f"Dynamic signal {name} failed: {e}")
                          pass # User function error, skip
 
     # Save statistics if requested and applicable
@@ -834,13 +931,24 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
 
             for sig_name, sig_func in signal_fns.items():
                 try:
-                    # Pass the input data (usually the image)
-                    val = sig_func(input_data)
+                    # Unified Context Pattern
+                    ctx = SignalContext(
+                        sample_id=sample_id,
+                        data=input_data,
+                        dataframe=DATAFRAME_M,
+                        origin=origin
+                    )
+                    try:
+                        val = sig_func(ctx)
+                    except TypeError:
+                        # Fallback for legacy static signals
+                        val = sig_func(input_data)
+
                     # Prefix 'signals_' if not already present to group in UI
                     key = sig_name if sig_name.startswith("signals") else f"signals_{sig_name}"
                     row[key] = val
                 except Exception as e:
-                    pass # Fail silently for single signal failures
+                    logger.debug(f"Static signal {sig_name} failed: {e}")
 
             batch_updates.append(row)
 

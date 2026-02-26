@@ -137,6 +137,7 @@ class DataService:
         )
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
+        self._deduce_and_set_aspect_ratios()
 
         if self._compute_natural_sort:
             # Always ensure natural sort stats are computed on startup
@@ -150,6 +151,48 @@ class DataService:
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         logger.info("DataService initialized.")
+
+    def _deduce_and_set_aspect_ratios(self):
+        """Automatically deduce and set aspect_ratio for all registered datasets.
+        
+        It loads the first raw image from each dataset to determine the 
+        canonical aspect ratio, then monkey-patches the 'aspect_ratio' 
+        attribute onto the dataset object if it's not already set.
+        """
+        try:
+            from weightslab.data.data_utils import load_raw_image
+            from weightslab.backend.ledgers import get_dataloaders
+            
+            loaders_dict = get_dataloaders()
+            for name, loader in loaders_dict.items():
+                if not loader or not hasattr(loader, "dataset"):
+                    continue
+                
+                # Unwrap to find the base dataset
+                dataset = loader.dataset
+                ds = getattr(dataset, "wrapped_dataset", dataset)
+                
+                # Skip if already set manually
+                if hasattr(ds, "aspect_ratio") and ds.aspect_ratio is not None:
+                    logger.debug(f"[DataService] Dataset '{name}' already has aspect_ratio={ds.aspect_ratio}")
+                    continue
+                
+                # Load first image to deduce ratio
+                try:
+                    if len(dataset) > 0:
+                        pil_img = load_raw_image(dataset, 0)
+                        if pil_img:
+                            w, h = pil_img.size
+                            ratio = w / h if h > 0 else 1.0
+                            ds.aspect_ratio = ratio
+                            logger.info(f"[DataService] Deduced aspect_ratio={ratio:.2f} for dataset '{name}' from first sample.")
+                except Exception as e:
+                    logger.debug(f"[DataService] Failed to deduce aspect_ratio for dataset '{name}': {e}")
+                    
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"[DataService] Unexpected error during aspect ratio deduction: {e}")
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -910,12 +953,18 @@ class DataService:
                     original_size = middle_pil.size
                     target_width = original_size[0]
                     target_height = original_size[1]
-                    aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
+                    # Check for explicit aspect ratio on dataset (favors true ratio over squashed model input)
+                    aspect_ratio = getattr(ds, "aspect_ratio", None)
+                    if aspect_ratio is not None:
+                        # Normalize target dimensions to honor explicit ratio before scaling
+                        target_width = int(target_height * aspect_ratio)
+                    else:
+                        aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
 
                     if request.resize_width < 0 and request.resize_height < 0:
                         percent = abs(request.resize_width) / 100.0
-                        target_width = int(original_size[0] * percent)
-                        target_height = int(original_size[1] * percent)
+                        target_width = int(target_width * percent)
+                        target_height = int(target_height * percent)
                     elif request.resize_width > 0 and request.resize_height > 0:
                         w_limit, h_limit = request.resize_width, request.resize_height
                         if w_limit / h_limit > aspect_ratio:
