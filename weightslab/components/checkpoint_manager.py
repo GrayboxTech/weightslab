@@ -1232,39 +1232,6 @@ class CheckpointManager:
             logger.warning(f"Failed to save logger snapshot: {e}")
             return None
 
-    def save_pending_changes(self, force: bool = False) -> bool:
-        """Dump any pending changes to disk.
-
-        This is called when:
-        - Training resumes after model/config/data changes
-        - Manual checkpoint is requested with force=True
-
-        Args:
-            force: Force dump even if no pending changes
-
-        Returns:
-            bool: True if changes were dumped, False otherwise
-        """
-        if not self._has_pending_changes and not force:
-            logger.debug("No pending changes to dump")
-            return False
-
-        if self.current_exp_hash is None:
-            logger.warning("No experiment hash set. Cannot dump pending changes.")
-            return False
-
-        logger.info(f"Dumping pending changes: {self._pending_components}")
-
-            with open(json_file, 'w') as f:
-                json.dump(snapshot_data, f, indent=2, default=str)
-
-            logger.info(f"Saved data snapshot: {json_file.name} ({len(snapshot_df)} rows) with RNG state")
-            return json_file
-
-        except Exception as e:
-            logger.error(f"Failed to save data snapshot: {e}")
-        return None
-
     def save_logger_snapshot(self, exp_hash: Optional[str] = None) -> Optional[Path]:
         """Persist logger queues for the given experiment hash.
 
