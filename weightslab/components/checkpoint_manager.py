@@ -402,7 +402,7 @@ class CheckpointManager:
             model_snapshot = self.get_model_snapshot()
             hp_snapshot = self.get_HP_snapshot()
             data_snapshot = self.get_dataframe_snapshot()
-            
+
             if model_snapshot is not None or hp_snapshot or data_snapshot:
                 self.current_exp_hash = self.hash_generator.generate_hash(
                     model=model_snapshot,
@@ -411,7 +411,7 @@ class CheckpointManager:
                     model_init_step=self._model_init_step,
                 )
                 logger.info(f"Initial experiment hash computed on-demand: {self.current_exp_hash}")
-        
+
         return self.current_exp_hash
 
     def get_HP_snapshot(self) -> Dict[str, Any]:
@@ -459,26 +459,26 @@ class CheckpointManager:
             return None
 
     def get_hp_hash(self) -> Optional[str]:
-        """Get hash of hyperparameters snapshot.""" 
+        """Get hash of hyperparameters snapshot."""
         if ledgers.get_hyperparams() == None:
             return "None"
         else:
             return self.hash_generator.get_component_hashes().get('hp')
-        
+
     def get_model_hash(self) -> Optional[str]:
-        """Get hash of model snapshot.""" 
+        """Get hash of model snapshot."""
         if ledgers.get_model() == None:
             return "None"
         else:
             return self.hash_generator.get_component_hashes().get('model')
-        
+
     def get_data_hash(self) -> Optional[str]:
-        """Get hash of dataframe snapshot.""" 
+        """Get hash of dataframe snapshot."""
         if ledgers.get_dataframe() == None:
             return "None"
         else:
             return self.hash_generator.get_component_hashes().get('data')
-        
+
     def get_latest_hash(self) -> Optional[str]:
         """Get the most recent experiment hash."""
         manifest = self._load_manifest()
@@ -618,7 +618,7 @@ class CheckpointManager:
             if self.current_exp_hash is not None:
                 logger.info(f"New experiment hash: {new_hash[:8]}-{new_hash[8:-8]}-{new_hash[-8:]} (previous: {self.current_exp_hash[:8]}-{self.current_exp_hash[8:-8]}-{self.current_exp_hash[-8:]})")
             else:
-                logger.info(f"Initial experiment hash set: {new_hash[:8]}-{new_hash[8:-8]}-{new_hash[-8:]}")    
+                logger.info(f"Initial experiment hash set: {new_hash[:8]}-{new_hash[8:-8]}-{new_hash[-8:]}")
             logger.info(f"Changed components: {changed_components}")
 
             # Update hash
@@ -778,11 +778,11 @@ class CheckpointManager:
             data_state: Data state dict
             changed_components: Set of changed components ('model', 'config', 'data')
         """
-        
+
         # Get checkpoint manager hp
         manager_hp = config.get('checkpoint_manager', {}) if config else {}
         enable_checkpoints = manager_hp.get('enable_checkpoints', True)
-        dump_model_architecture = manager_hp.get('dump_model_architecture', True) 
+        dump_model_architecture = manager_hp.get('dump_model_architecture', True)
         dump_model_state = manager_hp.get('dump_model_state', True)
         dump_optimizer_state = manager_hp.get('dump_optimizer_state', True)
         dump_data_state = manager_hp.get('dump_data_state', True)
@@ -792,15 +792,15 @@ class CheckpointManager:
         if not enable_checkpoints:
             logger.info("Checkpoint dumping is disabled in config; skipping dump.")
             return
-    
+
         # Create checkpoint subdirectories for this hash
         self._create_exp_hash_directories(
             self.current_exp_hash,
             create_data_dir='data' in changed_components and dump_data_state,
             create_hp_dir='config' in changed_components and dump_config_state,
             create_model_dir='model' in changed_components and (
-                dump_model_architecture or 
-                dump_model_state or 
+                dump_model_architecture or
+                dump_model_state or
                 dump_optimizer_state
             )
         )
@@ -932,7 +932,7 @@ class CheckpointManager:
         # Save checkpoint only if enabled in config to avoid unnecessary disk usage when only architecture/config changes
         if not save_model_checkpoint:
             return None
-        
+
         # Add metadata
         if metadata:
             checkpoint['metadata'] = metadata
@@ -982,7 +982,7 @@ class CheckpointManager:
         if self.current_exp_hash is None:
             logger.warning("No experiment hash set. Call update_experiment_hash first.")
             return None
-        
+
         model_dir = self.models_dir / self.current_exp_hash[8:-8]
         os.makedirs(model_dir, exist_ok=True)
         arch_file = model_dir / f"{self.current_exp_hash[8:-8]}_architecture.pkl"
@@ -1161,7 +1161,7 @@ class CheckpointManager:
                 signal_history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
                 signal_history_per_sample = lg.get_signal_history_per_sample() if hasattr(lg, "get_signal_history_per_sample") else {}
                 graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
-                
+
                 # Get final snapshot for this logger
                 snapshot["loggers"][lname] = {
                     "signal_history": signal_history,
@@ -1782,7 +1782,7 @@ class CheckpointManager:
             logger.warning("No components were loaded")
             return False
         success = True
-        
+
         # Apply model (architecture + weights)
         if 'model' in checkpoint_data['loaded_components']:
             try:
