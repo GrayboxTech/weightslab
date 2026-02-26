@@ -64,10 +64,12 @@ class PauseController:
     def pause(self):
         self._event.clear()
         set_hyperparam(key_path='is_training', value=False)
+        set_hyperparam(key_path='is_training', value=False)
         logger.info('\nTraining paused.')
 
     def _resume(self):
         self._event.set()
+        set_hyperparam(key_path='is_training', value=True)
         set_hyperparam(key_path='is_training', value=True)
         
     def resume(self):
@@ -78,6 +80,7 @@ class PauseController:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager != None:
             self.checkpoint_manager.update_experiment_hash(firsttime=True)
+            self.checkpoint_manager.save_pending_changes()
             self.checkpoint_manager.save_pending_changes()
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:

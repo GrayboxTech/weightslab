@@ -68,6 +68,7 @@ class ModelInterface(NetworkWithOps):
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
             compute_dependencies (bool, optional): If True, computes the graph
+            compute_dependencies (bool, optional): If True, computes the graph
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
