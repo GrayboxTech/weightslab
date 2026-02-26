@@ -266,7 +266,7 @@ def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, ui
         'normalized': False
     }
 
-    uint_dtype = np.uint8 if uint == 8 else np.uint16
+    uint_dtype = np.uint8 if uint == 8 and arr.max() <= 255 else np.uint16
     if preserve_original or arr.dtype == uint_dtype:
         return arr, metadata
 

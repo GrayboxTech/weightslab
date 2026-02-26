@@ -600,7 +600,8 @@ class DataLoaderInterface:
             else:
                 # No config for this dataloader -> optional default
                 try:
-                    self.set_batch_size(64)
+                    logger.debug(f"No batch size config found for '{self._ledger_name}' in latest hyperparams:\n{data_cfg}; using default batch size of 8.")
+                    self.set_batch_size(8)
                 except RuntimeError:
                     pass
         except Exception:

@@ -2,18 +2,17 @@ import os
 import time
 import tempfile
 import logging
-
-import tqdm
 import torch
 import yaml
+
+import weightslab as wl
 
 from torch import nn
 from torchvision import ops, transforms
 from torch.utils.data import Dataset
 from PIL import Image
 from pathlib import Path
-
-import weightslab as wl
+from pycocotools.coco import COCO
 
 from weightslab.utils.logger import LoggerQueue as Logger
 from weightslab.components.global_monitoring import (
@@ -267,7 +266,7 @@ os.environ["GRPC_VERBOSITY"] = "debug"
 logging.getLogger("PIL").setLevel(logging.INFO)
 
 
-def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_len=1, tqdm_display=False):
+def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_len=1, idx=0):
     """Iterate over the train loader to compute a detection loss on trainset.
 
     Note: This loop uses the model's high-level predict API (non-differentiable)
@@ -278,135 +277,132 @@ def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_l
 
     print(f"DEBUG: Entering pseudo_train with {train_loader_len} batches expected.", flush=True)
     with guard_training_context:
-        for idx, data in enumerate(loader):
-            inputs = data[0].to(device)
-            ids = data[1].to(device)
-            tseg = data[2].to(device)
-            tbbxs = data[3].to(device)
-            tlabels = data[4].to(device)
-            
-            if idx % 5 == 0:
-                print(f"DEBUG: [Batch {idx}/{train_loader_len}] Starting prediction...", flush=True)
+        data = next(loader)
+        inputs = data[0].to(device)
+        ids = data[1]
+        tseg = data[2].to(device)
+        tbbxs = data[3].to(device)
 
-            outputs = model.predict(inputs)[0]
-            pbbxs = torch.cat(
-                [
-                    outputs.boxes.cls[..., None],
-                    outputs.boxes.xyxy
-                ],
-                dim=1
-            )[None]
+        if idx % 5 == 0:
+            print(f"DEBUG: [Batch {idx}/{train_loader_len}] Starting prediction...", flush=True)
 
-            # ========== Build segmentation from boxes ==========
-            H, W = tseg.shape[-2:]  # target mask spatial size
-            class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
-            boxes_xyxy = outputs.boxes.xyxy
-            classes = outputs.boxes.cls.int()
-            
-            # Optional: filter by confidence if we had conf values
-            conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
-            
-            if idx % 5 == 0:
-                maxconf = conf.max().item() if conf is not None and conf.numel() > 0 else 0
-                print(f"DEBUG: [Batch {idx}] Prediction count: {len(outputs.boxes)} | Max conf: {maxconf:.2f}", flush=True)
+        outputs = model.predict(inputs)[0]
+        pbbxs = torch.cat(
+            [
+                outputs.boxes.cls[..., None],
+                outputs.boxes.xyxy
+            ],
+            dim=1
+        )[None]
 
-            keep = (conf >= 0.05) if conf is not None else torch.ones_like(classes, dtype=torch.bool)
-            boxes_xyxy = boxes_xyxy[keep]
-            classes = classes[keep]
+        # ========== Build segmentation from boxes ==========
+        H, W = tseg.shape[-2:]  # target mask spatial size
+        class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
+        boxes_xyxy = outputs.boxes.xyxy
+        classes = outputs.boxes.cls.int()
+        
+        # Optional: filter by confidence if we had conf values
+        conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
+        
+        if idx % 5 == 0:
+            maxconf = conf.max().item() if conf is not None and conf.numel() > 0 else 0
+            print(f"DEBUG: [Batch {idx}] Prediction count: {len(outputs.boxes)} | Max conf: {maxconf:.2f}", flush=True)
 
-            if len(boxes_xyxy) > 0:
-                 print(f"DEBUG: !!! SUCCESS !!! Sample {idx}, found {len(boxes_xyxy)} boxes.")
+        keep = (conf >= 0.05) if conf is not None else torch.ones_like(classes, dtype=torch.bool)
+        boxes_xyxy = boxes_xyxy[keep]
+        classes = classes[keep]
 
-            for box, cls in zip(boxes_xyxy, classes):
-                x1, y1, x2, y2 = box.round().int().tolist()
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(W, x2), min(H, y2)
-                if x2 > x1 and y2 > y1:
-                    class_map[y1:y2, x1:x2] = cls + 1
-            
-            pseg = class_map[None, ...] # channel dim
+        for box, cls in zip(boxes_xyxy, classes):
+            x1, y1, x2, y2 = box.round().int().tolist()
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(W, x2), min(H, y2)
+            if x2 > x1 and y2 > y1:
+                class_map[y1:y2, x1:x2] = cls + 1
+        
+        pseg = class_map[None, ...] # channel dim
 
-            if criterion_mlt is not None:
-                loss_batch = criterion_mlt(
-                    pbbxs[..., 1:],  # Remove class (index 0) to get boxes [x1, y1, x2, y2]
-                    tbbxs,
-                    batch_ids=ids,
-                    preds=pseg,  # Save segmentation mask as overlay
-                    targets=tseg,  # Save full GT mask
-                )
-                if isinstance(loss_batch, torch.Tensor):
-                    losses += torch.mean(loss_batch).item()
-                else:
-                    losses += loss_batch
+        if criterion_mlt is not None:
+            loss_batch = criterion_mlt(
+                pbbxs[..., 1:],  # Remove class (index 0) to get boxes [x1, y1, x2, y2]
+                tbbxs,
+                batch_ids=ids,
+                preds=pseg,  # Save segmentation mask as overlay
+                # targets=tseg,  # Save full GT mask - not necessary as preloaded 
+            )
+            if isinstance(loss_batch, torch.Tensor):
+                losses += torch.mean(loss_batch).item()
+            else:
+                losses += loss_batch
+        model.increase_age()  # Manually increment step for monitoring purposes as pseudo training
 
     loss = float(losses / max(1, train_loader_len)) if criterion_mlt is not None else None
     return loss
 
 
-def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_loader_len=1):
+def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_loader_len=1, idx=0):
     """Full evaluation pass over the val loader."""
     losses = 0.0
     metric_mlt.reset() if metric_mlt is not None else None
 
     print(f"DEBUG: Entering test loop with {test_loader_len} batches expected.", flush=True)
-    with guard_testing_context, torch.no_grad():
-        for idx, data in enumerate(loader):
-            if idx % 5 == 0:
-                print(f"DEBUG: [Eval {idx}/{test_loader_len}] Processing...", flush=True)
-            inputs = data[0].to(device)
-            ids = data[1].to(device)
-            tseg = data[2].to(device)
-            tbbxs = data[3].to(device)
-            tlabels = data[4].to(device)
+    with guard_testing_context:
+        data = next(loader)
+        if idx % 5 == 0:
+            print(f"DEBUG: [Eval {idx}/{test_loader_len}] Processing...", flush=True)
+        inputs = data[0].to(device)
+        ids = data[1]
+        tseg = data[2].to(device)
+        tbbxs = data[3].to(device)
 
-            # Predict boxes
-            outputs = model.predict(inputs)[0]
-            pbbxs = torch.cat([outputs.boxes.cls[..., None], outputs.boxes.xyxy], dim=1)[None]
-            # ========== Build segmentation from boxes ==========
-            # ===================================================
-            # Build a class map from detected boxes (0 = background)
-            H, W = tseg.shape[-2:]  # target mask spatial size
-            class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
+        # Predict boxes
+        outputs = model.predict(inputs)[0]
+        model.increase_age()  # Manually increment step for monitoring purposes as pseudo training
+        pbbxs = torch.cat([outputs.boxes.cls[..., None], outputs.boxes.xyxy], dim=1)[None]
+        # ========== Build segmentation from boxes ==========
+        # ===================================================
+        # Build a class map from detected boxes (0 = background)
+        H, W = tseg.shape[-2:]  # target mask spatial size
+        class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
 
-            # Unpack detections; outputs.boxes.xyxy is [N,4], outputs.boxes.cls is [N]
-            boxes_xyxy = outputs.boxes.xyxy
-            classes = outputs.boxes.cls.int()
-            conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
+        # Unpack detections; outputs.boxes.xyxy is [N,4], outputs.boxes.cls is [N]
+        boxes_xyxy = outputs.boxes.xyxy
+        classes = outputs.boxes.cls.int()
+        conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
 
-            # Optional: filter by confidence
-            if idx % 5 == 0:
-                max_conf = conf.max().item() if conf is not None and conf.numel() > 0 else 0
-                print(f"DEBUG: EVAL Sample {idx} | Max conf: {max_conf:.2f}")
+        # Optional: filter by confidence
+        if idx % 5 == 0:
+            max_conf = conf.max().item() if conf is not None and conf.numel() > 0 else 0
+            print(f"DEBUG: EVAL Sample {idx} | Max conf: {max_conf:.2f}")
 
-            keep = (conf >= 0.05) if conf is not None else torch.ones_like(classes, dtype=torch.bool)
-            boxes_xyxy = boxes_xyxy[keep]
-            classes = classes[keep]
+        keep = (conf >= 0.05) if conf is not None else torch.ones_like(classes, dtype=torch.bool)
+        boxes_xyxy = boxes_xyxy[keep]
+        classes = classes[keep]
 
-            # Rasterize boxes into the class map
-            for box, cls in zip(boxes_xyxy, classes):
-                x1, y1, x2, y2 = box.round().int().tolist()
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(W, x2), min(H, y2)
-                if x2 > x1 and y2 > y1:
-                    class_map[y1:y2, x1:x2] = cls + 1  # Offset by 1 to make 0 = Background
+        # Rasterize boxes into the class map
+        for box, cls in zip(boxes_xyxy, classes):
+            x1, y1, x2, y2 = box.round().int().tolist()
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(W, x2), min(H, y2)
+            if x2 > x1 and y2 > y1:
+                class_map[y1:y2, x1:x2] = cls + 1  # Offset by 1 to make 0 = Background
 
-            pseg = class_map[None, ...]  # add channel if your metric expects [1, H, W]
+        pseg = class_map[None, ...]  # add channel if your metric expects [1, H, W]
 
-            if criterion_mlt is not None:
-                loss_batch = criterion_mlt(
-                    pbbxs[..., 1:],  # Remove class (index 0) to get boxes [x1, y1, x2, y2]
-                    tbbxs,
-                    batch_ids=ids,
-                    preds=pseg,  # Pass rasterized mask
-                    targets=tseg, # Pass full rasterized mask
-                )
-                if isinstance(loss_batch, torch.Tensor):
-                    losses += torch.mean(loss_batch).item()
-                else:
-                    losses += loss_batch
+        if criterion_mlt is not None:
+            loss_batch = criterion_mlt(
+                pbbxs[..., 1:],  # Remove class (index 0) to get boxes [x1, y1, x2, y2]
+                tbbxs,
+                batch_ids=ids,
+                preds=pseg,  # Pass rasterized mask
+                # targets=tseg,  # Save full GT mask - not necessary as preloaded 
+            )
+            if isinstance(loss_batch, torch.Tensor):
+                losses += torch.mean(loss_batch).item()
+            else:
+                losses += loss_batch
 
-            # Now class_map is your predicted segmentation; compare/log against tseg
-            metric_mlt.update(pseg, tseg) if metric_mlt is not None else None
+        # Now class_map is your predicted segmentation; compare/log against tseg
+        metric_mlt.update(pseg, tseg) if metric_mlt is not None else None
 
     loss = float(losses / test_loader_len) if criterion_mlt is not None else None
     metric = float(metric_mlt.compute().detach().cpu().item() * 100.0) if metric_mlt is not None else None
@@ -476,26 +472,58 @@ if __name__ == "__main__":
         transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.NEAREST),
     ])
 
+    # Configure dataset and dataloader for COCO detection
     data_cfg = parameters.get("data", {})
-    test_cfg = data_cfg.get("test_loader", {})
 
-    images_dir = test_cfg.get("images_dir", "")
-    annotations_file = test_cfg.get("annotations_file", "")
-
-    # Fallback to local Mac dataset if config paths fail or are missing
-    if not os.path.exists(images_dir) or not os.path.exists(annotations_file):
-        default_data_root = "/Users/marcgraybx/graybox/development/data/coco"
-        images_dir = os.path.join(default_data_root, "images", "val2017")
-        annotations_file = os.path.join(default_data_root, "annotations", "instances_val2017.json")
-
-    # Create COCO object briefly to get the full list of categories
-    from pycocotools.coco import COCO
-    temp_coco = COCO(annotations_file)
+    # # Train
+    set_cfg = data_cfg.get("coco_train_final_v1", {})
+    images_dir = set_cfg.get("images_dir", "")
+    annotations_file = set_cfg.get("annotations_file", "")
+    temp_coco = COCO(annotations_file)  # Create COCO object briefly to get the full list of categories
     cat_ids = sorted(temp_coco.getCatIds())
     class_map = {cat_id: i for i, cat_id in enumerate(cat_ids)}
     num_classes = len(cat_ids) + 1
     print(f"DEBUG: Found {len(cat_ids)} categories in COCO. Mapping to {num_classes} total classes (including Background).")
-    
+    _train_dataset = COCOBBoxSegmentationDataset(
+        images_dir,
+        annotations_file,
+        image_transform=image_transform,
+        mask_transform=mask_transform,
+        class_map=class_map,
+        max_samples=SUBSET // 2,
+    )
+    # Set the desired number of classes as an attribute on the dataset for potential use in model/metric initialization
+    # If not, based on class_ids, the dataset will have classes in the range [0, num_classes-1], where 0 is Background and the rest are mapped from COCO category ids.
+    _train_dataset.num_classes = num_classes
+    try:
+        import json
+        categories = _train_dataset.coco.loadCats(cat_ids)
+        names = ["Background"] + [c["name"] for c in categories]
+        _train_dataset.class_names = json.dumps(names)
+        print(f"DEBUG: First 5 class names: {names[:5]}")
+    except Exception as e:
+        print(f"DEBUG: Failed to load class names: {e}")
+        _train_dataset.class_names = json.dumps(["Background"] + [f"Class_{i}" for i in range(num_classes - 1)])
+    train_loader_registered = wl.watch_or_edit(
+        _train_dataset,
+        flag="data",
+        loader_name="coco_train_final_v1",
+        batch_size=1,
+        shuffle=set_cfg.get("shuffle", False),
+        compute_hash=False,
+        is_training=False,
+        array_use_cache=True,
+    )
+
+    # # Val
+    set_cfg = data_cfg.get("coco_val_final_v1", {})
+    images_dir = set_cfg.get("images_dir", "")
+    annotations_file = set_cfg.get("annotations_file", "")
+    temp_coco = COCO(annotations_file)  # Create COCO object briefly to get the full list of categories
+    cat_ids = sorted(temp_coco.getCatIds())
+    class_map = {cat_id: i for i, cat_id in enumerate(cat_ids)}
+    num_classes = len(cat_ids) + 1
+    print(f"DEBUG: Found {len(cat_ids)} categories in COCO. Mapping to {num_classes} total classes (including Background).")
     _test_dataset = COCOBBoxSegmentationDataset(
         images_dir,
         annotations_file,
@@ -504,8 +532,8 @@ if __name__ == "__main__":
         class_map=class_map,
         max_samples=SUBSET // 2,
     )
-    _test_dataset.ignore_index = 0
-    _test_dataset.task_type = "segmentation"
+    # Set the desired number of classes as an attribute on the dataset for potential use in model/metric initialization
+    # If not, based on class_ids, the dataset will have classes in the range [0, num_classes-1], where 0 is Background and the rest are mapped from COCO category ids.
     _test_dataset.num_classes = num_classes
     try:
         import json
@@ -521,16 +549,11 @@ if __name__ == "__main__":
         flag="data",
         loader_name="coco_val_final_v1",
         batch_size=1,
-        shuffle=test_cfg.get("shuffle", False),
+        shuffle=set_cfg.get("shuffle", False),
         compute_hash=False,
         is_training=False,
-        array_use_cache=False,
+        array_use_cache=True,
     )
-
-    from torch.utils.data import DataLoader
-    # We use a raw DataLoader for the pseudo-training and testing loops
-    # to avoid the SimulationDataLoader hanging or being stateful/exhausted.
-    loop_loader = DataLoader(_test_dataset, batch_size=1, shuffle=False)
 
     # --- Define criterion and metric ---
     train_criterion = wl.watch_or_edit(
@@ -546,24 +569,12 @@ if __name__ == "__main__":
 
     # --- 6) Model, optimizer, losses, metric ---
     model = Yolov11(img_size=parameters.get("image_size", 128)).to(device)
-    
-    # Metadata for WeightsLab UI
-    model.task_type = "segmentation"
-    model.num_classes = num_classes
-    try:
-        import json
-        categories = _test_dataset.coco.loadCats(cat_ids)
-        names = ["Background"] + [c["name"] for c in categories]
-        model.class_names = json.dumps(names)
-    except Exception:
-        model.class_names = json.dumps(["Background"] + [f"Class_{i}" for i in range(model.num_classes - 1)])
-    model.seen_samples = 0
-    model.current_step = 0
     model = wl.watch_or_edit(
         model,
         flag="model",
         device=device,
-        use_onnx=True
+        use_onnx=True,
+        compute_dependencies=False, # Don't compute dependencies for the whole model (can be large); focus on data analysis and metrics in this example
     )
     
     # --- Compute class weights to handle class imbalance ---
@@ -584,31 +595,33 @@ if __name__ == "__main__":
 
     # ==============================
     # 7. Optional Trainset iteration
-    train_loss = None
-    train_loader_len = len(loop_loader)
-    train_loss = pseudo_train(
-        loop_loader, # Use the raw DataLoader for the manual pass
-        model,
-        criterion_mlt=train_criterion,
-        device=device,
-        train_loader_len=train_loader_len,
-        tqdm_display=tqdm_display,
-    )
-    if train_loss is not None:
-        print(f"Train loss (GIoU-based, no backprop): {train_loss:.4f}")
+    train_loss = .0
+    train_loader_len = len(train_loader_registered)
+    for idx in range(train_loader_len):
+        if idx % 5 == 0:
+            print(f"DEBUG: Starting pseudo_train batch {idx}/{train_loader_len}...", flush=True)
 
-    # ===============
-    # 8. Testing Loop
-    test_loader_len = len(loop_loader)
-    test_loss, test_metric = None, None
-    start_time = time.time()
-    # Note: loop_loader is an iterable, but we want it to start from scratch.
-    # Since it's a Dataloader, we can just iterate again.
-    test_loss, test_metric = test(loop_loader, model, test_criterion, device=device, test_loader_len=test_loader_len)
-    print("\n" + "=" * 60)
-    print(f"✅ Testing completed in {time.time() - start_time:.2f} seconds")
-    print(f"💾 Logs saved to: {log_dir}")
-    print("=" * 60)
+        train_loss += pseudo_train(
+            train_loader_registered, # Use the raw DataLoader for the manual pass
+            model,
+            criterion_mlt=train_criterion,
+            device=device,
+            train_loader_len=train_loader_len,
+            idx=idx,
+        )
+        if train_loss is not None:
+            print(f"Train loss (GIoU-based, no backprop): {train_loss:.4f}")
+
+        # ===============
+        # 8. Testing Loop
+        test_loader_len = len(test_loader_registered)
+        test_loss, test_metric = None, None
+        start_time = time.time()
+        test_loss, test_metric = test(test_loader_registered, model, test_criterion, device=device, test_loader_len=test_loader_len, idx=idx)
+        print("\n" + "=" * 60)
+        print(f"✅ Testing completed in {time.time() - start_time:.2f} seconds")
+        print(f"💾 Logs saved to: {log_dir}")
+        print("=" * 60)
 
     # Keep the main thread alive to allow background serving threads to run
     wl.keep_serving()

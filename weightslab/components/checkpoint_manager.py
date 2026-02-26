@@ -615,7 +615,10 @@ class CheckpointManager:
         is_new = (new_hash != self.current_exp_hash) or (force or dump_immediately)
 
         if is_new:
-            logger.info(f"New experiment hash: {new_hash[:8]}-{new_hash[8:-8]}-{new_hash[-8:]} (previous: {self.current_exp_hash[:8]}-{self.current_exp_hash[8:-8]}-{self.current_exp_hash[-8:]})")
+            if self.current_exp_hash is not None:
+                logger.info(f"New experiment hash: {new_hash[:8]}-{new_hash[8:-8]}-{new_hash[-8:]} (previous: {self.current_exp_hash[:8]}-{self.current_exp_hash[8:-8]}-{self.current_exp_hash[-8:]})")
+            else:
+                logger.info(f"Initial experiment hash set: {new_hash[:8]}-{new_hash[8:-8]}-{new_hash[-8:]}")    
             logger.info(f"Changed components: {changed_components}")
 
             # Update hash
