@@ -1157,7 +1157,7 @@ class CheckpointManager:
                 signal_history = lg.get_signal_history() if hasattr(lg, "get_signal_history") else []
                 signal_history_per_sample = lg.get_signal_history_per_sample() if hasattr(lg, "get_signal_history_per_sample") else {}
                 graphs = lg.get_graph_names() if hasattr(lg, "get_graph_names") else []
-                
+
                 # Get final snapshot for this logger
                 snapshot["loggers"][lname] = {
                     "signal_history": signal_history,
