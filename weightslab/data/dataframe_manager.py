@@ -811,20 +811,38 @@ class LedgeredDataFrameManager:
     ) -> pd.DataFrame:
         """
         Get a copy of the combined dataframe with optional array materialization.
-
-        Args:
-            autoload_arrays: If True, load arrays from arrays.h5 eagerly; if a list/set,
-                only those column names are eagerly loaded; otherwise keep lazy proxies.
-            return_proxies: If True and autoload_arrays is False, return ArrayH5Proxy objects
-            use_cache: When autoloading, allow proxy cache to speed repeated access
-
-        Returns:
-            Copy of the dataframe with array cells resolved according to options
+        Includes buffered records that haven't been flushed to the main store yet.
         """
-        # Work on a copy to avoid mutating the live frame
-        df = self._df
+        with self._lock:
+            if self._df.empty:
+                # Still try to build from buffer if possible
+                with self._buffer_lock:
+                    if not self._buffer:
+                        return pd.DataFrame()
+                    df = pd.DataFrame(list(self._buffer.values())).set_index("sample_id")
+            else:
+                df = self._df.copy()
 
-        if self._array_store is not None:
+        # Merge pending buffer updates for immediate visibility
+        with self._buffer_lock:
+            if self._buffer:
+                buffer_df = pd.DataFrame(list(self._buffer.values()))
+                if not buffer_df.empty:
+                    buffer_df["sample_id"] = buffer_df["sample_id"].apply(self._normalize_sample_id)
+                    buffer_df = buffer_df.set_index("sample_id")
+                    
+                    # Align and update
+                    if not df.empty:
+                        # Vectorized update
+                        df.update(buffer_df)
+                        # Add completely new rows from buffer
+                        new_rows = buffer_df.index.difference(df.index)
+                        if not new_rows.empty:
+                            df = pd.concat([df, buffer_df.loc[new_rows]])
+                    else:
+                        df = buffer_df
+
+        if self._array_store is not None and not df.empty:
             df = convert_dataframe_to_proxies(
                 df,
                 self._array_columns,
