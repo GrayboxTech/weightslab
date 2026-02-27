@@ -46,7 +46,7 @@ class LoggerQueue:
         if exp_hash not in self._signal_history_per_sample[graph_name]:
             self._signal_history_per_sample[graph_name][exp_hash] = []
 
-        if signal_per_sample:
+        if signal_per_sample and isinstance(signal_per_sample, dict):
             for sid, value in signal_per_sample.items():
                 self._signal_history_per_sample[graph_name][exp_hash].append(
                     {
@@ -90,7 +90,7 @@ class LoggerQueue:
                 for signal in signals:
                     print(f"    Sample ID: {signal['sample_id']}, Signal: {signal}")
         return self._signal_history_per_sample
-    
+
     def print_buffer(self):
         """Print current step buffer contents."""
         print(f"Current step: {self._last_step}")
@@ -104,7 +104,7 @@ class LoggerQueue:
     def get_signal_history_per_sample(self):
         """Retrieve all accumulated per-sample signals from memory."""
         return self._signal_history_per_sample
-    
+
     def get_and_clear_queue(self):
         """Get pending queue and clear it (for incremental updates to WeightsStudio)."""
         queue_copy = list(self._pending_queue)
@@ -141,7 +141,7 @@ class LoggerQueue:
         """Restore logger state from a snapshot dict."""
         if not snapshot:
             return
-        
+
         # Load graph names if available in snapshot (added in later versions)
         graph_names = snapshot.get("graph_names", [])
         self.graph_names.update(graph_names)
@@ -149,11 +149,11 @@ class LoggerQueue:
         # Load signal history if available in snapshot (added in later versions)
         signals = snapshot.get("signal_history", [])
         self.load_signal_history(signals)
-        
+
         # Load per-sample signals if available in snapshot (added in later versions)
         signals_per_sample = snapshot.get("signal_history_per_sample", {})
         self.load_signal_history_per_sample(signals_per_sample)
-        
+
     def clear_signal_histories(self):
         """Clear signal histories."""
         # Note: We do not clear graph names here as they are derived from signals and may be needed for future signals after clearing history.
