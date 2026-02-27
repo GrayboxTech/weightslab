@@ -104,7 +104,7 @@ class LedgeredDataFrameManager:
         sid_str = str(sid)
         if sid_str in self._df.index:
             return sid_str
-        
+
         return sid
 
     def set_array_store(self, array_store: H5ArrayStore):
@@ -161,8 +161,14 @@ class LedgeredDataFrameManager:
                 if self._df.empty:
                     self._df = loaded_df.reindex(columns=all_cols)
                 else:
-                    self._df = self._df.reindex(columns=all_cols)
+                    self._df = self._df.reindex(columns=all_cols)  # set columns first to avoid SettingWithCopyWarning
+
+                    # Process the loaded df
                     loaded_df = loaded_df.reindex(columns=all_cols)
+                    loaded_df = loaded_df.reset_index()
+                    loaded_df['sample_id'] = loaded_df['sample_id'].astype(str)  # Ensure str index
+                    loaded_df = loaded_df.set_index('sample_id')
+
                     # Override existing rows
                     self._df.update(loaded_df)
                     # Note: We NO LONGER concat missing_idx here.
@@ -237,7 +243,7 @@ class LedgeredDataFrameManager:
             if column in self._df.columns:
                 return self._df.pop(column)
             return None
-        
+
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
             self._pending.update(set(sample_ids))
@@ -830,7 +836,7 @@ class LedgeredDataFrameManager:
                 if not buffer_df.empty:
                     buffer_df["sample_id"] = buffer_df["sample_id"].apply(self._normalize_sample_id)
                     buffer_df = buffer_df.set_index("sample_id")
-                    
+
                     # Align and update
                     if not df.empty:
                         # Vectorized update
@@ -964,11 +970,11 @@ class LedgeredDataFrameManager:
             else:
                 buffered = list(self._buffer.values())
                 self._buffer = {}
-        
+
         # 2. Apply records (blocking)
         if buffered:
             self._apply_buffer_records(buffered)
-            
+
         # 3. Force flush to H5 (blocking)
         self._flush_to_h5_if_needed(force=True, blocking=True)
 
