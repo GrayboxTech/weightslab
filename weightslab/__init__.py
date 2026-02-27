@@ -11,7 +11,7 @@ import os
 import logging
 import threading
 
-from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, compute_signals
+from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, compute_signals, SignalContext
 from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory
 
@@ -62,6 +62,7 @@ __all__ = [
 	"discard_samples", 
 	"get_samples_by_tag",
     "get_discarded_samples",
+    "SignalContext",
 
     "_BANNER__",
     "__version__",

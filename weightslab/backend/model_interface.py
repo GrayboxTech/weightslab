@@ -165,6 +165,7 @@ class ModelInterface(NetworkWithOps):
         # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
         _checkpoint_auto_every_steps = 0
         _root_log_dir = None
+        _skip_checkpoint_load = self.skip_previous_auto_load
         try:
             from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
             names = list_hyperparams()
@@ -186,6 +187,8 @@ class ModelInterface(NetworkWithOps):
                 if isinstance(hp, dict):
                     _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
                     _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
+                    if not _skip_checkpoint_load:
+                        _skip_checkpoint_load = hp.get('skip_checkpoint_load', False)
         except Exception:
             _root_log_dir = None
             _checkpoint_auto_every_steps = 0
@@ -200,55 +203,56 @@ class ModelInterface(NetworkWithOps):
             existing_manager = existing_manager
             logger.info("Using checkpoint manager from ledger")
 
-            # Early auto-load latest model architecture and weights if checkpoints exist
-            try:
-                # Try to get the latest experiment hash
-                latest_hash = None
-                if hasattr(existing_manager, 'current_exp_hash') and existing_manager.current_exp_hash:
-                    latest_hash = existing_manager.current_exp_hash
-                elif hasattr(existing_manager, 'manifest') and existing_manager.manifest:
-                    manifest = existing_manager.manifest
-                    latest_hash = getattr(manifest, 'latest_hash', None)
+            if _skip_checkpoint_load:
+                logger.info("Skipping model checkpoint auto-load as requested.")
+            else:
+                # Early auto-load latest model architecture and weights if checkpoints exist
+                try:
+                    # Try to get the latest experiment hash
+                    latest_hash = None
+                    if hasattr(existing_manager, 'current_exp_hash') and existing_manager.current_exp_hash:
+                        latest_hash = existing_manager.current_exp_hash
+                    elif hasattr(existing_manager, 'manifest') and existing_manager.manifest:
+                        manifest = existing_manager.manifest
+                        latest_hash = getattr(manifest, 'latest_hash', None)
 
-                if latest_hash:
-                    # Use checkpoint manager's load_checkpoint to get architecture and weights
-                    checkpoint_data = existing_manager.load_checkpoint(
-                        exp_hash=latest_hash,
-                        load_model=True,
-                        load_weights=True,
-                        load_config=False,
-                        load_data=False,
-                        force=True
-                    )
+                    if latest_hash:
+                        # Use checkpoint manager's load_checkpoint to get weights
+                        checkpoint_data = existing_manager.load_checkpoint(
+                            exp_hash=latest_hash,
+                            load_model=False,
+                            load_weights=True,
+                            load_config=False,
+                            load_data=False,
+                            force=True
+                        )
 
-                    # Apply loaded model if architecture was loaded
-                    if checkpoint_data.get('model'):
-                        self = checkpoint_data['model']
-                        weights = checkpoint_data.get('weights')
-                        checkpoint_rng_state = checkpoint_data.get('weights', {}).get('rng_state')
+                        if checkpoint_data.get('weights'):
+                            # Only weights available, load into existing model
+                            weights = checkpoint_data['weights']
+                            if 'model_state_dict' in weights:
+                                try:
+                                    self.load_state_dict(weights['model_state_dict'], strict=True)
+                                    self.current_step = weights.get('step', -1)
+                                    
+                                    # Restore RNG state if available
+                                    checkpoint_rng_state = weights.get('rng_state')
+                                    if checkpoint_rng_state:
+                                        restore_rng_state(checkpoint_rng_state)
+                                        logger.debug(f"Restored RNG state from checkpoint")
+                                        
+                                    logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
+                                except Exception as e:
+                                    logger.warning(f"Failed to load weights state dict: {e}")
 
-                        # Restore RNG state if available
-                        restore_rng_state(checkpoint_rng_state)
-                        logger.debug(f"Restored RNG state from checkpoint")
-
-                    if checkpoint_data.get('weights'):
-                        # Only weights available, load into existing model
-                        weights = checkpoint_data['weights']
-                        if 'model_state_dict' in weights:
-                            self.load_state_dict(weights['model_state_dict'], strict=True)
-                            self.current_step = weights.get('step', -1)
-                            logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
-
-                    # As model architecture as has been loaded, and it's an instance of the ModelInterface,
-                    # we can set its current step if available in weights
-                    if isinstance(self.model, self.__class__):
+                        # Ensure the wrapper is registered in the ledger
                         self._registration(
                             weak=weak
                         )
                         return
 
-            except Exception as e:
-                logger.debug(f"Could not auto-load model checkpoint: {e}")
+                except Exception as e:
+                    logger.debug(f"Could not auto-load model checkpoint: {e}")
 
         else:
             existing_manager = CheckpointManager(root_log_dir=root_log_dir, load_model=True, load_config=False, load_data=False)

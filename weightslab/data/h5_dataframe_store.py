@@ -414,7 +414,8 @@ class H5DataFrameStore:
                                 for col in df_norm.columns:
                                     # If column is new, add it to existing
                                     if col not in existing.columns:
-                                        existing[col] = np.nan if not col.startswith("tag") else False  # for new cols created
+                                        is_bool = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
+                                        existing[col] = False if is_bool else np.nan
                                     # Update values for common rows
                                     existing.loc[common_idx, col] = df_norm.loc[common_idx, col]
 

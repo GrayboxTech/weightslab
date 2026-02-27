@@ -262,6 +262,7 @@ class DataLoaderInterface:
         self._pending_iteration_state: Optional[dict] = None
         self.is_training = kwargs.pop("is_training", False)
         self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
+        self.skip_previous_auto_load = kwargs.pop("skip_previous_auto_load", False)
 
         if isinstance(data_loader_or_dataset, DataLoader):
             logger.warning(
@@ -381,6 +382,21 @@ class DataLoaderInterface:
         try:
             checkpoint_manager = get_checkpoint_manager()
             if checkpoint_manager is None:
+                return
+
+            # Check if we should skip loading from hyperparameters
+            _skip = self.skip_previous_auto_load
+            if not _skip:
+                try:
+                    from weightslab.backend.ledgers import get_hyperparams
+                    hp = get_hyperparams()
+                    if isinstance(hp, dict):
+                        _skip = hp.get('skip_checkpoint_load', False)
+                except Exception:
+                    pass
+
+            if _skip:
+                logger.info(f"Skipping data checkpoint auto-load for {self._ledger_name or 'unnamed loader'} as requested.")
                 return
 
             # Get latest experiment hash

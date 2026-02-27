@@ -56,7 +56,7 @@ class LedgeredDataFrameManager:
         # Locks
         self._lock = threading.RLock()
         self._queue_lock = threading.Lock()
-        self._buffer_lock = threading.Lock()
+        self._buffer_lock = threading.RLock()
 
         # Columns that should store arrays in separate H5 file
         self._array_columns = [
@@ -118,6 +118,7 @@ class LedgeredDataFrameManager:
         return self._array_store
 
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
+        logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {len(df)} samples.")
         with self._lock:
             if store is not None:
                 self.set_store(store)
@@ -208,23 +209,29 @@ class LedgeredDataFrameManager:
             pass
 
         with self._lock:
-            # Align columns
-            all_cols = df_norm.columns
-            if self._df.empty:
-                self._df = df_norm.reindex(columns=all_cols)
-                return
-
-            # Right-preferred upsert: df_norm overrides existing, adds new rows
-            # Only update columns present in df_norm, keep other columns/values from self._df
-            existing_idx = df_norm.index.intersection(self._df.index)
+            # Align columns: Ensure the global dataframe has all columns present in the update
             missing_cols = df_norm.columns.difference(self._df.columns)
-            if len(existing_idx) > 0:
-                self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
+            if len(missing_cols) > 0:
+                self._df = self._df.reindex(columns=self._df.columns.union(missing_cols))
 
-            # Append rows that do not exist yet
-            missing_idx = df_norm.index.difference(self._df.index)
-            if len(missing_idx) > 0:
-                self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
+            if self._df.empty:
+                # Optimized initial load: just use the normalized dataframe
+                # Ensure we use a copy to avoid side effects
+                self._df = df_norm.copy()
+            else:
+                # Right-preferred upsert: df_norm overrides existing, adds new rows
+                # Only update columns present in df_norm, keep other columns/values from self._df
+                existing_idx = df_norm.index.intersection(self._df.index)
+                all_cols = df_norm.columns
+                if len(existing_idx) > 0:
+                    self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
+
+                # Append rows that do not exist yet
+                missing_idx = df_norm.index.difference(self._df.index)
+                if len(missing_idx) > 0:
+                    self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
+
+            logger.debug(f"[LedgeredDataFrameManager] Global DataFrame updated: {len(self._df)} rows, {len(self._df.columns)} columns.")
 
             # Set missing cols value for bool
             for col in missing_cols:
@@ -954,12 +961,12 @@ class LedgeredDataFrameManager:
             buffered = list(self._buffer.values())
             self._buffer = {}
 
-            # Apply records outside buffer lock
-            if buffered:
-                self._apply_buffer_records_nonblocking(buffered)
+        # Apply records outside buffer lock to avoid deadlock
+        if buffered:
+            self._apply_buffer_records_nonblocking(buffered)
 
-            # Flush to H5 if needed
-            self._flush_to_h5_if_needed(force=force)
+        # Flush to H5 if needed outside buffer lock
+        self._flush_to_h5_if_needed(force=force)
 
     def flush(self):
         """Blocking flush to ensure all data is persisted to H5 immediately."""

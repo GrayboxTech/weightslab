@@ -171,16 +171,16 @@ class CheckpointManager:
                 ).to_dict()
             )
 
-            # Collect tag series
-            df_tag_columns = [col for col in dfm.get_df_view().columns if col.startswith(f"{SampleStatsEx.TAG.value}:")]
-            for col in df_tag_columns:
-                collected_tags.update(
-                    {
-                        col: dfm.get_df_view(
-                            col
-                        ).to_dict()
-                    }
-                )
+            # Collect tag series (main tag column + prefixed columns)
+            df_columns = dfm.get_df_view().columns
+            tag_cols_to_capture = [col for col in df_columns if col == SampleStatsEx.TAG.value or col.startswith(f"{SampleStatsEx.TAG.value}:")]
+            
+            for col in tag_cols_to_capture:
+                 col_data = dfm.get_df_view(col)
+                 if isinstance(col_data, pd.Series):
+                     collected_tags[col] = col_data.to_dict()
+                 elif isinstance(col_data, pd.DataFrame) and col in col_data.columns:
+                     collected_tags[col] = col_data[col].to_dict()
 
             # if nothing found
             if not collected_tags and not collected_discarded:
