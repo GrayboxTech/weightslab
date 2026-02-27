@@ -339,9 +339,6 @@ class ExperimentService:
                     success=False,
                     message=f"Failed to set hyperparameters: {e}",
                 )
-
-            return pb2.CommandResponse(success=True, message="Hyper parameter changed")
-
             if request.HasField("load_checkpoint_operation"):
                 with weightslab_rlock:
                     # Pause training if it's currently running
@@ -370,6 +367,11 @@ class ExperimentService:
                             success=False,
                             message=str(e),
                         )
+                # Successful checkpoint load return
+                return pb2.CommandResponse(success=True, message=f"Loaded checkpoint {checkpoint_id}")
+
+            # Default return for other commands (e.g. hyperparameter changes)
+            return pb2.CommandResponse(success=True, message="Command executed successfully")
 
         # Read requests
         response = pb2.CommandResponse(success=True, message="")
