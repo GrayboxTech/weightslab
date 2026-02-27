@@ -71,7 +71,7 @@ class PauseController:
         self._event.set()
         set_hyperparam(key_path='is_training', value=True)
         set_hyperparam(key_path='is_training', value=True)
-        
+
     def resume(self):
         hash_by_module = None
         print('\nAttempting to resume training...')
@@ -196,7 +196,7 @@ class GuardContext:
                 # We also set the model to eval() mode to freeze BN stats and Dropout.
                 self.model.set_tracking_mode(TrackingMode.TRAIN)
                 self.model.eval()
-                
+
                 # Throttle logging
                 if not hasattr(self, '_last_audit_msg'):
                     self._last_audit_msg = 0

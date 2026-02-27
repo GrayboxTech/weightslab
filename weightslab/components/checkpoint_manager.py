@@ -170,6 +170,7 @@ class CheckpointManager:
                     SampleStatsEx.DISCARDED.value
                 ).to_dict()
             )
+
             # Collect tag series
             df_tag_columns = [col for col in dfm.get_df_view().columns if col.startswith(f"{SampleStatsEx.TAG.value}:")]
             for col in df_tag_columns:
@@ -1814,10 +1815,10 @@ class CheckpointManager:
                     with open(json_file, 'r') as f:
                         snapshot_data = json.load(f)
 
+                    # Extract RNG state from data snapshot if available
                     rng_state = snapshot_data.get('rng_state', {})
-
                     if load_data_snapshot:
-                        snapshot_df = pd.DataFrame(snapshot_data.get('data', []))
+                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index('sample_id') if 'data' in snapshot_data else pd.DataFrame()
                         if not snapshot_df.empty:
                             result['data_state'] = {'snapshot': snapshot_df}
                             result['loaded_components'].add('data')

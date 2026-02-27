@@ -107,7 +107,7 @@ class DataSampleTrackingWrapper(Dataset):
         preload_metadata: Whether to attempt preloading metadata into the stats dataframe defaults (can speed up access but may increase init time)
         preload_uids: Whether to attempt preloading unique IDs from metadata instead of generating them (requires metadata to have unique sample_id)
         keep_leakages: Whether to keep cross-loader duplicates that may cause data leakage (not recommended, use for debugging only)
-            
+
 
     Examples:
         Binary classification based on tags:
@@ -296,7 +296,7 @@ class DataSampleTrackingWrapper(Dataset):
                     data[SampleStatsEx.TARGET.value] = label
                 except Exception as e:
                     logger.debug(f"Could not preload label for sample {sid}: {e}")
-            
+
             if preload_metadata:
                 # Attempt to load metadata for this sample and store in defaults (will be None if not available)
                 try:
@@ -305,7 +305,7 @@ class DataSampleTrackingWrapper(Dataset):
                         data.update(metadata)
                 except Exception as e:
                     logger.debug(f"Could not preload metadata for sample {sid}: {e}")
-            
+
             if preload_uids:
                 # Attempt to load metadata for this sample and store in defaults (will be None if not available)
                 try:
@@ -321,7 +321,7 @@ class DataSampleTrackingWrapper(Dataset):
         if len(uids) > 0:
             self.unique_ids = list(uids.values())
             self.unique_id_to_index = {self.unique_ids[i]: i for i in range(len(self.unique_ids))}
-    
+
         # Register this split with the global ledger manager (shared across loaders) and load existing data
         if ledger_manager != None:
             ledger_manager.register_split(
@@ -407,17 +407,17 @@ class DataSampleTrackingWrapper(Dataset):
             return data[0], id
         elif len(data) == 2:  # For (data, label) format: return (data, id, label)
             return data[0], id, data[1]
-        
+
         # Element extraction
         # # First, always the input data
         item = data[0]
-        
+
         # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
         # id = data[1]
-        
+
         # # Third, is target/label
         target = data[2]
-        
+
         # # Finally, any additional elements (e.g., boxes, masks) are metadata
         rest = data[3:] if len(data) > 3 else ()
 
@@ -637,23 +637,23 @@ class DataSampleTrackingWrapper(Dataset):
     def _convert_tags_to_columns(self, sample_id: int, tag_value: Any) -> Dict[str, Any]:
         """
         LEGACY METHOD - Convert tag string(s) to individual boolean columns.
-        
+
         Handles:
         - Comma-separated: "tag1,tag2,tag3" → tag:tag1=1, tag:tag2=1, tag:tag3=1
         - Semicolon-separated: "tag1;tag2;tag3" → tag:tag1=1, tag:tag2=1, tag:tag3=1
         - Single tag: "mytag" → tag:mytag=1
-        
+
         Returns dict with updates ready to be passed to _set_values.
         """
         updates = {}
-        
+
         # Handle empty/None values
         if not tag_value or (isinstance(tag_value, str) and not tag_value.strip()):
             return updates
-        
+
         # Convert to string and parse tags
         tag_str = str(tag_value).strip()
-        
+
         # Split by comma or semicolon
         tags = set()
         for tag in tag_str.split(';'):
@@ -661,26 +661,26 @@ class DataSampleTrackingWrapper(Dataset):
                 clean_tag = t.strip()
                 if clean_tag:
                     tags.add(clean_tag)
-        
+
         # Create individual tag columns
         for tag in tags:
             col_name = f"{SampleStatsEx.TAG.value}:{tag}"
             updates[col_name] = 1
-        
+
         return updates
 
     def _get_tags_for_sample(self, sample_id: int) -> Set[str]:
         """
         Retrieve all tags for a given sample from individual tag columns.
-        
+
         Returns a set of tag names (without the "tag:" or "tag_" prefix) that are True/1 for this sample.
         """
         tags_set = set()
-        
+
         df_view = self._get_df_view()
         if df_view.empty or sample_id not in df_view.index:
             return tags_set
-        
+
         # Get all columns that match canonical "tag:<name>" and legacy "tag_<name>" patterns
         tag_prefix_colon = f"{SampleStatsEx.TAG.value}:"
         tag_prefix_legacy = f"{SampleStatsEx.TAG.value}_"
@@ -688,7 +688,7 @@ class DataSampleTrackingWrapper(Dataset):
             col for col in df_view.columns
             if col.startswith(tag_prefix_colon) or col.startswith(tag_prefix_legacy)
         ]
-        
+
         # Check which tag columns are True/1 for this sample
         for tag_col in tag_columns:
             tag_value = df_view.loc[sample_id, tag_col]
@@ -700,7 +700,7 @@ class DataSampleTrackingWrapper(Dataset):
                 else:
                     tag_name = tag_col[len(tag_prefix_legacy):]
                 tags_set.add(tag_name)
-        
+
         return tags_set
 
     def _save_pending_stats_to_h5(self):
@@ -986,7 +986,7 @@ class DataSampleTrackingWrapper(Dataset):
     def set(self, sample_id: int, stat_name: str, value: Any):
         """
             Set a specific stat value for a given sample ID.
-            
+
             Special handling: When stat_name is "tag" or "tags", creates individual
             boolean columns like "tag:<tagname>" set to 1.
         """
