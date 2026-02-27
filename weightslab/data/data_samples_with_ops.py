@@ -281,6 +281,10 @@ class DataSampleTrackingWrapper(Dataset):
 
         default_data = []
         uids = {}
+        logger.info(
+            f"Preloading sample statistics for {len(sample_ids)} samples in split '{self._dataset_split}' with preload_labels={preload_labels}, preload_metadata={preload_metadata}, preload_uids={preload_uids}..." +
+            f" This may take some time depending on the dataset and preload options. Set preload options to False to skip and initialize stats on demand (will be slower on first access but faster initialization)."
+        )
         for sid in tqdm(sample_ids, desc=f"Preloading samples for split '{self._dataset_split}'"):
             data = SampleStats.DEFAULTS.copy()  # Start with default stats for this sample
             data.update(
