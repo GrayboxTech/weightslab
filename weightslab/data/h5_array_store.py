@@ -299,7 +299,7 @@ def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, ui
     return normalized, metadata
 
 
-def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any]) -> np.ndarray:
+def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any], uint: int = 16) -> np.ndarray:
     """
     Reconstruct original array from normalized uint16 version using metadata.
 
@@ -319,7 +319,7 @@ def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any]) -> np.ndarray:
     # Denormalize from uint range
     arr_min = metadata['min']
     arr_max = metadata['max']
-    uint = metadata.get('uint', uint)
+    uint = metadata.get('uint', uint)  # Default to 16 if not specified
     original_dtype = np.dtype(metadata['original_dtype'])
 
     # Scale back from 0-65535 to original range
