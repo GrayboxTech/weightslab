@@ -105,7 +105,8 @@ class DataService:
 
     def __init__(self, ctx):
         self._ctx = ctx
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._update_lock = threading.Lock()
         self._df_manager = get_dataframe()
 
         # init references to the context components
@@ -137,19 +138,59 @@ class DataService:
         )
 
         self._is_filtered = False  # Track if the current view is filtered/modified by user
+        # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
+        # These should be triggered on-demand or run in background to avoid blocking training start.
+        # self._deduce_and_set_aspect_ratios()
 
-        if self._compute_natural_sort:
-            # Always ensure natural sort stats are computed on startup
-            # This occurs before the service is fully available to the UI.
-            self._compute_natural_sort_stats()
-        else:
-            logger.info("[DataService] Natural sort computation skipped (compute_natural_sort=False in hyperparams).")
+        # if self._compute_natural_sort:
+        #    self._compute_natural_sort_stats()
         
-        # Automatically compute registered custom signals
-        self._compute_custom_signals()
+        # self._compute_custom_signals()
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         logger.info("DataService initialized.")
+
+    def _deduce_and_set_aspect_ratios(self):
+        """Automatically deduce and set aspect_ratio for all registered datasets.
+        
+        It loads the first raw image from each dataset to determine the 
+        canonical aspect ratio, then monkey-patches the 'aspect_ratio' 
+        attribute onto the dataset object if it's not already set.
+        """
+        try:
+            from weightslab.data.data_utils import load_raw_image
+            from weightslab.backend.ledgers import get_dataloaders
+            
+            loaders_dict = get_dataloaders()
+            for name, loader in loaders_dict.items():
+                if not loader or not hasattr(loader, "dataset"):
+                    continue
+                
+                # Unwrap to find the base dataset
+                dataset = loader.dataset
+                ds = getattr(dataset, "wrapped_dataset", dataset)
+                
+                # Skip if already set manually
+                if hasattr(ds, "aspect_ratio") and ds.aspect_ratio is not None:
+                    logger.debug(f"[DataService] Dataset '{name}' already has aspect_ratio={ds.aspect_ratio}")
+                    continue
+                
+                # Load first image to deduce ratio
+                try:
+                    if len(dataset) > 0:
+                        pil_img = load_raw_image(dataset, 0)
+                        if pil_img:
+                            w, h = pil_img.size
+                            ratio = w / h if h > 0 else 1.0
+                            ds.aspect_ratio = ratio
+                            logger.info(f"[DataService] Deduced aspect_ratio={ratio:.2f} for dataset '{name}' from first sample.")
+                except Exception as e:
+                    logger.debug(f"[DataService] Failed to deduce aspect_ratio for dataset '{name}': {e}")
+                    
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"[DataService] Unexpected error during aspect ratio deduction: {e}")
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -256,6 +297,7 @@ class DataService:
                 # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
                 df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
                 if df.empty:
+                    logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
                     return df
 
                 # Ensure sample_id is a column if it was the index
@@ -910,12 +952,18 @@ class DataService:
                     original_size = middle_pil.size
                     target_width = original_size[0]
                     target_height = original_size[1]
-                    aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
+                    # Check for explicit aspect ratio on dataset (favors true ratio over squashed model input)
+                    aspect_ratio = getattr(ds, "aspect_ratio", None)
+                    if aspect_ratio is not None:
+                        # Normalize target dimensions to honor explicit ratio before scaling
+                        target_width = int(target_height * aspect_ratio)
+                    else:
+                        aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
 
                     if request.resize_width < 0 and request.resize_height < 0:
                         percent = abs(request.resize_width) / 100.0
-                        target_width = int(original_size[0] * percent)
-                        target_height = int(original_size[1] * percent)
+                        target_width = int(target_width * percent)
+                        target_height = int(target_height * percent)
                     elif request.resize_width > 0 and request.resize_height > 0:
                         w_limit, h_limit = request.resize_width, request.resize_height
                         if w_limit / h_limit > aspect_ratio:
@@ -1493,94 +1541,89 @@ class DataService:
     def _slowUpdateInternals(self, force: bool = False):
         """
         This method is responsible for updating the internal dataframe view with the latest data from the manager.
-        It is called before slicing data for GetDataSamples to ensure we serve the most recent data, while also respecting the user's current view (filters/sorts) and preventing disruptive updates during active interactions.
-
-        Arguments:
-        - force: If True, forces the update regardless of timing. Use with caution as it may disrupt the user experience if called too frequently. Normally, this method should be called without force, allowing it to throttle updates to at most once every 10 seconds during active use.
+        It uses a dedicated update lock to ensure only one thread performs the expensive update at a time,
+        while allowing other threads to read the existing dataframe without blocking.
         """
-
         current_time = time.time()
+        # Fast throttling check
         if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
 
-        updated_df = self._pull_into_all_data_view_df()
-
-        # Guard against init race conditions
-        if updated_df is None:
-            return
-
-        # Ensure default columns exist (persists them across updates even if not in H5 yet)
-        if SampleStatsEx.TAG.value not in updated_df.columns:
-             updated_df[SampleStatsEx.TAG.value] = ""
-        if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
-             updated_df["natural_sort_score"] = np.nan
-        if "deny_listed" not in updated_df.columns:
-             updated_df["deny_listed"] = False
-
-        if self._is_filtered and self._all_datasets_df is not None:
-            # The user has applied a custom view (Filter, Sort, or Aggregation).
-            try:
-                # Use intersection to detect rows we are currently watching in the filtered view
-                common_indices = self._all_datasets_df.index.intersection(updated_df.index)
-
-                if len(common_indices) > 0:
-                     # Force the new data to conform to the USER'S current view (rows/order).
-                     # providing live updates for the specific samples they are watching.
-                     # We use loc with a slice of unique indices to avoid duplicate axis errors.
-                     target_order = self._all_datasets_df.index
-                     updated_df = updated_df.reindex(target_order)
-                else:
-                     # Aggregation/Transformation - skip auto-update.
-                     return
-            except Exception as e:
-                logger.debug(f"[_slowUpdateInternals] Error matching indices for filtered view: {e}")
+        with self._update_lock:
+            # Re-check throttling inside lock to avoid redundant updates
+            if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
                 return
 
-        elif self._all_datasets_df is not None and not self._all_datasets_df.empty:
-            # Case C: Standard/Unfiltered View.
-            # Preserves sticky sort and appends new samples.
+            updated_df = self._pull_into_all_data_view_df()
 
-            # We check if the user has a custom sort active (not strictly increasing).
-            # Note: We use idx.is_monotonic_increasing as a proxy for "raw default order"
-            if not self._all_datasets_df.index.is_monotonic_increasing:
-                 # Try to maintain this sort for existing records and append new ones.
-                 old_index = self._all_datasets_df.index
-                 new_index = updated_df.index
+            # Guard against init race conditions
+            if updated_df is None:
+                return
 
-                 # Intersection preserves the ORDER of old_index
-                 # We use a set for O(1) matching but preserve list order of old_index
-                 new_index_set = set(new_index)
-                 kept_indices = [x for x in old_index if x in new_index_set]
+            # Capture a consistent snapshot of the current state
+            with self._lock:
+                is_filtered = self._is_filtered
+                current_all_df = self._all_datasets_df
 
-                 # Newly added samples (e.g. from live training) go to the end
-                 old_index_set = set(old_index)
-                 newly_added_indices = [x for x in new_index if x not in old_index_set]
+            # Ensure default columns exist
+            if SampleStatsEx.TAG.value not in updated_df.columns:
+                 updated_df[SampleStatsEx.TAG.value] = ""
+            if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
+                 updated_df["natural_sort_score"] = np.nan
+            if SampleStatsEx.DISCARDED.value not in updated_df.columns:
+                 updated_df[SampleStatsEx.DISCARDED.value] = False
 
-                 full_order = kept_indices + newly_added_indices
-                 
-                 try:
-                     # Ensure full_order is unique (it should be, but be defensive)
-                     # pd.Index(full_order).unique() preserves order.
-                     if isinstance(old_index, pd.MultiIndex):
-                         # pd.Index(full_order) on a list of tuples might lose MultiIndex metadata
-                         unique_order = pd.MultiIndex.from_tuples(full_order, names=old_index.names)
-                         # MultiIndex.unique() preserves order
-                         unique_order = unique_order.unique()
-                     else:
-                         unique_order = pd.Index(full_order).unique()
+            if is_filtered and current_all_df is not None:
+                # The user has applied a custom view (Filter, Sort, or Aggregation).
+                try:
+                    # Use intersection to detect rows we are currently watching in the filtered view
+                    common_indices = current_all_df.index.intersection(updated_df.index)
 
-                     updated_df = updated_df.reindex(unique_order)
-                 except Exception as e:
-                     logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
-                     # If reindex fails, keep the old dataframe to avoid losing the sort
-                     return
+                    if len(common_indices) > 0:
+                         # Force the new data to conform to the USER'S current view (rows/order).
+                         target_order = current_all_df.index
+                         updated_df = updated_df.reindex(target_order)
+                    else:
+                         # Aggregation/Transformation - skip auto-update.
+                         return
+                except Exception as e:
+                    logger.debug(f"[_slowUpdateInternals] Error matching indices for filtered view: {e}")
+                    return
 
-        # Deduplicate before saving back to prevent index corruption
-        if updated_df.index.has_duplicates:
-             updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
+            elif current_all_df is not None and not current_all_df.empty:
+                # Standard/Unfiltered View.
+                # Preserves sticky sort and appends new samples.
+                if not current_all_df.index.is_monotonic_increasing:
+                     old_index = current_all_df.index
+                     new_index = updated_df.index
 
-        self._all_datasets_df = updated_df
-        self._last_internals_update_time = current_time
+                     new_index_set = set(new_index)
+                     kept_indices = [x for x in old_index if x in new_index_set]
+
+                     old_index_set = set(old_index)
+                     newly_added_indices = [x for x in new_index if x not in old_index_set]
+
+                     full_order = kept_indices + newly_added_indices
+                     
+                     try:
+                         if isinstance(old_index, pd.MultiIndex):
+                             unique_order = pd.MultiIndex.from_tuples(full_order, names=old_index.names)
+                             unique_order = unique_order.unique()
+                         else:
+                             unique_order = pd.Index(full_order).unique()
+
+                         updated_df = updated_df.reindex(unique_order)
+                     except Exception as e:
+                         logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
+                         return
+
+            # Deduplicate before saving back to prevent index corruption
+            if updated_df.index.has_duplicates:
+                 updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
+
+            # Atomic swap to make the new view available to readers
+            self._all_datasets_df = updated_df
+            self._last_internals_update_time = current_time
 
     def _process_get_data_samples(self, request, context):
         """
@@ -1606,10 +1649,31 @@ class DataService:
                     data_records=[]
                 )
 
-            with self._lock:
-                self._slowUpdateInternals()  # Update global dataframe with latest data before slicing
-                # Use reset_index() to ensure origin and sample_id are available as columns for processing
-                df_slice = self._all_datasets_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()
+            # Trigger update if needed (it has its own internal locking)
+            self._slowUpdateInternals()
+
+            # Atomic snapshot of the current authoritative dataframe
+            # Readers don't need the global lock to slice a snapshot
+            current_df = self._all_datasets_df
+            
+            if current_df is None or current_df.empty:
+                logger.warning(f"Internal dataframe is empty or not initialized.")
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message="Internal dataframe is empty or not initialized.",
+                    data_records=[]
+                )
+
+            # Slice the snapshot
+            try:
+                df_slice = current_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()
+            except IndexError:
+                # Handle cases where slicing goes out of bounds
+                return pb2.DataSamplesResponse(
+                    success=False,
+                    message=f"Index {request.start_index} out of bounds for dataframe size {len(current_df)}",
+                    data_records=[]
+                )
 
             if df_slice.empty:
                 logger.warning(f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}")
@@ -1769,8 +1833,10 @@ class DataService:
                     # as that wipes out the existing slice/sort state before we try to modify the next slice.
                     is_only_view_sort = len(operations) == 1 and operations[0].get("function") == "df.sort_view_slice"
                     if not is_only_view_sort:
-                        self._slowUpdateInternals(force=True)  # Refresh to catch new columns/samples
-                    df = self._all_datasets_df
+                        self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
+                    
+                    # Work on a copy to allow concurrent readers to see a consistent state
+                    df = self._all_datasets_df.copy()
                     messages = []
 
 
@@ -1782,6 +1848,7 @@ class DataService:
 
                     final_message = " | ".join(messages) if messages else "No operation performed"
                     
+                    # Atomic swap
                     self._all_datasets_df = df
 
                     # Direct queries are manipulations -> Freeze the view
@@ -1799,10 +1866,14 @@ class DataService:
                     operations = request.query
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
                     with self._lock:
-                        df, message = execute_df_operation(self._all_datasets_df, request.query)  # in-place operation, or replace previous dataframe
+                        # Work on a copy to allow concurrent readers to see a consistent state
+                        working_df = self._all_datasets_df.copy()
+                        df, message = execute_df_operation(working_df, request.query)  # in-place operation, or replace previous dataframe
                         logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
                         if operations:
                             self._is_filtered = True
+                        
+                        # Atomic swap
                         self._all_datasets_df = df
                     return self._build_success_response(
                         df=df,
@@ -1856,13 +1927,14 @@ class DataService:
                     if isinstance(operations, dict): operations = [operations] # Backwards compat
                     if not operations: operations = []
 
-                    # 3) Apply Operations (CPU/MEMORY BOUND - REQUIRES LOCK)
                     with self._lock:
-                        self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
-                        # Start with the current authoritative DF
-                        df = self._all_datasets_df
+                        self._slowUpdateInternals(force=True)
+                        
+                        if self._all_datasets_df is None:
+                            self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
+                        
+                        df = self._all_datasets_df.copy()
                         messages = []
-                        # Default to FILTER, switch to ANALYSIS if we detect analysis/action output
                         intent_type = pb2.INTENT_FILTER
                         analysis_result = ""
 
@@ -1870,57 +1942,38 @@ class DataService:
                             func = op.get("function")
                             params = op.get("params", {}) or {}
 
-                            # 2a) Agent-driven RESET has highest priority
                             if params.get("__agent_reset__"):
                                 logger.debug("[ApplyDataQuery] Agent requested reset")
-                                # Rebuild from loaders; this is the only place we replace the df object
-                                self._all_datasets_df = self._pull_into_all_data_view_df()
-                                df = self._all_datasets_df  # Reset df to full dataset
-                                self._is_filtered = False   # Unfreeze updates
+                                df = self._pull_into_all_data_view_df() or pd.DataFrame()
+                                self._is_filtered = False
                                 messages.append("Reset view")
                                 continue
 
-                            # 2b) All other agent operations mutate df in-place
-                            # df is now carried forward across iterations
                             msg = self._apply_agent_operation(df, func, params)
                             messages.append(msg)
-
-                            # --- UPDATED INTENT CLASSIFICATION ---
-                            # Check for Clarification
+                        
                             if "Clarification needed" in msg or "I need more information" in msg:
-                                intent_type = pb2.INTENT_ANALYSIS  # Usually presented as a message/analysis
+                                intent_type = pb2.INTENT_ANALYSIS
                                 analysis_result = msg
-
-                            # Check for Action Triggers (e.g. "Action: Dataset saved...")
                             elif msg.startswith("Action:"):
                                 intent_type = pb2.INTENT_ANALYSIS
                                 analysis_result = msg
-
-                            # Check for Analysis Results
                             elif msg.startswith("Analysis Result:"):
                                 intent_type = pb2.INTENT_ANALYSIS
                                 analysis_result = msg.replace("Analysis Result:", "").strip()
-
-                            # Check for Errors
                             elif msg.startswith("Analysis Error:") or msg.startswith("Safety Violation:"):
                                 intent_type = pb2.INTENT_ANALYSIS
                                 analysis_result = msg
 
                         final_message = " | ".join(messages) if messages else "No operation performed"
 
-                        # 4) Persist the filtered df back for next query (CRITICAL for sequential filters!)
-                        # Only update if it was a manipulation query, not analysis
                         if intent_type == pb2.INTENT_FILTER:
-                            # Deduplicate before saving back
                             if df.index.has_duplicates:
                                 df = df[~df.index.duplicated(keep='last')]
+                            
                             self._all_datasets_df = df
-                            # If we modified the DF, we should freeze it (unless it was a Reset which handled above)
-                            # We check if *any* operation was effectively applied.
-                            # For simplicity, if intent is FILTER, we assume manipulation happened.
                             self._is_filtered = True
 
-                        # 5) Return updated counts after mutation
                         return self._build_success_response(
                             df=df,
                             message=final_message,

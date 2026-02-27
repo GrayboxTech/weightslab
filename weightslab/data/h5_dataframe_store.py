@@ -5,7 +5,6 @@ import logging
 import threading
 import hashlib
 import shutil
-
 import pandas as pd
 import numpy as np
 
@@ -15,8 +14,7 @@ from typing import Iterable, Optional, Union
 from weightslab.data.sample_stats import SampleStats
 
 
-# Initialize logger
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)  # Initialize logger
 
 
 class _InterProcessFileLock:
@@ -129,10 +127,7 @@ class H5DataFrameStore:
             df = df.set_index("sample_id")
         if df.index.name is None:
             df.index.name = "sample_id"
-        try:
-            df.index = df.index.astype(int)
-        except Exception:
-            pass
+
         # Sanitize column names: HDF5 doesn't allow '/' in object names
         df.columns = [str(col).replace('/', '__SLASH__') for col in df.columns]
 
@@ -419,7 +414,8 @@ class H5DataFrameStore:
                                 for col in df_norm.columns:
                                     # If column is new, add it to existing
                                     if col not in existing.columns:
-                                        existing[col] = np.nan if not col.startswith("tag") else False  # for new cols created
+                                        is_bool = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
+                                        existing[col] = False if is_bool else np.nan
                                     # Update values for common rows
                                     existing.loc[common_idx, col] = df_norm.loc[common_idx, col]
 
@@ -432,8 +428,8 @@ class H5DataFrameStore:
 
                         existing = existing[~existing.index.duplicated(keep='last')]
 
-                        # Final safety pass: force any remaining scalar object columns to string 
-                        # to prevent PyTables serialization errors caused by merging different dtypes 
+                        # Final safety pass: force any remaining scalar object columns to string
+                        # to prevent PyTables serialization errors caused by merging different dtypes
                         # (e.g. initializing a new column with bool False, then updating with string 'True')
                         for col in existing.select_dtypes(include=['object']).columns:
                             existing[col] = existing[col].astype(str)
@@ -473,20 +469,20 @@ class H5DataFrameStore:
 
     def delete_column(self, column_name: str, origins: Optional[Iterable[str]] = None) -> bool:
         """Delete a column from all specified origins (or all origins if None).
-        
+
         Args:
             column_name: Name of the column to delete
             origins: List of origins to modify, or None for all origins
-            
+
         Returns:
             True if successful, False otherwise
         """
         if not self._path.exists():
             return True  # Nothing to delete
-        
+
         # Create backup BEFORE any modifications
         backup_path = self._create_backup()
-        
+
         with self._local_lock:
             with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
                 try:
@@ -501,40 +497,40 @@ class H5DataFrameStore:
                                     origins_to_process.append(origin)
                         else:
                             origins_to_process = list(origins)
-                        
+
                         # Process each origin
                         modified_count = 0
                         for origin in origins_to_process:
                             key = self._key(origin)
                             if key not in store:
                                 continue
-                            
+
                             try:
                                 # Load existing data
                                 df = store.select(key)
-                                
+
                                 # Check if column exists (handle column name normalization)
                                 normalized_col = column_name.replace('/', '__SLASH__')
                                 if normalized_col in df.columns:
                                     # Drop the column
                                     df = df.drop(columns=[normalized_col])
-                                    
+
                                     # Remove old key and write updated dataframe
                                     store.remove(key)
                                     if not df.empty:
                                         store.append(key, df, format="table", data_columns=True)
-                                    
+
                                     modified_count += 1
                                     logger.debug(f"[H5DataFrameStore] Deleted column {column_name} from {origin}")
-                                    
+
                             except Exception as exc:
                                 logger.warning(f"[H5DataFrameStore] Failed to delete column from {origin}: {exc}")
                                 continue
-                        
+
                         store.flush()
                         logger.info(f"[H5DataFrameStore] Deleted column {column_name} from {modified_count} origins")
                         return True
-                        
+
                 except Exception as exc:
                     logger.error(f"[H5DataFrameStore] Failed to delete column {column_name}: {exc}")
                     # Restore from backup on error

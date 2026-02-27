@@ -56,7 +56,7 @@ class LedgeredDataFrameManager:
         # Locks
         self._lock = threading.RLock()
         self._queue_lock = threading.Lock()
-        self._buffer_lock = threading.Lock()
+        self._buffer_lock = threading.RLock()
 
         # Columns that should store arrays in separate H5 file
         self._array_columns = [
@@ -104,7 +104,7 @@ class LedgeredDataFrameManager:
         sid_str = str(sid)
         if sid_str in self._df.index:
             return sid_str
-        
+
         return sid
 
     def set_array_store(self, array_store: H5ArrayStore):
@@ -118,6 +118,7 @@ class LedgeredDataFrameManager:
         return self._array_store
 
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
+        logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {len(df)} samples.")
         with self._lock:
             if store is not None:
                 self.set_store(store)
@@ -161,8 +162,14 @@ class LedgeredDataFrameManager:
                 if self._df.empty:
                     self._df = loaded_df.reindex(columns=all_cols)
                 else:
-                    self._df = self._df.reindex(columns=all_cols)
+                    self._df = self._df.reindex(columns=all_cols)  # set columns first to avoid SettingWithCopyWarning
+
+                    # Process the loaded df
                     loaded_df = loaded_df.reindex(columns=all_cols)
+                    loaded_df = loaded_df.reset_index()
+                    loaded_df['sample_id'] = loaded_df['sample_id'].astype(str)  # Ensure str index
+                    loaded_df = loaded_df.set_index('sample_id')
+
                     # Override existing rows
                     self._df.update(loaded_df)
                     # Note: We NO LONGER concat missing_idx here.
@@ -202,23 +209,29 @@ class LedgeredDataFrameManager:
             pass
 
         with self._lock:
-            # Align columns
-            all_cols = df_norm.columns
-            if self._df.empty:
-                self._df = df_norm.reindex(columns=all_cols)
-                return
-
-            # Right-preferred upsert: df_norm overrides existing, adds new rows
-            # Only update columns present in df_norm, keep other columns/values from self._df
-            existing_idx = df_norm.index.intersection(self._df.index)
+            # Align columns: Ensure the global dataframe has all columns present in the update
             missing_cols = df_norm.columns.difference(self._df.columns)
-            if len(existing_idx) > 0:
-                self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
+            if len(missing_cols) > 0:
+                self._df = self._df.reindex(columns=self._df.columns.union(missing_cols))
 
-            # Append rows that do not exist yet
-            missing_idx = df_norm.index.difference(self._df.index)
-            if len(missing_idx) > 0:
-                self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
+            if self._df.empty:
+                # Optimized initial load: just use the normalized dataframe
+                # Ensure we use a copy to avoid side effects
+                self._df = df_norm.copy()
+            else:
+                # Right-preferred upsert: df_norm overrides existing, adds new rows
+                # Only update columns present in df_norm, keep other columns/values from self._df
+                existing_idx = df_norm.index.intersection(self._df.index)
+                all_cols = df_norm.columns
+                if len(existing_idx) > 0:
+                    self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
+
+                # Append rows that do not exist yet
+                missing_idx = df_norm.index.difference(self._df.index)
+                if len(missing_idx) > 0:
+                    self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
+
+            logger.debug(f"[LedgeredDataFrameManager] Global DataFrame updated: {len(self._df)} rows, {len(self._df.columns)} columns.")
 
             # Set missing cols value for bool
             for col in missing_cols:
@@ -237,7 +250,7 @@ class LedgeredDataFrameManager:
             if column in self._df.columns:
                 return self._df.pop(column)
             return None
-        
+
     def mark_dirty_batch(self, sample_ids: List[int], force_flush: bool = False):
         with self._lock:
             self._pending.update(set(sample_ids))
@@ -811,20 +824,38 @@ class LedgeredDataFrameManager:
     ) -> pd.DataFrame:
         """
         Get a copy of the combined dataframe with optional array materialization.
-
-        Args:
-            autoload_arrays: If True, load arrays from arrays.h5 eagerly; if a list/set,
-                only those column names are eagerly loaded; otherwise keep lazy proxies.
-            return_proxies: If True and autoload_arrays is False, return ArrayH5Proxy objects
-            use_cache: When autoloading, allow proxy cache to speed repeated access
-
-        Returns:
-            Copy of the dataframe with array cells resolved according to options
+        Includes buffered records that haven't been flushed to the main store yet.
         """
-        # Work on a copy to avoid mutating the live frame
-        df = self._df
+        with self._lock:
+            if self._df.empty:
+                # Still try to build from buffer if possible
+                with self._buffer_lock:
+                    if not self._buffer:
+                        return pd.DataFrame()
+                    df = pd.DataFrame(list(self._buffer.values())).set_index("sample_id")
+            else:
+                df = self._df.copy()
 
-        if self._array_store is not None:
+        # Merge pending buffer updates for immediate visibility
+        with self._buffer_lock:
+            if self._buffer:
+                buffer_df = pd.DataFrame(list(self._buffer.values()))
+                if not buffer_df.empty:
+                    buffer_df["sample_id"] = buffer_df["sample_id"].apply(self._normalize_sample_id)
+                    buffer_df = buffer_df.set_index("sample_id")
+
+                    # Align and update
+                    if not df.empty:
+                        # Vectorized update
+                        df.update(buffer_df)
+                        # Add completely new rows from buffer
+                        new_rows = buffer_df.index.difference(df.index)
+                        if not new_rows.empty:
+                            df = pd.concat([df, buffer_df.loc[new_rows]])
+                    else:
+                        df = buffer_df
+
+        if self._array_store is not None and not df.empty:
             df = convert_dataframe_to_proxies(
                 df,
                 self._array_columns,
@@ -930,12 +961,12 @@ class LedgeredDataFrameManager:
             buffered = list(self._buffer.values())
             self._buffer = {}
 
-            # Apply records outside buffer lock
-            if buffered:
-                self._apply_buffer_records_nonblocking(buffered)
+        # Apply records outside buffer lock to avoid deadlock
+        if buffered:
+            self._apply_buffer_records_nonblocking(buffered)
 
-            # Flush to H5 if needed
-            self._flush_to_h5_if_needed(force=force)
+        # Flush to H5 if needed outside buffer lock
+        self._flush_to_h5_if_needed(force=force)
 
     def flush(self):
         """Blocking flush to ensure all data is persisted to H5 immediately."""
@@ -946,11 +977,11 @@ class LedgeredDataFrameManager:
             else:
                 buffered = list(self._buffer.values())
                 self._buffer = {}
-        
+
         # 2. Apply records (blocking)
         if buffered:
             self._apply_buffer_records(buffered)
-            
+
         # 3. Force flush to H5 (blocking)
         self._flush_to_h5_if_needed(force=True, blocking=True)
 

@@ -29,6 +29,7 @@ from weightslab.backend.ledgers import (
     get_hyperparams,
     resolve_hp_name,
     get_checkpoint_manager,
+    get_dataframe
 )
 from weightslab.data.sample_stats import SampleStatsEx
 
@@ -261,6 +262,7 @@ class DataLoaderInterface:
         self._pending_iteration_state: Optional[dict] = None
         self.is_training = kwargs.pop("is_training", False)
         self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
+        self.skip_previous_auto_load = kwargs.pop("skip_previous_auto_load", False)
 
         if isinstance(data_loader_or_dataset, DataLoader):
             logger.warning(
@@ -382,6 +384,21 @@ class DataLoaderInterface:
             if checkpoint_manager is None:
                 return
 
+            # Check if we should skip loading from hyperparameters
+            _skip = self.skip_previous_auto_load
+            if not _skip:
+                try:
+                    from weightslab.backend.ledgers import get_hyperparams
+                    hp = get_hyperparams()
+                    if isinstance(hp, dict):
+                        _skip = hp.get('skip_checkpoint_load', False)
+                except Exception:
+                    pass
+
+            if _skip:
+                logger.info(f"Skipping data checkpoint auto-load for {self._ledger_name or 'unnamed loader'} as requested.")
+                return
+
             # Get latest experiment hash
             latest_hash = None
             if hasattr(checkpoint_manager, 'current_exp_hash') and checkpoint_manager.current_exp_hash:
@@ -412,9 +429,12 @@ class DataLoaderInterface:
                     snapshot_df = data_state.get('snapshot')
 
                     if snapshot_df is not None and not snapshot_df.empty:
-                        if hasattr(self.tracked_dataset, 'upsert_df'):
-                            self.tracked_dataset.upsert_df(snapshot_df, force_flush=True)
+                        dfm = get_dataframe()
+                        if dfm != None and hasattr(dfm, 'upsert_df'):
+                            dfm.upsert_df(snapshot_df, force_flush=True)
                             logger.info(f"Applied data snapshot from checkpoint ({len(snapshot_df)} rows)")
+                        else:
+                            logger.warning("Data snapshot loaded from checkpoint but dataframe manager is not available; cannot apply snapshot")
                 except Exception as e:
                     logger.warning(f"Failed to apply data snapshot: {e}")
 
@@ -492,7 +512,7 @@ class DataLoaderInterface:
             except Exception:
                 # Best-effort: skip if we cannot set the property
                 continue
-        
+
         # Proxy class_names if available on the wrapped dataset
         if hasattr(self.dataset, 'class_names'):
              self.class_names = self.dataset.class_names
@@ -556,7 +576,7 @@ class DataLoaderInterface:
         handles StopIteration by recreating the underlying iterator. This
         makes ``for batch in dataloader_interface`` loop forever over epochs
         without the user having to call ``reset_iterator`` manually.
-        """ 
+        """
         self._sync_batch_size_from_ledger()
         self._wait_if_paused()
         self._reset_iterator()  # Reset
@@ -640,7 +660,7 @@ class DataLoaderInterface:
             # Reset offset tracking for new epoch
             self._sample_offset = 0
             self._reset_iterator()
-            
+
             # Try to get first batch from new epoch
             try:
                 batch = next(self._iterator)
@@ -665,7 +685,7 @@ class DataLoaderInterface:
                             diagnostic_info["deny_listed_count"] = (df[SampleStatsEx.DISCARDED.value] == True).sum() if SampleStatsEx.DISCARDED.value in df.columns else 0
                     except Exception as e:
                         diagnostic_info["dataset_info_error"] = str(e)
-                
+
                 logger.warning(
                     f"Dataloader exhausted after reset. Diagnostic info: {diagnostic_info}"
                 )
@@ -703,14 +723,14 @@ class DataLoaderInterface:
 
     def _reset_iterator(self) -> None:
         """Reset the internal iterator so `_next_batch()` starts from the beginning.
-        
+
         For dataloaders with num_workers > 0, this explicitly cleans up the old iterator
         and its worker processes before creating a new one to avoid deadlocks or resource leaks.
         Also resets the sampler's offset to ensure we don't skip samples on new epochs.
         """
         import gc
         import time
-        
+
         # Explicitly delete old iterator to allow worker processes to be cleaned up
         if hasattr(self, '_iterator') and self._iterator is not None:
             try:
@@ -718,14 +738,14 @@ class DataLoaderInterface:
                 logger.debug("Deleted old iterator for cleanup")
             except Exception as e:
                 logger.debug(f"Failed to delete old iterator: {e}")
-        
+
         # Force garbage collection to ensure worker processes are terminated
         # This is especially important when num_workers > 0
         try:
             gc.collect()
         except Exception:
             pass
-        
+
         # Reset sampler's offset for new epoch (important: prevents skipping samples on subsequent epochs)
         if hasattr(self, '_mutable_batch_sampler') and self._mutable_batch_sampler is not None:
             if hasattr(self._mutable_batch_sampler, 'offset'):
@@ -733,12 +753,12 @@ class DataLoaderInterface:
                 self._mutable_batch_sampler.offset = 0
                 if old_offset > 0:
                     logger.debug(f"Reset sampler offset from {old_offset} to 0")
-        
+
         # Give worker processes time to fully terminate (especially important with num_workers > 0)
         # Short delay to avoid race conditions when spawning new workers
         if hasattr(self.dataloader, 'num_workers') and self.dataloader.num_workers > 0:
             time.sleep(0.01)  # 10ms delay for worker cleanup
-        
+
         # Create new iterator
         self._iterator = iter(self.dataloader)
         logger.debug(f"Created new iterator (num_workers={getattr(self.dataloader, 'num_workers', 'unknown')}, sampler_len={len(self._mutable_batch_sampler) if self._mutable_batch_sampler else 'N/A'})")

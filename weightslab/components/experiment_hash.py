@@ -13,6 +13,7 @@ Combined into a 24-byte hash that allows tracking what changed between versions.
 import hashlib
 import json
 import logging
+from time import time
 import torch as th
 
 from typing import Any, Dict, Optional, Set
@@ -53,6 +54,7 @@ class ExperimentHashGenerator:
         config: Optional[Dict[str, Any]] = None,
         data_state: Optional[Dict[str, Any]] = None,
         model_init_step: int = 0,
+        _last_time_loaded: float = 0.0
     ) -> str:
         """Generate a unique hash for the current experiment configuration.
 
@@ -69,7 +71,7 @@ class ExperimentHashGenerator:
         """
         # Generate individual 8-byte hashes
         hp_hash = self._hash_config(config) if config is not None else "00000000"
-        model_hash = self._hash_model(model, model_init_step=model_init_step) if model is not None else "00000000"
+        model_hash = self._hash_model(model, model_init_step=model_init_step, _last_time_loaded=_last_time_loaded) if model is not None else "00000000"
         data_hash = self._hash_data_state(data_state) if data_state is not None else "00000000"
 
         # Combine into 24-byte hash: HP (8) + MODEL (8) + DATA (8)
@@ -94,7 +96,8 @@ class ExperimentHashGenerator:
         config: Optional[Dict[str, Any]] = None,
         data_state: Optional[Dict[str, Any]] = None,
         model_init_step: int = 0,
-        force: bool = False
+        force: bool = False,
+        _last_time_loaded: float = 0.0
     ) -> tuple[bool, Set[str]]:
         """Check if the experiment configuration has changed.
 
@@ -119,7 +122,7 @@ class ExperimentHashGenerator:
 
         # Check model
         if model is not None:
-            model_hash = self._hash_model(model, model_init_step=model_init_step)
+            model_hash = self._hash_model(model, model_init_step=model_init_step, _last_time_loaded=_last_time_loaded)
             if model_hash != self._last_model_hash or force:
                 changed_components.add('model')
 
@@ -136,7 +139,7 @@ class ExperimentHashGenerator:
 
         return has_changed, changed_components
 
-    def _hash_model(self, model: th.nn.Module, model_init_step: int = 0) -> str:
+    def _hash_model(self, model: th.nn.Module, model_init_step: int = 0, _last_time_loaded: float = 0.0) -> str:
         """Generate a hash from model architecture.
 
         This captures the model structure (layer types, parameters, connections)
@@ -157,6 +160,7 @@ class ExperimentHashGenerator:
             arch_info = []
 
             # Model class name
+            arch_info.append(f"previously_loaded:{_last_time_loaded}")  # Add a unique timestamp to ensure different hash for each load, even if architecture is the same
             arch_info.append(f"class:{model.__class__.__name__}")
             arch_info.append(f"init_step:{int(model_init_step)}")
 

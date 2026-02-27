@@ -48,7 +48,7 @@ class ExperimentService:
         if request.break_by_slices:
             tags = list(request.tags) if request.tags else []
             graph_name = request.graph_name if hasattr(request, 'graph_name') and request.graph_name else None
-            
+
             # Get sample IDs that match the given tags
             sample_ids = set()
             if tags:
@@ -65,14 +65,14 @@ class ExperimentService:
                                 mask = df[tag_col] == True
                             else:
                                 mask = mask & (df[tag_col] == True)
-                    
+
                     if mask is not None:
                         filtered_df = df[mask]
                         sample_ids = set(filtered_df.index.tolist())
 
             # Get per-sample history from signal_logger
             history_per_sample = signal_logger.get_signal_history_per_sample()
-            
+
             # Collect all points for matching samples, filtered by graph_name if specified
             if graph_name not in history_per_sample:
                 return pb2.GetLatestLoggerDataResponse(points=[])  # No data for this graph_name
@@ -207,8 +207,8 @@ class ExperimentService:
                     experiment_hash,
                     load_model=True,
                     load_weights=True,
-                    load_config=False,
-                    load_data=False,
+                    load_config=True,
+                    load_data=True,
                     target_step=target_step,
                 )
             else:
@@ -339,9 +339,6 @@ class ExperimentService:
                     success=False,
                     message=f"Failed to set hyperparameters: {e}",
                 )
-                
-            return pb2.CommandResponse(success=True, message="Hyper parameter changed")
-                    
             if request.HasField("load_checkpoint_operation"):
                 with weightslab_rlock:
                     # Pause training if it's currently running
@@ -370,6 +367,11 @@ class ExperimentService:
                             success=False,
                             message=str(e),
                         )
+                # Successful checkpoint load return
+                return pb2.CommandResponse(success=True, message=f"Loaded checkpoint {checkpoint_id}")
+
+            # Default return for other commands (e.g. hyperparameter changes)
+            return pb2.CommandResponse(success=True, message="Command executed successfully")
 
         # Read requests
         response = pb2.CommandResponse(success=True, message="")

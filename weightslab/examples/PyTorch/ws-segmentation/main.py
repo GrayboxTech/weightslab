@@ -129,6 +129,7 @@ class BDD100kSegDataset(Dataset):
         num_classes=6,
         ignore_index=255,
         image_size=256,
+        max_samples=None
     ):
         super().__init__()
         self.root = root
@@ -145,7 +146,7 @@ class BDD100kSegDataset(Dataset):
             for f in os.listdir(img_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
-        image_files = sorted(set(image_files))
+        image_files = sorted(set(image_files))[:max_samples] if max_samples is not None else sorted(set(image_files))  # Optionally limit number of samples for faster testing
 
         self.images = []
         self.masks = []
@@ -340,6 +341,7 @@ if __name__ == "__main__":
         num_classes=num_classes,
         ignore_index=ignore_index,
         image_size=image_size,
+        max_samples=train_cfg.get("max_samples", None)  # Optionally limit number of samples for faster testing
     )
     _val_dataset = BDD100kSegDataset(
         root=data_root,
@@ -347,6 +349,7 @@ if __name__ == "__main__":
         num_classes=num_classes,
         ignore_index=ignore_index,
         image_size=image_size,
+        max_samples=test_cfg.get("max_samples", None)  # Optionally limit number of samples for faster testing
     )
 
     train_loader = wl.watch_or_edit(
@@ -377,16 +380,20 @@ if __name__ == "__main__":
     )
 
     # --- 6) Model, optimizer, losses, metric ---
-    model = SmallUNet(
+    _model = SmallUNet(
         in_channels=3, num_classes=num_classes, image_size=image_size
     ).to(device)
     model = wl.watch_or_edit(
-        model,
+        _model,
         flag="model",
         device=device
     )
     lr = parameters.get("optimizer", {}).get("lr", 1e-3)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    _optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = wl.watch_or_edit(
+        _optimizer,
+        flag="optimizer",
+    )
 
     # --- Compute class weights to handle class imbalance ---
     print("\n" + "=" * 60)
@@ -445,11 +452,13 @@ if __name__ == "__main__":
     test_loss, test_metric = None, None
     start_time = time.time()
     for train_step in train_range:
+        age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
+
         # Train
         train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
 
         # Test
-        if train_step == 0 or train_step % eval_every == 0:
+        if age == 0 or age % eval_every == 0:
             test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
             test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(test_loader_it, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
@@ -458,7 +467,7 @@ if __name__ == "__main__":
         if verbose and not tqdm_display:
             print(
                 "Training.. " +
-                f"Step {train_step}: " +
+                f"Step {train_step} (Age {age}): " +
                 f"| Train Loss: {train_loss:.4f} " +
                 (f"| Test Loss: {test_loss:.4f} " if test_loss is not None else '') +
                 (f"| Test Acc mlt: {test_metric:.2f}% " if test_metric is not None else '')

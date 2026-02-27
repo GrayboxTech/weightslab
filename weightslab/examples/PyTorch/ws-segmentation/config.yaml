@@ -6,8 +6,8 @@ experiment_name: seg_usecase
 compute_natural_sort: true
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 100
-experiment_dump_to_train_steps_ratio: 150
+eval_full_to_train_steps_ratio: 5
+experiment_dump_to_train_steps_ratio: 5
 tqdm_display: true
 is_training: false  # Start training immediately or not
 
@@ -29,6 +29,8 @@ data:
   train_loader:
     batch_size: 32
     shuffle: true
+    max_samples: 256
   test_loader:
     batch_size: 32
     shuffle: false
+    max_samples: 100

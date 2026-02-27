@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
 class MNISTCustomDataset(Dataset):
     """
     Custom MNIST dataset that includes filepath metadata for each image.
-    
+
     Returns tuples of (image, label, filepath) where filepath is stored
     as metadata that can be tracked by WeightsLab.
     """
-    
+
     def __init__(self, root, train=True, download=False, transform=None):
         """
         Args:
@@ -57,20 +57,20 @@ class MNISTCustomDataset(Dataset):
         self.transform = transform
         self.train = train
         self.root = root
-        
+
         # Build filepath mapping for each sample
         self._build_filepath_mapping()
-    
+
     def _build_filepath_mapping(self):
         """Build a mapping of sample index to filepath."""
         self.filepaths = {}
-        
+
         # For each index, construct a meaningful filepath
         # MNIST doesn't have original individual files, so we create virtual paths
         for idx in range(len(self.mnist)):
             label = self.mnist.targets[idx].item() if hasattr(self.mnist.targets[idx], 'item') else self.mnist.targets[idx]
             split = 'train' if self.train else 'test'
-            
+
             # Create a virtual filepath that identifies the image
             virtual_path = os.path.join(
                 'MNIST',
@@ -80,21 +80,21 @@ class MNISTCustomDataset(Dataset):
                 f'sample_{idx:05d}.pt'
             )
             self.filepaths[idx] = virtual_path
-    
+
     def __len__(self):
         return len(self.mnist)
-    
+
     def __getitem__(self, idx):
         """
         Returns:
             tuple: (image, idx, label)
         """
         image, label = self.mnist[idx]
-        
+
         # Apply transform if provided
         if self.transform:
             image = self.transform(image)
-        
+
         return image, idx, label
 
 
@@ -363,11 +363,13 @@ if __name__ == "__main__":
     train_loss = None
     test_loss, test_metric = None, None
     for train_step in train_range:
+        age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
+
         # Train one step
         train_loss = train(train_loader, model, optimizer, train_criterion, device)
 
         # Periodic test evaluation
-        if train_step > 0 and train_step % eval_every == 0:
+        if age > 0 and age % eval_every == 0:
             # Test (no nested progress bar)
             test_loss, test_metric = test(
                 test_loader,
@@ -382,7 +384,7 @@ if __name__ == "__main__":
         if verbose and not tqdm_display:
             import sys
             # Build compact progress message
-            msg = f"Step {train_step}: Loss={train_loss:.4f}"
+            msg = f"Step {train_step} (Age {age}): Loss={train_loss:.4f}"
             if test_loss is not None:
                 msg += f" | Test={test_loss:.4f} ({test_metric:.1f}%)"
 

@@ -22,7 +22,7 @@ import numpy as np
 
 # Config global logger
 logger = logging.getLogger(__name__)
-UINT_DEFAULT = 8  # Default to uint8 for array normalization
+UINT_DEFAULT = 16  # Default to uint8 for array normalization
 
 
 class LRUArrayCache:
@@ -248,7 +248,7 @@ class _InterProcessFileLock:
                 self._fh = None
 
 
-def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, uint: int = 8) -> Tuple[np.ndarray, Dict[str, Any]]:
+def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, uint: int = 16) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     Normalize array to uint16 for efficient storage.
 
@@ -266,7 +266,7 @@ def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, ui
         'normalized': False
     }
 
-    uint_dtype = np.uint8 if uint == 8 and arr.max() <= 255 else np.uint16
+    uint_dtype = np.uint8 if uint == 8 else np.uint16
     if preserve_original or arr.dtype == uint_dtype:
         return arr, metadata
 
@@ -277,10 +277,19 @@ def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, ui
     metadata['normalized'] = True
     metadata['min'] = float(arr_min)
     metadata['max'] = float(arr_max)
+    metadata['uint'] = uint
 
     if arr_max == arr_min:
-        # Constant array
-        return np.full(arr.shape, 2**(uint - 1), dtype=uint_dtype), metadata
+        if arr_max == 0:
+            # All zeros, can store as uint with zero values
+            metadata['normalized'] = False  # No need to normalize if all values are the same
+            return np.zeros(arr.shape, dtype=uint_dtype), metadata
+        elif arr_max < 2**uint - 1:
+            # Constant array
+            return arr.astype(uint_dtype), metadata
+        elif arr_max >= 2**uint - 1:
+            # Constant array exceeding uint range
+            return np.full(arr.shape, arr_max//2**uint - 1, dtype=uint_dtype), metadata
     elif arr_min >= 0 and arr_max <= 2**uint - 1:
         # Already in uint range
         return arr.astype(uint_dtype), metadata
@@ -290,7 +299,7 @@ def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, ui
     return normalized, metadata
 
 
-def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any], uint: int = 8) -> np.ndarray:
+def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any], uint: int = 16) -> np.ndarray:
     """
     Reconstruct original array from normalized uint16 version using metadata.
 
@@ -310,6 +319,7 @@ def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any], uint: int = 8) 
     # Denormalize from uint range
     arr_min = metadata['min']
     arr_max = metadata['max']
+    uint = metadata.get('uint', uint)  # Default to 16 if not specified
     original_dtype = np.dtype(metadata['original_dtype'])
 
     # Scale back from 0-65535 to original range
@@ -614,7 +624,7 @@ class H5ArrayStore:
 
                     # Denormalize if needed
                     if metadata.get('normalized', False):
-                        array = denormalize_array(array, metadata, uint=UINT_DEFAULT)
+                        array = denormalize_array(array, metadata)
 
                     # Cache the loaded array
                     self._cache.put(path_ref, array)

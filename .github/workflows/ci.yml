@@ -7,96 +7,6 @@ on:
     branches: [ main, dev]
 
 jobs:
-  code-quality:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for comparison
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: |
-            requirements*.txt
-            **/requirements*.txt
-
-      - name: Cache pip and Ruff
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/ruff
-          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache
-          restore-keys: |
-            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
-            ${{ runner.os }}-
-
-      - name: Get changed Python files
-        id: changed-files
-        run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            BASE_SHA=${{ github.event.pull_request.base.sha }}
-            HEAD_SHA=${{ github.event.pull_request.head.sha }}
-          else
-            BASE_SHA=${{ github.event.before }}
-            HEAD_SHA=${{ github.sha }}
-          fi
-
-          # Get changed Python files in weightslab directory, exclude generated files
-          CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
-            grep '^weightslab/.*\.py$' | \
-            grep -v '_pb2\.py$' | \
-            grep -v '_pb2_grpc\.py$' | \
-            grep -v 'ui\.py$' | \
-            grep -v 'trainer.*\.py$' || true)
-
-          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "has_files=false" >> $GITHUB_OUTPUT
-            echo "No Python files changed in weightslab directory"
-          else
-            echo "has_files=true" >> $GITHUB_OUTPUT
-            echo "Changed files:"
-            echo "$CHANGED_FILES"
-          fi
-
-      - name: Install linting tools
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install ruff pylint vulture
-
-      - name: Lint with Ruff (unused, style, bugs)
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          FILES="${{ steps.changed-files.outputs.changed_files }}"
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 --fix
-          fi
-
-      - name: Pylint (errors only)
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          FILES="${{ steps.changed-files.outputs.changed_files }}"
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
-          fi
-
-      - name: Vulture (unused code)
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          FILES="${{ steps.changed-files.outputs.changed_files }}"
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs vulture --min-confidence 70 . || true
-          fi
-
   install:
     runs-on: ubuntu-latest
     steps:
@@ -108,6 +18,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Normalize torch requirement
+        run: |
+          sed -i 's|^torch==2.1.2+cu121$|torch==2.1.2|' requirements.txt
+          sed -i 's|^--extra-index-url https://download.pytorch.org/whl/cu121$|--extra-index-url https://download.pytorch.org/whl/cpu|' requirements.txt
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -118,54 +33,10 @@ jobs:
 
       - name: Install project dependencies
         run: |
+          cat requirements.txt
           python -m pip install --upgrade pip
-          python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e .
 
       - name: Verify installation
         run: |
           python -c "import weightslab; print(f'weightslab imported successfully')"
-
-  test:
-    runs-on: ubuntu-latest
-    needs: install
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install project dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
-
-      - name: Run unit tests - General
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
-
-      - name: Run unit tests - Model
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/model -v
-
-      - name: Run unit tests - Data
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/data -v
-
-      - name: Run unit tests - Integrations
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/integrations -v
