@@ -1,0 +1,111 @@
+@import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap");
+
+html,
+body {
+  font-family: Montserrat, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    Segoe UI, Roboto, Helvetica Neue, Arial, Noto Sans, sans-serif,
+    Apple Color Emoji, Segoe UI Emoji, Segoe UI Symbol, Noto Color Emoji;
+}
+
+article h1,
+article h2,
+article h3,
+article h4,
+article h5,
+article h6 {
+  font-family: "Montserrat", sans-serif;
+  font-weight: 600;
+}
+
+article h1 {
+  font-size: 2.2rem;
+}
+
+article h2 {
+  font-size: 1.8rem;
+}
+
+article h3 {
+  font-size: 1.45rem;
+}
+
+article p,
+article li {
+  line-height: 1.75;
+}
+
+.mermaid {
+  background: transparent;
+}
+
+.wl-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  margin: 0.4rem 0 1.4rem;
+  text-align: center;
+}
+
+.wl-hero-logo {
+  max-width: min(680px, 92%);
+  width: 100%;
+  height: auto;
+}
+
+.wl-only-dark {
+  display: none;
+}
+
+body[data-theme="dark"] .wl-only-light {
+  display: none;
+}
+
+body[data-theme="dark"] .wl-only-dark {
+  display: block;
+}
+
+.wl-hero-subtitle {
+  font-size: 1.03rem;
+  margin: 0;
+}
+
+.wl-hero-cta-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.6rem;
+  margin-top: 0.3rem;
+}
+
+.wl-hero-cta,
+.wl-hero-cta:link,
+.wl-hero-cta:visited,
+.wl-hero-cta:active,
+.wl-hero-cta:focus {
+  display: inline-block;
+  padding: 0.55rem 1rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  font-weight: 600;
+  text-decoration: none;
+  background: #5f7393 !important;
+  border-color: #5f7393 !important;
+  color: #ffffff !important;
+}
+
+.wl-hero-cta:hover {
+  background: #6f83a2 !important;
+  border-color: #6f83a2 !important;
+}
+
+.wl-hero-cta-secondary {
+  background: transparent;
+  color: inherit !important;
+  border-color: currentColor;
+}
+
+.wl-hero-cta-secondary:hover {
+  background: rgba(120, 120, 120, 0.12);
+}

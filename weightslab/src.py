@@ -1,5 +1,8 @@
-""" The Experiment class is the main class of the graybox package.
-It is used to train and evaluate models. """
+"""Public WeightsLab SDK entry points.
+
+This module provides the user-facing helpers that are re-exported at package
+level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
+"""
 import os
 import sys
 import time
@@ -439,13 +442,23 @@ def _update_log_directory(new_log_dir: str):
 
 def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwargs) -> None:
     """
-    Watch or edit the given object.
+    Register or wrap an object so WeightsLab can observe and interact with it.
 
     Args:
-        obj (Callable): The object to watch or edit.
-        flag (str): The flag specifying the type of object to watch or
-        edit.
-        kwargs (Any): Additional keyword arguments to pass.
+        obj: Object to register. Common values are model, dataloader,
+            optimizer, logger, metric/loss object, or hyperparameter config.
+        obj_name: Optional explicit object name.
+        flag: Registration mode. Supported values include ``model``,
+            ``dataloader``/``dataset``/``data``, ``optimizer``, ``logger``,
+            ``loss``/``metric``/``signal``, and
+            ``hp``/``hyperparams``/``parameters``.
+        **kwargs: Additional options forwarded to the corresponding wrapper.
+
+    Returns:
+        A ledger proxy when available, otherwise the wrapped/registered object.
+
+    Raises:
+        ValueError: If ``flag`` is missing or unsupported.
     """
 
     # Sanity check on obj name attribute
@@ -770,11 +783,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 # ##############################################################################################################
 
 def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
-    """ Serve the trainer services.
+    """Start WeightsLab services.
 
     Args:
-        serving_cli (bool): Whether to use the CLI.
-        serving_grpc (bool): Whether to serve gRPC.
+        serving_cli: Start the interactive CLI server.
+        serving_grpc: Start the gRPC server.
+        **kwargs: Extra server options passed to underlying backends.
     """
 
     if serving_grpc:
@@ -785,7 +799,11 @@ def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> No
 
 
 def keep_serving(timeout: int = None) -> None:
-    """ Keep the main thread alive to allow background serving threads to run.
+    """Keep process alive while background WeightsLab services are running.
+
+    Args:
+        timeout: Maximum number of seconds to keep running. If ``None``, runs
+            until interrupted.
     """
     start_time = time.time()
     try:
@@ -800,7 +818,20 @@ def keep_serving(timeout: int = None) -> None:
 #  Signal Definition & Computation Helpers
 def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
-    Decorator to register a custom signal function.
+    Decorator that registers a custom signal function.
+
+    Static signals are typically computed from samples via
+    :func:`compute_signals`. Dynamic signals can subscribe to a training metric
+    and run every ``compute_every_n_steps``.
+
+    Args:
+        name: Public signal name. Defaults to decorated function name.
+        subscribe_to: Optional signal/metric name this signal reacts to.
+        compute_every_n_steps: Frequency for dynamic computation.
+        **kwargs: Additional signal metadata stored in the ledger.
+
+    Returns:
+        Callable: A decorator that registers the function and returns it.
 
     Usage:
         @wl.signal(name="blue_pixels")
@@ -833,12 +864,17 @@ def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: in
 
 def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = None):
     """
-    Execute registered signals on a dataset and update the central DataFrame.
+    Execute static registered signals over a dataset and persist results.
 
     Args:
-        dataset_or_loader: The dataset or dataloader to process.
-        origin: The split name (e.g. 'train', 'val'). Auto-detected if possible.
-        signals: List of signal names to run. If None, runs all registered signals.
+        dataset_or_loader: Dataset, dataloader, or WeightsLab tracked loader.
+        origin: Dataset split (for example ``train`` or ``val``). If omitted,
+            this is inferred when possible.
+        signals: Optional subset of signal names to run. If omitted, all
+            registered static signals are used.
+
+    Returns:
+        None. Results are upserted into the global dataframe ledger.
     """
     global DATAFRAME_M
     if DATAFRAME_M is None:
