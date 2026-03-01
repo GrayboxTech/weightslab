@@ -2,7 +2,7 @@ name: Docs (GitHub Pages)
 
 on:
   push:
-    branches: [main]
+    branches: [docstring,main]
   workflow_dispatch:
 
 permissions:

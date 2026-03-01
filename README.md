@@ -4,6 +4,13 @@
     alt="Graybox Logo"
     height="250"
   />
+
+  <p>
+    <a href="https://graybx.com/">Website</a> |
+    <a href="https://grayboxtech.github.io/weightslab/">Docs</a> |
+    <a href="https://join.slack.com/t/grayboxcommunity/shared_invite/zt-3gtjg2p4y-UmSQC9pgAs8ZNE_gy4D~5A">Slack</a> |
+    <a href="https://www.linkedin.com/company/graybx-com/">Linkedin</a>
+  </p>
 </div>
 
 </pred>
