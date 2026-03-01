@@ -26,7 +26,6 @@ from weightslab.components.global_monitoring import (
 
 # Setup loggers
 logging.basicConfig(level=logging.ERROR)
-os.environ["GRPC_VERBOSITY"] = "debug"
 logging.getLogger("PIL").setLevel(logging.INFO)
 
 

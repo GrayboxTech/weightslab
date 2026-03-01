@@ -4,6 +4,13 @@
     alt="Graybox Logo"
     height="250"
   />
+
+  <p>
+    <a href="https://graybx.com/">Website</a> |
+    <a href="https://grayboxtech.github.io/weightslab/">Docs</a> |
+    <a href="https://join.slack.com/t/grayboxcommunity/shared_invite/zt-3gtjg2p4y-UmSQC9pgAs8ZNE_gy4D~5A">Slack</a> |
+    <a href="https://www.linkedin.com/company/graybx-com/">Linkedin</a>
+  </p>
 </div>
 
 </pred>
@@ -67,15 +74,62 @@ cd weightslab_ui
 pip install -r ./requirements.txt
 ```
 
+### Documentation (API + SDK)
+
+WeightsLab includes a Sphinx documentation site in `docs/`.
+
+Build once:
+```bash
+pip install -r docs/requirements.txt
+sphinx-build -b html docs docs/_build/html
+```
+
+Serve on localhost with auto-reload:
+```bash
+sphinx-autobuild docs docs/_build/html --host 127.0.0.1 --port 8000
+```
+
+Open: `http://127.0.0.1:8000`
+
 
 ### Cookbook
 
 Check out our materials, with examples from toy to more complex models.
 
 Quickstart examples:
-- [Weights Lab - Cls toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/ws-classification)
-- [Weights Lab - Cls toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/ws-segmentation)
-- [Weights Lab - Cls toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/ws-detection)
+- [WeightsLab - Classification toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-classification)
+- [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-segmentation)
+- [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-detection)
+- [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch_Lightning/ws-classification)
+
+### New docs: practical use-case + Lightning
+
+- Use-case walkthrough (commented, end-to-end): `docs/usecases.rst`
+- PyTorch Lightning integration (including multi-GPU): `docs/pytorch_lightning.rst`
+
+#### PyTorch Lightning + multi-GPU (quick snippet)
+
+```python
+import torch
+import pytorch_lightning as pl
+
+use_gpu = torch.cuda.is_available()
+gpu_count = torch.cuda.device_count() if use_gpu else 0
+multi_gpu = gpu_count > 1
+
+trainer = pl.Trainer(
+  max_epochs=max_epochs,
+  accelerator="gpu" if use_gpu else "cpu",
+  devices=gpu_count if multi_gpu else 1,
+  strategy="ddp" if multi_gpu else "auto",
+  sync_batchnorm=multi_gpu,
+  use_distributed_sampler=multi_gpu,
+  logger=False,
+  enable_checkpointing=False,
+)
+```
+
+When using WeightsLab in Lightning steps, keep passing `batch_ids` to tracked losses/signals to preserve per-sample traceability.
 
 <!-- ### Documentation -->
 
