@@ -42,7 +42,6 @@ enable_h5_persistence: true
 is_training: false
 
 # Data loaders configuration
-data_root: ../datasets/mnist
 data:
   train_loader:
     batch_size: 64
