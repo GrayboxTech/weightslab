@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from datetime import datetime
-from typing import Dict, Sequence, Any, List
+from typing import Dict, Sequence, Any, List, Union
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
@@ -35,13 +35,13 @@ class LedgeredDataFrameManager:
 
     def __init__(self, flush_interval: float = 3.0, flush_max_rows: int = 100, enable_flushing_threads: bool = True, enable_h5_persistence: bool = True):
         self._df: pd.DataFrame = pd.DataFrame()
-        self._store: H5DataFrameStore | None = None
-        self._array_store: H5ArrayStore | None = None
+        self._store: Union[H5DataFrameStore, None] = None
+        self._array_store: Union[H5ArrayStore, None] = None
         self._pending: set[int] = set()
         self._force_flush = False
         self._flush_interval = flush_interval
         self._flush_max_rows = flush_max_rows
-        self._flush_thread: threading.Thread | None = None
+        self._flush_thread: Union[threading.Thread, None] = None
         self._flush_stop = threading.Event()
         self._flush_event = threading.Event()  # Event to wake thread for force flush
         self._flush_queue_count = 0
@@ -113,11 +113,11 @@ class LedgeredDataFrameManager:
             if self._enable_h5_persistence:
                 self._array_store = array_store
 
-    def get_array_store(self) -> H5ArrayStore | None:
+    def get_array_store(self) -> Union[H5ArrayStore, None]:
         """Get the array store instance."""
         return self._array_store
 
-    def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
+    def register_split(self, origin: str, df: Union[List, pd.DataFrame], store: Union[H5DataFrameStore, None] = None, autoload_arrays: Union[bool, list, set] = False, return_proxies: bool = True, use_cache: bool = True):
         logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {len(df)} samples.")
         with self._lock:
             if store is not None:
@@ -133,7 +133,7 @@ class LedgeredDataFrameManager:
         # Start flush thread if not already running
         self._ensure_flush_thread()
 
-    def _load_existing_data(self, origin: str = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
+    def _load_existing_data(self, origin: str = None, autoload_arrays: Union[bool, list, set] = False, return_proxies: bool = True, use_cache: bool = True):
         if not self._enable_h5_persistence:
             return
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
@@ -179,7 +179,7 @@ class LedgeredDataFrameManager:
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
-    def upsert_df(self, df_local: List | pd.DataFrame, origin: str = None, force_flush: bool = False):
+    def upsert_df(self, df_local: Union[List, pd.DataFrame], origin: str = None, force_flush: bool = False):
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
             return
 
@@ -318,7 +318,7 @@ class LedgeredDataFrameManager:
         except Exception:
             return None
 
-    def _safe_loss_dict(self, losses: Dict[str, Any] | None, idx: int) -> Dict[str, Any] | None:
+    def _safe_loss_dict(self, losses: Union[Dict[str, Any], None], idx: int) -> Union[Dict[str, Any], None]:
         if not losses:
             return None
         out: Dict[str, Any] = {}
@@ -366,11 +366,11 @@ class LedgeredDataFrameManager:
     def enqueue_batch(
         self,
         sample_ids: Sequence[int],
-        preds_raw: np.ndarray | None,
-        preds: np.ndarray | None,
-        losses: Dict[str, Any] | None,
-        targets: np.ndarray | None = None,
-        step: int | None = None
+        preds_raw: Union[np.ndarray, None],
+        preds: Union[np.ndarray, None],
+        losses: Union[Dict[str, Any], None],
+        targets: Union[np.ndarray, None] = None,
+        step: Union[int, None] = None
     ):
         """
             Enqueue a batch of sample stats for later flush.
@@ -474,7 +474,7 @@ class LedgeredDataFrameManager:
                         self._df = self._df.reindex(columns=df_local.columns)
                     self._df.loc[df_local.index, df_local.columns] = df_local
 
-    def get_row(self, origin: str, sample_id: int) -> pd.Series | None:
+    def get_row(self, origin: str, sample_id: int) -> Union[pd.Series, None]:
         with self._lock:
             if self._df.empty:
                 return None
@@ -818,7 +818,7 @@ class LedgeredDataFrameManager:
 
     def get_combined_df(
         self,
-        autoload_arrays: bool | list | set = False,
+        autoload_arrays: Union[bool, list, set] = False,
         return_proxies: bool = True,
         use_cache: bool = True,
     ) -> pd.DataFrame:

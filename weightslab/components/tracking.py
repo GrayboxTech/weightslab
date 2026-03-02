@@ -2,7 +2,7 @@
 import logging
 import enum
 from collections import defaultdict
-from typing import Set, List
+from typing import Set, List, Union
 import torch as th
 
 from weightslab.modules.neuron_ops import NeuronWiseOperations
@@ -23,8 +23,8 @@ class TrackingMode(str, enum.Enum):
 
 def add_tracked_attrs_to_input_tensor(
         indata: th.Tensor,
-        in_id_batch: th.Tensor | None,
-        label_batch: th.Tensor | None):
+    in_id_batch: Union[th.Tensor, None],
+    label_batch: Union[th.Tensor, None]):
 
     """
     Helper function that attaches to the input tensors useful infos. This

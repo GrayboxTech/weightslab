@@ -138,7 +138,7 @@ def restore_rng_state(rng_state):
     except Exception as e:
         logger.error(f"Error restoring RNG state: {e}")
 
-def extract_in_out_params(module: nn.Module) -> List[int | str]:
+def extract_in_out_params(module: nn.Module) -> List:
     """
     Detects and returns the primary input and output dimension parameters
     for a given PyTorch module instance, based on commmon templates.
@@ -274,7 +274,7 @@ def is_module_with_ops(module: nn.Module) -> bool:
 
 
 # Helper to retrieve module instance by its submodule path
-def get_module_by_name(model: nn.Module, name: str) -> nn.Module | None:
+def get_module_by_name(model: nn.Module, name: str) -> Union[nn.Module, None]:
     """
         Safely retrieves a module instance from the model based on its FX
         target name.

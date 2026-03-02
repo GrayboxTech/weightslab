@@ -3,7 +3,7 @@ import torch as th
 
 from torch import nn
 from enum import Enum
-from typing import List, Set, Optional, Callable, Dict, Any
+from typing import List, Set, Optional, Callable, Dict, Any, Union
 
 from weightslab.components.tracking import TrackingMode
 from weightslab.utils.tools import get_children
@@ -168,7 +168,7 @@ class NetworkWithOps(nn.Module):
     def operate(
         self,
         layer_id: int,
-        neuron_indices: Set[int] | int = {},
+        neuron_indices: Union[Set[int], int] = {},
         op_type: Enum = None,
         current_child_name: Optional[str] = None,
         skip_initialization: bool = False,
@@ -223,7 +223,7 @@ class NetworkWithOps(nn.Module):
     def _operate(
         self,
         layer_id: int,
-        neuron_indices: Set[int] | int = {},
+        neuron_indices: Union[Set[int], int] = {},
         op_type: Enum = None,
         current_child_name: Optional[str] = None,
         skip_initialization: bool = False,

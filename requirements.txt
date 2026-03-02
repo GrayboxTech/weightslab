@@ -10,7 +10,9 @@ torchaudio==2.1.2
 torchinfo==1.8.0
 torchmetrics==1.8.2
 tensorboard==2.20
-pytorch-lightning==2.6.1
+pytorch-lightning>=2.5
+onnx>=1.19.0
+onnxruntime  # This will install the latest version of onnxruntime, which is compatible with the installed version of onnx.
 
 # Python libraries
 filelock==3.15.4
@@ -30,17 +32,15 @@ grpcio==1.76.0
 grpcio-tools==1.76.0
 protobuf==6.33
 numpy>=1.25.2,<2.0
-onnx==1.20.0
-onnxruntime==1.23.2
 xxhash==3.6.0
-tables==3.10.2
+tables>=3.9
 httpx==0.28.1
 pydantic==2.11.10
 dotenv==0.9.9
-h5py==3.15.1
+h5py==3.14.0
 Pillow==11.0.0
 
 # LangChain dependencies for Agent
-langchain-core==1.2.7
-langchain-ollama==1.0.1
-langchain-openai==1.1.7
+langchain-core
+langchain-ollama
+langchain-openai

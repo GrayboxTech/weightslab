@@ -2,6 +2,7 @@ import logging
 import os
 import torch as th
 import weightslab as wl
+from typing import Union
 
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx import symbolic_trace
@@ -31,7 +32,7 @@ class ModelInterface(NetworkWithOps):
     def __init__(
             self,
             model: th.nn.Module,
-            dummy_input: th.Tensor | dict = None,
+            dummy_input: Union[th.Tensor, dict] = None,
             device: str = 'cpu',
             print_graph: bool = False,
             print_graph_filename: str = None,
@@ -81,7 +82,7 @@ class ModelInterface(NetworkWithOps):
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
-        
+
         # Proxy class_names if available on the wrapped model
         if hasattr(model, 'class_names'):
              self.class_names = model.class_names
@@ -234,13 +235,13 @@ class ModelInterface(NetworkWithOps):
                                 try:
                                     self.load_state_dict(weights['model_state_dict'], strict=True)
                                     self.current_step = weights.get('step', -1)
-                                    
+
                                     # Restore RNG state if available
                                     checkpoint_rng_state = weights.get('rng_state')
                                     if checkpoint_rng_state:
                                         restore_rng_state(checkpoint_rng_state)
                                         logger.debug(f"Restored RNG state from checkpoint")
-                                        
+
                                     logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
                                 except Exception as e:
                                     logger.warning(f"Failed to load weights state dict: {e}")

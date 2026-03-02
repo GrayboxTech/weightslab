@@ -18,7 +18,7 @@ import time
 import yaml
 from collections.abc import MutableMapping
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ class Proxy:
         """Enable equality comparison with the wrapped object.
 
         This allows `proxy is None` to return True when the wrapped object is None.
-        
+
         IMPORTANT: Use `proxy is None` or `proxy is not None` for None checks.
         Python's `is` operator cannot be overridden and `proxy is None` will always be False.
         """
@@ -185,7 +185,7 @@ class Proxy:
 
     def __ne__(self, other):
         """Enable inequality comparison with the wrapped object.
-        
+
         This allows `proxy is not None` to return False when the wrapped object is None.
         """
         return not self.__eq__(other)
@@ -202,7 +202,7 @@ class Proxy:
 
     def __hash__(self):
         """Make Proxy hashable by hashing the wrapped object's identity.
-        
+
         This allows Proxy objects to be used in sets and as dictionary keys.
         Uses id() for consistent hashing regardless of object's __hash__ implementation.
         """
@@ -741,7 +741,7 @@ def get_hyperparams(name: str = DEFAULT_NAME) -> Any:
 def list_hyperparams() -> List[str]:
     return GLOBAL_LEDGER.list_hyperparams()
 
-def resolve_hp_name() -> str | None:
+def resolve_hp_name() -> Union[str, None]:
     """Resolve a sensible hyperparam set name from the ledger.
     Checks for 'main', then 'experiment', then falls back to the first registered name.
     """

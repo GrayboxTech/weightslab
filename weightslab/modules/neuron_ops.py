@@ -1,5 +1,5 @@
 """ This module contains the interface for neuron-wise operations. """
-from typing import List
+from typing import List, Union
 from enum import Enum, auto
 
 
@@ -58,7 +58,7 @@ class NeuronWiseOperations:
             self,
             indices: List[int],
             skip_initialization: bool = False,
-            perturbation_ratio: float | None = None):
+            perturbation_ratio: Union[float, None] = None):
         """
         This function reinitialize neurons in the layer.
 

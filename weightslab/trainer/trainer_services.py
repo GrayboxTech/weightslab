@@ -2,6 +2,7 @@ import os
 import grpc
 import logging
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
+from typing import Union
 
 from threading import Thread
 from concurrent import futures
@@ -26,7 +27,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     which in turn uses smaller sub-services (model/data/etc.).
     """
 
-    def __init__(self, exp_name: str = None, exp_service: ExperimentService | None = None):
+    def __init__(self, exp_name: str = None, exp_service: Union[ExperimentService, None] = None):
         if exp_service is None:
             ctx = ExperimentContext(exp_name=exp_name)
             exp_service = ExperimentService(ctx=ctx)

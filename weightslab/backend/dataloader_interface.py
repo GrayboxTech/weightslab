@@ -17,7 +17,7 @@ It also supports:
 """
 import torch
 import logging
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Union
 
 from torch.utils.data import DataLoader, Dataset, Sampler
 
@@ -254,7 +254,7 @@ class DataLoaderInterface:
             **kwargs: Additional kwargs passed to DataLoader if a Dataset is provided.
         """
         # Normalize inputs
-        self.dataset: Dataset | DataLoader = data_loader_or_dataset
+        self.dataset: Union[Dataset, DataLoader] = data_loader_or_dataset
 
         # Internal flags / helpers
         self._mutable_batch_sampler = None

@@ -11,7 +11,7 @@ import threading
 from tqdm import tqdm
 from pathlib import Path
 from enum import Enum
-from typing import Callable, Any, Set, Dict, Optional
+from typing import Callable, Any, Set, Dict, Optional, Union
 from torch.utils.data import Dataset, Subset
 from weightslab.utils.tools import array_id_2bytes
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -798,7 +798,7 @@ class DataSampleTrackingWrapper(Dataset):
     def is_deny_listed(self, sample_id: int) -> bool:
         return self.get(sample_id=sample_id, stat_name=SampleStatsEx.DISCARDED, raw=True)
 
-    def denylist_samples(self, denied_samples_ids: Set[int] | None, accumulate: bool = False):
+    def denylist_samples(self, denied_samples_ids: Union[Set[int], None], accumulate: bool = False):
         with self._df_lock:
             # Get previously denied samples
             prev_denied = set()
@@ -825,7 +825,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Save pending changes to H5 after bulk deny operations
         self._save_pending_stats_to_h5()
 
-    def allowlist_samples(self, allowlist_samples_ids: Set[int] | None):
+    def allowlist_samples(self, allowlist_samples_ids: Union[Set[int], None]):
         with self._df_lock:
             if allowlist_samples_ids is None:
                 # Allow all

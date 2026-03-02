@@ -1,4 +1,5 @@
 import logging
+from typing import Union
 
 from weightslab.components.global_monitoring import pause_controller
 
@@ -16,7 +17,7 @@ class ExperimentContext:
     and builds hyper_parameter descriptors used by the protocol.
     """
 
-    def __init__(self, exp_name: str | None = None):
+    def __init__(self, exp_name: Union[str, None] = None):
         # Accept an explicit experiment name or resolve from the ledger.
         self._exp_name = exp_name
         # Components resolved from GLOBAL_LEDGER (model, dataloaders, optimizer,

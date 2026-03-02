@@ -6,6 +6,7 @@ import warnings; warnings.filterwarnings("ignore")
 import unittest
 import torch as th
 import torch.optim as opt
+from typing import Union
 
 from os import path
 from tqdm import trange
@@ -82,7 +83,7 @@ class NetworkWithOpsTest(unittest.TestCase):
             print_graph=False, skip_previous_auto_load=True, compute_dependencies=True
         )
 
-    def _train_one_epoch(self, cutoff: int | None = None):
+    def _train_one_epoch(self, cutoff: Union[int, None] = None):
         corrects = 0
         for idx, (image, label) in enumerate(self.train_loader):
             if cutoff and cutoff <= idx:

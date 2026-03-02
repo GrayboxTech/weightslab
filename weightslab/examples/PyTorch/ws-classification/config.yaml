@@ -23,7 +23,6 @@ serving_grpc: true
 serving_cli: true
 
 # DataLoader parameters
-data_root: ../testdatasets/mnist
 data:
   train_loader:
     shuffle: false

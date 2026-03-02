@@ -11,7 +11,7 @@ import logging
 import numpy as np
 import torch as th
 
-from typing import Callable, Optional, List, Any
+from typing import Callable, Optional, List, Any, Union
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -55,7 +55,7 @@ class SignalContext:
         """
         Standardized access to image data.
         Automatically converts 'ctx.data' (tensor, array, or path) to an HWC uint8 numpy image.
-        
+
         Supports:
             - PyTorch Tensors (any device)
             - NumPy Arrays (CHW or HWC)
@@ -68,19 +68,19 @@ class SignalContext:
         img = self.data
         if hasattr(img, "cpu") and hasattr(img, "numpy"):
             img = img.detach().cpu().numpy()
-        
+
         img_np = np.asanyarray(img)
-        
+
         # 2. Basic Shape Normalization
         # If it's a single-channel image (H, W) -> (H, W, 1)
         if img_np.ndim == 2:
             img_np = img_np[:, :, np.newaxis]
-            
+
         # 3. Transpose check: (C, H, W) -> (H, W, C)
         # We assume if the first dim is 1 or 3 and it's much smaller than others, it's CHW
         if img_np.ndim == 3 and img_np.shape[0] in [1, 3] and img_np.shape[0] < img_np.shape[1]:
             img_np = img_np.transpose(1, 2, 0)
-            
+
         # 4. Data Type & Scaling
         if np.issubdtype(img_np.dtype, np.floating):
             # Safe scale [0, 1] -> [0, 255]
@@ -88,7 +88,7 @@ class SignalContext:
                 img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
             else:
                 img_np = img_np.astype(np.uint8)
-        
+
         return img_np
 
     @property
@@ -99,17 +99,17 @@ class SignalContext:
         """
         if self.data is None:
             return None
-            
+
         data = self.data
         if hasattr(data, "cpu") and hasattr(data, "numpy"):
             data = data.detach().cpu().numpy()
-            
+
         arr = np.asanyarray(data)
-        
+
         # Heuristic for point cloud: 2D array where last dim is 3 (XYZ) or 4 (XYZI)
         if arr.ndim == 2 and arr.shape[1] in [3, 4]:
             return arr
-            
+
         return None
 
     @property
@@ -144,7 +144,7 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
-def _get_step(step: int | None = None) -> int:
+def _get_step(step: Union[int, None] = None) -> int:
     """
         Attempt to get the current training step from the model in the ledger, if available. This is used for logging signals with the correct global step.
         The function will try multiple approaches to find a valid step value:
@@ -185,7 +185,7 @@ def _get_step(step: int | None = None) -> int:
     return step
 
 
-def _extract_scalar_from_tensor(batch_scalar: th.Tensor | np.ndarray, out: th.Tensor | np.ndarray = None, ids: th.Tensor = None) -> tuple[float | None, th.Tensor | np.ndarray | None]:
+def _extract_scalar_from_tensor(batch_scalar: Union[th.Tensor, np.ndarray], out: Union[th.Tensor, np.ndarray] = None, ids: th.Tensor = None) -> tuple[Union[float, None], Union[th.Tensor, np.ndarray, None]]:
     # extract scalar
     scalar = None
     try:
@@ -1211,7 +1211,7 @@ def save_signals(
     preds_raw: th.Tensor = None,
     targets: th.Tensor = None,
     preds: th.Tensor = None,
-    step: int | None = None,
+    step: Union[int, None] = None,
     log: bool = True
 ):
     """

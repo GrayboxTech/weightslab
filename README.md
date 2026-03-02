@@ -64,14 +64,8 @@ Clone and install the framework (CLI based interaction):
 ```bash
 git clone https://github.com/GrayboxTech/weightslab.git
 cd weightslab
-pip install -e .
-```
-
-Clone the UI repository (UI based interaction; cf. loom video):
-```bash
-git clone git@github.com:GrayboxTech/weightslab_ui.git
-cd weightslab_ui
-pip install -r ./requirements.txt
+python -m pip install -r ./requirements.txt
+python -m pip install -e .
 ```
 
 ### Documentation (API + SDK)
@@ -80,7 +74,7 @@ WeightsLab includes a Sphinx documentation site in `docs/`.
 
 Build once:
 ```bash
-pip install -r docs/requirements.txt
+python -m pip install -r docs/requirements.txt
 sphinx-build -b html docs docs/_build/html
 ```
 

@@ -12,7 +12,7 @@ import torch.nn as nn
 import torchvision.models as models
 import torchvision.transforms as T
 
-from typing import Tuple, List
+from typing import Tuple, List, Union
 from torch.nn import functional as F
 
 from weightslab.components.tracking import add_tracked_attrs_to_input_tensor
@@ -721,7 +721,7 @@ class FlexibleCNNBlock(nn.Module):
 
     def __init__(self,
                  dim: int = 3,
-                 in_channels: int | None = 1,
+                 in_channels: Union[int, None] = 1,
                  out_channels: int = 8,
                  kernel_size: int = 3,
                  stride: int = 1,

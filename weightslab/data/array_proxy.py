@@ -7,7 +7,7 @@ efficient memory usage when working with large datasets.
 """
 
 import logging
-from typing import Optional, Any
+from typing import Optional, Any, Union
 import numpy as np
 import pandas as pd
 
@@ -346,7 +346,7 @@ def convert_dataframe_to_proxies(
     df: pd.DataFrame,
     array_columns: list,
     array_store=None,
-    autoload: bool | list | set = False,
+    autoload: Union[bool, list, set] = False,
     use_cache: bool = True,
     return_proxies: bool = True,
     inplace: bool = True

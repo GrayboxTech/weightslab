@@ -5,7 +5,7 @@ import torch as th
 
 from torch import nn
 from enum import Enum
-from typing import List, Set, Optional, Callable, Tuple
+from typing import List, Set, Optional, Callable, Tuple, Union
 
 from weightslab.utils.tools import normalize_dicts, reversing_indices
 from weightslab.components.tracking import Tracker
@@ -91,7 +91,7 @@ class LayerWiseOperations(NeuronWiseOperations):
     def get_name(self) -> str:
         return self.module_name
 
-    def get_neurons_value(self, v: int | List[int]) -> int:
+    def get_neurons_value(self, v: Union[int, List[int]]) -> int:
         """
         Method to handle the specific case when IN/OUT updates are not
         neurons information but shapes, e.g., unflatten layers.
@@ -129,7 +129,7 @@ class LayerWiseOperations(NeuronWiseOperations):
     def set_neurons(
             self,
             attr_name: str,
-            new_value: int | List[int] | th.Size | tuple
+            new_value: Union[int, List[int], th.Size, tuple]
     ) -> dict:
         """
         Setter (The Hook): This method runs whenever 'in_neurons' is assigned
@@ -233,7 +233,7 @@ class LayerWiseOperations(NeuronWiseOperations):
     # Utils Functions
     def get_operation(
             self,
-            op_type: ArchitectureNeuronsOpType | int,
+            op_type: Union[ArchitectureNeuronsOpType, int],
             **_
     ) -> Callable:
         """
@@ -403,7 +403,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     def _process_neurons_indices(
             self,
-            neuron_indices: Set[int] | int,
+            neuron_indices: Union[Set[int], int],
             is_incoming: bool = False,
             current_child_name: str = None,
             current_parent_name: str = None,
@@ -536,7 +536,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         activation_map: th.Tensor,
         data: th.Tensor,
         skip_register: bool = False,
-        intermediary: dict | None = None
+        intermediary: Union[dict, None] = None
     ) -> th.Tensor:
         # Update tensor information
         copy_forward_tracked_attrs(activation_map, data)
@@ -583,7 +583,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     def operate(
         self,
-        neuron_indices: int | Set[int],
+        neuron_indices: Union[int, Set[int]],
         is_incoming: bool = False,
         skip_initialization: bool = False,
         op_type: Enum = ArchitectureNeuronsOpType.ADD,
@@ -676,8 +676,8 @@ class LayerWiseOperations(NeuronWiseOperations):
     # Neurons Operations
     def _process_input_neurons_index(
             self,
-            neuron_indices: int | Set[int]
-    ) -> int | Set[int]:
+            neuron_indices: Union[int, Set[int]]
+        ) -> Union[int, Set[int]]:
         """
             Sanity function to process neuron indices.
 
@@ -711,7 +711,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     def _add_neurons(
         self,
-        neuron_indices: Set[int] | int = -1,
+        neuron_indices: Union[Set[int], int] = -1,
         is_incoming: bool = False,
         skip_initialization: bool = False,
         original_neuron_indices: Optional[List[int]] = None,
@@ -1131,7 +1131,7 @@ class LayerWiseOperations(NeuronWiseOperations):
     def _prune_neurons(
         self,
         original_neuron_indices: Set[int],
-        neuron_indices: List | Set[int],
+        neuron_indices: Union[List, Set[int]],
         is_incoming: bool = False,
         dependency: Optional[Callable] = None,
         **kwargs
@@ -1438,7 +1438,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     def _freeze_neurons(
         self,
-        neuron_indices: int | Set[int],
+        neuron_indices: Union[int, Set[int]],
         is_incoming: bool = False,
         **_
     ):
@@ -1500,10 +1500,10 @@ class LayerWiseOperations(NeuronWiseOperations):
 
     def _reset_neurons(
         self,
-        neuron_indices: int | Set[int],
+        neuron_indices: Union[int, Set[int]],
         is_incoming: bool = False,
         skip_initialization: bool = False,
-        perturbation_ratio: float | None = None,
+        perturbation_ratio: Union[float, None] = None,
         **_
     ):
         """
