@@ -39,11 +39,11 @@ class LoggerSnapshotRotationTests(unittest.TestCase):
             )
             ledgers.register_logger(logger_queue, name="main")
 
-            saved_path = manager.save_logger_snapshot(exp_hash=exp_hash)
+            saved_path = manager.save_logger_snapshot()
             self.assertIsNotNone(saved_path, "save_logger_snapshot should return a saved path")
             self.assertTrue(saved_path.exists(), "Logger snapshot manifest should exist")
 
-            snapshot_dir = Path(manager.loggers_dir) / exp_hash
+            snapshot_dir = Path(manager.loggers_dir)
             manifest_path = snapshot_dir / "loggers.manifest.json"
             self.assertTrue(manifest_path.exists(), "Manifest should be written for chunked snapshot format")
 
@@ -55,7 +55,7 @@ class LoggerSnapshotRotationTests(unittest.TestCase):
                 self.assertTrue((snapshot_dir / chunk_name).exists(), f"Missing expected chunk file: {chunk_name}")
 
             ledgers.clear_all()
-            loaded = manager.load_logger_snapshot(exp_hash)
+            loaded = manager.load_logger_snapshot()
             self.assertTrue(loaded, "Chunked snapshot should load successfully")
             restored_logger = ledgers.get_logger("main")
             self.assertTrue(hasattr(restored_logger, "get_signal_history"), "Restored logger should support signal history")
@@ -67,7 +67,7 @@ class LoggerSnapshotRotationTests(unittest.TestCase):
             exp_hash = "abcdef0199aabbcc12345678"
             manager.current_exp_hash = exp_hash
 
-            snapshot_dir = Path(manager.loggers_dir) / exp_hash
+            snapshot_dir = Path(manager.loggers_dir)
             snapshot_dir.mkdir(parents=True, exist_ok=True)
             legacy_payload = {
                 "exp_hash": exp_hash,
@@ -91,7 +91,7 @@ class LoggerSnapshotRotationTests(unittest.TestCase):
             with open(snapshot_dir / "loggers.json", "w", encoding="utf-8") as f:
                 json.dump(legacy_payload, f)
 
-            loaded = manager.load_logger_snapshot(exp_hash)
+            loaded = manager.load_logger_snapshot()
             self.assertTrue(loaded, "Legacy JSON logger snapshot should still load")
             restored_logger = ledgers.get_logger("main")
             self.assertTrue(hasattr(restored_logger, "get_signal_history"), "Restored logger should support signal history")

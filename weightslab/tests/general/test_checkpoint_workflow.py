@@ -272,7 +272,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
     def check_reproducibility(self, original_loss, reloaded_loss, original_uids=None, reloaded_uids=None, loss_tol=0.1, uids_msg=None):
         """Common reproducibility check for losses and UIDs"""
-        return 
+        return
         # #   Check reproducibility of losses and UIDs
         # if isinstance(original_loss, (list, tuple)):
         #     original_loss_sum = sum(original_loss)/len(original_loss)
@@ -493,7 +493,8 @@ class CheckpointSystemTests(unittest.TestCase):
         print("\nTraining completed.")
 
         # Verify checkpoints
-        model_dir_a = self.chkpt_manager.models_dir / exp_hash_a[8:-8]
+        exp_hash_a2 = self.chkpt_manager.get_current_experiment_hash()
+        model_dir_a = self.chkpt_manager.models_dir / exp_hash_a2[8:-8]
         self.assertTrue(model_dir_a.exists(), "Model checkpoint directory should exist")
 
         # Check for weight checkpoints
@@ -502,15 +503,15 @@ class CheckpointSystemTests(unittest.TestCase):
         self.assertGreaterEqual(len(weight_files), 2, "Should have at least 2 weight checkpoints")
 
         # Check HP directory
-        hp_dir_a = self.chkpt_manager.hp_dir / exp_hash_a[:8]
+        hp_dir_a = self.chkpt_manager.hp_dir / exp_hash_a2[:8]
         self.assertTrue(hp_dir_a.exists(), "HP checkpoint directory should exist")
 
         # Check data directory
-        data_dir_a = self.chkpt_manager.data_checkpoint_dir / exp_hash_a[-8:]
+        data_dir_a = self.chkpt_manager.data_checkpoint_dir / exp_hash_a2[-8:]
         self.assertTrue(data_dir_a.exists(), "Data checkpoint directory should exist")
 
         # Save state for next tests
-        self.state['exp_hash_a'] = exp_hash_a
+        self.state['exp_hash_a'] = exp_hash_a2
         self.state['losses_a'] = sum(loss_A) / len(loss_A)
         self.state['uids_a'] = uids_A
 
@@ -1282,7 +1283,7 @@ class CheckpointSystemTests(unittest.TestCase):
     def test_logger_queue_saved_with_weights(self):
         self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
 
-        snapshot_dir = Path(self.chkpt_manager.loggers_dir) / self.chkpt_manager.current_exp_hash
+        snapshot_dir = Path(self.chkpt_manager.loggers_dir)
         manifest_path = snapshot_dir / "loggers.manifest.json"
         legacy_snapshot_path = snapshot_dir / "loggers.json"
         self.assertTrue(
@@ -1299,7 +1300,7 @@ class CheckpointSystemTests(unittest.TestCase):
                 all((snapshot_dir / chunk_name).exists() for chunk_name in chunk_files),
                 "All logger snapshot chunks referenced by manifest should exist"
             )
-            self.assertTrue(self.chkpt_manager.load_logger_snapshot(self.chkpt_manager.current_exp_hash))
+            self.assertTrue(self.chkpt_manager.load_logger_snapshot())
             lg = ledgers.get_logger('main')
             loggers = {'main': {'signal_history': lg.get_signal_history() if hasattr(lg, 'get_signal_history') else []}}
         else:

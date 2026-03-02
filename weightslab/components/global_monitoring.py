@@ -72,7 +72,7 @@ class PauseController:
         set_hyperparam(key_path='is_training', value=True)
         set_hyperparam(key_path='is_training', value=True)
 
-    def resume(self):
+    def resume(self, force: bool = False) -> bool:
         hash_by_module = None
         print('\nAttempting to resume training...')
         # On resume, first dump any pending changes to checkpoint manager
@@ -88,7 +88,7 @@ class PauseController:
         print(f'Hashes by module: {hash_by_module}')
 
         # Then resume execution
-        if self.checkpoint_manager == None or self._is_hash_computed():
+        if self.checkpoint_manager == None or self._is_hash_computed() or force:
             print('Resuming training now...')
             self._resume()
             print(f'Hashes by module on resume: {hash_by_module}')

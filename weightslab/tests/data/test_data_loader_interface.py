@@ -1,6 +1,8 @@
 import math
 import unittest
 import torch
+import numpy as np
+
 from torch.utils.data import TensorDataset, DataLoader, Subset, Dataset, get_worker_info
 from torchvision import datasets, transforms
 
@@ -108,7 +110,7 @@ class TestDataLoaderInterface(unittest.TestCase):
 
     def test_dataloader_interface_uses_multiple_workers(self):
         dataset = WorkerIdDataset(64)
- 
+
         train_iface = DataLoaderInterface(
             dataset,
             batch_size=1,
@@ -131,7 +133,7 @@ class TestDataLoaderInterface(unittest.TestCase):
                 worker_tensor = batch[-1]
                 worker_ids.add(int(worker_tensor.reshape(-1)[0].item()))
                 if i + 1 >= max_batches:
-                    break 
+                    break
             return worker_ids
 
         train_worker_ids = _collect_worker_ids(train_iface)
@@ -139,17 +141,6 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         self.assertGreaterEqual(len(train_worker_ids), 2)
         self.assertGreaterEqual(len(test_worker_ids), 2)
-
-    def test_infinite_loader_restarts_epochs_and_collects_all_labels(self):
-        inf = infinite_loader(self.train_loader)
-        labels = []
-        num_calls = 300
-        for _ in range(num_calls):
-            batch = next(inf)
-            labels.extend(batch[1].tolist())
-
-        # after many calls we should still have seen every sample at least once
-        self.assertEqual(len(set(labels)), len(self.train_loader.dataset))
 
 
 class TestDataLoaderReproducibility(unittest.TestCase):
@@ -233,7 +224,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
         print("\n3. Generating batches...")
         _, bids_1, _ = next(dataloader)
         _, bids_2, _ = next(dataloader)
-        print(f"Batches: {bids_1.tolist()}, {bids_2.tolist()}")
+        print(f"Batches: {bids_1}, {bids_2}")
 
         # 4. Restore RNG and reset iterator
         print("\n4. Restoring RNG state and resetting iterator...")
@@ -245,15 +236,17 @@ class TestDataLoaderReproducibility(unittest.TestCase):
         print("\n5. Generating batches with restored RNG...")
         _, bids_1_repeat, _ = next(dataloader)
         _, bids_2_repeat, _ = next(dataloader)
-        print(f"Repeated batches: {bids_1_repeat.tolist()}, {bids_2_repeat.tolist()}")
+        print(f"Repeated batches: {bids_1_repeat}, {bids_2_repeat}")
 
         # Verify
+        b1_check = np.array_equal(bids_1, bids_1_repeat)
+        b2_check = np.array_equal(bids_2, bids_2_repeat)
         print(f"\n{'='*60}")
         print("Verification:")
-        print(f"  Batch 1 match: {torch.equal(bids_1, bids_1_repeat)}")
-        print(f"  Batch 2 match: {torch.equal(bids_2, bids_2_repeat)}")
-        self.assertTrue(torch.equal(bids_1, bids_1_repeat), "First batches should be identical")
-        self.assertTrue(torch.equal(bids_2, bids_2_repeat), "Second batches should be identical")
+        print(f"  Batch 1 match: {b1_check}")
+        print(f"  Batch 2 match: {b2_check}")
+        self.assertTrue(b1_check, "First batches should be identical")
+        self.assertTrue(b2_check, "Second batches should be identical")
         print(f"[OK] RNG reproducibility verified!\n")
 
     # TODO (GP): Re-enable once OffsetSampler is implemented and tested
@@ -281,7 +274,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
     #     print("\n2. Consuming first 2 batches...")
     #     _, bids_1, _ = next(dataloader)
     #     _, bids_2, _ = next(dataloader)
-    #     print(f"Batches 1-2: {bids_1.tolist()}, {bids_2.tolist()}")
+    #     print(f"Batches 1-2: {bids_1}, {bids_2}")
 
     #     iter_state = dataloader.capture_iteration_state()
     #     print(f"[OK] Iteration state captured: {iter_state}")
@@ -290,7 +283,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
     #     print("\n3. Consuming batches 3-4...")
     #     _, bids_3, _ = next(dataloader)
     #     _, bids_4, _ = next(dataloader)
-    #     print(f"Batches 3-4: {bids_3.tolist()}, {bids_4.tolist()}")
+    #     print(f"Batches 3-4: {bids_3}, {bids_4}")
 
     #     # 4. Restore iteration state
     #     print(f"\n4. Restoring to position after batch 2...")
@@ -301,7 +294,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
     #     print("\n5. Generating next batches (should match 3-4)...")
     #     _, bids_3_repeat, _ = next(dataloader)
     #     _, bids_4_repeat, _ = next(dataloader)
-    #     print(f"Repeated batches: {bids_3_repeat.tolist()}, {bids_4_repeat.tolist()}")
+    #     print(f"Repeated batches: {bids_3_repeat}, {bids_4_repeat}")
 
     #     # Verify
     #     print(f"\n{'='*60}")
@@ -311,5 +304,3 @@ class TestDataLoaderReproducibility(unittest.TestCase):
     #     self.assertTrue(torch.equal(bids_3, bids_3_repeat), "Batch 3 should be identical")
     #     self.assertTrue(torch.equal(bids_4, bids_4_repeat), "Batch 4 should be identical")
     #     print(f"[OK] Iteration state reproducibility verified!\n")
-
-

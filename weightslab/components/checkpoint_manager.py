@@ -174,7 +174,7 @@ class CheckpointManager:
             # Collect tag series (main tag column + prefixed columns)
             df_columns = dfm.get_df_view().columns
             tag_cols_to_capture = [col for col in df_columns if col == SampleStatsEx.TAG.value or col.startswith(f"{SampleStatsEx.TAG.value}:")]
-            
+
             for col in tag_cols_to_capture:
                  col_data = dfm.get_df_view(col)
                  if isinstance(col_data, pd.Series):
@@ -1432,7 +1432,7 @@ class CheckpointManager:
             or any(self.loggers_dir.glob(f"{self.LOGGER_SNAPSHOT_CHUNK_PREFIX}*{self.LOGGER_SNAPSHOT_CHUNK_SUFFIX}"))
         )
         if has_snapshot:
-            self.load_logger_snapshot(self.loggers_dir.name)
+            self.load_logger_snapshot()
 
     def _load_manifest(self) -> Dict[str, Any]:
         """Load manifest file."""
@@ -1578,8 +1578,8 @@ class CheckpointManager:
             logger.error(f"Failed to load checkpoint: {e}")
             return None
 
-    def load_logger_snapshot(self, exp_hash: str) -> bool:
-        """Load logger queues from snapshot for a specific experiment hash."""
+    def load_logger_snapshot(self) -> bool:
+        """Load logger queues from snapshot for the current experiment hash."""
         try:
             snapshot = self._load_logger_snapshot_payload()
             if not snapshot:
@@ -1597,7 +1597,7 @@ class CheckpointManager:
                     logger.warning(f"Failed to restore logger '{lname}': {inner_e}")
             return True
         except Exception as e:
-            logger.warning(f"Failed to load logger snapshot for {exp_hash}: {e}")
+            logger.warning(f"Failed to load logger snapshot: {e}")
             return False
 
     def load_checkpoint(self,
@@ -2058,7 +2058,7 @@ class CheckpointManager:
 
         # Restore logger snapshot for this experiment if available
         try:
-            self.load_logger_snapshot(exp_hash)
+            self.load_logger_snapshot()
         except Exception as e:
             logger.warning(f"Failed to restore logger snapshot for {exp_hash}: {e}")
 
