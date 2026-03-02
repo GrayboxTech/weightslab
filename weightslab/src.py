@@ -66,6 +66,11 @@ class SignalContext:
 
         # 1. Handle Tensors & Base Conversion
         img = self.data
+        
+        # WeightsLab Protocol: if data is a tuple (img, uid, label, metadata), extract image from first element
+        if isinstance(img, (tuple, list)):
+            img = img[0]
+            
         if hasattr(img, "cpu") and hasattr(img, "numpy"):
             img = img.detach().cpu().numpy()
         
@@ -100,24 +105,56 @@ class SignalContext:
         if self.data is None:
             return None
             
-        data = self.data
-        if hasattr(data, "cpu") and hasattr(data, "numpy"):
-            data = data.detach().cpu().numpy()
+        # WeightsLab Protocol: if data is a tuple, extract points from first element
+        pts = self.data
+        if isinstance(pts, (tuple, list)):
+            pts = pts[0]
             
-        arr = np.asanyarray(data)
+        if hasattr(pts, "cpu") and hasattr(pts, "numpy"):
+            pts = pts.detach().cpu().numpy()
+            
+        pts_np = np.asanyarray(pts)
         
         # Heuristic for point cloud: 2D array where last dim is 3 (XYZ) or 4 (XYZI)
-        if arr.ndim == 2 and arr.shape[1] in [3, 4]:
-            return arr
+        if pts_np.ndim == 2 and pts_np.shape[1] in [3, 4]:
+            return pts_np
             
         return None
 
     @property
-    def is_static(self) -> bool:
-        """True if running in pre-computation/static mode."""
-        return self.data is not None
+    def metadata(self) -> dict:
+        """
+        Access to sample metadata.
+        Returns the metadata dictionary if ctx.data follows the (img, uid, label, metadata) protocol.
+        """
+        if isinstance(self.data, (list, tuple)) and len(self.data) > 3:
+            return self.data[3]
+        return {}
 
     @property
+    def relation(self) -> dict:
+        """
+        Access to sample's external relational data (e.g. multi-view IDs).
+        """
+        if self.dataframe:
+            val = self.dataframe.get_value(self.origin, self.sample_id, "relation")
+            if isinstance(val, dict):
+                return val
+            # Handle possible stringified JSON if it came from persistent storage
+            if isinstance(val, str):
+                try:
+                    import json
+                    return json.loads(val.replace("'", '"'))
+                except Exception:
+                    pass
+        return {}
+
+    # True if running in pre-computation/static mode.
+    def is_static(self) -> bool:
+        """True if running in pre-computation/static mode."""
+        return self.subscribed_value is None
+
+    # True if running during training (triggered by a metric).
     def is_dynamic(self) -> bool:
         """True if running during training (triggered by a metric)."""
         return self.subscribed_value is not None
@@ -958,7 +995,8 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
                 logger.info(f"DEBUG: compute_signals first sample_id: {sample_id} (type: {type(sample_id)}) for origin: {origin}")
 
             raw_item = dataset[i]
-            input_data = _get_image(raw_item)
+            # No stripping here - pass full raw item to SignalContext
+            # Signals can use ctx.image (std helper) or ctx.data (raw item)
 
             row = {
                 "sample_id": str(sample_id),
@@ -970,7 +1008,7 @@ def compute_signals(dataset_or_loader, origin: str = None, signals: list[str] = 
                     # Unified Context Pattern
                     ctx = SignalContext(
                         sample_id=sample_id,
-                        data=input_data,
+                        data=raw_item, # Entire tuple (img, uid, label, meta)
                         dataframe=DATAFRAME_M,
                         origin=origin
                     )
