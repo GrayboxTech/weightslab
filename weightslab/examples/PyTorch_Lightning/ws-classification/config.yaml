@@ -5,6 +5,31 @@ experiment_name: "mnist_lightning"
 # Experiment config
 max_epochs: 5
 
+# PyTorch Lightning trainer configuration
+# - Single GPU: set devices: 1 and strategy: auto
+# - Multi GPU (single node): set devices: 2 (or more) and strategy: ddp
+lightning:
+  accelerator: auto
+  devices: auto
+  strategy: auto
+  sync_batchnorm: false
+  use_distributed_sampler: true
+
+# Recommended presets (copy one block into `lightning` above)
+lightning_presets:
+  single_gpu:
+    accelerator: gpu
+    devices: 1
+    strategy: auto
+    sync_batchnorm: false
+    use_distributed_sampler: false
+  multi_gpu_ddp:
+    accelerator: gpu
+    devices: 2
+    strategy: ddp
+    sync_batchnorm: true
+    use_distributed_sampler: true
+
 # WeightsLab services
 serving_grpc: true
 serving_cli: true

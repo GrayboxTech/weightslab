@@ -182,6 +182,7 @@ def main():
     parameters.setdefault("experiment_name", "mnist_lightning")
     parameters.setdefault("device", "auto")
     parameters.setdefault("max_epochs", 5)
+    parameters.setdefault("lightning", {})
 
     # Device selection
     if parameters.get("device", "auto") == "auto":
@@ -199,6 +200,40 @@ def main():
     log_dir = parameters["root_log_dir"]
     max_epochs = parameters.get("max_epochs", 5)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
+
+    # Lightning trainer configuration (YAML-driven)
+    lightning_cfg = parameters.get("lightning", {}) or {}
+    trainer_accelerator = lightning_cfg.get("accelerator", "auto")
+
+    if trainer_accelerator == "auto":
+        if torch.cuda.is_available():
+            trainer_accelerator = "gpu"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            trainer_accelerator = "mps"
+        else:
+            trainer_accelerator = "cpu"
+
+    trainer_devices = lightning_cfg.get("devices", "auto")
+    if trainer_devices == "auto":
+        if trainer_accelerator == "gpu":
+            gpu_count = torch.cuda.device_count()
+            trainer_devices = gpu_count if gpu_count > 0 else 1
+        else:
+            trainer_devices = 1
+
+    use_multi_device = isinstance(trainer_devices, int) and trainer_devices > 1
+
+    trainer_strategy = lightning_cfg.get("strategy", "auto")
+    if trainer_strategy == "ddp" and not use_multi_device:
+        trainer_strategy = "auto"
+
+    trainer_sync_batchnorm = bool(lightning_cfg.get("sync_batchnorm", use_multi_device))
+    if not use_multi_device:
+        trainer_sync_batchnorm = False
+
+    trainer_use_distributed_sampler = bool(
+        lightning_cfg.get("use_distributed_sampler", use_multi_device)
+    )
 
     # Hyperparameters (must use 'hyperparameters' flag for trainer services / UI)
     wl.watch_or_edit(
@@ -335,6 +370,10 @@ def main():
     print("=" * 60)
     print("🚀 STARTING TRAINING (PyTorch Lightning)")
     print(f"📊 Max epochs: {max_epochs}")
+    print(
+        f"⚙️ Trainer: accelerator={trainer_accelerator}, devices={trainer_devices}, "
+        f"strategy={trainer_strategy}"
+    )
     print(f"📦 Dataset splits: train={len(_train_dataset)}, val={len(_val_dataset)}")
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
@@ -344,8 +383,11 @@ def main():
     
     trainer = pl.Trainer(
         max_epochs=max_epochs,
-        accelerator=device if device in ["cpu", "cuda", "mps"] else "auto",
-        devices=1,
+        accelerator=trainer_accelerator,
+        devices=trainer_devices,
+        strategy=trainer_strategy,
+        sync_batchnorm=trainer_sync_batchnorm,
+        use_distributed_sampler=trainer_use_distributed_sampler,
 
         # Log part are disabled as WL SDK handles logging
         log_every_n_steps=0,

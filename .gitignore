@@ -40,3 +40,6 @@ experiment_service_pb2.py
 experiment_service_pb2_grpc.py
 
 .env
+
+docs/_build/
+docs/generated/
