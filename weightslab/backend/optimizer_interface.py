@@ -98,6 +98,8 @@ class OptimizerInterface:
         try:
             hp_name = resolve_hp_name()
             hp = get_hyperparams(hp_name)
+            
+            # 1. Handle Audit Mode
             if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
                 import time
                 # Throttle logging to avoid spam
@@ -108,6 +110,20 @@ class OptimizerInterface:
                     print(f"\n[WeightsLab] AUDIT MODE: Weights are frozen. Optimizer step skipped.", flush=True)
                     self._last_audit_log = time.time()
                 return
+
+            # 2. Sync Learning Rate from Ledger
+            if hp and 'optimizer' in hp:
+                optim_cfg = hp['optimizer']
+                if isinstance(optim_cfg, dict) and 'lr' in optim_cfg:
+                    new_lr = float(optim_cfg['lr'])
+                    current_lrs = self.get_lr()
+                    # Only update if different (avoid unnecessary param group mutations)
+                    if not any(abs(lr - new_lr) < 1e-10 for lr in current_lrs):
+                         old_lr = current_lrs[0]
+                         self.set_lr(new_lr)
+                         # Terminal feedback
+                         print(f"\nLearning rate updated: {old_lr} -> {new_lr}", flush=True)
+
         except Exception:
             pass
 

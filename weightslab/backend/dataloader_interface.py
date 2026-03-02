@@ -885,6 +885,9 @@ class DataLoaderInterface:
         if self.batch_size is not None and self.batch_size == new_batch_size:
             return
 
+        old_batch_size = self.batch_size
+        print(f"\nBatch size updated: {old_batch_size} -> {new_batch_size} (Loader: {getattr(self, '_ledger_name', 'unnamed')})", flush=True)
+
         # Case 1: we have a mutable batch sampler
         if getattr(self, "_mutable_batch_sampler", None) is not None:
             self._mutable_batch_sampler.batch_size = new_batch_size
