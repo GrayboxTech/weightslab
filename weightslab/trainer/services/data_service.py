@@ -140,10 +140,10 @@ class DataService:
         self._is_filtered = False  # Track if the current view is filtered/modified by user
         # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
         # These should be triggered on-demand or run in background to avoid blocking training start.
-        # self._deduce_and_set_aspect_ratios()
+        self._deduce_and_set_aspect_ratios()
 
-        # if self._compute_natural_sort:
-        #    self._compute_natural_sort_stats()
+        if self._compute_natural_sort:
+           self._compute_natural_sort_stats()
         
         # self._compute_custom_signals()
         self._is_filtered = False  # Track if the current view is filtered/modified by user
