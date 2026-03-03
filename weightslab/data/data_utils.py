@@ -259,7 +259,9 @@ def load_label(dataset, sample_id):
                     label = to_numpy_safe(data[2])  # Third element is typically the label
                     label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                     metadata = data[3:]
-            return label[0] if label.ndim == 1 and label.shape[0] == 1 else label
+            if label is not None:
+                return label[0] if label.ndim == 1 and label.shape[0] == 1 else label
+            return None
     return None
 
 
