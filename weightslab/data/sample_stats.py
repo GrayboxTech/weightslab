@@ -27,7 +27,6 @@ class SampleStats:
         
         DISCARDED = "discarded"
         TAG = "tag"
-        RELATION = "relation"
 
         @classmethod
         def ALL(cls):
@@ -45,7 +44,6 @@ class SampleStats:
         Ex.ORIGIN.value: str,
         Ex.TASK_TYPE.value: str,
         Ex.LAST_SEEN.value: int,
-        Ex.RELATION.value: dict,
     }
 
     # None are not accepted by PD H5 storage
@@ -61,7 +59,6 @@ class SampleStats:
         Ex.ORIGIN.value: "",
         Ex.TASK_TYPE.value: "",
         Ex.LAST_SEEN.value: -1,
-        Ex.RELATION.value: {},
     }
 
     MODEL_INOUT_LIST = [
@@ -80,7 +77,6 @@ class SampleStats:
             
             cls.Ex.DISCARDED.value,
             cls.Ex.TAG.value,
-            cls.Ex.RELATION.value,
             cls.Ex.ORIGIN.value,
             cls.Ex.LAST_SEEN.value,
         ]

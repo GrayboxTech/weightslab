@@ -144,12 +144,10 @@ class DataSampleTrackingWrapper(Dataset):
         preload_metadata: bool = True,
         preload_uids: bool = False,
         keep_leakages: bool = False,
-        relation: Optional[Dict[Any, Dict]] = None,
         **_,
     ):
         # Set name
         self.loader_name = loader_name
-        self._relation = relation or {}
 
         # Init Global Ledger Manager
         ledger_manager = get_dataframe()
@@ -287,7 +285,7 @@ class DataSampleTrackingWrapper(Dataset):
             f"Preloading sample statistics for {len(sample_ids)} samples in split '{self._dataset_split}' with preload_labels={preload_labels}, preload_metadata={preload_metadata}, preload_uids={preload_uids}..." +
             f" This may take some time depending on the dataset and preload options. Set preload options to False to skip and initialize stats on demand (will be slower on first access but faster initialization)."
         )
-        for i, sid in enumerate(tqdm(sample_ids, desc=f"Preloading samples for split '{self._dataset_split}'")):
+        for sid in tqdm(sample_ids, desc=f"Preloading samples for split '{self._dataset_split}'"):
             data = SampleStats.DEFAULTS.copy()  # Start with default stats for this sample
             data.update(
                 {
@@ -321,17 +319,6 @@ class DataSampleTrackingWrapper(Dataset):
                     uids[sid] = uid
                 except Exception as e:
                     logger.debug(f"Could not preload sample_id for sample {sid}: {e}")
-
-            if self._relation:
-                # Attempt to load relation for this sample (supports mapping by index or UID)
-                rel_val = self._relation.get(sid) or self._relation.get(i)
-                if rel_val:
-                    data[SampleStatsEx.RELATION.value] = rel_val
-                    # Also unpack for easy UI sorting/grouping
-                    if isinstance(rel_val, dict):
-                        for k, v in rel_val.items():
-                            data[f"{SampleStatsEx.RELATION.value}:{k}"] = v
-
             default_data.append(data)
 
         # Map new uids if exist

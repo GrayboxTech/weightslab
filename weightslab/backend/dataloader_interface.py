@@ -232,7 +232,6 @@ class DataLoaderInterface:
         compute_hash: bool = True,
         use_tags: bool = False,
         tags_mapping: Optional[dict] = None,
-        relation: Optional[dict] = None,
         **kwargs,
     ) -> None:
         """Initialize the DataLoaderInterface.
@@ -251,7 +250,6 @@ class DataLoaderInterface:
             compute_hash: Whether to compute hashes for samples in tracking wrapper.
             use_tags: Whether to use tags for samples in tracking wrapper.
             tags_mapping: Optional mapping of tags to integer labels.
-            relation: Optional relational mapping (id/cam) for samples.
 
             **kwargs: Additional kwargs passed to DataLoader if a Dataset is provided.
         """
@@ -280,7 +278,6 @@ class DataLoaderInterface:
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
                 loader_name=loader_name,
-                relation=relation,
                 **kwargs
             )
             self.tracked_dataset._map_updates_hook_fns.append(
@@ -298,7 +295,6 @@ class DataLoaderInterface:
                 use_tags=use_tags,
                 tags_mapping=tags_mapping,
                 loader_name=loader_name,
-                relation=relation,
                 **kwargs
             )
             self.tracked_dataset._map_updates_hook_fns.append(

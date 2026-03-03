@@ -306,7 +306,6 @@ def load_metadata(dataset, sample_id):
                         metadata.update(item)
                 return metadata if metadata else None
             return None
-        return None
     return None
 
 
@@ -461,9 +460,6 @@ def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
                 return Image.fromarray(np_img, mode="RGBA")
             else:
                 raise ValueError(f"Unsupported channel count: {channels}")
-        elif np_img.ndim < 2:
-            # Fallback for 1D signals/vectors: return a 1x1 placeholder
-            return Image.new("L", (1, 1), 0)
         else:
             raise ValueError(f"Unsupported image shape after processing: {np_img.shape}")
     elif hasattr(wrapped, "samples") or hasattr(wrapped, "imgs"):
@@ -498,10 +494,7 @@ def load_raw_image_array(dataset, index) -> tuple:
             middle_slice = np_img
         
         # Convert middle slice to PIL Image for thumbnail
-        if middle_slice.ndim < 2:
-            # Fallback for 1D signals/vectors: no valid thumbnail image
-            middle_pil = None
-        elif middle_slice.ndim == 2:
+        if middle_slice.ndim == 2:
             middle_slice_uint8 = to_uint8(middle_slice)
             middle_pil = Image.fromarray(middle_slice_uint8, mode="L")
         else:

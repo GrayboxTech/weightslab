@@ -713,29 +713,10 @@ class DataService:
                 SampleStatsEx.TARGET.value,
                 SampleStatsEx.PREDICTION.value,
                 SampleStatsEx.TASK_TYPE.value,
-                SampleStatsEx.RELATION.value,
             }
 
             if not stats_to_retrieve:
                 stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
-
-            # ====== Step 5b: Process Relation ======
-            relation = row.get(SampleStatsEx.RELATION.value)
-            if relation:
-                try:
-                    rel_val = relation
-                    if isinstance(relation, str):
-                        try:
-                            rel_val = json.loads(relation.replace("'", '"'))
-                        except Exception:
-                            pass
-                    
-                    if isinstance(rel_val, dict):
-                        data_stats.append(
-                            create_data_stat(SampleStatsEx.RELATION.value, "relation", value_string=json.dumps(rel_val))
-                        )
-                except Exception as e:
-                    logger.debug(f"Failed to process relation for sample {sample_id}: {e}")
 
             # Optimized bulk processing of stats
             for stat_name in stats_to_retrieve:
