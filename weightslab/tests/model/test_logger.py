@@ -134,12 +134,14 @@ class TestLoggerQueue(unittest.TestCase):
             {"loss": 1.0},
             global_step=0,
             signal_per_sample={10: 1.1, 11: 0.9},
+            aggregate_by_step=False,
         )
         logger.add_scalars(
             "loss",
             {"loss": 3.0},
             global_step=0,
             signal_per_sample={10: 2.0, 11: 4.0},
+            aggregate_by_step=False,
         )
 
         # Immediate mode logs per call (including same step)
@@ -148,6 +150,7 @@ class TestLoggerQueue(unittest.TestCase):
             {"loss": 2.5},
             global_step=1,
             signal_per_sample={12: 2.5},
+            aggregate_by_step=False,
         )
 
         history = logger.get_signal_history()
@@ -221,8 +224,8 @@ class TestLoggerQueue(unittest.TestCase):
         with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=None):
             logger = LoggerQueue(register=False)
 
-        logger.add_scalars("acc", {"acc": 0.7}, global_step=1, signal_per_sample={1: 0.7})
-        logger.add_scalars("acc", {"acc": 0.8}, global_step=2, signal_per_sample={1: 0.8})
+        logger.add_scalars("acc", {"acc": 0.7}, global_step=1, signal_per_sample={1: 0.7}, aggregate_by_step=False)
+        logger.add_scalars("acc", {"acc": 0.8}, global_step=2, signal_per_sample={1: 0.8}, aggregate_by_step=False)
 
         queue = logger.get_and_clear_queue()
         self.assertEqual(len(queue), 2)
@@ -320,14 +323,14 @@ class TestSrcLogSignal(unittest.TestCase):
         mock_logger = MagicMock()
 
         with patch("weightslab.src.get_logger", return_value=mock_logger):
-            _log_signal(0.75, {5: 0.75}, "loss", step=3)
+            _log_signal(0.75, {5: 0.75}, "loss", step=3, aggregate_by_step=True)
 
         mock_logger.add_scalars.assert_called_once_with(
             "loss",
             {"loss": 0.75},
             global_step=3,
             signal_per_sample={5: 0.75},
-            aggregate_by_step=False,
+            aggregate_by_step=True,
         )
 
     def test_log_signal_per_sample_enables_step_aggregation(self):
