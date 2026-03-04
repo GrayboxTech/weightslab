@@ -855,15 +855,26 @@ def _release_gpu_resources() -> None:
     except Exception:
         pass
 
-    if th.cuda.is_available():
+    cuda_module = getattr(th, 'cuda', None)
+    if cuda_module is not None:
         try:
-            th.cuda.empty_cache()
-        except Exception as e:
-            logger.debug(f"Could not empty CUDA cache: {e}")
-        try:
-            th.cuda.ipc_collect()
+            cuda_initialized = bool(
+                hasattr(cuda_module, 'is_initialized') and cuda_module.is_initialized()
+            )
         except Exception:
-            pass
+            cuda_initialized = False
+
+        # Important: avoid creating a fresh CUDA context just for cleanup,
+        # which can reserve baseline VRAM in idle keep-serving mode.
+        if cuda_initialized:
+            try:
+                cuda_module.empty_cache()
+            except Exception as e:
+                logger.debug(f"Could not empty CUDA cache: {e}")
+            try:
+                cuda_module.ipc_collect()
+            except Exception:
+                pass
 
 
 def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
