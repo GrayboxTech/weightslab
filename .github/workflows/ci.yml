@@ -112,6 +112,7 @@ jobs:
         run: |
           sed -i 's|^torch==2.1.2+cu121$|torch==2.1.2|' requirements.txt
           sed -i 's|^--extra-index-url https://download.pytorch.org/whl/cu121$|--extra-index-url https://download.pytorch.org/whl/cpu|' requirements.txt
+          cat requirements.txt
 
       - name: Cache pip
         uses: actions/cache@v4
