@@ -252,17 +252,6 @@ class TestGRPCWeightsStudioSDKState(unittest.TestCase):
         ds._agent = MagicMock()
         ds._agent.is_ollama_available.return_value = True
 
-        def _sync_from_manager(force=False):
-            refreshed = ds._df_manager.get_combined_df().copy()
-            if SampleStatsEx.TAG.value not in refreshed.columns:
-                refreshed[SampleStatsEx.TAG.value] = ""
-            if SampleStatsEx.DISCARDED.value not in refreshed.columns:
-                refreshed[SampleStatsEx.DISCARDED.value] = False
-            ds._all_datasets_df = refreshed
-            ds._last_internals_update_time = 0
-
-        ds._slowUpdateInternals = _sync_from_manager
-
         return ds, df_manager
 
     def _make_servicer_with_real_data_service(self, data_service):
