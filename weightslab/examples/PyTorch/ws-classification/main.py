@@ -1,4 +1,3 @@
-import itertools
 import os
 import time
 import logging
@@ -140,7 +139,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     losses = torch.tensor(0.0, device=device)
 
     for (inputs, ids, labels) in loader:
-        with guard_testing_context:
+        with guard_testing_context, torch.no_grad():
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -225,7 +224,7 @@ if __name__ == "__main__":
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
-    eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
+    eval_every = parameters.get("eval_every", 50)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
     training_steps_to_do = parameters.get("training_steps_to_do", 1000)
 
@@ -349,7 +348,7 @@ if __name__ == "__main__":
     # Setup clean progress bar with custom format
     if tqdm_display:
         train_range = tqdm.tqdm(
-            range(training_steps_to_do) if training_steps_to_do is not None else itertools.count(),
+            range(training_steps_to_do),
             desc="Training",
             bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
             ncols=140,
@@ -357,7 +356,7 @@ if __name__ == "__main__":
             leave=True
         )
     else:
-        train_range = range(training_steps_to_do) if training_steps_to_do is not None else itertools.count()
+        train_range = range(training_steps_to_do)
 
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
 

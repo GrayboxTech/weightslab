@@ -104,39 +104,16 @@ class ExperimentService:
             max_points = request.max_points or 10000
             history = signal_logger.get_signal_history()
 
-            # Normalize history to grouped list format:
-            # - Legacy: List[signal_entry]
-            # - Current: Dict[metric_name][experiment_hash][step] -> List[signal_entry]
+            # Group by metric_name and limit each
             signal_groups = {}
-            if isinstance(history, dict):
-                for metric_name, experiments in history.items():
-                    if metric_name not in signal_groups:
-                        signal_groups[metric_name] = []
-                    if not isinstance(experiments, dict):
-                        continue
-                    for _, steps in experiments.items():
-                        if not isinstance(steps, dict):
-                            continue
-                        for _, entries in steps.items():
-                            if isinstance(entries, list):
-                                signal_groups[metric_name].extend(
-                                    [entry for entry in entries if isinstance(entry, dict)]
-                                )
-                            elif isinstance(entries, dict):
-                                signal_groups[metric_name].append(entries)
-            elif isinstance(history, list):
-                for s in history:
-                    if not isinstance(s, dict):
-                        continue
-                    metric_name = s.get("metric_name", "")
-                    if metric_name not in signal_groups:
-                        signal_groups[metric_name] = []
-                    signal_groups[metric_name].append(s)
+            for s in history:
+                metric_name = s.get("metric_name", "")
+                if metric_name not in signal_groups:
+                    signal_groups[metric_name] = []
+                signal_groups[metric_name].append(s)
 
             # Take last max_points_per_signal for each signal and downsample if needed
             for metric_name, signal_history in signal_groups.items():
-                # Keep deterministic order by model_age before sampling
-                signal_history = sorted(signal_history, key=lambda item: item.get("model_age", 0))
 
                 # Downsample if we have more than 1000 points
                 if len(signal_history) > max_points:

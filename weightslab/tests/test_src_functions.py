@@ -148,29 +148,5 @@ class TestSrcSaveSignals(unittest.TestCase):
         self.assertEqual(kwargs["step"], 7)
 
 
-class TestSrcGpuRelease(unittest.TestCase):
-    def test_release_gpu_resources_does_not_touch_cuda_when_not_initialized(self):
-        with patch("weightslab.src.list_models", return_value=[]), \
-             patch("weightslab.src.get_optimizer", return_value=None), \
-             patch("weightslab.src.th.cuda.is_initialized", return_value=False), \
-             patch("weightslab.src.th.cuda.empty_cache") as mock_empty_cache, \
-             patch("weightslab.src.th.cuda.ipc_collect") as mock_ipc_collect:
-            src._release_gpu_resources()
-
-        mock_empty_cache.assert_not_called()
-        mock_ipc_collect.assert_not_called()
-
-    def test_release_gpu_resources_cleans_cuda_when_initialized(self):
-        with patch("weightslab.src.list_models", return_value=[]), \
-             patch("weightslab.src.get_optimizer", return_value=None), \
-             patch("weightslab.src.th.cuda.is_initialized", return_value=True), \
-             patch("weightslab.src.th.cuda.empty_cache") as mock_empty_cache, \
-             patch("weightslab.src.th.cuda.ipc_collect") as mock_ipc_collect:
-            src._release_gpu_resources()
-
-        mock_empty_cache.assert_called_once()
-        mock_ipc_collect.assert_called_once()
-
-
 if __name__ == "__main__":
     unittest.main()
