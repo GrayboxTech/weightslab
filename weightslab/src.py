@@ -278,7 +278,8 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
                     reg_name,
                     {reg_name: scalar},
                     global_step=step,
-                    signal_per_sample=signal_per_sample
+                    signal_per_sample=signal_per_sample,
+                    aggregate_by_step=kwargs.get('per_sample', True)  # Aggregate per-sample signals by step for logging if per_sample is True,
                 )
         except Exception:
             pass

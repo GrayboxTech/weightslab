@@ -262,6 +262,10 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
                 time.sleep(poll_interval)
                 continue
 
+            # hp logger issue
+            if hp == None:
+                logger.warning(f"Hyperparams proxy is None for name {name}. Check if the ledger is properly initialized and the hyperparams are set up. Retrying in {poll_interval} seconds...")
+
             # Check if hp is dict-like (has required methods) rather than isinstance
             if not hasattr(hp, '__getitem__') or not hasattr(hp, '__setitem__'):
                 time.sleep(poll_interval)
