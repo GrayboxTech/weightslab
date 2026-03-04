@@ -1,6 +1,8 @@
 # Global configuration
 device: auto
-experiment_name: "mnist_lightning"
+experiment_name: cls_MNIST_lightning
+training_steps_to_do: null  # Set to null for infinite training until manually stopped
+seed: 42
 
 # Experiment config
 max_epochs: 5
@@ -46,11 +48,11 @@ data:
   train_loader:
     batch_size: 64
     shuffle: true
-    num_workers: 4
+    num_workers: 0
   val_loader:
     batch_size: 64
     shuffle: false
-    num_workers: 4
+    num_workers: 0
 
 # Optimizer configuration
 optimizer:

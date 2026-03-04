@@ -267,11 +267,69 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
 
 
 # =============================================================================
+# Signal Definitions
+# =============================================================================
+
+"""
+The ctx (SignalContext) object contains:
+1. data: Raw input sample (image/tensor). [Used in STATIC mode]
+2. image: Automatically converted HWC uint8 numpy image. [Used in STATIC mode]
+3. subscribed_value: Live metric/loss value from the training loop. [Used in DYNAMIC mode]
+4. sample_id: Unique identifier for the sample. [Available in BOTH]
+5. dataframe: Proxy to query previously computed signals. [Available in BOTH]
+6. origin: The dataset split name (e.g. 'train_loader'). [Available in BOTH]
+7. is_static / is_dynamic: Helper flags for mode detection.
+"""
+
+@wl.signal(name="blue_pixels")
+def compute_blue_pixels(ctx: wl.SignalContext) -> int:
+    """
+    Static signal counting pixels where Blue channel is dominant.
+    
+    Context Attributes Used:
+        ctx.image
+    """
+    img_np = ctx.image
+    if img_np is None or img_np.ndim != 3: return 0
+    
+    # R, G, B
+    r, g, b = img_np[:,:,0], img_np[:,:,1], img_np[:,:,2]
+    
+    # Blue is dominant and bright
+    blue_mask = (b > 150) & (b > r) & (b > g)
+    return int(np.sum(blue_mask))
+
+
+@wl.signal(name="blue_weighted_loss", subscribe_to="train_mlt_loss/CE", compute_every_n_steps=1)
+def compute_blue_weighted_loss(ctx: wl.SignalContext) -> float:
+    """
+    Dynamic signal combining current loss with static blue pixel count.
+    
+    Context Attributes Used:
+        ctx.subscribed_value: The current 'train_mlt_loss/CE' value for this sample.
+        ctx.sample_id: Unique identifier used to link the loss to historical data.
+        ctx.dataframe: Used to look up the pre-computed 'blue_pixels' signal.
+        ctx.origin: The dataset split (train/val) needed for the dataframe query.
+    """
+    loss = ctx.subscribed_value 
+    
+    # Note: origin is typically 'train_loader' or 'test_loader' in this script
+    origin = ctx.origin or "train_loader"
+    blue_val = ctx.dataframe.get_value(origin, ctx.sample_id, "signals_blue_pixels")
+    
+    if blue_val is None or (isinstance(blue_val, float) and np.isnan(blue_val)):
+        blue_val = 0.0
+        
+    norm_blue = float(blue_val) / (128 * 128)
+    return loss * norm_blue
+
+
+# =============================================================================
 # Main
 # =============================================================================
 if __name__ == "__main__":
     # --- 1) Load hyperparameters from YAML (if present) ---
-    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "config_mz.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as fh:
             parameters = yaml.safe_load(fh) or {}
@@ -287,6 +345,7 @@ if __name__ == "__main__":
     parameters.setdefault("num_classes", 6)      # adjust to your label set
     parameters.setdefault("ignore_index", 255)   # if you have void pixels
     parameters.setdefault("image_size", 256)
+    parameters.setdefault("compute_natural_sort", True)
 
     exp_name = parameters["experiment_name"]
     num_classes = int(parameters["num_classes"])

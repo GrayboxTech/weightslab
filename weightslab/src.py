@@ -6,6 +6,7 @@ level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 import os
 import sys
 import time
+import gc
 import functools
 import logging
 import numpy as np
@@ -55,7 +56,7 @@ class SignalContext:
         """
         Standardized access to image data.
         Automatically converts 'ctx.data' (tensor, array, or path) to an HWC uint8 numpy image.
-        
+
         Supports:
             - PyTorch Tensors (any device)
             - NumPy Arrays (CHW or HWC)
@@ -68,19 +69,19 @@ class SignalContext:
         img = self.data
         if hasattr(img, "cpu") and hasattr(img, "numpy"):
             img = img.detach().cpu().numpy()
-        
+
         img_np = np.asanyarray(img)
-        
+
         # 2. Basic Shape Normalization
         # If it's a single-channel image (H, W) -> (H, W, 1)
         if img_np.ndim == 2:
             img_np = img_np[:, :, np.newaxis]
-            
+
         # 3. Transpose check: (C, H, W) -> (H, W, C)
         # We assume if the first dim is 1 or 3 and it's much smaller than others, it's CHW
         if img_np.ndim == 3 and img_np.shape[0] in [1, 3] and img_np.shape[0] < img_np.shape[1]:
             img_np = img_np.transpose(1, 2, 0)
-            
+
         # 4. Data Type & Scaling
         if np.issubdtype(img_np.dtype, np.floating):
             # Safe scale [0, 1] -> [0, 255]
@@ -88,7 +89,7 @@ class SignalContext:
                 img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
             else:
                 img_np = img_np.astype(np.uint8)
-        
+
         return img_np
 
     @property
@@ -99,17 +100,17 @@ class SignalContext:
         """
         if self.data is None:
             return None
-            
+
         data = self.data
         if hasattr(data, "cpu") and hasattr(data, "numpy"):
             data = data.detach().cpu().numpy()
-            
+
         arr = np.asanyarray(data)
-        
+
         # Heuristic for point cloud: 2D array where last dim is 3 (XYZ) or 4 (XYZI)
         if arr.ndim == 2 and arr.shape[1] in [3, 4]:
             return arr
-            
+
         return None
 
     @property
@@ -277,7 +278,8 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
                     reg_name,
                     {reg_name: scalar},
                     global_step=step,
-                    signal_per_sample=signal_per_sample
+                    signal_per_sample=signal_per_sample,
+                    aggregate_by_step=kwargs.get('per_sample', True)  # Aggregate per-sample signals by step for logging if per_sample is True,
                 )
         except Exception:
             pass
@@ -798,13 +800,96 @@ def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> No
         cli_serve(**kwargs)
 
 
-def keep_serving(timeout: int = None) -> None:
+def _move_to_cpu(value: Any) -> Any:
+    """Recursively move tensor containers to CPU."""
+    if isinstance(value, th.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {k: _move_to_cpu(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_to_cpu(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_move_to_cpu(v) for v in value)
+    return value
+
+
+def _release_gpu_resources() -> None:
+    """Best-effort migration of tracked Torch objects to CPU and CUDA cache cleanup."""
+    try:
+        model_names = list_models() or []
+    except Exception:
+        model_names = []
+
+    for model_name in model_names:
+        try:
+            model_obj = get_model(model_name)
+
+            # Try direct module first
+            if hasattr(model_obj, 'to') and callable(getattr(model_obj, 'to')):
+                model_obj.to('cpu')
+
+            # Fallback for wrappers exposing an inner model/module
+            inner_model = getattr(model_obj, 'model', None)
+            if inner_model is not None and hasattr(inner_model, 'to') and callable(getattr(inner_model, 'to')):
+                inner_model.to('cpu')
+
+            module = getattr(model_obj, 'module', None)
+            if module is not None and hasattr(module, 'to') and callable(getattr(module, 'to')):
+                module.to('cpu')
+        except Exception as e:
+            logger.debug(f"Could not move model '{model_name}' to CPU: {e}")
+
+    try:
+        optimizer = get_optimizer()
+        if optimizer is not None and hasattr(optimizer, 'state'):
+            for _, state in optimizer.state.items():
+                if isinstance(state, dict):
+                    for key, value in state.items():
+                        state[key] = _move_to_cpu(value)
+    except Exception as e:
+        logger.debug(f"Could not move optimizer state to CPU: {e}")
+
+    # Clean cached data and free memory
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    cuda_module = getattr(th, 'cuda', None)
+    if cuda_module is not None:
+        try:
+            cuda_initialized = bool(
+                hasattr(cuda_module, 'is_initialized') and cuda_module.is_initialized()
+            )
+        except Exception:
+            cuda_initialized = False
+
+        # Important: avoid creating a fresh CUDA context just for cleanup,
+        # which can reserve baseline VRAM in idle keep-serving mode.
+        if cuda_initialized:
+            try:
+                cuda_module.empty_cache()
+            except Exception as e:
+                logger.debug(f"Could not empty CUDA cache: {e}")
+            try:
+                cuda_module.ipc_collect()
+            except Exception:
+                pass
+
+
+def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
     """Keep process alive while background WeightsLab services are running.
 
     Args:
         timeout: Maximum number of seconds to keep running. If ``None``, runs
             until interrupted.
+        release_gpu: If ``True``, move tracked torch objects to CPU and release
+            CUDA cached memory before entering the wait loop.
     """
+    if release_gpu:
+        _release_gpu_resources()
+        logger.info("WeightsLab switched to CPU idle mode for serving.")
+
     start_time = time.time()
     try:
         while True:
