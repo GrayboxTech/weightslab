@@ -48,7 +48,7 @@ if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
 __version__ = "0.0.0"
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
-__credits__ = 'GrayBx'
+__credits__ = 'GrayBox'
 __license__ = 'BSD 2-clause'
 __all__ = [
     "watch_or_edit",
@@ -58,8 +58,8 @@ __all__ = [
     "signal",
     "compute_signals",
     "set_log_directory",
-	"tag_samples",
-	"discard_samples",
+	"tag_samples", 
+	"discard_samples", 
 	"get_samples_by_tag",
     "get_discarded_samples",
     "SignalContext",

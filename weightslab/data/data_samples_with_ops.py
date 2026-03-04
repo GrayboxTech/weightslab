@@ -307,15 +307,6 @@ class DataSampleTrackingWrapper(Dataset):
                     metadata = load_metadata(self, sid)
                     if metadata is not None:
                         data.update(metadata)
-                        
-                        # Generic Metadata Exploder: 
-                        # Automatically flatten nested dicts into sortable ledger columns.
-                        # e.g. metadata = {"relation": {"id": 1}} -> column "relation:id" = 1
-                        if isinstance(metadata, dict):
-                            for k, v in list(metadata.items()):
-                                if isinstance(v, dict):
-                                    for sub_key, sub_val in v.items():
-                                        data[f"{k}:{sub_key}"] = sub_val
                 except Exception as e:
                     logger.debug(f"Could not preload metadata for sample {sid}: {e}")
 

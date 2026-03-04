@@ -1282,7 +1282,6 @@ class CheckpointSystemTests(unittest.TestCase):
     # ========================================================================
     def test_logger_queue_saved_with_weights(self):
         self.chkpt_manager.update_experiment_hash(force=False, dump_immediately=False)
-        self.chkpt_manager.save_pending_changes(force=True)
 
         snapshot_dir = Path(self.chkpt_manager.loggers_dir)
         manifest_path = snapshot_dir / "loggers.manifest.json"
@@ -1311,22 +1310,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
         self.assertIn('main', loggers, "Logger entry should be present")
         signals = loggers['main'].get("signal_history", [])
-        if isinstance(signals, dict):
-            total_signals = 0
-            for experiments in signals.values():
-                if not isinstance(experiments, dict):
-                    continue
-                for steps in experiments.values():
-                    if not isinstance(steps, dict):
-                        continue
-                    for entries in steps.values():
-                        if isinstance(entries, list):
-                            total_signals += len(entries)
-                        elif entries is not None:
-                            total_signals += 1
-            self.assertGreaterEqual(total_signals, 0, "Signal history count should be non-negative")
-        else:
-            self.assertIsInstance(signals, list, "Signal history should be list or nested dict")
+        self.assertGreaterEqual(len(signals), 1, "Signal history should contain logged signals")
 
 
 class CheckpointStepAwareBehaviorTests(unittest.TestCase):

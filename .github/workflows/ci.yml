@@ -108,7 +108,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Normalize requirement
+      - name: Normalize torch requirement
         run: |
           sed -i 's|^torch==2.1.2+cu121$|torch==2.1.2|' requirements.txt
           sed -i 's|^--extra-index-url https://download.pytorch.org/whl/cu121$|--extra-index-url https://download.pytorch.org/whl/cpu|' requirements.txt
@@ -143,11 +143,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Normalize requirement
-        run: |
-          sed -i 's|^torch==2.1.2+cu121$|torch==2.1.2|' requirements.txt
-          sed -i 's|^--extra-index-url https://download.pytorch.org/whl/cu121$|--extra-index-url https://download.pytorch.org/whl/cpu|' requirements.txt
-
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -159,7 +154,7 @@ jobs:
       - name: Install project dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .
+          python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Run unit tests - General
         run: |
