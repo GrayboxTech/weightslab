@@ -8,66 +8,56 @@ from weightslab.components.global_monitoring import (
     guard_testing_context,
     pause_controller
 )
-from lightning import LightningModule, Trainer
-from lightning.pytorch.callbacks import Callback
 import torch.optim as optim
-
-
-
 import os
-
+import pytorch_lightning as pl
 from torchmetrics.classification import Accuracy
 
 # -----------------------------------------------------------------------------
-# 1. Dataset: Flattened Fashion MNIST with Deterministic Pairing
+# 1. Dataset: Fashion MNIST with Deterministic Pairing
 # -----------------------------------------------------------------------------
 class FashionMNISTSiamese(torch.utils.data.Dataset):
     def __init__(self, train=True, transform=None):
         self.split = "train" if train else "val"
         self.base_ds = datasets.FashionMNIST(root="./data", train=train, download=True, transform=transform)
-        
+
         # Deterministic shuffle for stable pairing
-        self.indices = list(range(len(self.base_ds)))
         import random
+        self.indices = list(range(len(self.base_ds)))
         random.seed(42)
         random.shuffle(self.indices)
 
     def __len__(self):
-        # We return PAIRS of images, so dataset length is halved
         return len(self.base_ds) // 2
 
     def __getitem__(self, idx):
-        # Pick two images based on shifted indices
         idx1 = self.indices[idx * 2]
         idx2 = self.indices[idx * 2 + 1]
-        
+
         img1, t1 = self.base_ds[idx1]
         img2, t2 = self.base_ds[idx2]
-        
-        # Unique IDs for each sample
+
+        # String UIDs for per-sample tracking
         uid1 = f"{self.split}_sample_{idx1}_left"
         uid2 = f"{self.split}_sample_{idx2}_right"
-        # Shared Group ID (int)
-        offset = 1000000 if self.split == "val" else 0
-        group_id = idx + offset
-        
-        # IMPORTANT: We return a tuple where:
-        # 1. First element is a LIST of images (will be collated into [batch_l, batch_r])
-        # 2. Second element is None (WeightsLab will manage it based on compute_hash=False)
-        # 3. Third element is a LIST of targets (labels)
-        # 4. Metadata dict contains 'group_id' for WeightsLab expansion/retrieval
+        # group_id as str — avoids tensor-wrapping mismatch during collation
+        offset = 1_000_000 if self.split == "val" else 0
+        group_id = str(idx + offset)
+
         return (
-            [img1, img2], 
-            [idx1, idx2], 
-            [t1, t2], 
+            [img1, img2],
+            [uid1, uid2],            # string UIDs, match metadata['uids']
+            [t1, t2],
             {
                 "group_id": group_id,
+                "uids": [uid1, uid2],  # tells ledger to expand to 2 rows
                 "pair_type": "same" if t1 == t2 else "different"
             }
         )
 
+
 # -----------------------------------------------------------------------------
-# 2. Multi-Task Model
+# 2. Backbone (plain nn.Module)
 # -----------------------------------------------------------------------------
 class FashionHingeBackbone(nn.Module):
     def __init__(self):
@@ -88,182 +78,174 @@ class FashionHingeBackbone(nn.Module):
         features = self.backbone(x)
         return self.cls_head(features), self.embed_head(features)
 
-    def step(self, batch, loss_clsf, loss_cosine, acc_metric, mode="train"):
+
+# -----------------------------------------------------------------------------
+# 3. LightningModule — used as an organised container; NOT passed to Trainer
+# -----------------------------------------------------------------------------
+class LitFashionHinge(pl.LightningModule):
+    def __init__(self, model, optimizer, loss_clsf, loss_cosine, acc_metric):
+        super().__init__()
+        self.model       = model
+        self.optimizer   = optimizer
+        self.loss_clsf   = loss_clsf
+        self.loss_cosine = loss_cosine
+        self.acc_metric  = acc_metric
+
+    def forward(self, x):
+        return self.model(x)
+
+    def _step(self, batch, origin):
+        """Shared logic for train and val steps."""
         images, uids, targets, metadata = batch
-        
-        if isinstance(images, (list, tuple)):
-            x_flat = torch.cat([img.float() for img in images], dim=0) 
-        else:
-            x_flat = images.float().view(-1, *images.shape[2:])
-            
-        if isinstance(targets, (list, tuple)):
-            t_flat = torch.cat(targets, dim=0) 
-        else:
-            t_flat = targets.view(-1) 
-        
+
+        x_flat = torch.cat([img.float() for img in images], dim=0)
+        t_flat = torch.cat(targets, dim=0)
+
+        # Flatten UIDs to a list of strings
         uids_flat = []
-        for i in range(len(uids)):
-            part = uids[i].detach().cpu() if hasattr(uids[i], "detach") else uids[i]
-            # Handle list/tensor and convert to string
-            if hasattr(part, "tolist"):
-                uids_flat.extend([str(x) for x in part.tolist()])
-            elif isinstance(part, (list, tuple)):
-                uids_flat.extend([str(x) for x in part])
-            else:
-                uids_flat.append(str(part))
-        
+        for part in uids:
+            part = part.detach().cpu() if hasattr(part, "detach") else part
+            uids_flat.extend([str(x) for x in (part.tolist() if hasattr(part, "tolist") else part)])
+
         logits, embed = self(x_flat)
         preds = logits.argmax(dim=1)
-        
-        err_cls = loss_clsf(logits, t_flat, batch_ids=uids_flat, preds=preds)
-        
-        e1 = embed[:len(embed)//2]
-        e2 = embed[len(embed)//2:]
-        t1 = t_flat[:len(t_flat)//2]
-        t2 = t_flat[len(t_flat)//2:]
-        
-        y = (t1 == t2).float() * 2 - 1 
-        loss_embed = loss_cosine(e1, e2, y) # No batch_ids here, return vector
-        
-        # Log per-group losses correctly (will be broadcast to both members of the pair)
+
+        # Classification loss — per-sample via batch_ids
+        err_cls = self.loss_clsf(logits, t_flat, batch_ids=uids_flat, preds=preds)
+
+        # Cosine embedding loss — per pair, then broadcast to both members
+        e1, e2 = embed[:len(embed) // 2], embed[len(embed) // 2:]
+        t1, t2 = t_flat[:len(t_flat) // 2], t_flat[len(t_flat) // 2:]
+        y = (t1 == t2).float() * 2 - 1
+        # batch_ids = left-member UIDs (one per pair) so wrappered_fwd can
+        # map each pair loss to a specific sample ID for the scalar chart
+        pair_ids = uids_flat[:len(uids_flat) // 2]
+        loss_embed = self.loss_cosine(e1, e2, y, batch_ids=pair_ids)
+
+        group_ids = [str(g) for g in metadata["group_id"]]
         wl.save_group_signals(
             signals={"loss_embed_cosine": loss_embed},
-            group_ids=metadata["group_id"],
-            origin=mode
+            group_ids=group_ids,
+            origin=origin,
         )
-        
+
         total_loss = err_cls.mean() + loss_embed.mean()
-        
-        if mode != "train":
-            acc_metric.update(logits, t_flat)
-            
+
+        # Update accuracy metric during validation
+        if origin == "val_loader":
+            self.acc_metric.update(logits, t_flat)
+
         return total_loss
 
-class FashionHingeModel(LightningModule):
-    def __init__(self, lr=0.001, backbone=None, loss_clsf=None, loss_cosine=None, acc_metric=None):
-        super().__init__()
-        self.save_hyperparameters(ignore=['backbone', 'loss_clsf', 'loss_cosine', 'acc_metric'])
-        self.lr = lr
-        self.model = backbone
-        self.loss_clsf = loss_clsf
-        self.loss_cosine = loss_cosine
-        self.acc_metric = acc_metric
-
-    def training_step(self, batch, batch_idx):
-        if hasattr(self.model, "current_step"):
-            self.model.current_step = self.global_step
-            
+    def training_step(self, batch):
         with guard_training_context:
-            return self.model.step(batch, self.loss_clsf, self.loss_cosine, self.acc_metric, mode="train")
+            return self._step(batch, origin="train_loader")
 
-    def validation_step(self, batch, batch_idx):
-        if hasattr(self.model, "current_step"):
-            self.model.current_step = self.global_step
-            
+    def validation_step(self, batch):
         with guard_testing_context:
-            return self.model.step(batch, self.loss_clsf, self.loss_cosine, self.acc_metric, mode="val")
+            loss = self._step(batch, origin="val_loader")
+            # acc_metric update runs inside the step via logits reuse
+            return loss
 
     def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=self.lr)
+        return self.optimizer
+
 
 # -----------------------------------------------------------------------------
-# 3. Training/Evaluation Callback
+# 4. Manual training loop — no Trainer involved
 # -----------------------------------------------------------------------------
-class TrainEvalCallback(Callback):
-    def __init__(self, train_loader, every_n_steps=50):
-        super().__init__()
-        self.train_loader = train_loader
-        self.every_n_steps = every_n_steps
+def to_device(item, device):
+    if isinstance(item, torch.Tensor):
+        return item.to(device)
+    if isinstance(item, (list, tuple)):
+        return [to_device(i, device) for i in item]
+    return item
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if (trainer.global_step + 1) % self.every_n_steps == 0:
-            pl_module.eval()
-            with torch.no_grad():
-                it = iter(self.train_loader)
-                for _ in range(2):
-                    try:
-                        batch = next(it)
-                        # Recursive device transfer helper
-                        def to_device(item):
-                            if isinstance(item, torch.Tensor):
-                                return item.to(pl_module.device)
-                            if isinstance(item, (list, tuple)):
-                                return [to_device(i) for i in item]
-                            return item
-                        
-                        batch = [to_device(b) for b in batch]
-                        pl_module.model.step(batch, pl_module.loss_clsf, pl_module.loss_cosine, pl_module.acc_metric, mode="audit")
-                    except StopIteration:
-                        break
-            pl_module.train()
 
-# -----------------------------------------------------------------------------
-# 4. Serving
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     wl.clear_all()
     params = wl.watch_or_edit({
-        "experiment_name": "fashion_mnist_hinge_full", 
-        "lr": 0.001, 
+        "experiment_name": "fashion_mnist_n_item",
+        "lr": 0.001,
         "batch_size": 32,
-        "root_log_dir": "./root_log_dir/fashion/4"
+        "root_log_dir": "./root_log_dir/fashion/8",
+        "data": {
+            "train_loader": {"batch_size": 32},
+            "val_loader":   {"batch_size": 32},
+        }
     }, flag="hp")
-    
+
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    train_ds = FashionMNISTSiamese(train=True, transform=transform)
-    val_ds = FashionMNISTSiamese(train=False, transform=transform)
-    
+    train_ds = FashionMNISTSiamese(train=True,  transform=transform)
+    val_ds   = FashionMNISTSiamese(train=False, transform=transform)
+
     train_loader = wl.watch_or_edit(
-        train_ds, 
-        flag="data", 
-        loader_name="train_loader", 
-        batch_size=params["batch_size"],
-        shuffle=True,
-        compute_hash=False,
+        train_ds, flag="data", loader_name="train_loader",
+        batch_size=params["batch_size"], shuffle=True, compute_hash=False,
     )
-    
     val_loader = wl.watch_or_edit(
-        val_ds, 
-        flag="data", 
-        loader_name="val_loader", 
-        batch_size=params["batch_size"],
-        shuffle=False,
-        compute_hash=False,
+        val_ds, flag="data", loader_name="val_loader",
+        batch_size=params["batch_size"], shuffle=False, compute_hash=False,
     )
-    
-    # Determine device
-    device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
+
+    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Create loss/metric objects and move to device
-    loss_clsf = wl.watch_or_edit(nn.CrossEntropyLoss(reduction='none').to(device), flag='loss', signal_name='loss_clsf')
-    loss_cosine = wl.watch_or_edit(nn.CosineEmbeddingLoss(margin=0.5, reduction='none').to(device), flag='loss', signal_name='loss_embed_cosine')
-    acc_metric = wl.watch_or_edit(Accuracy(task="multiclass", num_classes=10).to(device), flag='metric', signal_name='val_metric/accuracy')
+    # Watched loss / metric objects
+    loss_clsf   = wl.watch_or_edit(nn.CrossEntropyLoss(reduction='none').to(device),                flag='loss',   signal_name='loss_clsf')
+    loss_cosine = wl.watch_or_edit(nn.CosineEmbeddingLoss(margin=0.5, reduction='none').to(device), flag='loss',   signal_name='loss_embed_cosine')
+    acc_metric  = wl.watch_or_edit(Accuracy(task="multiclass", num_classes=10).to(device),          flag='metric', signal_name='val_metric/accuracy')
 
-    # Initialize sub-model on device
-    _backbone = FashionHingeBackbone().to(device)
-    backbone_proxy = wl.watch_or_edit(_backbone, flag="model", device=device)
-    
-    # Wrap in clean LightningModule (NOT watched directly)
-    model = FashionHingeModel(lr=params["lr"], backbone=backbone_proxy, loss_clsf=loss_clsf, loss_cosine=loss_cosine, acc_metric=acc_metric)
-    
+    # WL-wrapped model and optimizer
+    _model    = FashionHingeBackbone().to(device)
+    model     = wl.watch_or_edit(_model, flag="model", device=device)
+    _optimizer = optim.Adam(model.parameters(), lr=params["lr"])
+    optimizer  = wl.watch_or_edit(_optimizer, flag="optimizer")
+
+    # Instantiate the LightningModule as a pure container
+    lit = LitFashionHinge(
+        model=model, optimizer=optimizer,
+        loss_clsf=loss_clsf, loss_cosine=loss_cosine, acc_metric=acc_metric
+    )
+
     wl.serve(serving_grpc=True)
     pause_controller.resume()
-    
-    # Custom callback to eval on training set periodically
-    train_eval_callback = TrainEvalCallback(train_loader, every_n_steps=20)
-    
-    print("🚀 Starting training with PyTorch Lightning + WeightsLab Guards...")
-    trainer = Trainer(
-        max_epochs=5, 
-        log_every_n_steps=5, 
-        accelerator="auto",
-        devices=1,
-        enable_checkpointing=False,
-        logger=False, # WL SDK handles logging
-        callbacks=[train_eval_callback],
-        val_check_interval=50 # How often to run the official validation
-    )
-    trainer.fit(model, train_loader, val_loader)
 
+    print("🚀 Starting manual training loop (LightningModule as container)...")
+    max_epochs = 5
+    eval_every = 50  # validate every N steps
+
+    for epoch in range(max_epochs):
+        lit.train()
+        for batch_idx, batch in enumerate(train_loader):
+            batch = to_device(batch, device)
+
+            # --- training step ---
+            optimizer.zero_grad()
+            loss = lit.training_step(batch)   # uses guard_training_context internally
+            loss.backward()
+            optimizer.step()
+
+            model_age = model.get_age() if hasattr(model, "get_age") else (epoch * len(train_loader) + batch_idx)
+
+            # --- periodic validation ---
+            if model_age > 0 and model_age % eval_every == 0:
+                lit.eval()
+                val_ran = False
+                with torch.no_grad():
+                    for val_batch in val_loader:
+                        val_batch = to_device(val_batch, device)
+                        lit.validation_step(val_batch)
+                        val_ran = True
+
+                if val_ran:
+                    val_acc = acc_metric.compute()
+                    print(f"Step {model_age:>5} | Val Acc: {val_acc:.4f}")
+                    acc_metric.reset()
+                lit.train()
+
+            if batch_idx % 100 == 0:
+                print(f"Epoch {epoch} | Batch {batch_idx:>4}/{len(train_loader)} | Loss: {loss.item():.4f}")
+
+    print("✅ Training complete.")
     wl.keep_serving()

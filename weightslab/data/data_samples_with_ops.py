@@ -339,7 +339,7 @@ class DataSampleTrackingWrapper(Dataset):
                 row.update({
                     SampleStatsEx.SAMPLE_ID.value: sid,
                     SampleStatsEx.ORIGIN.value: split,
-                    SampleStatsEx.GROUP_ID.value: group_id,
+                    SampleStatsEx.GROUP_ID.value: str(group_id),
                     SampleStatsEx.MEMBER_RANK.value: rank
                 })
                 
@@ -354,8 +354,10 @@ class DataSampleTrackingWrapper(Dataset):
                 
                 # Apply metadata flattening
                 if metadata:
-                    row.update(metadata)
-                    for k, v in list(metadata.items()):
+                    # Do not overwrite standard managed keys with raw un-casted metadata payload
+                    safe_meta = {k: v for k, v in metadata.items() if k not in {SampleStatsEx.GROUP_ID.value, SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.ORIGIN.value}}
+                    row.update(safe_meta)
+                    for k, v in list(safe_meta.items()):
                         if isinstance(v, dict):
                             for sub_key, sub_val in v.items():
                                 row[f"{k}:{sub_key}"] = sub_val

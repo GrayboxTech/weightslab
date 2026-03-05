@@ -528,6 +528,15 @@ class LedgeredDataFrameManager:
             # Filter for efficiency
             mask_total = (self._df[SampleStats.Ex.ORIGIN.value] == origin) & (self._df[SampleStats.Ex.GROUP_ID.value].isin(group_ids))
             if not mask_total.any():
+                unique_origins = self._df[SampleStats.Ex.ORIGIN.value].unique() if not self._df.empty else []
+                
+                # Let's see if group IDs exist at all regardless of origin
+                if not self._df.empty:
+                    mask_group_only = self._df[SampleStats.Ex.GROUP_ID.value].isin(group_ids)
+                    if mask_group_only.any():
+                        found_origins = self._df.loc[mask_group_only, SampleStats.Ex.ORIGIN.value].unique()
+                    else:
+                        sample_gids = self._df[SampleStats.Ex.GROUP_ID.value].dropna().head(5).tolist()
                 return
 
             # Faster lookup
@@ -540,10 +549,23 @@ class LedgeredDataFrameManager:
             affected_ids = []
             for gid, updates in zip(group_ids, updates_list):
                 indices = gid_to_indices.get(gid)
+                if indices is None:
+                    # Let's try coercing gid to the type of the first key in gid_to_indices
+                    if gid_to_indices and list(gid_to_indices.keys())[0] is not None:
+                        try:
+                            sample_type = type(list(gid_to_indices.keys())[0])
+                            coerced_gid = sample_type(gid)
+                            indices = gid_to_indices.get(coerced_gid)
+                        except Exception:
+                            pass
+                            
                 if indices:
                     for col, val in updates.items():
                         self._df.loc[indices, col] = val
                     affected_ids.extend(indices)
+                else:
+                    if not affected_ids:  # Only print once to avoid log spam
+                        print(f"[DEBUG] Could not find gid {repr(gid)} in gid_to_indices keys. Sample key: {repr(list(gid_to_indices.keys())[0]) if gid_to_indices else 'None'}")
             
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
