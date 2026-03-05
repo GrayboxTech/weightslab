@@ -300,6 +300,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Remove parameters
     _ = kw.pop('flag', None)
     ids = kw.pop('batch_ids', None)
+    group_ids = kw.pop('group_id', None)
     preds = kw.pop('preds', None)
     batch_scalar = kw.pop('signals', None)
     preds_raw = a[0] if len(a) > 0 else None
@@ -310,7 +311,6 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # discarded samples/tainted groups from the loss tensor.
     origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
-    group_ids = kw.get('group_id')
 
     if origin and ids is not None and hasattr(out, 'device') and out.ndim > 0:
         try:

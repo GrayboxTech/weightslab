@@ -170,7 +170,7 @@ if __name__ == "__main__":
         "experiment_name": "fashion_mnist_n_item",
         "lr": 0.001,
         "batch_size": 32,
-        "root_log_dir": "./root_log_dir/fashion/8",
+        "root_log_dir": "./root_log_dir/fashion/9",
         "data": {
             "train_loader": {"batch_size": 32},
             "val_loader":   {"batch_size": 32},
