@@ -322,7 +322,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     dynamic_updates = {}
     ids_np = None
     if ids is not None:
-        ids_np = ids.detach().cpu().numpy() if hasattr(ids, 'detach') else np.asarray(ids)
+        if hasattr(ids, 'detach'):
+            ids_np = ids.detach().cpu().numpy()
+        else:
+            try:
+                # Handle list of tensors (common in Siamese/multi-output)
+                ids_np = np.array([i.detach().cpu().numpy() if hasattr(i, 'detach') else i for i in ids])
+            except Exception:
+                ids_np = np.asarray(ids)
 
     if ids_np is not None:
          # Identify Subscribers for this specific signal (reg_name)
@@ -1349,7 +1356,11 @@ def save_signals(
             return
 
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(str) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids)
+    # Convert tensors to numpy for lightweight buffering, forcing to strings for consistent ledger indexing
+    if isinstance(batch_ids, th.Tensor):
+        batch_ids_np = batch_ids.detach().cpu().numpy().astype(str)
+    else:
+        batch_ids_np = np.asarray(batch_ids).astype(str)
     if preds is not None:
         pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
         if np.issubdtype(pred_np.dtype, np.floating):
@@ -1392,11 +1403,11 @@ def save_signals(
     else:
         losses_data = None
     # # Process targets
-    if target_np is not None and target_np.ndim == 1:
+    if target_np is not None and target_np.ndim == 1 and target_np.size > len(batch_ids_np):
         target_np = target_np[:, np.newaxis]
-    if pred_np is not None and pred_np.ndim == 1:
+    if pred_np is not None and pred_np.ndim == 1 and pred_np.size > len(batch_ids_np):
         pred_np = pred_np[:, np.newaxis]
-    if pred_raw_np is not None and pred_raw_np.ndim == 1:
+    if pred_raw_np is not None and pred_raw_np.ndim == 1 and pred_raw_np.size > len(batch_ids_np):
         pred_raw_np = pred_raw_np[:, np.newaxis]
 
     # Enqueue to dataframe manager buffer for efficientcy
@@ -1408,6 +1419,82 @@ def save_signals(
         losses=losses_data,
         step=step
     )
+
+
+def save_group_signals(
+    signals: dict,
+    group_ids: list[str] | th.Tensor,
+    origin: str = 'train',
+    step: int | None = None,
+    log: bool = True
+):
+    """
+    Save and broadcast group-level statistics (e.g., contrastive loss for an image pair).
+
+    Args:
+        signals: Dictionary of {name: value} metrics for the group.
+        group_ids: List of group IDs the signals belong to.
+        origin: Split name ('train', 'val').
+        step: Optional training step.
+        log: Whether to log to the global metrics dashboard.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    # Get current model step
+    step = _get_step(step=step)
+
+    # Convert to standard format
+    # Convert to standard format, forcing to strings for consistent ledger indexing
+    if isinstance(group_ids, th.Tensor):
+        group_ids = group_ids.detach().cpu().numpy().astype(str).tolist()
+    else:
+        group_ids = [str(gid) for gid in group_ids]
+    
+    # Process signals and handle batches
+    batch_signals = {}
+    scalar_signals = {}
+    
+    for k, v in signals.items():
+        # Prefix for UI grouping
+        key = k if k.startswith("signals//") else f"signals//{k}"
+        
+        # Detect if this is a batch vector matching group_ids
+        is_batch = False
+        val_to_log = v
+        
+        if hasattr(v, '__len__') and not isinstance(v, (str, dict)) and len(v) == len(group_ids):
+            is_batch = True
+            if hasattr(v, 'detach'):
+                v = v.detach().cpu().numpy()
+            batch_signals[key] = v
+            val_to_log = np.mean(v)
+        else:
+            if hasattr(v, 'item'):
+                v = v.item()
+            scalar_signals[key] = v
+            val_to_log = v
+
+        # Log mean/scalar to dashboard
+        if log:
+            _log_signal(float(val_to_log), None, k, step=step)
+
+    # Broadcast to all members in ledger
+    all_updates = []
+    for i, gid in enumerate(group_ids):
+        # We also record the last seen step for all members
+        updates = scalar_signals.copy()
+        for k, v_batch in batch_signals.items():
+            updates[k] = v_batch[i]
+            
+        if step is not None:
+            updates[SampleStatsEx.LAST_SEEN.value] = step
+        
+        all_updates.append(updates)
+    
+    # Bulk update for performance (avoids repeated dataframe scans)
+    DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=group_ids, updates_list=all_updates)
 
 
 # ##############################################################################################################
@@ -1439,3 +1526,8 @@ if __name__ == "__main__":
 
     # Keep script alive
     keep_serving(timeout=60)
+
+
+def clear_all():
+    """Clear all WeightsLab registries (models, dataloaders, etc.)."""
+    ledgers.clear_all()

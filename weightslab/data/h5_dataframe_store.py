@@ -243,6 +243,7 @@ class H5DataFrameStore:
         if not self._path.exists():
             return None
         try:
+            self._ensure_parent()
             backup_path = self._path.with_suffix(".h5.backup")
             shutil.copy2(self._path, backup_path)
             logger.debug(f"[H5DataFrameStore] Created backup at {backup_path}")

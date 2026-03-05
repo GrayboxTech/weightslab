@@ -474,6 +474,80 @@ class LedgeredDataFrameManager:
                         self._df = self._df.reindex(columns=df_local.columns)
                     self._df.loc[df_local.index, df_local.columns] = df_local
 
+    def update_by_group(self, origin: str, group_id: str, updates: Dict[str, Any]):
+        """Broadcast updates to all samples sharing a group_id."""
+        if not updates:
+            return
+        
+        with self._lock:
+            if self._df.empty:
+                return
+            
+            # Find all matching rows
+            # We assume group_id is a column in the dataframe
+            if SampleStats.Ex.GROUP_ID.value not in self._df.columns:
+                logger.debug(f"[LedgeredDataFrameManager] update_by_group: group_id column missing in ledger.")
+                return
+
+            mask = (self._df[SampleStats.Ex.GROUP_ID.value] == group_id) & (self._df[SampleStats.Ex.ORIGIN.value] == origin)
+            
+            if mask.any():
+                # Add columns if missing
+                all_cols = self._df.columns.union(updates.keys())
+                if len(all_cols) != len(self._df.columns):
+                    self._df = self._df.reindex(columns=all_cols)
+                
+                # Apply updates to all rows in group
+                # Pandas handles broadcasting automatically here
+                for col, val in updates.items():
+                    self._df.loc[mask, col] = val
+                
+                # Mark all affected samples as dirty
+                affected_ids = self._df.index[mask].tolist()
+                self.mark_dirty_batch(affected_ids)
+            else:
+                logger.debug(f"[LedgeredDataFrameManager] update_by_group: No samples found for group_id={group_id} in origin={origin}")
+
+    def update_by_groups_bulk(self, origin: str, group_ids: List[Any], updates_list: List[Dict[str, Any]]):
+        """Broadcast updates to multiple groups in one pass."""
+        if not group_ids or not updates_list:
+            return
+
+        with self._lock:
+            if self._df.empty or SampleStats.Ex.GROUP_ID.value not in self._df.columns:
+                return
+
+            # Collect columns and ensure they exist
+            all_new_cols = set()
+            for up in updates_list:
+                all_new_cols.update(up.keys())
+            
+            if not all_new_cols.issubset(self._df.columns):
+                self._df = self._df.reindex(columns=self._df.columns.union(all_new_cols))
+
+            # Filter for efficiency
+            mask_total = (self._df[SampleStats.Ex.ORIGIN.value] == origin) & (self._df[SampleStats.Ex.GROUP_ID.value].isin(group_ids))
+            if not mask_total.any():
+                return
+
+            # Faster lookup
+            df_slice = self._df[mask_total]
+            from collections import defaultdict
+            gid_to_indices = defaultdict(list)
+            for idx, gid in zip(df_slice.index, df_slice[SampleStats.Ex.GROUP_ID.value]):
+                gid_to_indices[gid].append(idx)
+
+            affected_ids = []
+            for gid, updates in zip(group_ids, updates_list):
+                indices = gid_to_indices.get(gid)
+                if indices:
+                    for col, val in updates.items():
+                        self._df.loc[indices, col] = val
+                    affected_ids.extend(indices)
+            
+            if affected_ids:
+                self.mark_dirty_batch(affected_ids)
+
     def get_row(self, origin: str, sample_id: int) -> pd.Series | None:
         with self._lock:
             if self._df.empty:
@@ -639,13 +713,7 @@ class LedgeredDataFrameManager:
 
             missing_idx = df_updates.index.difference(self._df.index)
             if len(missing_idx) > 0:
-                self._df = pd.concat(
-                    [
-                        self._df,
-                        pd.DataFrame(index=missing_idx, columns=self._df.columns)
-                    ],
-                    copy=False,
-                )
+                self._df = self._df.reindex(index=self._df.index.append(missing_idx))
 
             mask = df_updates.notna()
             self._df.loc[df_updates.index, df_updates.columns] = (

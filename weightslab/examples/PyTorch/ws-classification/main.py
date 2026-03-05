@@ -102,7 +102,7 @@ class MNISTCustomDataset(Dataset):
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_mlt, device):
+def train(loader, model, optimizer, criterion_mlt, device, epoch=0):
     """Single training step using the tracked dataloader + watched loss."""
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
@@ -124,9 +124,16 @@ def train(loader, model, optimizer, criterion_mlt, device):
             preds_raw.float(),
             labels.long(),
             batch_ids=ids,
-            preds=preds
+            preds=preds,
         )
         total_loss = loss_batch_mlt.mean()  # Final scalar loss
+
+        # Log seen_count signal separately
+        wl.save_signals(
+            signals={"seen_count": torch.full((inputs.size(0),), epoch + 1, dtype=torch.float)},
+            batch_ids=ids,
+            log=False
+        )
 
         # Model
         total_loss.backward()
@@ -240,7 +247,12 @@ if __name__ == "__main__":
 
     # Model
     _model = CNN().to(device)
-    model = wl.watch_or_edit(_model, flag="model", device=device)
+    model = wl.watch_or_edit(
+        _model, 
+        flag="model", 
+        device=device,
+        skip_previous_auto_load=parameters.get("skip_checkpoint_load", False)
+    )
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)
@@ -296,6 +308,7 @@ if __name__ == "__main__":
     test_shuffle = test_cfg.get("shuffle", False)
 
     # Create tracked loaders for train, test, and test
+    skip_auto_load = parameters.get("skip_checkpoint_load", False)
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
@@ -306,7 +319,8 @@ if __name__ == "__main__":
         compute_hash=False,
         preload_labels=True,
         preload_metadata=False,
-        enable_h5_persistence=enable_h5_persistence
+        enable_h5_persistence=enable_h5_persistence,
+        skip_previous_auto_load=skip_auto_load
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -318,7 +332,8 @@ if __name__ == "__main__":
         compute_hash=False,
         preload_labels=True,
         preload_metadata=False,
-        enable_h5_persistence=enable_h5_persistence
+        enable_h5_persistence=enable_h5_persistence,
+        skip_previous_auto_load=skip_auto_load
     )
 
     # Losses & metrics (watched objects – they log themselves)
@@ -363,11 +378,17 @@ if __name__ == "__main__":
 
     train_loss = None
     test_loss, test_metric = None, None
+    steps_per_epoch = len(train_loader)
+    
     for train_step in train_range:
-        age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
+        # Get model age in steps (total steps seen by model)
+        age = model.get_age() if hasattr(model, "get_age") else train_step
 
+        # Calculate current epoch
+        epoch = train_step // steps_per_epoch
+        
         # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion, device)
+        train_loss = train(train_loader, model, optimizer, train_criterion, device, epoch=epoch)
 
         # Periodic test evaluation
         if age > 0 and age % eval_every == 0:
@@ -393,6 +414,10 @@ if __name__ == "__main__":
             sys.stdout.write(f"\r{msg:<100}")
             sys.stdout.flush()
         elif tqdm_display:
+            # Update description with epoch
+            epoch = train_step // steps_per_epoch
+            train_range.set_description(f"Epoch {epoch}")
+            
             # Build compact postfix string
             postfix_parts = [f"train_loss={train_loss:.4f}"]
             if test_loss is not None:
