@@ -570,6 +570,94 @@ class LedgeredDataFrameManager:
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
 
+    def get_tainted_group_ids(self, group_ids: List[Any], origin: str) -> set:
+        """Return the subset of group_ids where at least one member is discarded.
+
+        Used by save_group_signals to skip group-level losses for broken groups
+        (e.g., a cosine-embedding pair where one image was discarded), while
+        still allowing each sample to contribute to its own per-sample losses.
+
+        Args:
+            group_ids: The group IDs to check (as strings, matching ledger).
+            origin: The dataset split name (e.g. 'train_loader').
+
+        Returns:
+            A set of group_id strings that are tainted (contain a discarded member).
+        """
+        tainted = set()
+        from weightslab.data.sample_stats import SampleStatsEx
+        discard_col = SampleStatsEx.DISCARDED.value
+        group_col = SampleStats.Ex.GROUP_ID.value
+        origin_col = SampleStats.Ex.ORIGIN.value
+
+        with self._lock:
+            if self._df.empty:
+                return tainted
+            if group_col not in self._df.columns or discard_col not in self._df.columns:
+                return tainted
+
+            # Narrow to this origin and the requested group_ids only
+            mask = (
+                (self._df[origin_col] == origin) &
+                (self._df[group_col].isin(group_ids))
+            )
+            slice_df = self._df[mask]
+            if slice_df.empty:
+                return tainted
+
+            # Find groups that have at least one discarded member
+            discarded_mask = slice_df[discard_col] == True
+            if discarded_mask.any():
+                tainted = set(slice_df.loc[discarded_mask, group_col].unique())
+
+        return tainted
+
+    def get_discarded_sample_ids(self, sample_ids: List[Any], origin: str) -> set:
+        """Return the subset of sample_ids that are marked as discarded.
+
+        Used by wl.get_active_sample_mask to exclude discarded samples from
+        per-sample loss computations (e.g. classification) during the current epoch.
+
+        Args:
+            sample_ids: The sample IDs (UIDs) to check (as strings/ints).
+            origin: The dataset split name (e.g. 'train_loader').
+
+        Returns:
+            A set of sample_id strings that are discarded.
+        """
+        discarded_ids = set()
+        from weightslab.data.sample_stats import SampleStatsEx
+        discard_col = SampleStatsEx.DISCARDED.value
+        origin_col = SampleStats.Ex.ORIGIN.value
+
+        with self._lock:
+            if self._df.empty or discard_col not in self._df.columns:
+                return discarded_ids
+
+            # Convert all sample_ids to strings for lookup
+            s_ids = [str(sid) for sid in sample_ids]
+            
+            # Efficient lookup: only check samples existing in index
+            existing_mask = self._df.index.isin(s_ids)
+            if not existing_mask.any():
+                return discarded_ids
+                
+            slice_df = self._df[existing_mask]
+            
+            # Narrow by origin if present
+            if origin_col in slice_df.columns:
+                origin_mask = slice_df[origin_col] == origin
+                slice_df = slice_df[origin_mask]
+                
+            if slice_df.empty:
+                return discarded_ids
+
+            # Find samples that are discarded
+            discarded = slice_df[slice_df[discard_col] == True].index.tolist()
+            discarded_ids = set(str(sid) for sid in discarded)
+
+        return discarded_ids
+
     def get_row(self, origin: str, sample_id: int) -> pd.Series | None:
         with self._lock:
             if self._df.empty:

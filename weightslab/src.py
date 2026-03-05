@@ -28,6 +28,7 @@ from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
 from weightslab.backend.ledgers import list_models, get_model as _gm
+from weightslab.components import global_monitoring
 from tqdm import tqdm
 
 
@@ -306,6 +307,27 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
+
+    # discarded samples/tainted groups from the loss tensor.
+    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
+    group_ids = kw.get('group_id')
+
+    if origin and ids is not None and hasattr(out, 'device') and out.ndim > 0:
+        try:
+            # Multi-sample Group Masking
+            if group_ids is not None:
+                mask = get_active_group_mask(group_ids, origin).to(out.device)
+                if len(mask) == len(out):
+                    out = out * mask
+            
+            # Per-sample Individual Masking
+            else:
+                mask = get_active_sample_mask(ids, origin).to(out.device)
+                if len(mask) == len(out):
+                    out = out * mask
+        except Exception as e:
+            logger.debug(f"Automatic backend discard masking failed: {e}")
+
     if kwargs.get('per_sample', False):
         if out.ndim > 1:
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
@@ -1421,6 +1443,98 @@ def save_signals(
     )
 
 
+def get_active_group_mask(
+    group_ids: list[str],
+    origin: str,
+) -> th.Tensor:
+    """Return a boolean mask (one entry per group_id) indicating active (non-tainted) groups.
+
+    A group is "tainted" when at least one of its members has been marked as
+    discarded in the UI. Tainted groups should be excluded from group-level loss
+    computations so the model is not updated based on broken pairs/triplets.
+
+    This should be called **before** `.mean()` in your training step, so the
+    gradient for tainted groups is properly zeroed, not just suppressed in the UI.
+
+    Args:
+        group_ids: List of group ID strings for the current batch (one per pair/group).
+        origin: Dataset split name matching the ledger (e.g. 'train_loader').
+
+    Returns:
+        A float tensor of shape (len(group_ids),) with 1.0 for active groups
+        and 0.0 for tainted groups. Safe to multiply against your loss vector.
+
+    Example::
+
+        # Cosine embedding loss — one value per pair in the batch
+        loss_embed = loss_cosine(e1, e2, y)            # shape: (B/2,)
+        group_mask = wl.get_active_group_mask(group_ids, origin="train_loader")
+        # Zero out tainted pairs so they don't update weights
+        n_active = group_mask.sum().clamp(min=1)
+        loss_embed = (loss_embed * group_mask).sum() / n_active
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    group_ids = [str(g) for g in group_ids]
+    mask = th.ones(len(group_ids), dtype=th.float32)
+
+    if DATAFRAME_M is None or not hasattr(DATAFRAME_M, 'get_tainted_group_ids'):
+        return mask
+
+    try:
+        tainted = DATAFRAME_M.get_tainted_group_ids(group_ids, origin)
+        if tainted:
+            for i, gid in enumerate(group_ids):
+                if gid in tainted:
+                    mask[i] = 0.0
+    except Exception:
+        pass  # Fail-safe: if check fails, treat all groups as active
+
+    return mask
+
+
+def get_active_sample_mask(
+    sample_ids: list[str],
+    origin: str,
+) -> th.Tensor:
+    """Return a boolean mask (one entry per sample_id) indicating active (non-discarded) samples.
+
+    This ensures that any sample marked as discarded in the UI is immediately
+    excluded from per-sample loss calculations, even if it is already in the
+    current training batch (before the sampler's next epoch refresh).
+
+    Args:
+        sample_ids: List of sample ID strings/ints for the current batch.
+        origin: Dataset split name (e.g. 'train_loader').
+
+    Returns:
+        A float tensor of shape (len(sample_ids),) with 1.0 for active samples
+        and 0.0 for discarded samples.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    sample_ids = [str(sid) for sid in sample_ids]
+    mask = th.ones(len(sample_ids), dtype=th.float32)
+
+    if DATAFRAME_M is None or not hasattr(DATAFRAME_M, 'get_discarded_sample_ids'):
+        return mask
+
+    try:
+        discarded_ids = DATAFRAME_M.get_discarded_sample_ids(sample_ids, origin)
+        if discarded_ids:
+            for i, sid in enumerate(sample_ids):
+                if sid in discarded_ids:
+                    mask[i] = 0.0
+    except Exception:
+        pass
+
+    return mask
+
+
 def save_group_signals(
     signals: dict,
     group_ids: list[str] | th.Tensor,
@@ -1480,9 +1594,23 @@ def save_group_signals(
         if log:
             _log_signal(float(val_to_log), None, k, step=step)
 
-    # Broadcast to all members in ledger
+    # --- Group-discard filtering ---
+    # If any member of a group is discarded, skip the group loss for that group.
+    # Per-sample losses (e.g. classification) are still computed since samples stay in the batch.
+    tainted_group_ids: set = set()
+    if DATAFRAME_M is not None and hasattr(DATAFRAME_M, 'get_tainted_group_ids'):
+        try:
+            tainted_group_ids = DATAFRAME_M.get_tainted_group_ids(group_ids, origin)
+        except Exception:
+            pass  # Never block training on best-effort discard check
+
+    # Broadcast to all members in ledger (skip tainted groups)
     all_updates = []
+    active_group_ids = []
     for i, gid in enumerate(group_ids):
+        if gid in tainted_group_ids:
+            continue  # Skip: at least one member was discarded; group loss is undefined
+
         # We also record the last seen step for all members
         updates = scalar_signals.copy()
         for k, v_batch in batch_signals.items():
@@ -1492,9 +1620,13 @@ def save_group_signals(
             updates[SampleStatsEx.LAST_SEEN.value] = step
         
         all_updates.append(updates)
+        active_group_ids.append(gid)
     
+    if not active_group_ids:
+        return  # All groups were tainted; nothing to write
+
     # Bulk update for performance (avoids repeated dataframe scans)
-    DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=group_ids, updates_list=all_updates)
+    DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
 
 
 # ##############################################################################################################

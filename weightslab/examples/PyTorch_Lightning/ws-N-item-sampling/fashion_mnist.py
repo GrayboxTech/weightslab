@@ -111,18 +111,20 @@ class LitFashionHinge(pl.LightningModule):
         preds = logits.argmax(dim=1)
 
         # Classification loss — per-sample via batch_ids
+        # WeightsLab backend automatically masks discarded samples
         err_cls = self.loss_clsf(logits, t_flat, batch_ids=uids_flat, preds=preds)
 
-        # Cosine embedding loss — per pair, then broadcast to both members
+        # Cosine embedding loss — per pair
         e1, e2 = embed[:len(embed) // 2], embed[len(embed) // 2:]
         t1, t2 = t_flat[:len(t_flat) // 2], t_flat[len(t_flat) // 2:]
         y = (t1 == t2).float() * 2 - 1
-        # batch_ids = left-member UIDs (one per pair) so wrappered_fwd can
-        # map each pair loss to a specific sample ID for the scalar chart
+        
         pair_ids = uids_flat[:len(uids_flat) // 2]
-        loss_embed = self.loss_cosine(e1, e2, y, batch_ids=pair_ids)
-
         group_ids = [str(g) for g in metadata["group_id"]]
+        
+        # WeightsLab backend automatically masks tainted groups (broken pairs)
+        loss_embed = self.loss_cosine(e1, e2, y, batch_ids=pair_ids, group_id=group_ids)
+
         wl.save_group_signals(
             signals={"loss_embed_cosine": loss_embed},
             group_ids=group_ids,
