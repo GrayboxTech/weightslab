@@ -20,11 +20,13 @@ class SampleStats:
         PREDICTION = "prediction"
         PREDICTION_RAW = "prediction_raw"
 
+        SIGNAL = "signal"
+
         TARGET = "target"
         ORIGIN = "origin"
         TASK_TYPE = "task_type"
         LAST_SEEN = "last_seen"
-        
+
         DISCARDED = "discarded"
         TAG = "tag"
 
@@ -74,7 +76,7 @@ class SampleStats:
             "SIGNALS.*",  # Prefix for dynamic signals
             "tag.*",  # Prefix for dynamic TAG
             "TAG.*",  # Prefix for dynamic TAG
-            
+
             cls.Ex.DISCARDED.value,
             cls.Ex.TAG.value,
             cls.Ex.ORIGIN.value,

@@ -227,6 +227,7 @@ if __name__ == "__main__":
         print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
+    # Parameters
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
