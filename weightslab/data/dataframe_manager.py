@@ -474,40 +474,6 @@ class LedgeredDataFrameManager:
                         self._df = self._df.reindex(columns=df_local.columns)
                     self._df.loc[df_local.index, df_local.columns] = df_local
 
-    def update_by_group(self, origin: str, group_id: str, updates: Dict[str, Any]):
-        """Broadcast updates to all samples sharing a group_id."""
-        if not updates:
-            return
-        
-        with self._lock:
-            if self._df.empty:
-                return
-            
-            # Find all matching rows
-            # We assume group_id is a column in the dataframe
-            if SampleStats.Ex.GROUP_ID.value not in self._df.columns:
-                logger.debug(f"[LedgeredDataFrameManager] update_by_group: group_id column missing in ledger.")
-                return
-
-            mask = (self._df[SampleStats.Ex.GROUP_ID.value] == group_id) & (self._df[SampleStats.Ex.ORIGIN.value] == origin)
-            
-            if mask.any():
-                # Add columns if missing
-                all_cols = self._df.columns.union(updates.keys())
-                if len(all_cols) != len(self._df.columns):
-                    self._df = self._df.reindex(columns=all_cols)
-                
-                # Apply updates to all rows in group
-                # Pandas handles broadcasting automatically here
-                for col, val in updates.items():
-                    self._df.loc[mask, col] = val
-                
-                # Mark all affected samples as dirty
-                affected_ids = self._df.index[mask].tolist()
-                self.mark_dirty_batch(affected_ids)
-            else:
-                logger.debug(f"[LedgeredDataFrameManager] update_by_group: No samples found for group_id={group_id} in origin={origin}")
-
     def update_by_groups_bulk(self, origin: str, group_ids: List[Any], updates_list: List[Dict[str, Any]]):
         """Broadcast updates to multiple groups in one pass."""
         if not group_ids or not updates_list:

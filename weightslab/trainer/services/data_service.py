@@ -26,6 +26,7 @@ from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals, Proxy
 from weightslab.data.data_utils import load_label, load_raw_image, to_numpy_safe
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
+from weightslab.data.data_utils import load_raw_image_array
 
 
 # Get global logger
@@ -933,9 +934,8 @@ class DataService:
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
 
-            # ====== Step 9: Generate raw data bytes and thumbnail (handles 4D volumetric) ======
+            # ====== Step 9: Generate raw data bytes and thumbnail ======
             if request.include_raw_data and dataset is not None:
-                from weightslab.data.data_utils import load_raw_image_array
                 
                 try:
                     # New grouped-aware location resolution
