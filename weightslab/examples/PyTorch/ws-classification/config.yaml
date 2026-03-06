@@ -26,12 +26,15 @@ serving_cli: true
 # DataLoader parameters
 data:
   train_loader:
-    shuffle: false
+    shuffle: true
     batch_size: 16
+    max_samples: 1000
   val_loader:
     shuffle: false
     batch_size: 16
+    max_samples: 100
   test_loader:
     shuffle: false
     batch_size: 16
     drop_last: false
+    max_samples: 200

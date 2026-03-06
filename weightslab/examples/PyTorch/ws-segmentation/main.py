@@ -60,8 +60,6 @@ class SmallUNet(nn.Module):
         self.task_type = "segmentation"
         self.num_classes = num_classes
         self.class_names = ["Background", "Ego Road", "Driveable Area", "Lane Line 1", "Lane Line 2", "Lane Line 3"]
-        self.seen_samples = 0
-        self.current_step = 0
         self.input_shape = (1, in_channels, image_size, image_size)
 
         self.enc1 = DoubleConv(in_channels, 32)
@@ -285,16 +283,16 @@ The ctx (SignalContext) object contains:
 def compute_blue_pixels(ctx: wl.SignalContext) -> int:
     """
     Static signal counting pixels where Blue channel is dominant.
-    
+
     Context Attributes Used:
         ctx.image
     """
     img_np = ctx.image
     if img_np is None or img_np.ndim != 3: return 0
-    
+
     # R, G, B
     r, g, b = img_np[:,:,0], img_np[:,:,1], img_np[:,:,2]
-    
+
     # Blue is dominant and bright
     blue_mask = (b > 150) & (b > r) & (b > g)
     return int(np.sum(blue_mask))
@@ -304,22 +302,22 @@ def compute_blue_pixels(ctx: wl.SignalContext) -> int:
 def compute_blue_weighted_loss(ctx: wl.SignalContext) -> float:
     """
     Dynamic signal combining current loss with static blue pixel count.
-    
+
     Context Attributes Used:
         ctx.subscribed_value: The current 'train_mlt_loss/CE' value for this sample.
         ctx.sample_id: Unique identifier used to link the loss to historical data.
         ctx.dataframe: Used to look up the pre-computed 'blue_pixels' signal.
         ctx.origin: The dataset split (train/val) needed for the dataframe query.
     """
-    loss = ctx.subscribed_value 
-    
+    loss = ctx.subscribed_value
+
     # Note: origin is typically 'train_loader' or 'test_loader' in this script
     origin = ctx.origin or "train_loader"
     blue_val = ctx.dataframe.get_value(origin, ctx.sample_id, "signals_blue_pixels")
-    
+
     if blue_val is None or (isinstance(blue_val, float) and np.isnan(blue_val)):
         blue_val = 0.0
-        
+
     norm_blue = float(blue_val) / (128 * 128)
     return loss * norm_blue
 

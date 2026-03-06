@@ -97,7 +97,8 @@ message HyperParameters {
   optional int32 full_eval_frequency = 5;
   optional int32 checkpont_frequency = 6;
   optional bool is_training = 7;
-  optional bool auditor_mode = 8;
+  optional int32 nb_steps = 8;
+  optional bool auditor_mode = 9;
 }
 
 message MetricsStatus {
@@ -381,4 +382,3 @@ message RestoreCheckpointResponse {
   bool success = 1;            // Whether restore was successful
   string message = 2;          // Details/error message
 }
-

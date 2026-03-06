@@ -29,7 +29,8 @@ from weightslab.backend.ledgers import (
     get_hyperparams,
     resolve_hp_name,
     get_checkpoint_manager,
-    get_dataframe
+    get_dataframe,
+    get_model
 )
 from weightslab.data.sample_stats import SampleStatsEx
 
@@ -370,6 +371,10 @@ class DataLoaderInterface:
                 # Best-effort: ignore registration failures
                 pass
 
+        # Get model and hp Proxy for future supervision
+        self.model = get_model()
+        self.hp = get_hyperparams()
+
     def _load_checkpoint_data(self) -> None:
         """Load data checkpoint, RNG state, and dataloader iteration state early.
 
@@ -632,6 +637,11 @@ class DataLoaderInterface:
         """If the global pause controller is paused, wait until resumed."""
         try:
             pause_controller.wait_if_paused()
+            if self.model != None:
+                m_age = self.model.get_age()
+                if m_age > 0 and m_age == self.hp.get("pause_at_step", -1):
+                    logger.info("Model is paused as model aged; waiting for resume...")
+                    pause_controller.pause()
         except Exception:
             # Fail-open if pause controller is not available
             pass
