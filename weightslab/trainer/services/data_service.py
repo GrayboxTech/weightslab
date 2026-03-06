@@ -2329,14 +2329,13 @@ class DataService:
 
         try:
             split_names = []
-            with self._lock:
-                self._slowUpdateInternals()
-                if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                    if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
-                        split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value][~self._all_datasets_df[SampleStatsEx.ORIGIN.value].isna()].unique().tolist())
-                    elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
-                        if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
-                            split_names = sorted(self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist())
+            self._slowUpdateInternals()
+            if self._all_datasets_df is not None and not self._all_datasets_df.empty:
+                if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
+                    split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value][~self._all_datasets_df[SampleStatsEx.ORIGIN.value].isna()].unique().tolist())
+                elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                    if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
+                        split_names = sorted(self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist())
             logger.info(f"GetDataSplits returning: {split_names}")
 
             return pb2.DataSplitsResponse(

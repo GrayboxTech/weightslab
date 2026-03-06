@@ -64,6 +64,7 @@ class PauseController:
     def pause(self):
         self._event.clear()
         set_hyperparam(key_path='is_training', value=False)
+        set_hyperparam(key_path='pause_at_step', value=0)
         logger.info('\nTraining paused.')
 
     def _resume(self):

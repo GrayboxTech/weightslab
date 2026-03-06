@@ -283,6 +283,7 @@ class ExperimentService:
                 return pb2.CommandResponse(success=False, message=detailed_msg)
 
             try:
+                hp_now = None
                 if hyper_parameters.HasField("training_steps_to_do"):
                     set_hyperparam(
                         name=hp_name,

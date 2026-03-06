@@ -17,7 +17,7 @@ service ExperimentService {
   // Data Service (for weights_studio UI)
   rpc ApplyDataQuery (DataQueryRequest) returns (DataQueryResponse);
   rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
-  rpc EditDataSample (DataEditsRequest) returns (DataEditsRequest);
+  rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
   rpc GetDataSplits (Empty) returns (DataSplitsResponse);
   rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
 
@@ -99,6 +99,9 @@ message HyperParameters {
   optional bool is_training = 7;
   optional int32 nb_steps = 8;
   optional bool auditor_mode = 9;
+  optional int32 train_batch_size = 10;
+  optional int32 eval_batch_size = 11;
+  optional int32 test_batch_size = 12;
 }
 
 message MetricsStatus {
