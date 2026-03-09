@@ -20,9 +20,6 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-          cache-dependency-path: |
-            requirements*.txt
-            **/requirements*.txt
 
       - name: Cache pip and Ruff
         uses: actions/cache@v4
@@ -108,22 +105,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Normalize requirement
-        run: |
-          sed -i 's|^torch==2.1.2+cu121$|torch==2.1.2|' requirements.txt
-          sed -i 's|^--extra-index-url https://download.pytorch.org/whl/cu121$|--extra-index-url https://download.pytorch.org/whl/cpu|' requirements.txt
-
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-pip
 
       - name: Install project dependencies
         run: |
-          cat requirements.txt
           python -m pip install --upgrade pip
           python -m pip install -e .
 
@@ -143,18 +134,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Normalize requirement
-        run: |
-          sed -i 's|^torch==2.1.2+cu121$|torch==2.1.2|' requirements.txt
-          sed -i 's|^--extra-index-url https://download.pytorch.org/whl/cu121$|--extra-index-url https://download.pytorch.org/whl/cpu|' requirements.txt
-
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-pip
 
       - name: Install project dependencies
         run: |
@@ -180,3 +166,55 @@ jobs:
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m unittest discover -s ./weightslab/tests/integrations -v
+
+  build-and-publish:
+    name: Build & Publish (TestPyPI)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distributions
+        run: python -m twine check dist/*
+
+      - name: Publish to TestPyPI
+        if: always()
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${{ secrets.TEST_PYPI_API_TOKEN }}" ]; then
+            echo "TEST_PYPI_API_TOKEN is not set; skipping TestPyPI upload."
+            exit 0
+          fi
+          python -m twine upload --repository testpypi dist/* --non-interactive
+
+      # To enable automatic publishing to real PyPI:
+      # 1) Create an API token at https://pypi.org/manage/account/token/
+      # 2) Add it as repository secret PYPI_API_TOKEN
+      # 3) Uncomment the step below (remove the leading '#' from each line)
+      #
+      # - name: Publish to PyPI
+      #   env:
+      #     TWINE_USERNAME: __token__
+      #     TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      #   run: |
+      #     if [ -z "${{ secrets.PYPI_API_TOKEN }}" ]; then
+      #       echo "PYPI_API_TOKEN is not set; skipping PyPI upload."
+      #       exit 0
+      #     fi
+      #     python -m twine upload dist/* --non-interactive
