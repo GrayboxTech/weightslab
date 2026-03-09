@@ -44,3 +44,6 @@ Pillow==11.0.0
 langchain-core==1.2.7
 langchain-ollama==1.0.1
 langchain-openai==1.1.7
+
+# Pip specific dependencies
+opencv-python==4.6.0.66
