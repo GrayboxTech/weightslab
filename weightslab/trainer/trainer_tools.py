@@ -44,20 +44,22 @@ def execute_df_operation(df, operation_str):
         DataFrame or None (if inplace=True)
     """
     try:
+        from weightslab.trainer.services.agent.security import safe_execute
         # Format operation first
         operation_str = operation_str.replace("'''", "\"\"\"").replace("@\"\"\"", "").replace("\"\"\"", "").replace("@\'\'\'", "").replace("\'\'\'", "")
 
-        # Execute the operation
-        exec(operation_str, {"df": df, "pd": pd})
+        # Execute the operation in a sandbox
+        df = safe_execute(operation_str, df, mode="exec", timeout=20)
         
         # If result is None, the operation was inplace, return the modified df
-        success_message = f"Operation '{operation_str}' executed successfully."
+        success_message = f"Operation executed successfully."
         return df, success_message
 
     except Exception as e:
-        error_msg = f"Error executing DataFrame operation '{operation_str}': {e}"
+        error_msg = f"Security/Execution Error: {e}"
         logger.error(error_msg, exc_info=True)
         return df, error_msg  # Return original df on error
+
 
 
 def get_hyper_parameters_pb(

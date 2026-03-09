@@ -323,10 +323,12 @@ class DataManipulationAgent:
                         meta["range"] = [float(s.min()), float(s.max())]
                         meta["mean"] = float(s.mean()) if len(s) > 0 else 0
                     elif "object" in dtype or "category" in dtype or "string" in dtype:
-                        # Categorical/String context
+                        # Categorical/String context: Sanitize to prevent prompt injection
                         unique_vals = s.dropna().unique().tolist()
-                        meta["samples"] = unique_vals[:10]
+                        sanitized_samples = [str(v)[:50].replace("\n", " ") for v in unique_vals[:10]]
+                        meta["samples"] = sanitized_samples
                         meta["unique_count"] = len(unique_vals)
+
 
                     column_metadata[col] = meta
             except:
@@ -357,7 +359,7 @@ class DataManipulationAgent:
         for ep in env_paths:
             if ep.exists():
                 load_dotenv(dotenv_path=ep)
-                _LOGGER.info(f"Loaded credentials from {ep}")
+                _LOGGER.info(f"Loaded credentials from {os.path.basename(ep)}")
                 break
 
         config_paths = [repo_root / "agent_config.yaml", inner_pkg / "agent_config.yaml", Path.cwd() / "agent_config.yaml"]
@@ -376,7 +378,7 @@ class DataManipulationAgent:
                 self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
                 self.ollama_port = a_cfg.get("ollama_port", self.ollama_port)
                 self.ollama_model = a_cfg.get("ollama_model", self.ollama_model)
-                _LOGGER.info(f"Applied agent configuration from {path}")
+                _LOGGER.info(f"Applied agent configuration from {os.path.basename(path)}")
                 break
             except Exception as e:
                 _LOGGER.warning(f"Error loading config from {path}: {e}")

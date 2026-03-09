@@ -26,6 +26,8 @@ from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
 from weightslab.data.data_utils import load_label, load_raw_image, to_numpy_safe
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
+from weightslab.trainer.services.agent.security import safe_execute
+
 
 
 # Get global logger
@@ -1258,8 +1260,10 @@ class DataService:
         if func == "df.apply_mask":
             code = params.get("code", "")
             try:
-                mask = eval(code, {"df": df, "np": np, "pd": pd})
+                # Use safe_execute with AST whitelisting and timeout
+                mask = safe_execute(code, df, mode="eval", timeout=20)
                 if isinstance(mask, (pd.Series, np.ndarray, list, pd.Index)):
+
                     if isinstance(mask, (list, pd.Index)) and not pd.api.types.is_bool_dtype(pd.Series(mask)):
                          kept = df.loc[mask]
                     else:
@@ -1305,8 +1309,9 @@ class DataService:
                          # because heuristics fail on column names like 'signals//loss'
                          pass
 
-                # 1. Evaluate the expression with safe context
-                new_values = eval(code, {"df": df, "np": np, "pd": pd})
+                # 1. Evaluate the expression with safe, sandboxed context
+                new_values = safe_execute(code, df, mode="eval", timeout=20)
+
 
                 # 2. Check for scalar vs series compatibility
                 # (Pandas handles most of this, but we ensure robustness)
@@ -1453,8 +1458,10 @@ class DataService:
                      return f"Applied operation: sort_view_slice({start}:{end})"
 
                 if func_name == "drop" and "index" in params:
-                    index_to_drop = eval(params["index"], {"df": df, "np": np})
+                    # Parse index using sandboxed execute
+                    index_to_drop = safe_execute(params["index"], df, mode="eval", timeout=5)
                     df.drop(index=index_to_drop, inplace=True)
+
                     return "Applied operation: drop"
 
                 if func_name == "sort_values":
@@ -1531,10 +1538,11 @@ class DataService:
             if not code: return "No code provided"
             if "import " in code or "__" in code: return "Safety Violation"
             try:
-                result = eval(code, {"df": df, "pd": pd, "np": np})
+                result = safe_execute(code, df, mode="eval", timeout=10)
                 return f"Analysis Result: {result}"
             except Exception as e:
-                return f"Analysis Error: {e}"
+                return f"Analysis Error: {str(e)}"
+
 
         return "No operation applied"
 
@@ -1711,9 +1719,10 @@ class DataService:
             logger.error("Failed to retrieve samples: %s", str(e), exc_info=True)
             return pb2.DataSamplesResponse(
                 success=False,
-                message=f"Failed to retrieve samples: {str(e)}\n{traceback.format_exc()}",
+                message=f"Internal Server Error: Failed to retrieve data samples.",
                 data_records=[]
             )
+
 
     def _calculate_tag_column_updates(self, sample_id: int, origin: str, new_tag_name: str, edit_type) -> dict:
         """
