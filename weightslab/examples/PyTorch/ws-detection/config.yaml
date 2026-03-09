@@ -3,24 +3,24 @@ device: auto
 experiment_name: coco_detection_usecase
 
 # Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
-compute_natural_sort: false
+compute_natural_sort: true
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 1500
-experiment_dump_to_train_steps_ratio: 200
+eval_full_to_train_steps_ratio: 25
+experiment_dump_to_train_steps_ratio: 25
 tqdm_display: true
 is_training: false  # Start training immediately or not
 training_steps_to_do: null  # Set to null for infinite training until manually stopped
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
-ledger_enable_h5_persistence: true
+ledger_enable_h5_persistence: false
 ledger_flush_max_rows: 15
 ledger_flush_interval: 2
 
 # Serving
 serving_grpc: true
-serving_cli: true
+serving_cli: false
 
 # Data
 image_size: 128

@@ -213,6 +213,20 @@ class LedgeredDataFrameManager:
             missing_cols = df_norm.columns.difference(self._df.columns)
             if len(missing_cols) > 0:
                 self._df = self._df.reindex(columns=self._df.columns.union(missing_cols))
+                for col in missing_cols:
+                    source_dtype = df_norm[col].dtype
+                    target_dtype = source_dtype
+
+                    if pd.api.types.is_bool_dtype(source_dtype):
+                        target_dtype = "boolean"
+                    elif pd.api.types.is_integer_dtype(source_dtype):
+                        target_dtype = "Int64"
+
+                    try:
+                        self._df[col] = self._df[col].astype(target_dtype)
+                    except Exception:
+                        # Keep pandas-inferred dtype as fallback
+                        pass
 
             if self._df.empty:
                 # Optimized initial load: just use the normalized dataframe

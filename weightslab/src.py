@@ -3,16 +3,17 @@
 This module provides the user-facing helpers that are re-exported at package
 level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 """
-import os
-import sys
-import time
 import gc
-import functools
+import os
+import time
+import types
 import logging
+import functools
 import numpy as np
 import torch as th
 
-from typing import Callable, Optional, List, Any
+from tqdm import tqdm
+from typing import Callable, Optional, Any
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -28,7 +29,6 @@ from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
 from weightslab.backend.ledgers import list_models, get_model as _gm
-from tqdm import tqdm
 
 
 # Get global logger
@@ -145,6 +145,11 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
+# Set age function if not present for better compatibility with checkpoint manager patterns
+def _get_age(self):
+    return self.current_step
+
+
 def _get_step(step: int | None = None) -> int:
     """
         Attempt to get the current training step from the model in the ledger, if available. This is used for logging signals with the correct global step.
@@ -172,16 +177,23 @@ def _get_step(step: int | None = None) -> int:
             val = m.get_age()
             if val is not None:
                 step = max([int(val)-1, 0])  # Use age-1 as step to reflect completed step; ensure non-negative
+
         elif hasattr(m, 'current_step'):
             val = m.current_step
+
             if val is not None:
                 step = max([int(val)-1, 0])  # Use current_step-1 as step to reflect completed step; ensure non-negative
+
             elif step is not None:
                 # step = step # fallback to provided step
                 m.current_step = step  # add current_step attribute to model for future tracking
+
+            m.get_age = types.MethodType(_get_age, m)  # To make a proper bound method so `self` is passed correctly, we use types.MethodType
+
         elif step is not None:
             # If model doesn't have current_step, force it to 0 or try to infer from checkpoint manager
             m.current_step = step  # add current_step attribute to model for future tracking
+            m.get_age = types.MethodType(_get_age, m)  # To make a proper bound method so `self` is passed correctly, we use types.MethodType
 
     return step
 
