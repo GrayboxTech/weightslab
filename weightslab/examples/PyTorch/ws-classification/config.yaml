@@ -15,20 +15,20 @@ is_training: false  # Start training immediately or not
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
-ledger_enable_h5_persistence: true
+ledger_enable_h5_persistence: false
 ledger_flush_max_rows: 15000
 ledger_flush_interval: 30.0
 
 # Configure clients
 serving_grpc: true
-serving_cli: true
+serving_cli: false
 
 # DataLoader parameters
 data:
   train_loader:
     shuffle: true
     batch_size: 16
-    max_samples: 1000
+    max_samples: 250
   val_loader:
     shuffle: false
     batch_size: 16

@@ -49,12 +49,21 @@ class MNISTCustomDataset(Dataset):
             transform (callable, optional): Optional transform to be applied on images
         """
         # Load the standard MNIST dataset
-        self.mnist = datasets.MNIST(
-            root=root,
-            train=train,
-            download=download,
-            transform=None  # We'll apply transform manually to track filepath
-        )
+        try:
+            self.mnist = datasets.MNIST(
+                root=root,
+                train=train,
+                download=download,
+                transform=None  # We'll apply transform manually to track filepath
+            )
+        except RuntimeError as e:
+            logger.error(f"Error loading MNIST dataset: {e}")
+            self.mnist = datasets.MNIST(
+                root=root,
+                train=train,
+                download=True,
+                transform=None  # We'll apply transform manually to track filepath
+            )
         self.transform = transform
         self.train = train
         self.root = root
