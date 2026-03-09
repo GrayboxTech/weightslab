@@ -53,7 +53,8 @@ try:
     from ._version import __version__  # type: ignore
 except Exception:
     # Fallback when developing locally or before build; keeps behavior stable.
-    __version__ = "0.0.0"
+	from datetime import datetime
+	__version__ = datetime.utcnow().strftime("%Y%m%d%H%M%S")
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'
