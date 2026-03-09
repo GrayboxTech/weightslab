@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "weightslab"
-version = "0.0.0"
+dynamic = ["version"]
 description = "Paving the way between black-box and white-box modeling."
 readme = "README.md"
 authors = [
@@ -68,3 +68,10 @@ Homepage = "https://github.com/GrayboxTech/weightslab"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["weightslab", "weightslab.*"]
+
+[tool.setuptools_scm]
+# Write the generated version into a small module so your package can import it at runtime
+write_to = "weightslab/_version.py"
+# Optional: choose version/local schemes — defaults are usually fine
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"

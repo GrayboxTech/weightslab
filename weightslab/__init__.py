@@ -15,6 +15,9 @@ from .src import watch_or_edit, serve, keep_serving, save_signals, tag_samples, 
 from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory
 
+# If you already have other top-level exports, keep them.
+# This snippet ensures __version__ is available even when setuptools_scm hasn't written the file yet.
+
 
 # Change the name of the current (main) thread
 threading.current_thread().name = "WL-MainThread"
@@ -45,7 +48,12 @@ if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
 	os.environ['WEIGHTSLAB_initialized'] = 'true'  # Ensure WL init once
 
 # Get Package Metadata
-__version__ = "0.0.0"
+try:
+    # setuptools_scm will write weightslab/_version.py during build
+    from ._version import __version__  # type: ignore
+except Exception:
+    # Fallback when developing locally or before build; keeps behavior stable.
+    __version__ = "0.0.0"
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'

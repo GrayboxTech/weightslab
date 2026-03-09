@@ -48,6 +48,7 @@ class MNISTCustomDataset(Dataset):
             download (bool): If True, download the data if not present
             transform (callable, optional): Optional transform to be applied on images
         """
+
         # Load the standard MNIST dataset
         try:
             self.mnist = datasets.MNIST(
@@ -74,6 +75,7 @@ class MNISTCustomDataset(Dataset):
 
     def _build_filepath_mapping(self):
         """Build a mapping of sample index to filepath."""
+
         self.filepaths = {}
 
         # For each index, construct a meaningful filepath
@@ -104,6 +106,7 @@ class MNISTCustomDataset(Dataset):
         Returns:
             tuple: (image, idx, label)
         """
+
         image, label = self.mnist[idx]
 
         # Apply transform if provided
@@ -118,6 +121,7 @@ class MNISTCustomDataset(Dataset):
 # -----------------------------------------------------------------------------
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
+
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
