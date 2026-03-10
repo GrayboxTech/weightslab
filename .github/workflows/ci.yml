@@ -172,6 +172,8 @@ jobs:
     name: Build & Publish Dev (TestPyPI)
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       published_version: ${{ steps.version.outputs.published_version }}
     steps:
@@ -237,6 +239,8 @@ jobs:
     name: Test Install From Pip
     needs: build-and-publish-dev
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -269,6 +273,8 @@ jobs:
     needs:
       - test-install-from-pip-dev
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4
@@ -303,6 +309,8 @@ jobs:
     name: Test Install From Pip
     needs: build-and-publish-main
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     steps:
       - name: Set up Python
