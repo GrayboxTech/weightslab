@@ -11,7 +11,9 @@ sys.path.insert(0, PROJECT_ROOT)
 project = "WeightsLab"
 author = "Graybox"
 copyright = f"{datetime.now().year}, {author}"
-release = "0.0.0"
+docs_ref = os.environ.get("DOCS_REF", "")
+release = os.environ.get("DOCS_VERSION", docs_ref if docs_ref else "0.0.0")
+version = release
 
 extensions = [
     "sphinx.ext.mathjax",
