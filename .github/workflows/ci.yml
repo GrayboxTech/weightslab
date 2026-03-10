@@ -191,7 +191,9 @@ jobs:
       - name: Compute publish version
         id: version
         run: |
-          PRETEND="$(date -u +%Y%m%d%H%M%S)"
+          TS="$(date -u +%Y%m%d%H%M%S)"
+          SHA="$(git rev-parse --short=8 HEAD)"
+          PRETEND="${TS}.dev0+${SHA}"
           echo "published_version=${PRETEND}" >> $GITHUB_OUTPUT
           echo "Publishing version: ${PRETEND}"
 
