@@ -238,7 +238,7 @@ jobs:
           python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
 
   test-install-from-pip-dev:
-    name: Test Install From Pip
+    name: Test Install From Pip Dev
     needs: build-and-publish-dev
     runs-on: ubuntu-latest
     permissions:
@@ -263,7 +263,7 @@ jobs:
             echo "Missing published version from upstream job"
             exit 1
           fi
-          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir
+          sleep 60 && python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir
           echo "weightslab==${WL_VERSION} installed from TestPyPI"
 
       - name: Verify package import
@@ -274,10 +274,13 @@ jobs:
   build-and-publish-main:
     needs:
       - test-install-from-pip-dev
+    name: Build & Publish Main (PyPI)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    outputs:
+      published_version: ${{ steps.main-version.outputs.published_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -292,6 +295,23 @@ jobs:
 
       - name: Build distributions
         run: python -m build
+
+      - name: Capture built version
+        id: main-version
+        run: |
+          WHEEL_PATH="$(ls dist/weightslab-*.whl | head -n 1)"
+          if [ -z "${WHEEL_PATH}" ]; then
+            echo "No wheel found in dist/"
+            exit 1
+          fi
+          WHEEL_FILE="$(basename "${WHEEL_PATH}")"
+          WL_VERSION="$(echo "${WHEEL_FILE}" | sed -E 's/^weightslab-([^-]+)-.*/\1/')"
+          if [ -z "${WL_VERSION}" ]; then
+            echo "Could not parse version from ${WHEEL_FILE}"
+            exit 1
+          fi
+          echo "published_version=${WL_VERSION}" >> $GITHUB_OUTPUT
+          echo "Main published version: ${WL_VERSION}"
 
       - name: Check distributions
         run: python -m twine check dist/*
@@ -308,7 +328,7 @@ jobs:
           python -m twine upload dist/* --non-interactive
 
   test-install-from-pip-main:
-    name: Test Install From Pip
+    name: Test Install From Pip Main
     needs: build-and-publish-main
     runs-on: ubuntu-latest
     permissions:
@@ -334,8 +354,8 @@ jobs:
             echo "Missing published version from upstream job"
             exit 1
           fi
-          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir
-          echo "weightslab==${WL_VERSION} installed from TestPyPI"
+          sleep 60 && python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
+          echo "weightslab==${WL_VERSION} installed from PyPI"
 
       - name: Verify package import
         run: |
