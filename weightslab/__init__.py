@@ -73,7 +73,7 @@ __all__ = [
     "get_discarded_samples",
     "SignalContext",
 
-    "_BANNER__",
+    "_BANNER",
     "__version__",
     "__license__",
     "__author__",
