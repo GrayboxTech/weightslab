@@ -204,7 +204,7 @@ jobs:
 
       - name: Publish to TestPyPI
         env:
-          TWINE_USERNAME: __token__
+          TWINE_USERNAME: GuillaumeP_GB
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
         run: |
           if [ -z "${{ secrets.TEST_PYPI_API_TOKEN }}" ]; then
