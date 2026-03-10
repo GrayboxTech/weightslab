@@ -172,10 +172,19 @@ jobs:
         env:
           WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
         run: |
-          curl -s -X POST "https://weights-studio.example/api/v1/jobs" \
-            -H "Authorization: Bearer $WS_TOKEN" \
+          if [ -z "${WS_TOKEN}" ]; then
+            echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
+            exit 0
+          fi
+
+          # Trigger the ws-ci workflow in the weights_studio repository on main.
+          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
+            -H "Authorization: Bearer ${WS_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
-            -d '{"ref": "'"refs/heads/main"'", "source": "github-actions"}'
+            -d '{"ref":"main"}'
+
+          echo "WeightsStudio workflow dispatch requested successfully."
 
   build-and-publish-dev:
     name: Build & Publish Dev (TestPyPI)
