@@ -187,19 +187,14 @@ jobs:
       - name: Install build tools
         run: python -m pip install --upgrade pip build twine
 
-      - name: Set synthetic setuptools_scm version
-        id: version
-        # Use current UTC datetime as a unique version stamp.
+      - name: Build distributions
         run: |
           PRETEND="$(date -u +%Y%m%d%H%M%S)"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=${PRETEND}" >> $GITHUB_ENV
           echo "published_version=${PRETEND}" >> $GITHUB_OUTPUT
           echo "Publishing version: ${PRETEND}"
-
-      - name: Build distributions
-        env:
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ env.SETUPTOOLS_SCM_PRETEND_VERSION }}
-        run: |
+          export SETUPTOOLS_SCM_PRETEND_VERSION=${PRETEND}
+          echo "Building with version ${SETUPTOOLS_SCM_PRETEND_VERSION}"
           python -m build
 
       - name: Check distributions
