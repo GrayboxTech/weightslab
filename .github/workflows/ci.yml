@@ -192,10 +192,12 @@ jobs:
         id: version
         run: |
           TS="$(date -u +%Y%m%d%H%M%S)"
-          SHA="$(git rev-parse --short=8 HEAD)"
-          PRETEND="${TS}.dev0+${SHA}"
+          SHA_HEX="$(git rev-parse --short=8 HEAD)"
+          # TestPyPI/PyPI reject local versions (+sha), so encode sha as decimal in devN.
+          SHA_DEC="$((16#${SHA_HEX}))"
+          PRETEND="${TS}.dev${SHA_DEC}"
           echo "published_version=${PRETEND}" >> $GITHUB_OUTPUT
-          echo "Publishing version: ${PRETEND}"
+          echo "Publishing version: ${PRETEND} (from sha ${SHA_HEX})"
 
       - name: Build distributions
         env:
