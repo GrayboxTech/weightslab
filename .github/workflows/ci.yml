@@ -377,7 +377,7 @@ jobs:
             echo "Missing published version from upstream job"
             exit 1
           fi
-          sleep 60 && python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
+          sleep 180 && python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
           echo "weightslab==${WL_VERSION} installed from PyPI"
 
       - name: Verify package import
