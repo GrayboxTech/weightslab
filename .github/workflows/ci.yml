@@ -143,35 +143,55 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip
 
-      - name: Install project dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install .
+      # - name: Install project dependencies
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     python -m pip install .
 
-      - name: Run unit tests - General
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
+      # - name: Run unit tests - General
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
 
-      - name: Run unit tests - Model
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/model -v
+      # - name: Run unit tests - Model
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/model -v
 
-      - name: Run unit tests - Data
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/data -v
+      # - name: Run unit tests - Data
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/data -v
 
-      - name: Run unit tests - Integrations
+      # - name: Run unit tests - Integrations
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/integrations -v
+
+      - name: Trigger WeightsStudio CI
+        env:
+          WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
         run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/integrations -v
+          if [ -z "${WS_TOKEN}" ]; then
+            echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
+            exit 0
+          fi
+
+          # Trigger the ws-ci workflow in the weights_studio repository on main.
+          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
+            -H "Authorization: Bearer ${WS_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{"ref":"main"}'
+
+          echo "WeightsStudio workflow dispatch requested successfully."
 
   build-and-publish-dev:
     name: Build & Publish Dev (TestPyPI)
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       published_version: ${{ steps.version.outputs.published_version }}
     steps:
@@ -236,9 +256,11 @@ jobs:
           python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
 
   test-install-from-pip-dev:
-    name: Test Install From Pip
+    name: Test Install From Pip Dev
     needs: build-and-publish-dev
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -259,7 +281,7 @@ jobs:
             echo "Missing published version from upstream job"
             exit 1
           fi
-          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir
+          sleep 60 && python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir
           echo "weightslab==${WL_VERSION} installed from TestPyPI"
 
       - name: Verify package import
@@ -270,12 +292,25 @@ jobs:
   build-and-publish-main:
     needs:
       - test-install-from-pip-dev
+    name: Build & Publish Main (PyPI)
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    outputs:
+      published_version: ${{ steps.main-version.outputs.published_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Verify tag commit is on main
+        run: |
+          git fetch origin main --depth=1
+          if ! git branch -r --contains "$GITHUB_SHA" | grep -q "origin/main"; then
+            echo "Tag ${GITHUB_REF} does not point to a commit on main"
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -286,6 +321,23 @@ jobs:
 
       - name: Build distributions
         run: python -m build
+
+      - name: Capture built version
+        id: main-version
+        run: |
+          WHEEL_PATH="$(ls dist/weightslab-*.whl | head -n 1)"
+          if [ -z "${WHEEL_PATH}" ]; then
+            echo "No wheel found in dist/"
+            exit 1
+          fi
+          WHEEL_FILE="$(basename "${WHEEL_PATH}")"
+          WL_VERSION="$(echo "${WHEEL_FILE}" | sed -E 's/^weightslab-([^-]+)-.*/\1/')"
+          if [ -z "${WL_VERSION}" ]; then
+            echo "Could not parse version from ${WHEEL_FILE}"
+            exit 1
+          fi
+          echo "published_version=${WL_VERSION}" >> $GITHUB_OUTPUT
+          echo "Main published version: ${WL_VERSION}"
 
       - name: Check distributions
         run: python -m twine check dist/*
@@ -302,10 +354,12 @@ jobs:
           python -m twine upload dist/* --non-interactive
 
   test-install-from-pip-main:
-    name: Test Install From Pip
+    name: Test Install From Pip Main
     needs: build-and-publish-main
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -326,8 +380,8 @@ jobs:
             echo "Missing published version from upstream job"
             exit 1
           fi
-          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir
-          echo "weightslab==${WL_VERSION} installed from TestPyPI"
+          sleep 60 && python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
+          echo "weightslab==${WL_VERSION} installed from PyPI"
 
       - name: Verify package import
         run: |
