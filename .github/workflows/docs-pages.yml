@@ -5,6 +5,8 @@ on:
     branches: [docstring, dev, main]
     tags:
       - 'v*'
+  pull_request:
+    branches: [dev, main]
   workflow_dispatch:
 
 permissions:
@@ -51,6 +53,7 @@ jobs:
         run: sphinx-build -b html docs docs/_build/html
 
       - name: Prepare publish tree
+        if: github.event_name != 'pull_request'
         env:
           DOCS_PATH: ${{ steps.meta.outputs.docs_path }}
           REF_NAME: ${{ github.ref_name }}
@@ -72,6 +75,7 @@ jobs:
           touch site/.nojekyll
 
       - name: Deploy to gh-pages
+        if: github.event_name != 'pull_request'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
