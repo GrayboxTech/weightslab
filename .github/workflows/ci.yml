@@ -214,7 +214,7 @@ jobs:
             echo "TEST_PYPI_API_TOKEN not set; skipping TestPyPI upload."
             exit 0
           fi
-          python -m twine upload --repository testpypi dist/* --non-interactive
+          python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
 
   test-install-from-pip:
     name: Test Install From Pip
