@@ -170,40 +170,16 @@ jobs:
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m unittest discover -s ./weightslab/tests/integrations -v
 
-      - name: Trigger WeightsStudio CI
-        env:
-          WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-          WL_BRANCH: ${{ github.head_ref || github.ref_name }}
-        run: |
-          if [ -z "${WS_TOKEN}" ]; then
-            echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
-            exit 0
-          fi
-
-          TARGET_BRANCH="${WL_BRANCH}"
-          if [ -z "${TARGET_BRANCH}" ]; then
-            TARGET_BRANCH="dev"
-          fi
-
-          if git ls-remote --exit-code --heads "https://x-access-token:${WS_TOKEN}@github.com/GrayboxTech/weights_studio.git" "${TARGET_BRANCH}" > /dev/null 2>&1; then
-            echo "Using matching weights_studio branch: ${TARGET_BRANCH}"
-          else
-            echo "weights_studio branch '${TARGET_BRANCH}' not found, falling back to dev"
-            TARGET_BRANCH="dev"
-          fi
-
-          # Trigger the ws-ci workflow in the weights_studio repository.
-          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
-            -H "Authorization: Bearer ${WS_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d '{"ref":"'"${TARGET_BRANCH}"'"}'
-
-          echo "WeightsStudio workflow dispatch requested successfully on '${TARGET_BRANCH}'."
+  weightsstudio-ci:
+    name: WeightsStudio CI
+    needs: test
+    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
+    with:
+      weightslab_branch: ${{ (github.head_ref || github.ref_name) == 'main' && 'main' || 'dev' }}
 
   build-and-publish-dev:
     name: Build & Publish Dev (TestPyPI)
-    needs: test
+    needs: weightsstudio-ci
     runs-on: ubuntu-latest
     permissions:
       contents: read
