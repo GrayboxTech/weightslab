@@ -248,7 +248,7 @@ class COCOBBoxSegmentationDataset(Dataset):
                 for ann in anns
         ], dtype=torch.int64) if anns else torch.zeros((0,), dtype=torch.int64)
         image_id_t = torch.tensor([image_id], dtype=torch.int64)
-        
+
         # DEBUG: Verify we have variety in target classes
         unique_classes = torch.unique(transformed_gt)
         if idx % 100 == 0:
@@ -300,10 +300,10 @@ def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_l
         class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
         boxes_xyxy = outputs.boxes.xyxy
         classes = outputs.boxes.cls.int()
-        
+
         # Optional: filter by confidence if we had conf values
         conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
-        
+
         if idx % 5 == 0:
             maxconf = conf.max().item() if conf is not None and conf.numel() > 0 else 0
             print(f"DEBUG: [Batch {idx}] Prediction count: {len(outputs.boxes)} | Max conf: {maxconf:.2f}", flush=True)
@@ -318,7 +318,7 @@ def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_l
             x2, y2 = min(W, x2), min(H, y2)
             if x2 > x1 and y2 > y1:
                 class_map[y1:y2, x1:x2] = cls + 1
-        
+
         pseg = class_map[None, ...] # channel dim
 
         if criterion_mlt is not None:
@@ -327,7 +327,7 @@ def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_l
                 tbbxs,
                 batch_ids=ids,
                 preds=pseg,  # Save segmentation mask as overlay
-                # targets=tseg,  # Save full GT mask - not necessary as preloaded 
+                # targets=tseg,  # Save full GT mask - not necessary as preloaded
             )
             if isinstance(loss_batch, torch.Tensor):
                 losses += torch.mean(loss_batch).item()
@@ -394,7 +394,7 @@ def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_
                 tbbxs,
                 batch_ids=ids,
                 preds=pseg,  # Pass rasterized mask
-                # targets=tseg,  # Save full GT mask - not necessary as preloaded 
+                # targets=tseg,  # Save full GT mask - not necessary as preloaded
             )
             if isinstance(loss_batch, torch.Tensor):
                 losses += torch.mean(loss_batch).item()
@@ -576,7 +576,7 @@ if __name__ == "__main__":
         use_onnx=True,
         compute_dependencies=False, # Don't compute dependencies for the whole model (can be large); focus on data analysis and metrics in this example
     )
-    
+
     # --- Compute class weights to handle class imbalance ---
     print("\n" + "=" * 60)
     print("Computing class weights to address class imbalance...")

@@ -5,6 +5,7 @@ import os
 import traceback
 import threading
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -95,6 +96,75 @@ def generate_thumbnail(pil_image, max_size=(128, 128), quality=85):
         return b""
 
 
+def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
+    """Normalize a source metadata name for deterministic copied-column naming."""
+    name = str(source_name or "").strip()
+    if not name:
+        return "metadata"
+    if "@" in name:
+        _, name = name.split("@", 1)
+    exp_hash = str(experiment_hash or "").strip()
+    if exp_hash and name.startswith(f"{exp_hash}_"):
+        name = name[len(exp_hash) + 1:]
+    name = name.replace("@", "_")
+    # Remove trailing "_<int>" only when the suffix is numeric
+    if "_" in name:
+        base, suffix = name.rsplit("_", 1)
+        if suffix.isdigit() and base:
+            name = base
+    name = re.sub(r"\s+", "_", name)
+    return name
+
+
+def build_metadata_copy_column_names(existing_columns, experiment_hash: str, source_name: str):
+    """Build backend/ui copied metadata names with incrementing suffix _1, _2, ..."""
+    exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
+    normalized_source = normalize_metadata_copy_source_name(source_name, exp_hash)
+    existing_iterable = [] if existing_columns is None else existing_columns
+    existing = {str(col) for col in existing_iterable}
+
+    index = 1
+    while True:
+        copy_name = f"{normalized_source}_{index}@{exp_hash}"
+        if copy_name not in existing:
+            return copy_name
+        index += 1
+
+
+def duplicate_metadata_column_in_dataframe(df: pd.DataFrame, source_column: str, experiment_hash: str):
+    """Return a dataframe copy with one duplicated metadata column using experiment-hash naming."""
+    if source_column not in df.columns:
+        raise KeyError(f"Source metadata column not found: {source_column}")
+
+    copy_name = build_metadata_copy_column_names(df.columns, experiment_hash, source_column)
+    df[copy_name] = df[source_column]
+    return df, copy_name
+
+
+def is_copy_metadata_column_name(column_name: str) -> bool:
+    name = str(column_name or "").strip()
+    return bool(re.match(r".+_\d+@.+$", name))
+
+
+def is_protected_metadata_name(column_name: str) -> bool:
+    name = str(column_name or "").strip()
+    if not name:
+        return False
+
+    protected = set(SampleStatsEx.ALL())
+    if name in protected:
+        return True
+
+    # Protect dynamic families too (e.g. tag:xxx, signal:xxx, signals//xxx)
+    prefixed_families = [
+        re.escape(SampleStatsEx.TAG.value),
+        re.escape(SampleStatsEx.SIGNAL.value),
+        r"signals",
+    ]
+    family_regex = rf"^({'|'.join(prefixed_families)})(?:$|[:/_\\-].*)"
+    return bool(re.match(family_regex, name, flags=re.IGNORECASE))
+
+
 class DataService:
 
     """
@@ -144,7 +214,7 @@ class DataService:
 
         if self._compute_natural_sort:
            self._compute_natural_sort_stats()
-        
+
         # self._compute_custom_signals()
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
@@ -152,29 +222,29 @@ class DataService:
 
     def _deduce_and_set_aspect_ratios(self):
         """Automatically deduce and set aspect_ratio for all registered datasets.
-        
-        It loads the first raw image from each dataset to determine the 
-        canonical aspect ratio, then monkey-patches the 'aspect_ratio' 
+
+        It loads the first raw image from each dataset to determine the
+        canonical aspect ratio, then monkey-patches the 'aspect_ratio'
         attribute onto the dataset object if it's not already set.
         """
         try:
             from weightslab.data.data_utils import load_raw_image
             from weightslab.backend.ledgers import get_dataloaders
-            
+
             loaders_dict = get_dataloaders()
             for name, loader in loaders_dict.items():
                 if not loader or not hasattr(loader, "dataset"):
                     continue
-                
+
                 # Unwrap to find the base dataset
                 dataset = loader.dataset
                 ds = getattr(dataset, "wrapped_dataset", dataset)
-                
+
                 # Skip if already set manually
                 if hasattr(ds, "aspect_ratio") and ds.aspect_ratio is not None:
                     logger.debug(f"[DataService] Dataset '{name}' already has aspect_ratio={ds.aspect_ratio}")
                     continue
-                
+
                 # Load first image to deduce ratio
                 try:
                     if len(dataset) > 0:
@@ -186,9 +256,10 @@ class DataService:
                             logger.info(f"[DataService] Deduced aspect_ratio={ratio:.2f} for dataset '{name}' from first sample.")
                 except Exception as e:
                     logger.debug(f"[DataService] Failed to deduce aspect_ratio for dataset '{name}': {e}")
-                    
+
         except ImportError:
             pass
+
         except Exception as e:
             logger.warning(f"[DataService] Unexpected error during aspect ratio deduction: {e}")
 
@@ -218,9 +289,6 @@ class DataService:
         """Recreate the in-memory dataframe view from the shared H5 store."""
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
-
-
-
 
     def _resolve_root_log_dir(self) -> Path:
         """Resolve root log directory from hyperparams/env, fallback to ./logs."""
@@ -254,7 +322,7 @@ class DataService:
             pass
         return data_dir / "data_with_ops.h5"
 
-    def is_agent_available(self) -> bool:
+    def _is_agent_available(self) -> bool:
         """
         Check if the agent (Ollama) is available for natural language queries.
 
@@ -305,7 +373,7 @@ class DataService:
                     df = df.reset_index()
 
                 # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
-                # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without 
+                # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
                 # exploding the dataframe size due to duplicate sample_id index labels.
                 if SampleStatsEx.ORIGIN.value in df.columns:
                     # Use drop=True to ensure origin is NOT in both index and columns (avoids ambiguity)
@@ -315,12 +383,12 @@ class DataService:
                     # Fallback to single index if origin is missing, though manager should provide it
                     df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=True)
 
-                # DEDUPLICATE: Ensure index is unique before returning. 
+                # DEDUPLICATE: Ensure index is unique before returning.
                 # If duplicates exist, reindex() will fail later.
                 if df.index.has_duplicates:
                     logger.debug(f"[DataService] Dropping {df.index.duplicated().sum()} duplicate index labels from data view.")
                     df = df[~df.index.duplicated(keep='last')]
-                
+
                 return df
             except Exception as e:
                 logger.debug(f"[DataService] Error pulling data view: {e}")
@@ -370,7 +438,7 @@ class DataService:
                 self._all_datasets_df[SampleStatsEx.TAG.value] = ""
             except Exception:
                 pass
-        
+
         # Ensure natural_sort_score exists (init with NaN if missing)
         if self._compute_natural_sort and "natural_sort_score" not in self._all_datasets_df.columns:
             try:
@@ -404,7 +472,7 @@ class DataService:
         """
         Compute natural sort statistics (brightness, hue, saturation, entropy) for all samples
         and update the dataframe.
-        
+
         Includes a 'natural_sort_score' for sorting, configured by weights.
         """
         # --- CONFIGURATION: Define Natural Sort Cues & Weights ---
@@ -414,13 +482,13 @@ class DataService:
         # 2. "Complexity" focus: Brightness=0.2, Entropy=0.8
         # 3. "Balanced": Brightness=0.5, Entropy=0.5
         # 4. "Grouped" (Pseudo-primary key): Brightness=5.0, Entropy=1.0 (Forces clustering by light)
-        
+
         SORT_WEIGHTS = {
             "brightness": 0.7,  # Primary cue: Lighting conditions
             "entropy": 0.3,     # Secondary cue: Texture/Scene complexity
             "hue": 0.0          # Optional: Color tint
         }
-        
+
         logger.info(f"[DataService] Starting natural sort stats computation with weights: {SORT_WEIGHTS}")
 
         try:
@@ -451,7 +519,7 @@ class DataService:
             idx, row = args
             try:
                 origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
-                
+
                 # Sample ID is either the index or in the columns — use as-is (may be string UID)
                 if SampleStatsEx.SAMPLE_ID.value in row:
                     sample_id = row[SampleStatsEx.SAMPLE_ID.value]
@@ -515,10 +583,10 @@ class DataService:
                 # Normalize robustly to 0-1 range for combination
                 # Brightness: 0-255 typical for 8-bit
                 norm_brightness = min(max(brightness / 255.0, 0.0), 1.0)
-                
+
                 # Entropy: 0-8 bits typical for 8-bit image
                 norm_entropy = min(max(entropy / 8.0, 0.0), 1.0)
-                
+
                 # Hue: 0-179 in OpenCV
                 norm_hue = min(max(hue / 179.0, 0.0), 1.0)
 
@@ -592,7 +660,7 @@ class DataService:
         logger.info(f"[DataService] Completed stats computation for {processed_count} samples")
         print(f"\n\nNatural sort computation finished for {processed_count} samples\n\n")
         return f"Computed stats for {processed_count} samples"
-        
+
     def _compute_custom_signals(self):
         """
         Discover and compute registered custom signals for all active dataloaders.
@@ -600,22 +668,22 @@ class DataService:
         """
         # Local import to avoid circular dependency
         import weightslab.src as wl_src
-        
+
         # Get all registered signal names
         signals = list_signals()
         if not signals:
             return
-            
+
         # Get all active dataloaders
         # use get_dataloaders without args to get all registered ones
-        loaders = get_dataloaders(None) 
-        
+        loaders = get_dataloaders(None)
+
         logger.info(f"[DataService] Checking custom signals {signals} for {len(loaders)} loaders...")
-        
+
         for loader_name, loader in loaders.items():
             if not loader or not hasattr(loader, "dataset"):
                 continue
-                
+
             try:
                 # We need to determine the origin/split name for the compute_signals function
                 # Try to inspect the loader/dataset
@@ -625,14 +693,14 @@ class DataService:
                     origin = ds._dataset_split
                 elif hasattr(loader, "dataset") and hasattr(loader.dataset, "split"):
                     origin = loader.dataset.split
-                
+
                 # Run computation
                 logger.info(f"[DataService] Computing signals {signals} for loader '{loader_name}' (origin={origin})")
                 wl_src.compute_signals(loader, origin=origin, signals=signals)
-                
+
             except Exception as e:
                 logger.error(f"[DataService] Failed to compute signals for loader '{loader_name}': {e}")
-                
+
         # Force view update
         self._slowUpdateInternals(force=True)
 
@@ -668,7 +736,7 @@ class DataService:
 
             ds = getattr(dataset, "wrapped_dataset", dataset)
             model = self._ctx.components.get("model") if self._ctx else None
-            
+
             # Robust Task Type Detection
             # 1. DB Row takes precedence if valid string
             db_task_type = row.get(SampleStatsEx.TASK_TYPE.value)
@@ -705,7 +773,7 @@ class DataService:
 
             # ====== Step 5a: Process stats ======
             stats_to_retrieve = list(request.stats_to_retrieve)
-            
+
             # These columns are handled explicitly later in the pipeline
             exclude_cols = {
                 SampleStatsEx.SAMPLE_ID.value,
@@ -733,7 +801,7 @@ class DataService:
                     value = round(value, 7)
                 elif isinstance(value, bool):
                     value = int(value)
-                
+
                 # Check if it s a tag column here and handle it as a string stat with the tag name as value
                 if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
                     if value == 1:
@@ -771,7 +839,7 @@ class DataService:
                 # Treat label as segmentation mask -> array stat
                 data_stats.append(
                     create_data_stat(
-                        name='label',
+                        name='target',
                         stat_type='array',
                         shape=list(label_arr.shape),
                         value=label_arr.astype(float).ravel().tolist(),
@@ -837,12 +905,12 @@ class DataService:
                     )
             elif label is not None:
                 # Classification / other scalar-like labels
-                
+
                 # Handle dictionary labels (e.g. detection targets)
                 if isinstance(label, dict):
                     data_stats.append(
                         create_data_stat(
-                            name='label',
+                            name='target',
                             stat_type='string',
                             shape=[1],
                             value_string=str(label), # Simplified visualization
@@ -858,7 +926,7 @@ class DataService:
                     try:
                         data_stats.append(
                             create_data_stat(
-                                name='label',
+                                name='target',
                                 stat_type='scalar',
                                 shape=[1],
                                 value=[float(label)],
@@ -871,7 +939,7 @@ class DataService:
                             label_arr = np.asanyarray(label)
                             data_stats.append(
                                 create_data_stat(
-                                    name='label',
+                                    name='target',
                                     stat_type='array',
                                     shape=list(label_arr.shape),
                                     value=label_arr.astype(float).ravel().tolist(),
@@ -936,13 +1004,13 @@ class DataService:
             # ====== Step 9: Generate raw data bytes and thumbnail (handles 4D volumetric) ======
             if request.include_raw_data and dataset is not None:
                 from weightslab.data.data_utils import load_raw_image_array
-                
+
                 try:
                     ds_idx = dataset.get_index_from_sample_id(sample_id)
                 except KeyError:
                     ds_idx = None
                     logger.debug(f"Missing sample_id={sample_id} in dataset mapping.")
-                
+
                 if ds_idx is not None:
                     np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(dataset, ds_idx)
                 else:
@@ -1039,7 +1107,7 @@ class DataService:
 
     def _get_unique_tags(self) -> List[str]:
         """Collect all unique tags currently present in the tracked datasets.
-        
+
         Tags are stored as individual boolean columns with prefix "tags_".
         This method extracts all tag names from the column names.
         """
@@ -1138,7 +1206,7 @@ class DataService:
             elif "scope:view" in sort_part:
                 sort_scope = "view"
                 sort_part = sort_part.replace("scope:view", "")
-                
+
                 # Extract start/count if present
                 # Split by space to find params, reassemble sort string
                 tokens = sort_part.split()
@@ -1213,7 +1281,7 @@ class DataService:
                     })
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
         return operations
-        
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -1383,7 +1451,7 @@ class DataService:
                          # Apply sort to slice
                          # Filter params for sort_values
                          sort_params = {k: v for k, v in params.items() if k not in ["start", "count"]}
-                         
+
                          by_cols = sort_params.get("by", [])
                          # Handle special 'index' sort case which sort_values doesn't handle if 'index' is not a column
                          if by_cols and len(by_cols) == 1 and by_cols[0] == "index":
@@ -1399,11 +1467,11 @@ class DataService:
                                  if "ambiguous" in str(e).lower() or isinstance(e, KeyError) or "not in index" in str(e).lower():
                                       by = sort_params.get("by")
                                       by_list = [by] if isinstance(by, str) else by
-                                      
+
                                       # Check if ANY of the sort columns are in the index levels
                                       index_names = getattr(sub_df.index, 'names', [])
                                       needs_index_sort = any(col in index_names for col in by_list)
-                                      
+
                                       if needs_index_sort:
                                           # Robust fallback: temporarily reset index so we can sort by everything at once
                                           # then restore the index. This handles mixed index/column multi-sorts.
@@ -1411,18 +1479,18 @@ class DataService:
                                               # Save index names to restore later
                                               orig_index_names = sub_df.index.names
                                               temp_df = sub_df.reset_index()
-                                              
+
                                               # Adjust 'by' if needed (e.g. if 'index' was used, it's now 'sample_id' etc)
                                               # but here columns usually match.
                                               temp_df.sort_values(inplace=True, **sort_params)
-                                              
+
                                               # Restore index and update sub_df
                                               sub_df = temp_df.set_index(list(orig_index_names))
                                           except Exception as inner_e:
                                               logger.error(f"Mixed sort fallback failed: {inner_e}")
                                               # If that failed, try forcing string keys as last ditch
                                               sub_df.sort_values(inplace=True, **sort_params, key=lambda x: x.astype(str))
-                                 
+
                                  # Fallback for mixed types
                                  elif "key" not in sort_params and isinstance(e, TypeError):
                                      sort_params["key"] = lambda x: x.astype(str)
@@ -1433,7 +1501,7 @@ class DataService:
                          # Reassign values (ignoring index alignment to swap rows in place)
                          # We use .values to ensure we just paste the sorted data into these slots
                          df.iloc[start:end] = sub_df.values
-                         
+
                          # CRITICAL: We must also update the index to match the moved data,
                          # otherwise Sample ID X will point to data from Sample ID Y (corruption).
                          try:
@@ -1449,7 +1517,7 @@ class DataService:
                          except Exception as e:
                              logger.error(f"Failed to update index in sort_view_slice: {e}")
                              raise e
-                     
+
                      return f"Applied operation: sort_view_slice({start}:{end})"
 
                 if func_name == "drop" and "index" in params:
@@ -1475,7 +1543,7 @@ class DataService:
                              else:
                                  # Multi-column sort or other ambiguity, fallback to converting columns
                                  df.sort_values(inplace=True, **params, key=lambda x: x)
-                        
+
                         # Fallback for mixed types (e.g. lists vs strings/floats): sort by string representation
                         elif "key" not in params and isinstance(e, TypeError):
                             logger.warning(f"Sort failed due to type mismatch ({e}). Retrying with string conversion...")
@@ -1566,8 +1634,6 @@ class DataService:
                 current_all_df = self._all_datasets_df
 
             # Ensure default columns exist
-            if SampleStatsEx.TAG.value not in updated_df.columns:
-                 updated_df[SampleStatsEx.TAG.value] = ""
             if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
                  updated_df["natural_sort_score"] = np.nan
             if SampleStatsEx.DISCARDED.value not in updated_df.columns:
@@ -1594,25 +1660,29 @@ class DataService:
                 # Standard/Unfiltered View.
                 # Preserves sticky sort and appends new samples.
                 if not current_all_df.index.is_monotonic_increasing:
-                     old_index = current_all_df.index
-                     new_index = updated_df.index
-
-                     new_index_set = set(new_index)
-                     kept_indices = [x for x in old_index if x in new_index_set]
-
-                     old_index_set = set(old_index)
-                     newly_added_indices = [x for x in new_index if x not in old_index_set]
-
-                     full_order = kept_indices + newly_added_indices
-                     
                      try:
-                         if isinstance(old_index, pd.MultiIndex):
-                             unique_order = pd.MultiIndex.from_tuples(full_order, names=old_index.names)
-                             unique_order = unique_order.unique()
-                         else:
-                             unique_order = pd.Index(full_order).unique()
+                         key_cols = [SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value]
 
-                         updated_df = updated_df.reindex(unique_order)
+                         old_df_keys = current_all_df.reset_index()
+                         new_df_keys = updated_df.reset_index()
+
+                         if not all(col in old_df_keys.columns for col in key_cols) or not all(col in new_df_keys.columns for col in key_cols):
+                             raise KeyError(f"Missing key columns for reindex: required={key_cols}")
+
+                         old_keys = list(old_df_keys[key_cols].itertuples(index=False, name=None))
+                         new_keys = list(new_df_keys[key_cols].itertuples(index=False, name=None))
+
+                         new_key_set = set(new_keys)
+                         kept_keys = [key for key in old_keys if key in new_key_set]
+
+                         old_key_set = set(old_keys)
+                         newly_added_keys = [key for key in new_keys if key not in old_key_set]
+
+                         full_order = kept_keys + newly_added_keys
+                         unique_order = pd.MultiIndex.from_tuples(full_order, names=key_cols).unique()
+
+                         keyed_updated = new_df_keys.set_index(key_cols, drop=True)
+                         updated_df = keyed_updated.reindex(unique_order)
                      except Exception as e:
                          logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
                          return
@@ -1655,7 +1725,7 @@ class DataService:
             # Atomic snapshot of the current authoritative dataframe
             # Readers don't need the global lock to slice a snapshot
             current_df = self._all_datasets_df
-            
+
             if current_df is None or current_df.empty:
                 logger.warning(f"Internal dataframe is empty or not initialized.")
                 return pb2.DataSamplesResponse(
@@ -1718,10 +1788,10 @@ class DataService:
     def _calculate_tag_column_updates(self, sample_id: int, origin: str, new_tag_name: str, edit_type) -> dict:
         """
         Calculate individual tag column updates based on the edit type.
-        
+
         Returns a dictionary of column updates like:
         {"tags_tag1": 1, "tags_tag2": 1, ...}
-        
+
         For EDIT_ACCUMULATE: adds the new tag
         For EDIT_REMOVE: removes the specified tag
         For EDIT_OVERRIDE: replaces all tags with the new value
@@ -1744,15 +1814,15 @@ class DataService:
                         row = self._all_datasets_df.loc[mask].iloc[0]
                     else:
                         row = None
-                
+
                 if row is not None:
                     for col in row.index:
-                        if col == new_tag_name and row[col]:  # If existing, revert the value 
+                        if col == new_tag_name and row[col]:  # If existing, revert the value
                             existing_tag_value = bool(1 - row[col])
 
         except (KeyError, AttributeError) as e:
             logger.debug(f"Could not read current tags: {e}")
-        
+
         # Calculate target tags based on edit type
         if edit_type == SampleEditType.EDIT_REMOVE:
             existing_tag_value = False  # For removal, we set the tag to False
@@ -1760,31 +1830,31 @@ class DataService:
         else:
             # Override: replace all tags with the new value
             target_tags_set = self._parse_tags(new_tag_name)
-        
+
         # Create column updates for all target tags
         for tag in target_tags_set:
             tag_updates[tag] = bool(existing_tag_value)
-        
+
         return tag_updates
-    
+
     def _parse_tags(self, tag_value: str) -> set:
         """
         Parse a tag string into individual tag names.
         Handles comma, semicolon, or mixed separators.
-        
+
         Example:
             "tag1,tag2;tag3" → {'tag1', 'tag2', 'tag3'}
         """
         if not tag_value or not isinstance(tag_value, str):
             return set()
-        
+
         tags = set()
         for tag in tag_value.split(';'):
             for t in tag.split(','):
                 clean_tag = t.strip()
                 if clean_tag:
                     tags.add(clean_tag)
-        
+
         return tags
 
     # RPC Implementations
@@ -1834,7 +1904,7 @@ class DataService:
                     is_only_view_sort = len(operations) == 1 and operations[0].get("function") == "df.sort_view_slice"
                     if not is_only_view_sort:
                         self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
-                    
+
                     # Work on a copy to allow concurrent readers to see a consistent state
                     df = self._all_datasets_df.copy()
                     messages = []
@@ -1847,7 +1917,7 @@ class DataService:
                         messages.append(msg)
 
                     final_message = " | ".join(messages) if messages else "No operation performed"
-                    
+
                     # Atomic swap
                     self._all_datasets_df = df
 
@@ -1872,7 +1942,7 @@ class DataService:
                         logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
                         if operations:
                             self._is_filtered = True
-                        
+
                         # Atomic swap
                         self._all_datasets_df = df
                     return self._build_success_response(
@@ -1929,10 +1999,10 @@ class DataService:
 
                     with self._lock:
                         self._slowUpdateInternals(force=True)
-                        
+
                         if self._all_datasets_df is None:
                             self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
-                        
+
                         df = self._all_datasets_df.copy()
                         messages = []
                         intent_type = pb2.INTENT_FILTER
@@ -1951,7 +2021,7 @@ class DataService:
 
                             msg = self._apply_agent_operation(df, func, params)
                             messages.append(msg)
-                        
+
                             if "Clarification needed" in msg or "I need more information" in msg:
                                 intent_type = pb2.INTENT_ANALYSIS
                                 analysis_result = msg
@@ -1970,7 +2040,7 @@ class DataService:
                         if intent_type == pb2.INTENT_FILTER:
                             if df.index.has_duplicates:
                                 df = df[~df.index.duplicated(keep='last')]
-                            
+
                             self._all_datasets_df = df
                             self._is_filtered = True
 
@@ -2009,7 +2079,7 @@ class DataService:
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and discarded).
-        
+
         Tags are stored as individual boolean columns (tags_<tagname>) instead of
         a single comma-separated string. This allows for efficient dataframe indexing, grouping,
         and sorting by tags.
@@ -2032,13 +2102,140 @@ class DataService:
             else:
                 hp["is_training"] = False
 
+        if request.stat_name == "__copy_metadata__":
+            source_column = str(request.string_value or "").strip()
+            if not source_column:
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Missing source metadata name to copy.",
+                )
+
+            with self._lock:
+                try:
+                    self._slowUpdateInternals()
+                    if self._all_datasets_df is None or self._all_datasets_df.empty:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No dataframe available to copy metadata from.",
+                        )
+
+                    if source_column not in self._all_datasets_df.columns and source_column not in self._all_datasets_df.index.names:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message=f"Metadata column not found: {source_column}",
+                        )
+
+                    checkpoint_manager = components.get("checkpoint_manager")
+                    experiment_hash = None
+                    if checkpoint_manager is not None and hasattr(checkpoint_manager, "get_current_experiment_hash"):
+                        experiment_hash = checkpoint_manager.get_current_experiment_hash()
+                    experiment_hash = str(experiment_hash or "current_experiment_hash")
+
+                    self._all_datasets_df = self._all_datasets_df.reset_index()
+                    self._all_datasets_df, backend_column_name = duplicate_metadata_column_in_dataframe(
+                        self._all_datasets_df,
+                        source_column=source_column,
+                        experiment_hash=experiment_hash,
+                    )
+
+                    if SampleStatsEx.ORIGIN.value not in self._all_datasets_df.columns:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message=f"Cannot copy metadata without '{SampleStatsEx.ORIGIN.value}' column in dataframe.",
+                        )
+
+                    for origin, origin_df in self._all_datasets_df.groupby(SampleStatsEx.ORIGIN.value, sort=False):
+                        update_df = pd.DataFrame(
+                            {
+                                "sample_id": origin_df.index.astype(str),
+                                SampleStatsEx.ORIGIN.value: origin,
+                                backend_column_name: origin_df[backend_column_name].values,
+                            }
+                        ).set_index("sample_id")
+                        self._df_manager.upsert_df(update_df, origin=str(origin), force_flush=True)
+
+                    # Force global dataframe to save state to h5 if possible
+                    try:
+                        self._df_manager.flush_if_needed_nonblocking(force=True)
+                    except Exception as flush_error:
+                        logger.warning(f"[EditDataSample] Flush after metadata clone failed: {flush_error}")
+
+                    self._slowUpdateInternals(force=True)
+
+                    return pb2.DataEditsResponse(
+                        success=True,
+                        message=f"Saved metadata '{source_column}' as '{backend_column_name}'.",
+                    )
+                except Exception as e:
+                    logger.error(f"[EditDataSample] Failed to copy metadata column: {e}", exc_info=True)
+                    return pb2.DataEditsResponse(
+                        success=False,
+                        message=f"Failed to copy metadata column: {str(e)}",
+                    )
+
+        if request.stat_name == "__delete_metadata__":
+            target_column = str(request.string_value or "").strip()
+            if not target_column:
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Missing metadata name to delete.",
+                )
+
+            with self._lock:
+                try:
+                    self._slowUpdateInternals()
+                    if self._all_datasets_df is None or self._all_datasets_df.empty:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No dataframe available to delete metadata from.",
+                        )
+
+                    if target_column not in self._all_datasets_df.columns:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message=f"Metadata column not found: {target_column}",
+                        )
+
+                    if is_protected_metadata_name(target_column):
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message=f"Cannot delete protected metadata field: {target_column}",
+                        )
+
+                    if not is_copy_metadata_column_name(target_column):
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message=f"Only copied metadata can be deleted: {target_column}",
+                        )
+
+                    if self._df_manager is not None:
+                        self._df_manager.drop_column(target_column)
+                        try:
+                            self._df_manager.flush_if_needed_nonblocking(force=True)
+                        except Exception as flush_error:
+                            logger.warning(f"[EditDataSample] Flush after metadata delete failed: {flush_error}")
+
+                    if target_column in self._all_datasets_df.columns:
+                        self._all_datasets_df = self._all_datasets_df.drop(columns=[target_column])
+
+                    self._slowUpdateInternals(force=True)
+
+                    return pb2.DataEditsResponse(
+                        success=True,
+                        message=f"Deleted metadata '{target_column}'",
+                    )
+                except Exception as e:
+                    logger.error(f"[EditDataSample] Failed to delete metadata column: {e}", exc_info=True)
+                    return pb2.DataEditsResponse(
+                        success=False,
+                        message=f"Failed to delete metadata column: {str(e)}",
+                    )
+
         if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
-                message="Only 'tags' and 'discarded' stat editing is supported for now.",
+                message="Only 'tags', 'discarded', '__copy_metadata__', and '__delete_metadata__' edits are supported.",
             )
-
-        # No dataset lookups needed; all edits apply directly to the global dataframe.
 
         # =====================================================================
         # Process tag edits using the new column-based tag system
@@ -2056,12 +2253,12 @@ class DataService:
                         if is_tag_request:
                             # Calculate tag column updates based on edit type
                             tag_updates = self._calculate_tag_column_updates(
-                                sid, 
+                                sid,
                                 origin,
-                                request.string_value,  
+                                request.string_value,
                                 request.type
                             )
-                            
+
                             # Add all tag column updates for this sample
                             if origin not in updates_by_origin:
                                 updates_by_origin[origin] = {}
@@ -2070,10 +2267,10 @@ class DataService:
                                     "sample_id": sid_value,
                                     SampleStatsEx.ORIGIN.value: origin,
                                 }
-                            
+
                             # Merge tag column updates into the sample's updates
                             updates_by_origin[origin][sid_value].update(tag_updates)
-                        
+
                         # =================
                         # DENY LISTED EDITS
                         # =================
@@ -2086,13 +2283,13 @@ class DataService:
                                 SampleStatsEx.ORIGIN.value: origin,
                                 request.stat_name: bool(request.bool_value),
                             }
-                    
+
                     # Upsert all tag column updates into the global dataframe
                     for origin, samples in updates_by_origin.items():
                         rows = list(samples.values())
                         df_update = pd.DataFrame(rows).set_index("sample_id")
                         self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
-                    
+
                     # Auto-cleanup: if EDIT_REMOVE was used on a tag, delete the entire column immediately
                     if is_tag_request and request.type == SampleEditType.EDIT_REMOVE and request.float_value == -1:
                         column_name = request.stat_name.strip()
@@ -2100,23 +2297,23 @@ class DataService:
                             logger.info(f"[EditDataSample] Deleting tag column: {column_name}")
                             # Delete the column from storage
                             self._df_manager.drop_column(column_name)
-                            
+
                             # Remove from in-memory dataframe if it exists
                             if self._all_datasets_df is not None:
                                 if column_name in self._all_datasets_df.columns:
                                     self._all_datasets_df = self._all_datasets_df.drop(columns=[column_name])
-                    
+
                     # Reload dataframe to reflect all changes without destroying current sort/view
                     self._slowUpdateInternals(force=True)
-                
+
                 # Prevent _slowUpdateInternals from automatically overwriting our edits with stale data
                 self._last_internals_update_time = time.time()
-                
+
                 return pb2.DataEditsResponse(
                     success=True,
                     message=f"Edited {len(request.samples_ids)} samples",
                 )
-            
+
             except Exception as e:
                 logger.error(f"[EditDataSample] Failed to edit samples: {e}", exc_info=True)
                 return pb2.DataEditsResponse(
@@ -2132,14 +2329,13 @@ class DataService:
 
         try:
             split_names = []
-            with self._lock:
-                self._slowUpdateInternals()
-                if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                    if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
-                        split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value][~self._all_datasets_df[SampleStatsEx.ORIGIN.value].isna()].unique().tolist())
-                    elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
-                        if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
-                            split_names = sorted(self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist())
+            self._slowUpdateInternals()
+            if self._all_datasets_df is not None and not self._all_datasets_df.empty:
+                if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
+                    split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value][~self._all_datasets_df[SampleStatsEx.ORIGIN.value].isna()].unique().tolist())
+                elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                    if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
+                        split_names = sorted(self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist())
             logger.info(f"GetDataSplits returning: {split_names}")
 
             return pb2.DataSplitsResponse(
@@ -2162,7 +2358,7 @@ class DataService:
         """
 
         try:
-            available = self.is_agent_available()
+            available = self._is_agent_available()
             msg = "Agent is available" if available else "Agent is not available"
             return pb2.AgentHealthResponse(available=available, message=msg)
         except Exception as e:

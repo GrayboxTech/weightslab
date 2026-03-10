@@ -1,3 +1,4 @@
+import itertools
 import os
 import time
 import logging
@@ -39,7 +40,7 @@ class MNISTCustomDataset(Dataset):
     as metadata that can be tracked by WeightsLab.
     """
 
-    def __init__(self, root, train=True, download=False, transform=None):
+    def __init__(self, root, train=True, download=False, transform=None, max_samples=None):
         """
         Args:
             root (str): Root directory where MNIST data is stored
@@ -47,27 +48,41 @@ class MNISTCustomDataset(Dataset):
             download (bool): If True, download the data if not present
             transform (callable, optional): Optional transform to be applied on images
         """
+
         # Load the standard MNIST dataset
-        self.mnist = datasets.MNIST(
-            root=root,
-            train=train,
-            download=download,
-            transform=None  # We'll apply transform manually to track filepath
-        )
+        try:
+            self.mnist = datasets.MNIST(
+                root=root,
+                train=train,
+                download=download,
+                transform=None  # We'll apply transform manually to track filepath
+            )
+        except RuntimeError as e:
+            logger.error(f"Error loading MNIST dataset: {e}")
+            self.mnist = datasets.MNIST(
+                root=root,
+                train=train,
+                download=True,
+                transform=None  # We'll apply transform manually to track filepath
+            )
         self.transform = transform
         self.train = train
         self.root = root
+        self.max_samples = max_samples
 
         # Build filepath mapping for each sample
         self._build_filepath_mapping()
 
     def _build_filepath_mapping(self):
         """Build a mapping of sample index to filepath."""
+
         self.filepaths = {}
 
         # For each index, construct a meaningful filepath
         # MNIST doesn't have original individual files, so we create virtual paths
         for idx in range(len(self.mnist)):
+            if self.max_samples is not None and idx >= self.max_samples:
+                break
             label = self.mnist.targets[idx].item() if hasattr(self.mnist.targets[idx], 'item') else self.mnist.targets[idx]
             split = 'train' if self.train else 'test'
 
@@ -82,6 +97,8 @@ class MNISTCustomDataset(Dataset):
             self.filepaths[idx] = virtual_path
 
     def __len__(self):
+        if self.max_samples is not None:
+            return min(len(self.mnist), self.max_samples)
         return len(self.mnist)
 
     def __getitem__(self, idx):
@@ -89,6 +106,7 @@ class MNISTCustomDataset(Dataset):
         Returns:
             tuple: (image, idx, label)
         """
+
         image, label = self.mnist[idx]
 
         # Apply transform if provided
@@ -103,6 +121,7 @@ class MNISTCustomDataset(Dataset):
 # -----------------------------------------------------------------------------
 def train(loader, model, optimizer, criterion_mlt, device):
     """Single training step using the tracked dataloader + watched loss."""
+
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
         inputs = inputs.to(device)
@@ -139,7 +158,7 @@ def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
     losses = torch.tensor(0.0, device=device)
 
     for (inputs, ids, labels) in loader:
-        with guard_testing_context, torch.no_grad():
+        with guard_testing_context:
             inputs = inputs.to(device)
             labels = labels.to(device)
 
@@ -221,10 +240,11 @@ if __name__ == "__main__":
         print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
+    # Parameters
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
-    eval_every = parameters.get("eval_every", 50)
+    eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
     training_steps_to_do = parameters.get("training_steps_to_do", 1000)
 
@@ -263,6 +283,10 @@ if __name__ == "__main__":
         print(f"Downloading data to {data_root}")
     os.makedirs(data_root, exist_ok=True)
 
+    # Read data config for all loaders
+    train_cfg = parameters.get("data", {}).get("train_loader", {})
+    test_cfg = parameters.get("data", {}).get("test_loader", {})
+
     _train_dataset = MNISTCustomDataset(
         root=data_root,
         train=True,
@@ -272,6 +296,7 @@ if __name__ == "__main__":
                 transforms.ToTensor(),
             ]
         ),
+        max_samples=train_cfg.get("max_samples", None)
     )
     _test_dataset = MNISTCustomDataset(
         root=data_root,
@@ -282,25 +307,16 @@ if __name__ == "__main__":
                 transforms.ToTensor(),
             ]
         ),
+        max_samples=test_cfg.get("max_samples", None)
     )
-
-    # Read data config for all loaders
-    train_cfg = parameters.get("data", {}).get("train_loader", {})
-    test_cfg = parameters.get("data", {}).get("test_loader", {})
-
-    train_bs = train_cfg.get("batch_size", 16)
-    test_bs = test_cfg.get("batch_size", 16)
-
-    train_shuffle = train_cfg.get("shuffle", True)
-    test_shuffle = test_cfg.get("shuffle", False)
 
     # Create tracked loaders for train, test, and test
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
         loader_name="train_loader",
-        batch_size=train_bs,
-        shuffle=train_shuffle,
+        batch_size=train_cfg.get("batch_size", 16),
+        shuffle=train_cfg.get("shuffle", True),
         is_training=True,
         compute_hash=False,
         preload_labels=True,
@@ -311,8 +327,8 @@ if __name__ == "__main__":
         _test_dataset,
         flag="data",
         loader_name="test_loader",
-        batch_size=test_bs,
-        shuffle=test_shuffle,
+        batch_size=test_cfg.get("batch_size", 16),
+        shuffle=test_cfg.get("shuffle", False),
         is_training=False,
         compute_hash=False,
         preload_labels=True,
@@ -348,7 +364,7 @@ if __name__ == "__main__":
     # Setup clean progress bar with custom format
     if tqdm_display:
         train_range = tqdm.tqdm(
-            range(training_steps_to_do),
+            range(training_steps_to_do) if training_steps_to_do is not None else itertools.count(),
             desc="Training",
             bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
             ncols=140,
@@ -356,7 +372,7 @@ if __name__ == "__main__":
             leave=True
         )
     else:
-        train_range = range(training_steps_to_do)
+        train_range = range(training_steps_to_do) if training_steps_to_do is not None else itertools.count()
 
     test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
 
