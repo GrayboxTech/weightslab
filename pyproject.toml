@@ -15,7 +15,7 @@ license = { text = "BSD 2-clause" }
 requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 1 - Planning",
-  "Intended Audience :: AI/Science/Research",
+  "Intended Audience :: Science/Research",
   "License :: OSI Approved :: BSD License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.10",
