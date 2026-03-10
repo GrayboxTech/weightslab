@@ -34,6 +34,7 @@ venv/
 laumch.json
 settings.json
 
+_version.py
 __pycache__/
 
 experiment_service_pb2.py
