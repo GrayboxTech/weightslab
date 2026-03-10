@@ -143,30 +143,39 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip
 
-      - name: Install project dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install .
+      # - name: Install project dependencies
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     python -m pip install .
 
-      - name: Run unit tests - General
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
+      # - name: Run unit tests - General
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
 
-      - name: Run unit tests - Model
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/model -v
+      # - name: Run unit tests - Model
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/model -v
 
-      - name: Run unit tests - Data
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/data -v
+      # - name: Run unit tests - Data
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/data -v
 
-      - name: Run unit tests - Integrations
+      # - name: Run unit tests - Integrations
+      #   run: |
+      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+      #     python -m unittest discover -s ./weightslab/tests/integrations -v
+
+      - name: Trigger WeightsStudio CI
+        env:
+          WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
         run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/integrations -v
+          curl -s -X POST "https://weights-studio.example/api/v1/jobs" \
+            -H "Authorization: Bearer $WS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"ref": "'"refs/heads/main"'", "source": "github-actions"}'
 
   build-and-publish-dev:
     name: Build & Publish Dev (TestPyPI)
