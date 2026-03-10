@@ -170,7 +170,7 @@ jobs:
 
   build-and-publish-dev:
     name: Build & Publish Dev (TestPyPI)
-    # needs: test
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       published_version: ${{ steps.version.outputs.published_version }}
@@ -266,7 +266,8 @@ jobs:
           python -c "import weightslab; import importlib.metadata as m; print('weightslab import OK'); print('installed version:', m.version('weightslab'))"
 
   build-and-publish-main:
-    needs: test
+    needs:
+      - test-install-from-pip-dev
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     steps:
