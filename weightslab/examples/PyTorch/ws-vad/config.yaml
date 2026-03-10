@@ -1,5 +1,5 @@
 experiment_name: vad_unet
-root_log_dir: ./logs/vad/0
+root_log_dir: ./logs/vad/24
 # Absolute path to your VAD data root (can also be set at runtime via the WL UI)
 data_root: /Users/marcgraybx/graybox/development/data/VAD
 
@@ -8,13 +8,14 @@ base_channels: 8          # channel multiplier for UNetMulti
 image_size: 256           # both H and W are resized to this
 
 # ── Training ─────────────────────────────────────────────────────────────────
-lr: 0.001
+lr: 0.0001
 batch_size: 16
 training_steps: 200000
 eval_every: 200           # evaluate test set every N training steps
 
 # ── Loss weights ─────────────────────────────────────────────────────────────
-recon_weight: 0.3         # MSE reconstruction vs. BCE classification trade-off
+recon_weight: 2.0         # MSE reconstruction vs. BCE classification trade-off
+contrastive_weight: 1.0   # organized embedding space weight
 
 # ── WeightsLab backend ───────────────────────────────────────────────────────
 serving_grpc: true
