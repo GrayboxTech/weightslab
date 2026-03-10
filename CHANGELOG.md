@@ -14,26 +14,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 > support, improved dtype handling in `DataFrameManager`, updated examples
 > including a BDD driving-dataset subset, and new CI publishing workflows.
 
-### Security
-
-- **`torch`** bumped **2.1.2 → 2.6.0** to fix a heap buffer overflow
-  (PyTorch < 2.2.0), a use-after-free (PyTorch < 2.2.0), and a
-  `torch.load` / `weights_only=True` remote-code-execution vector
-  (PyTorch < 2.6.0). (`pyproject.toml`)
-- **`torchvision`** bumped **0.16.2 → 0.21.0** — required companion upgrade
-  for torch 2.6.0 compatibility. (`pyproject.toml`)
-- **`torchaudio`** bumped **2.1.2 → 2.6.0** — required companion upgrade
-  for torch 2.6.0 compatibility. (`pyproject.toml`)
-- **`protobuf`** bumped **6.33 → 6.33.5** to fix a JSON recursion-depth
-  bypass that allowed crafted messages to exceed the configured depth limit.
-  (`pyproject.toml`)
-- **`Pillow`** bumped **11.0.0 → 12.1.1** to fix an out-of-bounds write
-  when loading malformed PSD images (affects 10.3.0 – 12.1.0).
-  (`pyproject.toml`)
-- **`opencv-python`** bumped **4.6.0.66 → 4.8.1.78** to replace the
-  bundled `libwebp` binary that was vulnerable to CVE-2023-4863 (heap
-  buffer overflow in WebP decoding). (`pyproject.toml`)
-
 ### Added
 
 - **`pyproject.toml`** – full PEP 621 packaging manifest with
