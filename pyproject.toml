@@ -23,9 +23,9 @@ classifiers = [
 
 # Sanitized runtime dependencies converted from requirements.txt
 dependencies = [
-  "torch==2.1.2",
-  "torchvision==0.16.2",
-  "torchaudio==2.1.2",
+  "torch==2.6.0",
+  "torchvision==0.21.0",
+  "torchaudio==2.6.0",
   "torchinfo==1.8.0",
   "torchmetrics==1.8.2",
   "tensorboard==2.20",
@@ -45,7 +45,7 @@ dependencies = [
   "PyYAML==6.0.3",
   "grpcio==1.76.0",
   "grpcio-tools==1.76.0",
-  "protobuf==6.33",
+  "protobuf==6.33.5",
   "numpy>=1.25.2,<2.0",
   "onnx==1.20.0",
   "onnxruntime==1.23.2",
@@ -55,11 +55,11 @@ dependencies = [
   "pydantic==2.11.10",
   "dotenv==0.9.9",
   "h5py==3.15.1",
-  "Pillow==11.0.0",
+  "Pillow==12.1.1",
   "langchain-core==1.2.7",
   "langchain-ollama==1.0.1",
   "langchain-openai==1.1.7",
-  "opencv-python==4.6.0.66",
+  "opencv-python==4.8.1.78",
 ]
 
 [project.urls]
