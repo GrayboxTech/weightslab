@@ -3,6 +3,8 @@ name: Docs (GitHub Pages)
 on:
   push:
     branches: [docstring, dev, main]
+    tags:
+      - 'v*'
   pull_request:
     branches: [main]
     types: [opened, reopened, ready_for_review]
