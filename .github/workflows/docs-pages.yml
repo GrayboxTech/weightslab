@@ -1,4 +1,4 @@
-name: Docs (GitHub Pages)
+name: Docs (GitHub Pages) CI
 
 on:
   push:
