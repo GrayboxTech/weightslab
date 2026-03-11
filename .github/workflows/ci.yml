@@ -283,18 +283,20 @@ jobs:
 
           # TestPyPI can take a few minutes to expose newly uploaded versions.
           for attempt in $(seq 1 60); do
-            echo "Checking TestPyPI for weightslab==${WL_VERSION} (attempt ${attempt}/20)"
-            if curl -fsSL "https://test.pypi.org/pypi/weightslab/json" | python -c "import json, os, sys; version = os.environ['WL_VERSION']; releases = json.load(sys.stdin).get('releases', {}); sys.exit(0 if (version in releases and releases[version]) else 1)"
-            then
-              echo "Found weightslab==${WL_VERSION} on TestPyPI"
+            echo "Checking pip visibility for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+            if python -m pip download \
+                --index-url https://test.pypi.org/simple/ \
+                --no-deps \
+                "weightslab==${WL_VERSION}" \
+                -d /tmp/wl-probe >/dev/null 2>&1; then
+              echo "Found weightslab==${WL_VERSION} in TestPyPI simple index"
               break
             fi
 
-            if [ "${attempt}" -eq 20 ]; then
-              echo "Timed out waiting for weightslab==${WL_VERSION} to appear on TestPyPI"
+            if [ "${attempt}" -eq 60 ]; then
+              echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI simple index"
               exit 1
             fi
-
             sleep 7
           done
 
