@@ -1,4 +1,4 @@
-name: CI
+name: Release CI
 
 on:
   push:
@@ -67,7 +67,7 @@ jobs:
             echo "PYPI_API_TOKEN not set; skipping PyPI upload."
             exit 0
           fi
-          python -m twine upload dist/* --non-interactive
+          python -m twine upload dist/* --non-interactive --verbose
 
   test-install-from-pip-main:
     name: Test Install From Pip Main
@@ -127,6 +127,8 @@ jobs:
   create_release:
     runs-on: ubuntu-latest
     needs: test-install-from-pip-main
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -138,8 +140,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          body: |
-            $(cat CHANGELOG.md || echo "Release ${{ github.ref_name }}")
+          body_path: CHANGELOG.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

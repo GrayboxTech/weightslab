@@ -1,4 +1,4 @@
-name: CI
+name: Code CI
 
 on:
   push:
@@ -150,30 +150,30 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip
 
-      # - name: Install project dependencies
-      #   run: |
-      #     python -m pip install --upgrade pip
-      #     python -m pip install .
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
 
-      # - name: Run unit tests - General
-      #   run: |
-      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-      #     python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
+      - name: Run unit tests - General
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
 
-      # - name: Run unit tests - Model
-      #   run: |
-      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-      #     python -m unittest discover -s ./weightslab/tests/model -v
+      - name: Run unit tests - Model
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests/model -v
 
-      # - name: Run unit tests - Data
-      #   run: |
-      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-      #     python -m unittest discover -s ./weightslab/tests/data -v
+      - name: Run unit tests - Data
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests/data -v
 
-      # - name: Run unit tests - Integrations
-      #   run: |
-      #     export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-      #     python -m unittest discover -s ./weightslab/tests/integrations -v
+      - name: Run unit tests - Integrations
+        run: |
+          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m unittest discover -s ./weightslab/tests/integrations -v
 
       - name: Trigger WeightsStudio CI
         env:
@@ -192,168 +192,6 @@ jobs:
             -d '{"ref":"main"}'
 
           echo "WeightsStudio workflow dispatch requested successfully."
-
-  build-and-publish-dev:
-    name: Build & Publish Dev (TestPyPI)
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      published_version: ${{ steps.version.outputs.published_version }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install build tools
-        run: python -m pip install --upgrade pip build twine
-
-      - name: Compute publish version
-        id: version
-        run: |
-          TS="$(date -u +%Y%m%d%H%M%S)"
-          SHA_HEX="$(git rev-parse --short=8 HEAD)"
-          # TestPyPI/PyPI reject local versions (+sha), so encode sha as decimal in devN.
-          SHA_DEC="$((16#${SHA_HEX}))"
-          PRETEND="${TS}.dev${SHA_DEC}"
-          echo "published_version=${PRETEND}" >> $GITHUB_OUTPUT
-          echo "Publishing version: ${PRETEND} (from sha ${SHA_HEX})"
-
-      - name: Build distributions
-        env:
-          # Package-specific override is the most reliable way with setuptools_scm.
-          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB: ${{ steps.version.outputs.published_version }}
-        run: |
-          echo "Building with version ${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB}"
-          python -m build
-
-      - name: Verify built artifact version
-        env:
-          WL_VERSION: ${{ steps.version.outputs.published_version }}
-        run: |
-          ls -la dist
-          if ls dist | grep -q "0.0.0"; then
-            echo "Build still produced 0.0.0 artifacts"
-            exit 1
-          fi
-          if ! ls dist | grep -q "${WL_VERSION}"; then
-            echo "Expected version ${WL_VERSION} not found in dist artifacts"
-            exit 1
-          fi
-
-      - name: Check distributions
-        run: python -m twine check dist/*
-
-      - name: Publish to TestPyPI
-        env:
-          TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
-          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: |
-          if [ -z "${{ secrets.TEST_PYPI_API_TOKEN }}" ]; then
-            echo "TEST_PYPI_API_TOKEN not set; skipping TestPyPI upload."
-            exit 0
-          fi
-          python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
-
-  test-install-from-pip-dev:
-    name: Test Install From Pip Dev
-    needs: build-and-publish-dev
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Create isolated virtual environment
-        run: |
-          python -m venv .venv-ci
-
-      - name: Install from TestPyPI (with retry)
-        env:
-          WL_VERSION: ${{ needs.build-and-publish-dev.outputs.published_version }}
-        run: |
-          . .venv-ci/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install .
-
-      - name: Build distributions
-        run: python -m build
-
-      - name: Capture built version
-        id: main-version
-        run: |
-          WHEEL_PATH="$(ls dist/weightslab-*.whl | head -n 1)"
-          if [ -z "${WHEEL_PATH}" ]; then
-            echo "No wheel found in dist/"
-            exit 1
-          fi
-          WHEEL_FILE="$(basename "${WHEEL_PATH}")"
-          WL_VERSION="$(echo "${WHEEL_FILE}" | sed -E 's/^weightslab-([^-]+)-.*/\1/')"
-          if [ -z "${WL_VERSION}" ]; then
-            echo "Could not parse version from ${WHEEL_FILE}"
-            exit 1
-          fi
-          echo "published_version=${WL_VERSION}" >> $GITHUB_OUTPUT
-          echo "Main published version: ${WL_VERSION}"
-
-      - name: Check distributions
-        run: python -m twine check dist/*
-
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          if [ -z "${{ secrets.PYPI_API_TOKEN }}" ]; then
-            echo "PYPI_API_TOKEN not set; skipping PyPI upload."
-            exit 0
-          fi
-          python -m twine upload dist/* --non-interactive
-
-  test-install-from-pip-main:
-    name: Test Install From Pip Main
-    needs: build-and-publish-main
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Create isolated virtual environment
-        run: |
-          python -m venv .venv-ci
-
-      - name: Install from TestPyPI (with retry)
-        env:
-          WL_VERSION: ${{ needs.build-and-publish-main.outputs.published_version }}
-        run: |
-          . .venv-ci/bin/activate
-          python -m pip install --upgrade pip
-          if [ -z "${WL_VERSION}" ]; then
-            echo "Missing published version from upstream job"
-            exit 1
-          fi
-          sleep 60 && python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
-          echo "weightslab==${WL_VERSION} installed from PyPI"
-
-      - name: Verify package import
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/integrations -v
 
   weightsstudio-ci:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
