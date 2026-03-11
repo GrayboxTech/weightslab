@@ -152,7 +152,9 @@ class NetworkWithOps(nn.Module):
             return
         if not hasattr(tracked_input, 'batch_size'):
             setattr(tracked_input, 'batch_size', tracked_input.shape[0])
-        self.current_step += 1
+
+        # Increase model age at each forward pass during training
+        self.increase_age()
 
         # If an instance provides an auto-dump hook (e.g., ModelInterface), call it.
         try:

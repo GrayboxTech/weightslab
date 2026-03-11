@@ -104,16 +104,39 @@ class ExperimentService:
             max_points = request.max_points or 10000
             history = signal_logger.get_signal_history()
 
-            # Group by metric_name and limit each
+            # Normalize history to grouped list format:
+            # - Legacy: List[signal_entry]
+            # - Current: Dict[metric_name][experiment_hash][step] -> List[signal_entry]
             signal_groups = {}
-            for s in history:
-                metric_name = s.get("metric_name", "")
-                if metric_name not in signal_groups:
-                    signal_groups[metric_name] = []
-                signal_groups[metric_name].append(s)
+            if isinstance(history, dict):
+                for metric_name, experiments in history.items():
+                    if metric_name not in signal_groups:
+                        signal_groups[metric_name] = []
+                    if not isinstance(experiments, dict):
+                        continue
+                    for _, steps in experiments.items():
+                        if not isinstance(steps, dict):
+                            continue
+                        for _, entries in steps.items():
+                            if isinstance(entries, list):
+                                signal_groups[metric_name].extend(
+                                    [entry for entry in entries if isinstance(entry, dict)]
+                                )
+                            elif isinstance(entries, dict):
+                                signal_groups[metric_name].append(entries)
+            elif isinstance(history, list):
+                for s in history:
+                    if not isinstance(s, dict):
+                        continue
+                    metric_name = s.get("metric_name", "")
+                    if metric_name not in signal_groups:
+                        signal_groups[metric_name] = []
+                    signal_groups[metric_name].append(s)
 
             # Take last max_points_per_signal for each signal and downsample if needed
             for metric_name, signal_history in signal_groups.items():
+                # Keep deterministic order by model_age before sampling
+                signal_history = sorted(signal_history, key=lambda item: item.get("model_age", 0))
 
                 # Downsample if we have more than 1000 points
                 if len(signal_history) > max_points:
@@ -260,6 +283,7 @@ class ExperimentService:
                 return pb2.CommandResponse(success=False, message=detailed_msg)
 
             try:
+                hp_now = None
                 if hyper_parameters.HasField("training_steps_to_do"):
                     set_hyperparam(
                         name=hp_name,
@@ -307,14 +331,19 @@ class ExperimentService:
                             # Mode actually changed — pause and announce switch
                             trainer = components.get("trainer")
                             if trainer:
-                                print(f"\n[WeightsLab] Pausing to switch mode...", flush=True)
+                                logger.info(f"\n[WeightsLab] Pausing to switch mode...")
                                 trainer.pause()
                                 set_hyperparam(name=hp_name, key_path="is_training", value=False)
                             mode_label = "AUDIT" if incoming_audit else "TRAIN"
-                            print(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode", flush=True)
+                            logger.info(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode")
 
                         # Always update the stored value (harmless no-op if unchanged)
-                        set_hyperparam(name=hp_name, key_path="auditor_mode", value=incoming_audit)
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="auditor_mode",
+                            value=incoming_audit
+                        )
+
                 except ValueError:
                     pass
 
@@ -322,23 +351,36 @@ class ExperimentService:
                 if hyper_parameters.HasField("is_training"):
                     trainer = components.get("trainer")
                     if trainer is not None:
+                        # Set number of steps desired to run before next pause if provided, based on current model age + requested nb_steps
+                        if hyper_parameters.HasField("nb_steps"):
+                            m = components.get("model")  # Get model
+                            m_age = m.get_age()
+                            logger.info(f"\n[WeightsLab] UI Command: Define number of steps at {hyper_parameters.nb_steps}")
+                            if hyper_parameters.nb_steps > 0:
+                                set_hyperparam(
+                                    name=hp_name,
+                                    key_path="pause_at_step",
+                                    value=m_age+hyper_parameters.nb_steps
+                                )
+                        # Set training state and pause/resume accordingly
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="is_training",
+                            value=hyper_parameters.is_training
+                        )
                         if hyper_parameters.is_training:
-                            print("\n[WeightsLab] UI Command: RESUME", flush=True)
+                            logger.info("\n[WeightsLab] UI Command: RESUME")
                             trainer.resume()
                         else:
-                            print("\n[WeightsLab] UI Command: PAUSE", flush=True)
+                            logger.info("\n[WeightsLab] UI Command: PAUSE")
                             trainer.pause()
-                    set_hyperparam(
-                        name=hp_name,
-                        key_path="is_training",
-                        value=hyper_parameters.is_training
-                    )
 
             except Exception as e:
                 return pb2.CommandResponse(
                     success=False,
                     message=f"Failed to set hyperparameters: {e}",
                 )
+
             if request.HasField("load_checkpoint_operation"):
                 with weightslab_rlock:
                     # Pause training if it's currently running

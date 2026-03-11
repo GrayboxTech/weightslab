@@ -64,17 +64,17 @@ class PauseController:
     def pause(self):
         self._event.clear()
         set_hyperparam(key_path='is_training', value=False)
-        set_hyperparam(key_path='is_training', value=False)
+        set_hyperparam(key_path='pause_at_step', value=0)
         logger.info('\nTraining paused.')
 
     def _resume(self):
         self._event.set()
         set_hyperparam(key_path='is_training', value=True)
-        set_hyperparam(key_path='is_training', value=True)
 
     def resume(self, force: bool = False) -> bool:
         hash_by_module = None
-        print('\nAttempting to resume training...')
+        logger.info('\nAttempting to resume training...')
+
         # On resume, first dump any pending changes to checkpoint manager
         if self.checkpoint_manager == None:
             self.checkpoint_manager = get_checkpoint_manager()
@@ -85,17 +85,16 @@ class PauseController:
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:
             logger.warning('Cannot access checkpoint manager on resume.')
-        print(f'Hashes by module: {hash_by_module}')
+        logger.info(f'Hashes by module: {hash_by_module}')
 
         # Then resume execution
         if self.checkpoint_manager == None or self._is_hash_computed() or force:
-            print('Resuming training now...')
+            logger.info('Resuming training now...')
             self._resume()
-            print(f'Hashes by module on resume: {hash_by_module}')
+            logger.info(f'Hashes by module on resume: {hash_by_module}')
             logger.info(f'\nTraining resumed as modules hashes have been computed: {hash_by_module}.')
             return True
         else:
-            print('Cannot resume training: experiment hash not computed yet for every modules.')
             logger.warning(f'Cannot resume training: experiment hash not computed yet for every modules {hash_by_module}.')
             return False
 
@@ -261,6 +260,10 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
             except Exception:
                 time.sleep(poll_interval)
                 continue
+
+            # hp logger issue
+            if hp == None:
+                logger.warning(f"Hyperparams proxy is None for name {name}. Check if the ledger is properly initialized and the hyperparams are set up. Retrying in {poll_interval} seconds...")
 
             # Check if hp is dict-like (has required methods) rather than isinstance
             if not hasattr(hp, '__getitem__') or not hasattr(hp, '__setitem__'):
