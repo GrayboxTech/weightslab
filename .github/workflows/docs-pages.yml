@@ -2,7 +2,12 @@ name: Docs (GitHub Pages)
 
 on:
   push:
-    branches: [docstring,dev,main]
+    branches: [docstring, dev, main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +16,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: docs-pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -20,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -32,8 +39,68 @@ jobs:
           python -m pip install -r docs/requirements.txt
           python -m pip install numpy pandas tqdm PyYAML
 
-      - name: Build Sphinx documentation
-        run: sphinx-build -b html docs docs/_build/html
+      - name: Build Sphinx multiversion docs
+        run: sphinx-multiversion docs docs/_build/html
+
+      - name: Prepare latest alias and versions manifest
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          import shutil
+          from pathlib import Path
+
+          root = Path("docs/_build/html")
+          main_dir = root / "main"
+          latest_dir = root / "latest"
+
+          if main_dir.exists():
+              shutil.copytree(main_dir, latest_dir, dirs_exist_ok=True)
+
+          versions = []
+          semver = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+          for d in root.iterdir():
+              if not d.is_dir() or not (d / "index.html").exists():
+                  continue
+              name = d.name
+              if name not in {"latest", "dev"} and not semver.match(name):
+                  continue
+
+              if name == "latest":
+                  rank = (0, 0, 0, 0)
+                  label = "latest"
+              elif name == "dev":
+                  rank = (1, 0, 0, 0)
+                  label = "dev"
+              else:
+                  m = semver.match(name)
+                  rank = (2, -int(m.group(1)), -int(m.group(2)), -int(m.group(3)))
+                  label = name
+
+              versions.append({"name": name, "label": label, "rank": rank})
+
+          versions.sort(key=lambda v: v["rank"])
+          payload = [{"name": v["name"], "label": v["label"]} for v in versions]
+
+          (root / "versions.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+          for v in payload:
+              (root / v["name"] / "versions.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+          if payload:
+              default_name = payload[0]["name"]
+              redirect = f"""<!doctype html>
+          <html><head>
+            <meta charset=\"utf-8\" />
+            <meta http-equiv=\"refresh\" content=\"0; url=./{default_name}/index.html\" />
+            <title>WeightsLab Docs</title>
+          </head><body>
+            Redirecting to <a href=\"./{default_name}/index.html\">{default_name}</a>.
+          </body></html>
+          """
+              (root / "index.html").write_text(redirect, encoding="utf-8")
+          PY
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -44,6 +111,7 @@ jobs:
           path: docs/_build/html
 
   deploy:
+    if: ${{ github.event_name != 'pull_request' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
