@@ -37,7 +37,24 @@ jobs:
           python -m pip install -r docs/requirements.txt
           python -m pip install numpy pandas tqdm PyYAML
 
+      - name: Compute docs version
+        id: docs-version
+        shell: bash
+        run: |
+          DOCS_REF="${GITHUB_REF_NAME}"
+          DOCS_VERSION="${DOCS_REF}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            DOCS_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "docs_ref=${DOCS_REF}" >> "$GITHUB_OUTPUT"
+          echo "docs_version=${DOCS_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Docs ref: ${DOCS_REF}"
+          echo "Docs version: ${DOCS_VERSION}"
+
       - name: Build Sphinx documentation
+        env:
+          DOCS_REF: ${{ steps.docs-version.outputs.docs_ref }}
+          DOCS_VERSION: ${{ steps.docs-version.outputs.docs_version }}
         run: sphinx-build -b html docs docs/_build/html
 
       - name: Setup Pages

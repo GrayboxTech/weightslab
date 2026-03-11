@@ -86,7 +86,7 @@ jobs:
         run: |
           python -m venv .venv-ci
 
-      - name: Install from TestPyPI (with retry)
+      - name: Install from PyPI (with retry)
         env:
           WL_VERSION: ${{ needs.build-and-publish-main.outputs.published_version }}
         run: |
@@ -96,7 +96,27 @@ jobs:
             echo "Missing published version from upstream job"
             exit 1
           fi
-          sleep 60 && python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
+
+          # PyPI can take a few minutes to expose newly uploaded versions.
+          for attempt in $(seq 1 60); do
+            echo "Checking pip visibility for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+            if python -m pip download \
+                --index-url https://pypi.org/simple/ \
+                --no-deps \
+                "weightslab==${WL_VERSION}" \
+                -d /tmp/wl-probe >/dev/null 2>&1; then
+              echo "Found weightslab==${WL_VERSION} in PyPI simple index"
+              break
+            fi
+
+            if [ "${attempt}" -eq 60 ]; then
+              echo "Timed out waiting for weightslab==${WL_VERSION} on PyPI simple index"
+              exit 1
+            fi
+            sleep 7
+          done
+
+          python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
           echo "weightslab==${WL_VERSION} installed from PyPI"
 
       - name: Verify package import
