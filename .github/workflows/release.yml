@@ -67,7 +67,7 @@ jobs:
             echo "PYPI_API_TOKEN not set; skipping PyPI upload."
             exit 0
           fi
-          python -m twine upload dist/* --non-interactive
+          python -m twine upload dist/* --non-interactive --verbose
 
   test-install-from-pip-main:
     name: Test Install From Pip Main
