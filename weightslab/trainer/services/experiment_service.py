@@ -283,6 +283,7 @@ class ExperimentService:
                 return pb2.CommandResponse(success=False, message=detailed_msg)
 
             try:
+                hp_now = None
                 if hyper_parameters.HasField("training_steps_to_do"):
                     set_hyperparam(
                         name=hp_name,
@@ -330,14 +331,19 @@ class ExperimentService:
                             # Mode actually changed — pause and announce switch
                             trainer = components.get("trainer")
                             if trainer:
-                                print(f"\n[WeightsLab] Pausing to switch mode...", flush=True)
+                                logger.info(f"\n[WeightsLab] Pausing to switch mode...")
                                 trainer.pause()
                                 set_hyperparam(name=hp_name, key_path="is_training", value=False)
                             mode_label = "AUDIT" if incoming_audit else "TRAIN"
-                            print(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode", flush=True)
+                            logger.info(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode")
 
                         # Always update the stored value (harmless no-op if unchanged)
-                        set_hyperparam(name=hp_name, key_path="auditor_mode", value=incoming_audit)
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="auditor_mode",
+                            value=incoming_audit
+                        )
+
                 except ValueError:
                     pass
 
@@ -345,23 +351,36 @@ class ExperimentService:
                 if hyper_parameters.HasField("is_training"):
                     trainer = components.get("trainer")
                     if trainer is not None:
+                        # Set number of steps desired to run before next pause if provided, based on current model age + requested nb_steps
+                        if hyper_parameters.HasField("nb_steps"):
+                            m = components.get("model")  # Get model
+                            m_age = m.get_age()
+                            logger.info(f"\n[WeightsLab] UI Command: Define number of steps at {hyper_parameters.nb_steps}")
+                            if hyper_parameters.nb_steps > 0:
+                                set_hyperparam(
+                                    name=hp_name,
+                                    key_path="pause_at_step",
+                                    value=m_age+hyper_parameters.nb_steps
+                                )
+                        # Set training state and pause/resume accordingly
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="is_training",
+                            value=hyper_parameters.is_training
+                        )
                         if hyper_parameters.is_training:
-                            print("\n[WeightsLab] UI Command: RESUME", flush=True)
+                            logger.info("\n[WeightsLab] UI Command: RESUME")
                             trainer.resume()
                         else:
-                            print("\n[WeightsLab] UI Command: PAUSE", flush=True)
+                            logger.info("\n[WeightsLab] UI Command: PAUSE")
                             trainer.pause()
-                    set_hyperparam(
-                        name=hp_name,
-                        key_path="is_training",
-                        value=hyper_parameters.is_training
-                    )
 
             except Exception as e:
                 return pb2.CommandResponse(
                     success=False,
                     message=f"Failed to set hyperparameters: {e}",
                 )
+
             if request.HasField("load_checkpoint_operation"):
                 with weightslab_rlock:
                     # Pause training if it's currently running

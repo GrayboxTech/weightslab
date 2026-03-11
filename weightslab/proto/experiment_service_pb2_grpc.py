@@ -77,7 +77,7 @@ class ExperimentServiceStub(object):
         self.EditDataSample = channel.unary_unary(
                 '/ExperimentService/EditDataSample',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.SerializeToString,
-                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.FromString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsResponse.FromString,
                 _registered_method=True)
         self.GetDataSplits = channel.unary_unary(
                 '/ExperimentService/GetDataSplits',
@@ -219,7 +219,7 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
             'EditDataSample': grpc.unary_unary_rpc_method_handler(
                     servicer.EditDataSample,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.FromString,
-                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.SerializeToString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataEditsResponse.SerializeToString,
             ),
             'GetDataSplits': grpc.unary_unary_rpc_method_handler(
                     servicer.GetDataSplits,
@@ -479,7 +479,7 @@ class ExperimentService(object):
             target,
             '/ExperimentService/EditDataSample',
             weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.SerializeToString,
-            weightslab_dot_proto_dot_experiment__service__pb2.DataEditsRequest.FromString,
+            weightslab_dot_proto_dot_experiment__service__pb2.DataEditsResponse.FromString,
             options,
             channel_credentials,
             insecure,

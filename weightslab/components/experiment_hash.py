@@ -206,6 +206,7 @@ class ExperimentHashGenerator:
         config_cp = config.copy()
         config_cp.pop('root_log_dir', None)
         config_cp.pop('is_training', None)
+        config_cp.pop('pause_at_step', None)
 
         try:
             # Sort keys for deterministic hashing

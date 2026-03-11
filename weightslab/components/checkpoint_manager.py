@@ -421,7 +421,8 @@ class CheckpointManager:
     def get_HP_snapshot(self) -> Dict[str, Any]:
         """Get current hyperparameters snapshot from ledger."""
         try:
-            hp = ledgers.get_hyperparams()
+            hp_name = ledgers.resolve_hp_name()
+            hp = ledgers.get_hyperparams(hp_name)
             if hp is None:
                 return {}
             if isinstance(hp, ledgers.Proxy) and hasattr(hp, 'get') and callable(hp.get):
@@ -439,6 +440,16 @@ class CheckpointManager:
         """Get current model snapshot from ledger."""
         try:
             model = ledgers.get_model()
+            if model == None:
+                # Try to resolve if exactly one model exists
+                try:
+                    model = ledgers.get_model(None)
+                except Exception:
+                    # If multiple or none, fallback to searching for a valid one
+                    models = ledgers.list_models()
+                    if models:
+                        model = ledgers.get_model(models[0])
+
             if model is None:
                 return None
             if isinstance(model, ledgers.Proxy) and hasattr(model, 'get') and callable(model.get):
@@ -454,6 +465,14 @@ class CheckpointManager:
         """Get current dataframe snapshot from registered dataloaders."""
         try:
             dfm = ledgers.get_dataframe()
+            if dfm == None:
+                try:
+                    dfm = ledgers.get_dataframe(None)
+                except Exception:
+                    dfms = ledgers.list_dataframes()
+                    if dfms:
+                        dfm = ledgers.get_dataframe(dfms[0])
+
             if isinstance(dfm, ledgers.Proxy) and hasattr(dfm, 'get') and callable(dfm.get):
                 dfm = dfm.get()
             if dfm is None:
