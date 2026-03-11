@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: docs-pages-${{ github.ref }}
