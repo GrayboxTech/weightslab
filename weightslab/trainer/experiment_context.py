@@ -186,10 +186,10 @@ class ExperimentContext:
                 current = 0
                 model = self._components.get("model")
                 if model:
-                    if hasattr(model, 'current_step'):
-                        current = int(model.current_step)
-                    elif hasattr(model, 'get_age'):
+                    if hasattr(model, 'get_age'):
                         current = int(model.get_age())
+                    elif hasattr(model, 'current_step'):
+                        current = int(model.current_step)
 
                 # Get remaining from hyperparams
                 remaining = _hp_getter("training_steps_to_do", 999)()

@@ -516,7 +516,7 @@ class CheckpointSystemTests(unittest.TestCase):
         self.state['uids_a'] = uids_A
 
         # Final verbose
-        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.current_step}")
+        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
         print(f"\n[OK] TEST A PASSED - Initial training completed")
 
     # =============================
@@ -583,7 +583,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Final verbose
         print(f"\n[OK] TEST B PASSED - Model architecture updated")
-        print(f"  Final model_age: {model.current_step}")
+        print(f"  Final model_age: {model.get_age()}")
 
     # ========================================================================
     # Test: 03_train_C_hyperparams_change
@@ -647,7 +647,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Final verbose
         print(f"\n[OK] TEST C PASSED - Hyperparameters updated")
-        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.current_step}")
+        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
 
     # ========================================================================
     # Test: 04_train_D_data_change
@@ -734,7 +734,7 @@ class CheckpointSystemTests(unittest.TestCase):
 
         # Final verbose
         print(f"\n[OK] TEST D PASSED - Data state updated")
-        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.current_step}")
+        print(f"  Final model_age (i.e., how many epochs lived by the model): {model.get_age()}")
 
     # ========================================================================
     # Test: 05_train_E_reload_and_branch
@@ -840,7 +840,7 @@ class CheckpointSystemTests(unittest.TestCase):
         self.state['uids_e'] = uids_E
 
         print(f"\n[OK] TEST E PASSED - Reloaded and generate a new train branch successfully")
-        print(f"  Final model_age: {model.current_step}")
+        print(f"  Final model_age: {model.get_age()}")
 
     # ========================================================================
     # Test: 06_reload_before_model_change

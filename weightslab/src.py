@@ -3,16 +3,17 @@
 This module provides the user-facing helpers that are re-exported at package
 level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 """
-import os
-import sys
-import time
 import gc
-import functools
+import os
+import time
+import types
 import logging
+import functools
 import numpy as np
 import torch as th
 
-from typing import Callable, Optional, List, Any
+from tqdm import tqdm
+from typing import Callable, Optional, Any
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -146,6 +147,11 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
+# Set age function if not present for better compatibility with checkpoint manager patterns
+def _get_age(self):
+    return self.current_step
+
+
 def _get_step(step: int | None = None) -> int:
     """
         Attempt to get the current training step from the model in the ledger, if available. This is used for logging signals with the correct global step.
@@ -173,16 +179,23 @@ def _get_step(step: int | None = None) -> int:
             val = m.get_age()
             if val is not None:
                 step = max([int(val)-1, 0])  # Use age-1 as step to reflect completed step; ensure non-negative
+
         elif hasattr(m, 'current_step'):
             val = m.current_step
+
             if val is not None:
                 step = max([int(val)-1, 0])  # Use current_step-1 as step to reflect completed step; ensure non-negative
+
             elif step is not None:
                 # step = step # fallback to provided step
                 m.current_step = step  # add current_step attribute to model for future tracking
+
+            m.get_age = types.MethodType(_get_age, m)  # To make a proper bound method so `self` is passed correctly, we use types.MethodType
+
         elif step is not None:
             # If model doesn't have current_step, force it to 0 or try to infer from checkpoint manager
             m.current_step = step  # add current_step attribute to model for future tracking
+            m.get_age = types.MethodType(_get_age, m)  # To make a proper bound method so `self` is passed correctly, we use types.MethodType
 
     return step
 
@@ -319,7 +332,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                 mask = get_active_group_mask(group_ids, origin).to(out.device)
                 if len(mask) == len(out):
                     out = out * mask
-            
+
             # Per-sample Individual Masking
             else:
                 mask = get_active_sample_mask(ids, origin).to(out.device)
@@ -1565,19 +1578,19 @@ def save_group_signals(
         group_ids = group_ids.detach().cpu().numpy().astype(str).tolist()
     else:
         group_ids = [str(gid) for gid in group_ids]
-    
+
     # Process signals and handle batches
     batch_signals = {}
     scalar_signals = {}
-    
+
     for k, v in signals.items():
         # Prefix for UI grouping
         key = k if k.startswith("signals//") else f"signals//{k}"
-        
+
         # Detect if this is a batch vector matching group_ids
         is_batch = False
         val_to_log = v
-        
+
         if hasattr(v, '__len__') and not isinstance(v, (str, dict)) and len(v) == len(group_ids):
             is_batch = True
             if hasattr(v, 'detach'):
@@ -1615,13 +1628,13 @@ def save_group_signals(
         updates = scalar_signals.copy()
         for k, v_batch in batch_signals.items():
             updates[k] = v_batch[i]
-            
+
         if step is not None:
             updates[SampleStatsEx.LAST_SEEN.value] = step
-        
+
         all_updates.append(updates)
         active_group_ids.append(gid)
-    
+
     if not active_group_ids:
         return  # All groups were tainted; nothing to write
 

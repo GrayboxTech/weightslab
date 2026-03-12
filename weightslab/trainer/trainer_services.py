@@ -119,6 +119,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
 
+    grpc_host = os.getenv("GRPC_BACKEND_HOST", grpc_host)
     grpc_port = int(os.getenv("GRPC_BACKEND_PORT", grpc_port))
 
     def serving_thread_callback():
