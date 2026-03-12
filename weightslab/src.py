@@ -5,6 +5,8 @@ level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 """
 import gc
 import os
+import sys
+import ctypes
 import time
 import types
 import logging
@@ -28,6 +30,32 @@ from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
+
+
+def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
+    """CPython-specific: find every local variable in the *caller's* caller frame
+    that points to *original_obj* and rebind it to *new_obj* in-place.
+
+    This lets ``wl.watch_or_edit(parameters, ...)`` (without capturing the return
+    value) transparently replace ``parameters`` with the returned Proxy in the
+    calling scope.  Silently does nothing on non-CPython runtimes.
+    """
+    try:
+        # frame 0 = _rebind_caller_local
+        # frame 1 = watch_or_edit  (or whatever internal caller)
+        # frame 2 = user code
+        frame = sys._getframe(2)
+        changed = False
+        for name, val in list(frame.f_locals.items()):
+            if val is original_obj:
+                frame.f_locals[name] = new_obj
+                changed = True
+        if changed:
+            ctypes.pythonapi.PyFrame_LocalsToFast(
+                ctypes.py_object(frame), ctypes.c_int(0)
+            )
+    except Exception:
+        pass
 from weightslab.backend.ledgers import list_models, get_model as _gm
 from weightslab.components import global_monitoring
 from tqdm import tqdm
@@ -125,6 +153,7 @@ class SignalContext:
         """True if running during training (triggered by a metric)."""
         return self.subscribed_value is not None
 
+
 # #####################################################################################################################
 # WEIGHTSLAB INTERNAL FUNCTIONS FOR LOGGING, SIGNAL EXTRACTION, WRAPPING, ETC. (not typically called directly by users)
 # #####################################################################################################################
@@ -147,7 +176,6 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
-# Set age function if not present for better compatibility with checkpoint manager patterns
 def _get_age(self):
     return self.current_step
 
@@ -297,6 +325,24 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
                 )
         except Exception:
             pass
+
+
+def _update_log_directory(new_log_dir: str):
+    """
+        Move the current log file to a new directory and update the file handler.
+
+        This is useful for setting a user-specified log directory after initial
+        setup with a temporary file. The function will:
+        - Move the existing log file to the new directory (if it exists)
+        - Update the logging FileHandler to point to the new location
+    """
+
+    # Update logging directory to use root_log_dir after parameters registration
+    hp = get_hyperparams()
+    try:
+        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
+    except Exception as e:
+        logger.debug(f"Could not update log directory: {e}")
 
 
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
@@ -462,24 +508,6 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     return out
 
 
-def _update_log_directory(new_log_dir: str):
-    """
-        Move the current log file to a new directory and update the file handler.
-
-        This is useful for setting a user-specified log directory after initial
-        setup with a temporary file. The function will:
-        - Move the existing log file to the new directory (if it exists)
-        - Update the logging FileHandler to point to the new location
-    """
-
-    # Update logging directory to use root_log_dir after parameters registration
-    hp = get_hyperparams()
-    try:
-        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
-    except Exception as e:
-        logger.debug(f"Could not update log directory: {e}")
-
-
 # ##############################################################################################################
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
@@ -527,7 +555,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_model` will create a Proxy if
         # the name is not yet present.
-        proxy = get_model()
+        _model = get_model()
 
         # Architecture operations require dependencies to be available.
         # Keep backward-compatible behavior by enabling dependency computation
@@ -540,10 +568,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Register logger in backend for model training
         LoggerQueue()
 
+        # No rebind here since the model wrapper is designed to be a drop-in replacement for the original model
+
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
-        return proxy if proxy != None else wrapper
+        return _model if _model != None else wrapper
 
     # DataLoader
     elif 'data' in flag.lower() or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
@@ -552,9 +582,9 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # real wrapper is registered. `get_dataloader` will create a Proxy if
         # the name is not yet present.\[]
         try:
-            proxy = get_dataloader(kwargs.get('loader_name', DEFAULT_NAME))
+            _dataloader = get_dataloader(kwargs.get('loader_name', DEFAULT_NAME))
         except Exception:
-            proxy = None
+            _dataloader = None
 
         # Auto-inject root_log_dir from hyperparameters if not provided
         if kwargs is None or 'root_log_dir' not in kwargs:
@@ -583,12 +613,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
-        proxy.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
+        _dataloader.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
 
-        # Prefer returning the proxy (if one exists) so external callers hold
-        # a stable reference that will see updates. If no proxy was
+        # There is not rebind here because obj can be a dataloader or a dataset
+
+        # Prefer returning the _dataloader (if one exists) so external callers hold
+        # a stable reference that will see updates. If no _dataloader was
         # obtainable, return the wrapper itself.
-        return proxy if proxy != None else wrapper
+        return _dataloader if _dataloader != None else wrapper
 
     # Optimizer
     elif 'optimizer' in flag.lower() or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
@@ -597,31 +629,37 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # real wrapper is registered. `get_optimizer` will create a Proxy if
         # the name is not yet present.
         try:
-            proxy = get_optimizer()
+            _opt = get_optimizer()
         except Exception:
-            proxy = None
+            _opt = None
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = OptimizerInterface(obj, **kwargs)
 
+        # rebind caller,, i.e., in-place update
+        _rebind_caller_local(obj, _opt)
+
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
-        return proxy if proxy != None else wrapper
+        return _opt
 
     # Logger
     elif 'logger' in flag.lower() or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
         # Ensure there's a proxy placeholder if callers already requested the logger
         try:
-            proxy = get_logger()
+            _logger = get_logger()
         except Exception:
-            proxy = None
+            _logger = None
 
         # Register the logger into the ledger. This will update any proxy in-place.
         register_logger(obj)
 
+        # rebind caller,, i.e., in-place update
+        _rebind_caller_local(obj, _logger)
+
         # Return a stable handle (proxy) when available, otherwise the registered logger
-        return proxy if proxy != None else obj
+        return _logger
 
     # Signals
     # # Loss
@@ -649,14 +687,16 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             except Exception:
                 pass
 
-            # return proxy if exists else the object
-            try:
-                return get_signal(reg_name)
-            except Exception:
-                return obj
+            # rebind caller, i.e., in-place update
+            _loss = get_signal(reg_name)
+            _rebind_caller_local(obj, _loss)
+
+            return _loss
+
         except Exception:
             # fall back to hyperparams branch if something unexpected
             pass
+
     # # Metric
     elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
@@ -689,11 +729,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             except Exception:
                 pass
 
-            # return proxy if exists else the object
-            try:
-                return get_signal(reg_name)
-            except Exception:
-                return obj
+            # rebind caller, i.e., in-place update
+            _metric = get_signal(reg_name)
+            _rebind_caller_local(obj, _metric)
+
+            return _metric
+
         except Exception:
             # fall back to hyperparams branch if something unexpected
             pass
@@ -765,6 +806,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     # Normal registration if no checkpoint hyperparameters were loaded
                     if isinstance(obj, str):
                         path = obj
+                        # ensure proxy placeholder exists before registering
+                        _hp = get_hyperparams()
                         # register empty/defaults if provided in kwargs
                         if defaults:
                             register_hyperparams(defaults)
@@ -781,9 +824,13 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             _update_log_directory(new_log_dir)
 
                         # return the ledger handle (proxy or dict)
-                        return get_hyperparams()
+                        _hp = get_hyperparams()
+                        _rebind_caller_local(obj, _hp)
+                        return _hp
 
                     elif isinstance(obj, dict):
+                        # ensure proxy placeholder exists before registering
+                        get_hyperparams()
                         register_hyperparams(obj)
 
                         # Update log directory if root_log_dir provided in hyperparameters or defaults
@@ -795,7 +842,9 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         if new_log_dir:
                             _update_log_directory(new_log_dir)
 
-                        return get_hyperparams()
+                        _hp = get_hyperparams()
+                        _rebind_caller_local(obj, _hp)
+                        return _hp
                     else:
                         # unsupported type for hp; attempt best-effort registration
                         try:
@@ -810,11 +859,15 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             if new_log_dir:
                                 _update_log_directory(new_log_dir)
 
-                            return get_hyperparams()
+                            _hp = get_hyperparams()
+                            _rebind_caller_local(obj, _hp)
+                            return _hp
                         except Exception:
                             raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
 
-                return get_hyperparams()
+                _hp = get_hyperparams()
+                _rebind_caller_local(obj, _hp)
+                return _hp
             except Exception:
                 # bubble up original error
                 raise
@@ -825,22 +878,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 # ##############################################################################################################
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
-
-def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
-    """Start WeightsLab services.
-
-    Args:
-        serving_cli: Start the interactive CLI server.
-        serving_grpc: Start the gRPC server.
-        **kwargs: Extra server options passed to underlying backends.
-    """
-
-    if serving_grpc:
-        grpc_serve(**kwargs)
-
-    if serving_cli:
-        cli_serve(**kwargs)
-
 
 def _move_to_cpu(value: Any) -> Any:
     """Recursively move tensor containers to CPU."""
@@ -919,6 +956,22 @@ def _release_gpu_resources() -> None:
                 pass
 
 
+def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
+    """Start WeightsLab services.
+
+    Args:
+        serving_cli: Start the interactive CLI server.
+        serving_grpc: Start the gRPC server.
+        **kwargs: Extra server options passed to underlying backends.
+    """
+
+    if serving_grpc:
+        grpc_serve(**kwargs)
+
+    if serving_cli:
+        cli_serve(**kwargs)
+
+
 def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
     """Keep process alive while background WeightsLab services are running.
 
@@ -942,7 +995,7 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down WeightsLab services.")
 
-#  Signal Definition & Computation Helpers
+
 def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
     Decorator that registers a custom signal function.
@@ -1642,6 +1695,11 @@ def save_group_signals(
     DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
 
 
+def clear_all():
+    """Clear all WeightsLab registries (models, dataloaders, etc.)."""
+    ledgers.clear_all()
+
+
 # ##############################################################################################################
 # MAIN EXAMPLES USAGE (can be called from training script to manually set)
 # ##############################################################################################################
@@ -1671,8 +1729,3 @@ if __name__ == "__main__":
 
     # Keep script alive
     keep_serving(timeout=60)
-
-
-def clear_all():
-    """Clear all WeightsLab registries (models, dataloaders, etc.)."""
-    ledgers.clear_all()

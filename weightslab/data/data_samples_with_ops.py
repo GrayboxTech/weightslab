@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import threading
 
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
@@ -35,6 +35,7 @@ from weightslab.data.sample_stats import (
 
 
 # Global logger
+logging.getLogger("PIL").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 global _UID_CNT
 _UID_CNT = 0
@@ -146,11 +147,15 @@ class DataSampleTrackingWrapper(Dataset):
         keep_leakages: bool = False,
         **_,
     ):
+        if len(wrapped_dataset) == 0:
+            logger.warning(f"Wrapped dataset for split '{loader_name}' is empty. DataSampleTrackingWrapper will be initialized but no samples will be tracked.")
+            raise ValueError("Wrapped dataset is empty. Please provide a non-empty dataset to DataSampleTrackingWrapper.")
+
         # Helper maps for grouped data
         self._sid_to_physical_idx = {}
         self._sid_to_member_rank = {}
         self.physical_uids = [] # Representative ID for each physical index (used for DataLoader)
-        
+
         # Set name
         self.loader_name = loader_name
 
@@ -284,15 +289,15 @@ class DataSampleTrackingWrapper(Dataset):
         # Start with defaults for all UIDs (single dict build per row to trim overhead)
         # Note: We now iterate through PHYSICAL indices and expand rows if multiple UIDs are found.
         # This decouples len(self) from len(wrapped_dataset).
-        
+
         default_data = []
         expanded_uids = []
         physical_uids = []
-        
+
         logger.info(
             f"Preloading sample statistics for PHYSICAL indices in split '{split}' with preload_labels={preload_labels}, preload_metadata={preload_metadata}..."
         )
-        
+
         n_physical = len(wrapped_dataset)
         for p_idx in tqdm(range(n_physical), desc=f"Initializing ledger for split '{split}'"):
             # 1. Fetch metadata to detect groups
@@ -311,29 +316,29 @@ class DataSampleTrackingWrapper(Dataset):
                 for m in raw_item[3:]:
                     if isinstance(m, dict):
                         metadata.update(m)
-            
+
             # Detect UIDs from metadata or generate them
             uids = metadata.get('uids')
             if uids is None:
                 # Fallback to the single UID that would have been generated
                 # (We use the one already generated in _generate_uids for this physical index)
                 uids = [str(self.unique_ids[p_idx])]
-            
+
             # Detect Group ID
             group_id = metadata.get('group_id')
             if group_id is None:
                 group_id = uids[0] # Default group_id to first sample ID
-            
+
             # Store first UID as the representative for this physical index
             physical_uids.append(uids[0])
-            
+
             # 2. Register each sample in this group
             for rank, sid in enumerate(uids):
                 sid = str(sid)
                 expanded_uids.append(sid)
                 self._sid_to_physical_idx[sid] = p_idx
                 self._sid_to_member_rank[sid] = rank
-                
+
                 # Build ledger row
                 row = SampleStats.DEFAULTS.copy()
                 row.update({
@@ -342,7 +347,7 @@ class DataSampleTrackingWrapper(Dataset):
                     SampleStatsEx.GROUP_ID.value: str(group_id),
                     SampleStatsEx.MEMBER_RANK.value: rank
                 })
-                
+
                 # Preload labels/targets if requested
                 if preload_labels:
                     # In grouped cases, the target might be a list matching UIDs
@@ -351,7 +356,7 @@ class DataSampleTrackingWrapper(Dataset):
                         row[SampleStatsEx.TARGET.value] = target_payload[rank]
                     else:
                         row[SampleStatsEx.TARGET.value] = target_payload
-                
+
                 # Apply metadata flattening
                 if metadata:
                     # Do not overwrite standard managed keys with raw un-casted metadata payload
@@ -361,7 +366,7 @@ class DataSampleTrackingWrapper(Dataset):
                         if isinstance(v, dict):
                             for sub_key, sub_val in v.items():
                                 row[f"{k}:{sub_key}"] = sub_val
-                
+
                 default_data.append(row)
 
         # Update the unique_ids array to reflect the expanded (flat) sample set
@@ -438,7 +443,7 @@ class DataSampleTrackingWrapper(Dataset):
          - If it returns more than two elements, we assume the format is (data, uids, targets, **metadata) and return (data, id, target, *metadata).
            In this case, we also override the target with tag-based labels if use_tags is enabled.
         """
-        # Distinguish between Individual Access (id provided) 
+        # Distinguish between Individual Access (id provided)
         # and Bulk Access (index only, e.g. from DataLoader)
         if id is None:
             # Bulk mode: Return exactly what the underlying dataset yields
@@ -448,15 +453,15 @@ class DataSampleTrackingWrapper(Dataset):
         sid = str(id)
         p_idx = self._sid_to_physical_idx.get(sid)
         rank = self._sid_to_member_rank.get(sid, 0)
-        
+
         if p_idx is None:
             # Fallback if ID is not in grouped map
             p_idx = index
             rank = 0
-        
+
         # 1. Fetch from wrapped dataset
         data = self.wrapped_dataset[p_idx]
-        
+
         # 2. Pluck specific member
         # Standard format: (pixels, target) or (pixels, uids, targets, ...)
         if isinstance(data, (tuple, list)):
@@ -465,10 +470,10 @@ class DataSampleTrackingWrapper(Dataset):
                 item = pixels[rank]
             else:
                 item = pixels
-                
+
             # Resolve target and 'rest' based on tuple length
             if len(data) >= 3:
-                # WeightsLab format: (pixels, uids, targets, ...) 
+                # WeightsLab format: (pixels, uids, targets, ...)
                 target = data[2]
                 rest = data[3:]
             elif len(data) == 2:
@@ -486,7 +491,7 @@ class DataSampleTrackingWrapper(Dataset):
             item = data
             target = None
             rest = ()
-            
+
         # For single element (unsupervised): return (item, id)
         # Override target with tag-based label if use_tags is enabled
         if self._use_tags:
@@ -653,7 +658,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Use ThreadPoolExecubased on your system (typically CPU count)
         with ThreadPoolExecutor(thread_name_prefix="unique_id_generator") as executor:
             # Submit all tasks
-            futures = {executor.submit(compute_id, idx): idx for idx in range(n_samples)}
+            futures = {executor.submit(compute_id, idx): idx for idx in trange(n_samples, desc="Generating unique IDs", unit="sample")}
 
             # Collect results as they complete
             for future in as_completed(futures):
