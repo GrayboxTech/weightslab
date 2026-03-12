@@ -364,7 +364,7 @@ def evaluate_all(loader, model, cls_criterion, contrastive_criterion, metric, de
             total_losses += batch_loss.item()
             num_batches += 1
             
-            metric.update(cls_logits, labels_flat.long())
+            metric.update(torch.sigmoid(cls_logits), labels_flat.long())
             
             wl.save_signals(
                 batch_ids=uids_flat,
@@ -408,11 +408,13 @@ if __name__ == "__main__":
     parameters.setdefault("image_size", 256)
     parameters.setdefault("batch_size", 4)
     parameters.setdefault("lr", 1e-4)
+    parameters.setdefault("base_channels", 16)
 
+    parameters.setdefault("recon_weight", 1.0)
     parameters.setdefault("contrastive_weight", 1.0)
-    parameters.setdefault("root_log_dir", "./logs/vad/4")
+    parameters.setdefault("root_log_dir", "./logs/vad/24")
 
-    parameters.setdefault("is_training", True)
+    parameters.setdefault("is_training", False)
 
     if parameters["device"] == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -439,6 +441,7 @@ if __name__ == "__main__":
     transform = transforms.Compose([
         transforms.Resize((parameters["image_size"], parameters["image_size"])),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     _train_ds = VADDataset(data_root, split="train", transform=transform)
@@ -455,7 +458,12 @@ if __name__ == "__main__":
 
     # 3. Model, Optimizer, etc.
     print("Initialising UNet model...", flush=True)
-    _model = UNetMulti(in_ch=3, base=4, bottleneck=32, image_size=parameters["image_size"]).to(device)
+    _model = UNetMulti(
+        in_ch=3, 
+        base=parameters["base_channels"], 
+        bottleneck=64, 
+        image_size=parameters["image_size"]
+    ).to(device)
     print(f"Watching model with WeightsLab...", flush=True)
     model = wl.watch_or_edit(_model, flag="model", device=device, compute_dependencies=False)
 
