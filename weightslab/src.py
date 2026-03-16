@@ -29,6 +29,8 @@ from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
 from weightslab.backend.ledgers import list_models, get_model as _gm
+from weightslab.components import global_monitoring
+from tqdm import tqdm
 
 
 # Get global logger
@@ -311,6 +313,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Remove parameters
     _ = kw.pop('flag', None)
     ids = kw.pop('batch_ids', None)
+    group_ids = kw.pop('group_id', None)
     preds = kw.pop('preds', None)
     batch_scalar = kw.pop('signals', None)
     preds_raw = a[0] if len(a) > 0 else None
@@ -318,6 +321,26 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
+
+    # discarded samples/tainted groups from the loss tensor.
+    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
+
+    if origin and ids is not None and hasattr(out, 'device') and out.ndim > 0:
+        try:
+            # Multi-sample Group Masking
+            if group_ids is not None:
+                mask = get_active_group_mask(group_ids, origin).to(out.device)
+                if len(mask) == len(out):
+                    out = out * mask
+
+            # Per-sample Individual Masking
+            else:
+                mask = get_active_sample_mask(ids, origin).to(out.device)
+                if len(mask) == len(out):
+                    out = out * mask
+        except Exception as e:
+            logger.debug(f"Automatic backend discard masking failed: {e}")
+
     if kwargs.get('per_sample', False):
         if out.ndim > 1:
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
@@ -334,7 +357,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     dynamic_updates = {}
     ids_np = None
     if ids is not None:
-        ids_np = ids.detach().cpu().numpy() if hasattr(ids, 'detach') else np.asarray(ids)
+        if hasattr(ids, 'detach'):
+            ids_np = ids.detach().cpu().numpy()
+        else:
+            try:
+                # Handle list of tensors (common in Siamese/multi-output)
+                ids_np = np.array([i.detach().cpu().numpy() if hasattr(i, 'detach') else i for i in ids])
+            except Exception:
+                ids_np = np.asarray(ids)
 
     if ids_np is not None:
          # Identify Subscribers for this specific signal (reg_name)
@@ -1366,7 +1396,11 @@ def save_signals(
             return
 
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(str) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids)
+    # Convert tensors to numpy for lightweight buffering, forcing to strings for consistent ledger indexing
+    if isinstance(batch_ids, th.Tensor):
+        batch_ids_np = batch_ids.detach().cpu().numpy().astype(str)
+    else:
+        batch_ids_np = np.asarray(batch_ids).astype(str)
     if preds is not None:
         pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
         if np.issubdtype(pred_np.dtype, np.floating):
@@ -1409,11 +1443,11 @@ def save_signals(
     else:
         losses_data = None
     # # Process targets
-    if target_np is not None and target_np.ndim == 1:
+    if target_np is not None and target_np.ndim == 1 and target_np.size > len(batch_ids_np):
         target_np = target_np[:, np.newaxis]
-    if pred_np is not None and pred_np.ndim == 1:
+    if pred_np is not None and pred_np.ndim == 1 and pred_np.size > len(batch_ids_np):
         pred_np = pred_np[:, np.newaxis]
-    if pred_raw_np is not None and pred_raw_np.ndim == 1:
+    if pred_raw_np is not None and pred_raw_np.ndim == 1 and pred_raw_np.size > len(batch_ids_np):
         pred_raw_np = pred_raw_np[:, np.newaxis]
 
     # Enqueue to dataframe manager buffer for efficientcy
@@ -1425,6 +1459,192 @@ def save_signals(
         losses=losses_data,
         step=step
     )
+
+
+def get_active_group_mask(
+    group_ids: list[str],
+    origin: str,
+) -> th.Tensor:
+    """Return a boolean mask (one entry per group_id) indicating active (non-tainted) groups.
+
+    A group is "tainted" when at least one of its members has been marked as
+    discarded in the UI. Tainted groups should be excluded from group-level loss
+    computations so the model is not updated based on broken pairs/triplets.
+
+    This should be called **before** `.mean()` in your training step, so the
+    gradient for tainted groups is properly zeroed, not just suppressed in the UI.
+
+    Args:
+        group_ids: List of group ID strings for the current batch (one per pair/group).
+        origin: Dataset split name matching the ledger (e.g. 'train_loader').
+
+    Returns:
+        A float tensor of shape (len(group_ids),) with 1.0 for active groups
+        and 0.0 for tainted groups. Safe to multiply against your loss vector.
+
+    Example::
+
+        # Cosine embedding loss — one value per pair in the batch
+        loss_embed = loss_cosine(e1, e2, y)            # shape: (B/2,)
+        group_mask = wl.get_active_group_mask(group_ids, origin="train_loader")
+        # Zero out tainted pairs so they don't update weights
+        n_active = group_mask.sum().clamp(min=1)
+        loss_embed = (loss_embed * group_mask).sum() / n_active
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    group_ids = [str(g) for g in group_ids]
+    mask = th.ones(len(group_ids), dtype=th.float32)
+
+    if DATAFRAME_M is None or not hasattr(DATAFRAME_M, 'get_tainted_group_ids'):
+        return mask
+
+    try:
+        tainted = DATAFRAME_M.get_tainted_group_ids(group_ids, origin)
+        if tainted:
+            for i, gid in enumerate(group_ids):
+                if gid in tainted:
+                    mask[i] = 0.0
+    except Exception:
+        pass  # Fail-safe: if check fails, treat all groups as active
+
+    return mask
+
+
+def get_active_sample_mask(
+    sample_ids: list[str],
+    origin: str,
+) -> th.Tensor:
+    """Return a boolean mask (one entry per sample_id) indicating active (non-discarded) samples.
+
+    This ensures that any sample marked as discarded in the UI is immediately
+    excluded from per-sample loss calculations, even if it is already in the
+    current training batch (before the sampler's next epoch refresh).
+
+    Args:
+        sample_ids: List of sample ID strings/ints for the current batch.
+        origin: Dataset split name (e.g. 'train_loader').
+
+    Returns:
+        A float tensor of shape (len(sample_ids),) with 1.0 for active samples
+        and 0.0 for discarded samples.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    sample_ids = [str(sid) for sid in sample_ids]
+    mask = th.ones(len(sample_ids), dtype=th.float32)
+
+    if DATAFRAME_M is None or not hasattr(DATAFRAME_M, 'get_discarded_sample_ids'):
+        return mask
+
+    try:
+        discarded_ids = DATAFRAME_M.get_discarded_sample_ids(sample_ids, origin)
+        if discarded_ids:
+            for i, sid in enumerate(sample_ids):
+                if sid in discarded_ids:
+                    mask[i] = 0.0
+    except Exception:
+        pass
+
+    return mask
+
+
+def save_group_signals(
+    signals: dict,
+    group_ids: list[str] | th.Tensor,
+    origin: str = 'train',
+    step: int | None = None,
+    log: bool = True
+):
+    """
+    Save and broadcast group-level statistics (e.g., contrastive loss for an image pair).
+
+    Args:
+        signals: Dictionary of {name: value} metrics for the group.
+        group_ids: List of group IDs the signals belong to.
+        origin: Split name ('train', 'val').
+        step: Optional training step.
+        log: Whether to log to the global metrics dashboard.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    # Get current model step
+    step = _get_step(step=step)
+
+    # Convert to standard format
+    # Convert to standard format, forcing to strings for consistent ledger indexing
+    if isinstance(group_ids, th.Tensor):
+        group_ids = group_ids.detach().cpu().numpy().astype(str).tolist()
+    else:
+        group_ids = [str(gid) for gid in group_ids]
+
+    # Process signals and handle batches
+    batch_signals = {}
+    scalar_signals = {}
+
+    for k, v in signals.items():
+        # Prefix for UI grouping
+        key = k if k.startswith("signals//") else f"signals//{k}"
+
+        # Detect if this is a batch vector matching group_ids
+        is_batch = False
+        val_to_log = v
+
+        if hasattr(v, '__len__') and not isinstance(v, (str, dict)) and len(v) == len(group_ids):
+            is_batch = True
+            if hasattr(v, 'detach'):
+                v = v.detach().cpu().numpy()
+            batch_signals[key] = v
+            val_to_log = np.mean(v)
+        else:
+            if hasattr(v, 'item'):
+                v = v.item()
+            scalar_signals[key] = v
+            val_to_log = v
+
+        # Log mean/scalar to dashboard
+        if log:
+            _log_signal(float(val_to_log), None, k, step=step)
+
+    # --- Group-discard filtering ---
+    # If any member of a group is discarded, skip the group loss for that group.
+    # Per-sample losses (e.g. classification) are still computed since samples stay in the batch.
+    tainted_group_ids: set = set()
+    if DATAFRAME_M is not None and hasattr(DATAFRAME_M, 'get_tainted_group_ids'):
+        try:
+            tainted_group_ids = DATAFRAME_M.get_tainted_group_ids(group_ids, origin)
+        except Exception:
+            pass  # Never block training on best-effort discard check
+
+    # Broadcast to all members in ledger (skip tainted groups)
+    all_updates = []
+    active_group_ids = []
+    for i, gid in enumerate(group_ids):
+        if gid in tainted_group_ids:
+            continue  # Skip: at least one member was discarded; group loss is undefined
+
+        # We also record the last seen step for all members
+        updates = scalar_signals.copy()
+        for k, v_batch in batch_signals.items():
+            updates[k] = v_batch[i]
+
+        if step is not None:
+            updates[SampleStatsEx.LAST_SEEN.value] = step
+
+        all_updates.append(updates)
+        active_group_ids.append(gid)
+
+    if not active_group_ids:
+        return  # All groups were tainted; nothing to write
+
+    # Bulk update for performance (avoids repeated dataframe scans)
+    DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
 
 
 # ##############################################################################################################
@@ -1456,3 +1676,8 @@ if __name__ == "__main__":
 
     # Keep script alive
     keep_serving(timeout=60)
+
+
+def clear_all():
+    """Clear all WeightsLab registries (models, dataloaders, etc.)."""
+    ledgers.clear_all()

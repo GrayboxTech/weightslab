@@ -24,10 +24,11 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.proto.experiment_service_pb2 import SampleEditType
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
-from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals
+from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals, Proxy
 from weightslab.trainer.services.lidar_utils import render_bev_mask
 from weightslab.data.data_utils import load_label, load_raw_image, to_numpy_safe
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
+from weightslab.data.data_utils import load_raw_image_array
 import torch as th
 
 
@@ -192,7 +193,7 @@ class DataService:
         # Check hyperparameters for compute_natural_sort flag (default: False)
         # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
-        hp_dict = hp.get() if (hp is not None and hasattr(hp, "get")) else (hp if isinstance(hp, dict) else {})
+        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})
         self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
 
         # In-memory dataframe view of all datasets combined (streamed to UI)
@@ -312,7 +313,7 @@ class DataService:
         try:
             hp = self._ctx.components.get("hyperparams")
             if hp is not None and hasattr(hp, "get"):
-                hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})
                 if isinstance(hp_dict, dict):
                     root = (
                         hp_dict.get("root_log_dir")
@@ -358,7 +359,7 @@ class DataService:
         try:
             hp = self._ctx.components.get("hyperparams")
             if hp is not None and hasattr(hp, "get"):
-                hp_dict = hp.get() if not isinstance(hp, dict) else hp
+                hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})
                 if isinstance(hp_dict, dict):
                     flag = hp_dict.get("is_training")
                     if flag is not None:
@@ -1203,8 +1204,10 @@ class DataService:
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Could not convert prediction to array: {pred}, error: {e}")
 
-            # ====== Step 9: Generate raw data bytes and thumbnail (handles 4D volumetric) ======
+            # ====== Step 9: Generate raw data bytes and thumbnail ======
             if request.include_raw_data:
+                np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
+
                 # Optimized: check if already in row (pushed by user script)
                 input_arr = row.get("input")
                 if input_arr is not None and isinstance(input_arr, np.ndarray):
@@ -1222,19 +1225,19 @@ class DataService:
                         else:
                             middle_pil = Image.fromarray(input_arr.squeeze())
                 elif dataset is not None:
-                    from weightslab.data.data_utils import load_raw_image_array
                     try:
-                        ds_idx = dataset.get_index_from_sample_id(sample_id)
-                    except KeyError:
-                        ds_idx = None
-                        logger.debug(f"Missing sample_id={sample_id} in dataset mapping.")
+                        # New grouped-aware location resolution
+                        if hasattr(dataset, "get_physical_location"):
+                            ds_idx, member_rank = dataset.get_physical_location(sample_id)
+                        else:
+                            ds_idx = dataset.get_index_from_sample_id(sample_id)
+                            member_rank = 0
 
-                    if ds_idx is not None:
-                        np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(dataset, ds_idx)
-                    else:
-                        np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
-                else:
-                    np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
+                        if ds_idx is not None:
+                            # Pass the rank to load_raw_image_array so it plucks the right pixels
+                            np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    except (KeyError, ValueError, AttributeError):
+                        logger.debug(f"Missing sample_id={sample_id} in dataset mapping.")
 
                 if middle_pil is not None:
                     original_size = middle_pil.size
@@ -2552,13 +2555,16 @@ class DataService:
 
         try:
             split_names = []
-            self._slowUpdateInternals()
-            if self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
-                    split_names = sorted(self._all_datasets_df[SampleStatsEx.ORIGIN.value][~self._all_datasets_df[SampleStatsEx.ORIGIN.value].isna()].unique().tolist())
-                elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
-                    if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
-                        split_names = sorted(self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist())
+            with self._lock:
+                self._slowUpdateInternals()
+                if self._all_datasets_df is not None and not self._all_datasets_df.empty:
+                    if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
+                        raw_splits = self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist()
+                        split_names = sorted([str(s) for s in raw_splits if s is not None and pd.notna(s)])
+                    elif isinstance(self._all_datasets_df.index, pd.MultiIndex):
+                        if SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
+                            raw_splits = self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist()
+                            split_names = sorted([str(s) for s in raw_splits if s is not None and pd.notna(s)])
             logger.info(f"GetDataSplits returning: {split_names}")
 
             return pb2.DataSplitsResponse(

@@ -27,6 +27,9 @@ class SampleStats:
         TASK_TYPE = "task_type"
         LAST_SEEN = "last_seen"
 
+        GROUP_ID = "group_id"
+        MEMBER_RANK = "member_rank"
+
         DISCARDED = "discarded"
         TAG = "tag"
 
@@ -39,13 +42,15 @@ class SampleStats:
 
         Ex.PREDICTION.value: list,
         Ex.PREDICTION_RAW.value: list,
-        Ex.TARGET.value: list,
+        Ex.TARGET.value: Any,
 
         Ex.DISCARDED.value: bool,
 
         Ex.ORIGIN.value: str,
         Ex.TASK_TYPE.value: str,
         Ex.LAST_SEEN.value: int,
+        Ex.GROUP_ID.value: str,
+        Ex.MEMBER_RANK.value: int,
     }
 
     # None are not accepted by PD H5 storage
@@ -61,6 +66,8 @@ class SampleStats:
         Ex.ORIGIN.value: "",
         Ex.TASK_TYPE.value: "",
         Ex.LAST_SEEN.value: -1,
+        Ex.GROUP_ID.value: "",
+        Ex.MEMBER_RANK.value: 0,
     }
 
     MODEL_INOUT_LIST = [
