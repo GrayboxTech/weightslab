@@ -43,5 +43,5 @@ _version.py
 *.code-workspace
 
 # Ignore documentation build artifacts
-docs/_build/
-docs/generated/
+_build
+generated
