@@ -32,7 +32,7 @@ class ModelInterface(NetworkWithOps):
             self,
             model: th.nn.Module,
             dummy_input: th.Tensor | dict = None,
-            device: str = 'cpu',
+            device: str = None,
             print_graph: bool = False,
             print_graph_filename: str = None,
             name: str = None,
@@ -41,7 +41,7 @@ class ModelInterface(NetworkWithOps):
             compute_dependencies: bool = False,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
-            **_
+            **kwargs
     ):
         """
         Initializes the WatcherEditor instance.
@@ -68,7 +68,6 @@ class ModelInterface(NetworkWithOps):
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
             compute_dependencies (bool, optional): If True, computes the graph
-            compute_dependencies (bool, optional): If True, computes the graph
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
@@ -86,14 +85,18 @@ class ModelInterface(NetworkWithOps):
         if hasattr(model, 'class_names'):
              self.class_names = model.class_names
 
-        # Proxy class_names if available on the wrapped model
-        if hasattr(model, 'class_names'):
-             self.class_names = model.class_names
-
         # Define variables
         # # Disable tracking for implementation
         self.tracking_mode = TrackingMode.DISABLED
         self.name = "Default Name" if name is None else name
+        # Handle device resolution: if not specified, try to infer from model
+        if not device:
+            device = model.device if hasattr(model, 'device') else 'cpu'
+
+        # Ensure device is a string
+        if device and not isinstance(device, str):
+            device = str(device)
+
         self.device = device
         self.model = model.to(device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
