@@ -113,7 +113,6 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
     """Configure trainer services such as gRPC server.
-
     Args:
         n_workers_grpc (int): Number of threads for the gRPC server.
         port_grpc (int): Port number for the gRPC server.
@@ -121,6 +120,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
 
+    grpc_host = os.getenv("GRPC_BACKEND_HOST", grpc_host)
     grpc_port = int(os.getenv("GRPC_BACKEND_PORT", grpc_port))
 
     def serving_thread_callback():
@@ -161,6 +161,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
         "grpc_port": grpc_port,
         "n_workers_grpc": n_workers_grpc
     })
+
 
 if __name__ == "__main__":
     grpc_serve()

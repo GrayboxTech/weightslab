@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
+from weightslab.data.sample_stats import SampleStatsEx
 
 
 class TestH5DataFrameStore(unittest.TestCase):
@@ -21,15 +22,15 @@ class TestH5DataFrameStore(unittest.TestCase):
         train_df = pd.DataFrame(
             {
                 "sample_id": [1, 2],
-                "tags": ["a", ""],
-                "deny_listed": [False, True],
+                f"{SampleStatsEx.TAG.value}:a": 1,
+                SampleStatsEx.DISCARDED.value: [False, True],
             }
         ).set_index("sample_id")
         eval_df = pd.DataFrame(
             {
                 "sample_id": [3],
-                "tags": ["b"],
-                "deny_listed": [False],
+                f"{SampleStatsEx.TAG.value}:b": 1,
+                SampleStatsEx.DISCARDED.value: [False],
             }
         ).set_index("sample_id")
 
@@ -42,7 +43,7 @@ class TestH5DataFrameStore(unittest.TestCase):
         self.assertEqual(len(loaded), 3)
         # Ensure values are preserved
         train_rows = loaded[loaded["origin"] == "train"].set_index("sample_id")
-        self.assertTrue(train_rows.loc[2, "deny_listed"])
+        self.assertTrue(train_rows.loc[2, SampleStatsEx.DISCARDED.value])
 
 
 if __name__ == "__main__":

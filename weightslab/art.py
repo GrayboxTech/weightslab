@@ -52,7 +52,7 @@ _BANNER = f"""
                            |  $$$$$$/
                             \______/
 By GrayBx
-Git branch: {branch}
-Version: {version}
-Commit hash: {commit_hash}
 """
+if branch is not None and version is not None and commit_hash is not None:
+    _BANNER += f"\nBranch: {branch} | Version: {version} | Commit: {commit_hash}\n"
+_BANNER__ = _BANNER  # Expose banner with a different name for external use and legacy

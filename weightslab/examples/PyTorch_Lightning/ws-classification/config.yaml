@@ -1,0 +1,59 @@
+# Global configuration
+device: auto
+experiment_name: cls_MNIST_lightning
+training_steps_to_do: null  # Set to null for infinite training until manually stopped
+seed: 42
+
+# Experiment config
+max_epochs: 5
+
+# PyTorch Lightning trainer configuration
+# - Single GPU: set devices: 1 and strategy: auto
+# - Multi GPU (single node): set devices: 2 (or more) and strategy: ddp
+lightning:
+  accelerator: auto
+  devices: auto
+  strategy: auto
+  sync_batchnorm: false
+  use_distributed_sampler: true
+
+# Recommended presets (copy one block into `lightning` above)
+lightning_presets:
+  single_gpu:
+    accelerator: gpu
+    devices: 1
+    strategy: auto
+    sync_batchnorm: false
+    use_distributed_sampler: false
+  multi_gpu_ddp:
+    accelerator: gpu
+    devices: 2
+    strategy: ddp
+    sync_batchnorm: true
+    use_distributed_sampler: true
+
+# WeightsLab services
+serving_grpc: true
+serving_cli: true
+serving_ui: false
+
+# H5 persistence for fast data loading
+enable_h5_persistence: true
+
+# Start Training from scratch
+is_training: false
+
+# Data loaders configuration
+data:
+  train_loader:
+    batch_size: 64
+    shuffle: true
+    num_workers: 0
+  val_loader:
+    batch_size: 64
+    shuffle: false
+    num_workers: 0
+
+# Optimizer configuration
+optimizer:
+  lr: 0.001

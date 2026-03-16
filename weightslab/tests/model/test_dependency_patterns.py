@@ -394,7 +394,7 @@ class DependencyPatternTest(unittest.TestCase):
     def get_dependencies_torchfx(self, model: nn.Module, dummy_input: torch.Tensor) -> List[Tuple[nn.Module, nn.Module, DepType]]:
         """Extract dependencies using torch.fx tracing"""
         try:
-            m = ModelInterface(model, dummy_input=dummy_input, use_onnx=False, skip_previous_auto_load=True)
+            m = ModelInterface(model, dummy_input=dummy_input, use_onnx=False, skip_previous_auto_load=True, compute_dependencies=True)
             self.model = m
             return self.model
         except Exception as e:
@@ -403,7 +403,7 @@ class DependencyPatternTest(unittest.TestCase):
     def get_dependencies_onnx(self, model: nn.Module, dummy_input: torch.Tensor) -> List[Tuple[nn.Module, nn.Module, DepType]]:
         """Extract dependencies using ONNX export"""
         try:
-            m = ModelInterface(model, dummy_input=dummy_input, use_onnx=True, skip_previous_auto_load=True)
+            m = ModelInterface(model, dummy_input=dummy_input, use_onnx=True, skip_previous_auto_load=True, compute_dependencies=True)
             self.model = m
             return self.model
         except Exception as e:

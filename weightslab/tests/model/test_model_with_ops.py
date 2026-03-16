@@ -1,5 +1,6 @@
 """ Tests for model logic."""
 import os
+import shutil
 import time
 import warnings; warnings.filterwarnings("ignore")
 import unittest
@@ -35,15 +36,25 @@ class NetworkWithOpsTest(unittest.TestCase):
         self.dummy_network = ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
-            print_graph=False, skip_previous_auto_load=True
+            print_graph=False, skip_previous_auto_load=True,
+            compute_dependencies=True
         )
+        try:
+            self.dataset_train = ds.MNIST(
+                os.path.join(self.test_dir, "data"),
+                train=True,
+                transform=transform,
+                download=True
+            )
+        except RuntimeError:
+            shutil.rmtree(os.path.join(self.test_dir), ignore_errors=True)
+            self.dataset_train = ds.MNIST(
+                os.path.join(self.test_dir, "data"),
+                train=True,
+                transform=transform,
+                download=True
+            )
 
-        self.dataset_train = ds.MNIST(
-            os.path.join(self.test_dir, "data"),
-            train=True,
-            transform=transform,
-            download=True
-        )
         self.train_sample1 = self.dataset_train[0]
         self.train_sample2 = self.dataset_train[1]
         self.tracked_input = th.stack(
@@ -68,7 +79,7 @@ class NetworkWithOpsTest(unittest.TestCase):
         return ModelInterface(
             self.model,
             dummy_input=th.randn(self.model.input_shape),
-            print_graph=False, skip_previous_auto_load=True
+            print_graph=False, skip_previous_auto_load=True, compute_dependencies=True
         )
 
     def _train_one_epoch(self, cutoff: int | None = None):

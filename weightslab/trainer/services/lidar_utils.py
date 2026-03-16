@@ -9,6 +9,49 @@ import matplotlib.cm as cm
 
 logger = logging.getLogger(__name__)
 
+# Cache for colormaps to avoid redundant lookups
+_CMAP_CACHE = {}
+_CMAP_LUT_CACHE = {}
+
+def get_colormap(name):
+    """Retrieve and cache colormap instance."""
+    if name in _CMAP_CACHE:
+        return _CMAP_CACHE[name]
+    
+    try:
+        from matplotlib import cm
+        if hasattr(cm, 'get_cmap'):
+            cmap = cm.get_cmap(name)
+        else:
+            import matplotlib as mpl
+            cmap = mpl.colormaps[name]
+    except Exception:
+        # Fallback
+        try:
+            cmap = cm.get_cmap("turbo")
+        except:
+            cmap = None
+            
+    _CMAP_CACHE[name] = cmap
+    return cmap
+
+def get_colormap_lut(name, brightness=1.0):
+    """Get a 256-entry uint8 RGB lookup table for the colormap."""
+    key = (name, brightness)
+    if key in _CMAP_LUT_CACHE:
+        return _CMAP_LUT_CACHE[key]
+        
+    cmap = get_colormap(name)
+    if cmap is None:
+        return None
+        
+    # Generate 256 samples
+    vals = np.linspace(0, 1, 256)
+    rgba = cmap(vals)
+    rgb = (rgba[:, :3] * 255 * brightness).astype(np.uint8)
+    _CMAP_LUT_CACHE[key] = rgb
+    return rgb
+
 def load_labels_for_scan(bin_path):
     """
     Given a path like .../velodyne/000001.bin, try to find .../label_velodyne/000001.txt
@@ -138,60 +181,50 @@ def render_lidar(points, config, file_path=None):
 
 
 def render_bev(points, res=0.1, size=800, cx=400, cy=400, max_dist=50.0, cmap_name="turbo", labels=None, brightness=1.0):
-    """
-    Render Top-Down Bird's Eye View with optional Labels.
-    """
-    if points.size == 0:
+    # 1. Pre-filter points by range in meters to avoid computing pixels for all points
+    # Horizontal range covered by the image:
+    # u = cx - y / res => y = (cx - u) * res
+    # v = cy - x / res => x = (cy - v) * res
+    # u in [0, size], v in [0, size]
+    x_min, x_max = (cy - size) * res, cy * res
+    y_min, y_max = (cx - size) * res, cx * res
+    
+    pts_x = points[:, 0]
+    pts_y = points[:, 1]
+    
+    mask = (pts_x >= x_min) & (pts_x <= x_max) & (pts_y >= y_min) & (pts_y <= y_max)
+    points_filtered = points[mask]
+    
+    if points_filtered.size == 0:
         return Image.new("RGB", (size, size))
         
-    x = points[:, 0]
-    y = points[:, 1]
-    z = points[:, 2] # Use Z for color
+    x = points_filtered[:, 0]
+    y = points_filtered[:, 1]
+    z = points_filtered[:, 2]
 
-    # 1. Map to pixels
-    # Standard KITTI BEV:
-    # X axis (forward) -> Image Up (-v)
-    # Y axis (left) -> Image Left (-u)  OR  Y axis (left) -> Image Right (u)?
-    # Usually we want X pointing UP in the image.
-    # Image (0,0) is Top-Left. 
-    # v = cy - x / res
-    # u = cx - y / res  (if Y is Left positive)
+    # 2. Map to pixels
+    u = ((cx - y / res)).astype(np.int32)
+    v = ((cy - x / res)).astype(np.int32)
     
-    # Try typical setup:
-    # X (Forward) -> Up (Negative V)
-    # Y (Left) -> Left (Negative U)
-    
-    u = (cx - y / res).astype(np.int32)
-    v = (cy - x / res).astype(np.int32)
-    
-    # 2. Filter out-of-bounds
-    mask = (u >= 0) & (u < size) & (v >= 0) & (v < size)
-    
-    u = u[mask]
-    v = v[mask]
-    z = z[mask]
+    # Clip just in case of float precision issues
+    u = np.clip(u, 0, size - 1)
+    v = np.clip(v, 0, size - 1)
     
     # 3. Canvas
-    # Initialize black
     canvas = np.zeros((size, size, 3), dtype=np.uint8)
     
-    if len(z) > 0:
-        # 4. Color by Height (Z)
-        # Normalize Z for colormap (-2m to +3m is typical usable range)
-        z_min, z_max = -2.5, 3.0
-        norm_z = np.clip((z - z_min) / (z_max - z_min), 0, 1)
-        
-        try:
-             cmap = cm.get_cmap(cmap_name)
-             
-             # Apply Cmap
-             colors = cmap(norm_z) # (N, 4)
-             rgb = (colors[:, :3] * 255 * brightness).astype(np.uint8)
-             canvas[v, u] = rgb
-             
-        except ImportError:
-             # Fallback white
-             canvas[v, u] = 255
+    # 4. Color by Height (Z)
+    z_min, z_max = -2.5, 3.0
+    # Map Z to [0, 255] for LUT lookup
+    z_idx = (np.clip((z - z_min) / (z_max - z_min), 0, 1) * 255).astype(np.uint8)
+    
+    lut = get_colormap_lut(cmap_name, brightness=brightness)
+    if lut is not None:
+         # Apply LUT - MUCH faster than calling cmap() on every point
+         canvas[v, u] = lut[z_idx]
+    else:
+         # Fallback white
+         canvas[v, u] = 255
     
     # Convert to PIL for drawing boxes
     img = Image.fromarray(canvas, mode="RGB")

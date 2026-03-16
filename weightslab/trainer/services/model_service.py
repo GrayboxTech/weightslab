@@ -220,10 +220,20 @@ class ModelService:
                 logger.warning(f"No dataset found for origin '{request.origin}'")
                 return empty_resp
 
-            if request.sample_id < 0 or request.sample_id >= len(ds):
+            requested_sample_id = str(request.sample_id)
+            if requested_sample_id == "":
                 raise ValueError(f"No sample id {request.sample_id} for {request.origin}")
 
-            sid = ds.get_sample_id_at_index(request.sample_id)
+            sid = requested_sample_id
+            if hasattr(ds, "get_index_from_sample_id"):
+                try:
+                    ds.get_index_from_sample_id(requested_sample_id)
+                except Exception:
+                    try:
+                        ds.get_index_from_sample_id(int(requested_sample_id))
+                        sid = int(requested_sample_id)
+                    except Exception as exc:
+                        raise ValueError(f"No sample id {request.sample_id} for {request.origin}") from exc
             x = _get_input_tensor_for_sample(ds, sid, getattr(model, "device", "cpu"))
 
             with torch.no_grad():
