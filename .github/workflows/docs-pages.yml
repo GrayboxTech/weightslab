@@ -2,7 +2,7 @@ name: Docs (GitHub Pages) CI
 
 on:
   push:
-    branches: [docstring, dev, main]
+    branches: [documentation, dev, main]
     tags:
       - 'v*'
   pull_request:
