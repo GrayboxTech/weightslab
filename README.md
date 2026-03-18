@@ -1,7 +1,7 @@
 <div align="center">
   <img
     src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/GitHub_banner_WL.png"
-    alt="Graybox Logo"
+    alt="Graybox Logo."
     height="250"
   />
 
@@ -15,86 +15,76 @@
 
 </pred>
 </pred style="font-style: italic;">
-WeightsLab — Inspect, Edit and Evolve Neural Networks
+WeightsLab — Inspect, Edit, and Evolve Neural Networks
 By Graybx.
 </pre>
 </div>
 
+
 ## About WeightsLab
-WeightsLab is a powerful tool for editing and inspecting data & AI model weights, during training.
+WeightsLab is a powerful tool for editing and inspecting data & AI models.
 
 ### What Problems Does It Solve?
-WeightsLab addresses critical training challenges:
+WeightsLab addresses critical AI research challenges:
 
-* Overfitting and training plateau
 * Dataset insights & optimization
+* Overfitting and training plateau
 * Over/Under parameterization
 
 ### Key Capabilities
-The granular statistics and interactive paradigm enables powerful workflows:
+The granular statistics and interactive paradigm enable powerful workflows:
 
-* Monitor granular insights on data samples and weights parameters
-* Discard low quality samples by click or query
-* Create slices of data and discard them during training
-* Iterative pruning or growing of the architectures by click or query
+* Monitor granular insights on data samples, signals, and weight parameters
+* Use the AI agent to:
+  * Create slices of data and discard them for the next training iteration
+  * Discard low-quality samples from training data
+  * Iterative pruning or growing of the architectures (INCOMING feature)
 
 
-## Getting Started
-### Watch our demo below:
+## Play our demo below:
 
 <div>
   <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
-    <p>Demo Video - Watch Video</p>
+    <p>BDD SANDBOX</p>
   </a>
-  <!-- <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
-    <img style="max-width:300px;" src="https://cdn.loom.com/sessions/thumbnails/5d04822a0933427d971d320f64687730-00001.gif">
-  </a> -->
+  <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
+    <p>VLA SANDBOX</p>
+  </a>
 </div>
 
+
+## Getting Started
 ### Installation
-Define a python environment
+Define a Python environment (Python >= 3.10, <3.15
 ```bash
 python -m venv weightslab_venv
 ./weightslab_venv/Scripts/activate
 ```
-or install and use conda.
+Or install directly on your machine.
 
-Clone and install the framework (CLI based interaction):
-
+Install our framework:
 ```bash
-git clone https://github.com/GrayboxTech/weightslab.git
-cd weightslab
-pip install -e .
+python -m pip install weightslab
 ```
 
-Clone the UI repository (UI based interaction; cf. loom video):
+Deploy our interface with Docker:
 ```bash
-git clone git@github.com:GrayboxTech/weightslab_ui.git
-cd weightslab_ui
-pip install -r ./requirements.txt
+cd ./ui
+docker compose up -d
 ```
 
-### Documentation (API + SDK)
+## Documentation (API + SDK)
 
-WeightsLab includes a Sphinx documentation site in `docs/`.
-
-Build once:
-```bash
-pip install -r docs/requirements.txt
-sphinx-build -b html docs docs/_build/html
-```
-
-Serve on localhost with auto-reload:
-```bash
-sphinx-autobuild docs docs/_build/html --host 127.0.0.1 --port 8000
-```
-
-Open: `http://127.0.0.1:8000`
+* <div>
+  <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
+    <p>Documentation</p>
+  </a>
+</div>
 
 
-### Cookbook
+## Cookbook
 
-Check out our materials, with examples from toy to more complex models.
+Check out our materials, which include examples ranging from toys to more complex models and experiments.
 
 Quickstart examples:
 - [WeightsLab - Classification toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-classification)
@@ -102,43 +92,13 @@ Quickstart examples:
 - [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-detection)
 - [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch_Lightning/ws-classification)
 
-### New docs: practical use-case + Lightning
 
-- Use-case walkthrough (commented, end-to-end): `docs/usecases.rst`
-- PyTorch Lightning integration (including multi-GPU): `docs/pytorch_lightning.rst`
-
-#### PyTorch Lightning + multi-GPU (quick snippet)
-
-```python
-import torch
-import pytorch_lightning as pl
-
-use_gpu = torch.cuda.is_available()
-gpu_count = torch.cuda.device_count() if use_gpu else 0
-multi_gpu = gpu_count > 1
-
-trainer = pl.Trainer(
-  max_epochs=max_epochs,
-  accelerator="gpu" if use_gpu else "cpu",
-  devices=gpu_count if multi_gpu else 1,
-  strategy="ddp" if multi_gpu else "auto",
-  sync_batchnorm=multi_gpu,
-  use_distributed_sampler=multi_gpu,
-  logger=False,
-  enable_checkpointing=False,
-)
-```
-
-When using WeightsLab in Lightning steps, keep passing `batch_ids` to tracked losses/signals to preserve per-sample traceability.
-
-<!-- ### Documentation -->
-
-### Community
+## Community
 
 Graybx is building a wonderful community of AI researchers and engineers.
-Are you interested in joining our project ? Contact us at hello [at] graybx [dot] com
+Are you interested in joining our project? Contact us at hello [at] graybx [dot] com
 
-
+<!-- 
 ### Citation
 
 If you publish work that uses Graybx, please cite Graybx as follows:
@@ -150,3 +110,4 @@ If you publish work that uses Graybx, please cite Graybx as follows:
   year={2025}
 }
 ```
+-->
