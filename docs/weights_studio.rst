@@ -1,8 +1,8 @@
 Weights Studio Guide
 ====================
 
-Weights Studio is the visual frontend for WeightsLab experiments.
-It connects to your running WeightsLab backend over gRPC-Web via Envoy,
+Weights Studio is the visual frontend for Weightslab experiments.
+It connects to your running Weightslab backend over gRPC-Web via Envoy,
 and gives you interactive control over samples, tags, discard/restore actions,
 training/audit mode, and training signal plots.
 
@@ -17,7 +17,7 @@ Runtime path:
 
 1. Browser UI (Vite app)
 2. Envoy proxy (gRPC-Web bridge)
-3. WeightsLab Python gRPC service
+3. Weightslab Python gRPC service
 
 Project location
 ----------------
@@ -36,7 +36,7 @@ Key files:
 Quick start (Docker)
 --------------------
 
-1. Start your WeightsLab backend (gRPC on host, default port ``50051``).
+1. Start your Weightslab backend (gRPC on host, default port ``50051``).
 2. Load environment variables from ``../weights_studio/docker/.env``.
 3. Start studio stack from ``../weights_studio/docker``:
 
@@ -81,7 +81,7 @@ Environment/configuration checklist
 
 Backend:
 
-- Ensure WeightsLab serves gRPC and listens on host ``0.0.0.0:50051``.
+- Ensure Weightslab serves gRPC and listens on host ``0.0.0.0:50051``.
 
 Envoy:
 
@@ -100,7 +100,7 @@ Sanity checks:
 Server integration (AWS example)
 --------------------------------
 
-This section describes a practical cloud deployment path for WeightsLab +
+This section describes a practical cloud deployment path for Weightslab +
 Weights Studio on AWS.
 
 Recommended production architecture
@@ -108,7 +108,7 @@ Recommended production architecture
 
 - **UI**: Weights Studio frontend behind HTTPS (ALB).
 - **gRPC-Web bridge**: Envoy service reachable by frontend.
-- **Backend**: WeightsLab training service (Python gRPC).
+- **Backend**: Weightslab training service (Python gRPC).
 - **Storage**: EBS/EFS/S3 for logs/checkpoints depending on your workflow.
 
 Two common deployment options
@@ -116,7 +116,7 @@ Two common deployment options
 
 1. **EC2 (fastest to start)**
 
-   - Run WeightsLab backend process on the VM (port ``50051``).
+   - Run Weightslab backend process on the VM (port ``50051``).
    - Run Envoy + frontend via Docker Compose.
    - Use one security group to expose only HTTPS (and optionally admin ports
      privately).
@@ -125,7 +125,7 @@ Two common deployment options
 
    - Service A: frontend container.
    - Service B: Envoy container.
-   - Service C: WeightsLab backend container (or external training worker).
+   - Service C: Weightslab backend container (or external training worker).
    - Route through ALB + target groups.
 
 Minimum port plan (AWS)
@@ -135,7 +135,7 @@ Minimum port plan (AWS)
   - ``443`` (HTTPS to frontend/ALB)
 - Internal service ports:
   - ``8080`` (Envoy gRPC-Web listener)
-  - ``50051`` (WeightsLab backend gRPC)
+  - ``50051`` (Weightslab backend gRPC)
   - ``9901`` (Envoy admin, keep private)
   - ``5173`` (frontend dev port; avoid exposing directly in production)
 
@@ -211,7 +211,7 @@ Use this pattern for a simple single-VM production-like deployment.
 2. Install runtime dependencies
 
   - Docker Engine + Docker Compose plugin
-  - Python environment for your WeightsLab backend process
+  - Python environment for your Weightslab backend process
 
 3. Configure environment
 
@@ -230,7 +230,7 @@ Use this pattern for a simple single-VM production-like deployment.
 
 4. Start backend service
 
-  Start WeightsLab gRPC in your training/runtime process and ensure it binds
+  Start Weightslab gRPC in your training/runtime process and ensure it binds
   to a reachable interface (for example ``0.0.0.0:50051``).
 
 5. Start studio containers
@@ -368,10 +368,10 @@ Right-click menu on plots includes:
 - Copy chart image
 - Save chart image
 
-WeightsLab CLI console (dev)
+Weightslab CLI console (dev)
 ----------------------------
 
-The WeightsLab CLI console is a local developer REPL for inspecting and
+The Weightslab CLI console is a local developer REPL for inspecting and
 controlling a running experiment through the global ledger.
 
 - Transport: local TCP text commands with JSON responses.
@@ -455,12 +455,12 @@ Developer notes
 - Use Weights Studio for richer visual workflows; use CLI for low-latency
   command-driven operations.
 
-WeightsLab workflow recommendation
+Weightslab workflow recommendation
 ----------------------------------
 
 Typical loop for productive usage:
 
-1. Start WeightsLab backend and studio stack.
+1. Start Weightslab backend and studio stack.
 2. Monitor training metrics and sample-level signals.
 3. Use grid metadata + modal details to inspect hard or noisy samples.
 4. Tag slices (e.g., outliers, hard cases).

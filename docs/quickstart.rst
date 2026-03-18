@@ -1,63 +1,94 @@
 Quickstart
 ==========
 
-Install docs dependencies
--------------------------
+This page gives you a practical, minimal path to get WeightsLab running.
+If you prefer to start from examples, see ``usecases`` right after this setup.
+
+Prerequisites
+-------------
+
+- Python 3.10+ installed.
+- A virtual environment tool (``venv`` or Conda).
+- Your training project available locally.
+
+Install WeightsLab
+------------------
+
+Create and activate a virtual environment, then install WeightsLab in editable mode.
+
+.. code-block:: bash
+
+   # From the repository root
+   python -m venv .venv
+   # Windows PowerShell
+   .\.venv\Scripts\Activate.ps1
+   # Linux/macOS
+   # source .venv/bin/activate
+
+   python -m pip install weightslab
+
+
+Optional: build docs locally
+----------------------------
 
 .. code-block:: bash
 
    pip install -r docs/requirements.txt
-
-Build docs once
----------------
-
-.. code-block:: bash
-
    sphinx-build -b html docs docs/_build/html
 
-Serve docs with live reload (localhost)
----------------------------------------
 
-.. code-block:: bash
+Launch WeightsLab services from your training script
+----------------------------------------------------
 
-   sphinx-autobuild docs docs/_build/html --host 127.0.0.1 --port 8000
-
-Then open: http://127.0.0.1:8000
-
-WeightsLab CLI console (dev quick reference)
---------------------------------------------
-
-Start from your training script:
+At minimum, enable gRPC + CLI so the UI and local console can interact with your run. CLI will allow you to inspect and adjust hyperparameters on the fly, modify model architecture, and debug parameters, while gRPC serves data to the UI for monitoring and sample tagging.
 
 .. code-block:: python
 
    import weightslab as wl
 
+   # Start service endpoints used by Weights Studio and CLI.
    wl.serve(serving_grpc=True, serving_cli=True)
+
+   # Keep services alive while training is running.
    wl.keep_serving()
 
-Standalone server/client:
+If you want to run the CLI on another process, run:
 
 .. code-block:: bash
 
    python -m weightslab.backend.cli serve --host localhost --port 60000
+
+
+Connect with the CLI client
+---------------------------
+
+.. code-block:: bash
+
    python -m weightslab.backend.cli client --host localhost --port 60000
 
-Most useful commands:
+Useful first commands:
 
-- ``help``: list all commands and examples.
-- ``status``: show registered models/loaders/optimizers/hyperparams.
-- ``pause`` / ``resume``: toggle training state.
-- ``list_uids [--discarded] [--limit N]``: inspect sample IDs.
-- ``discard <uid...>`` / ``undiscard <uid...>``: update sample usage.
-- ``add_tag <uid> <tag>``: tag one sample.
-- ``hp`` / ``hp <name>`` / ``set_hp ...``: inspect/update hyperparameters.
+- ``help``: list all command syntaxes and examples.
+- ``status``: show current models/loaders/optimizers/hyperparameters.
+- ``pause`` / ``resume``: toggle training state safely.
+- ``hp`` and ``hp <name>``: inspect hyperparameter sets.
+- ``set_hp [hp_name] <key.path> <value>``: update one hyperparameter value.
 
-For full CLI behavior and detailed action semantics, see ``weights_studio``.
 
-What to read next
------------------
+Use Weightslab Studio (UI)
+-----------------------
 
-- ``usecases``: commented end-to-end PyTorch integration example.
-- ``pytorch_lightning``: Lightning integration with single and multi-GPU setup.
-- ``weights_studio``: UI setup and operations (Docker, ports, controls, actions).
+For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the Weights Studio web app via Docker Compose. This will start both the UI and Envoy proxy, which routes data to your training script's gRPC server.:
+Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
+
+.. code-block:: bash
+
+   docker compose -f docker/docker-compose.yml up -d
+
+
+Recommended next reading
+------------------------
+
+- ``four_way_approach``: understand model/data/hyperparameters/logger together.
+- ``usecases``: end-to-end PyTorch integration example.
+- ``pytorch_lightning``: Lightning integration and multi-GPU notes.

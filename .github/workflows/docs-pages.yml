@@ -2,7 +2,7 @@ name: Docs (GitHub Pages) CI
 
 on:
   push:
-    branches: [docstring, dev, main]
+    branches: [documentation, dev, main]
     tags:
       - 'v*'
   pull_request:
@@ -66,7 +66,7 @@ jobs:
               if not d.is_dir() or not (d / "index.html").exists():
                   continue
               name = d.name
-              if name not in {"latest", "dev"} and not semver.match(name):
+              if name not in {"latest", "documentation", "dev"} and not semver.match(name):
                   continue
 
               if name == "latest":
@@ -75,9 +75,12 @@ jobs:
               elif name == "dev":
                   rank = (1, 0, 0, 0)
                   label = "dev"
+              elif name == "documentation":
+                  rank = (2, 0, 0, 0)
+                  label = "documentation"
               else:
                   m = semver.match(name)
-                  rank = (2, -int(m.group(1)), -int(m.group(2)), -int(m.group(3)))
+                  rank = (3, -int(m.group(1)), -int(m.group(2)), -int(m.group(3)))
                   label = name
 
               versions.append({"name": name, "label": label, "rank": rank})

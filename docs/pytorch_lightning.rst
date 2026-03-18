@@ -1,25 +1,25 @@
 PyTorch Lightning Integration
 =============================
 
-WeightsLab is compatible with PyTorch Lightning and already includes a full example:
+Weightslab is compatible with PyTorch Lightning and already includes a full example:
 
 ``weightslab/examples/PyTorch_Lightning/ws-classification/main.py``
 
-This page explains how to integrate WeightsLab in a Lightning workflow and scale to multiple GPUs.
+This page explains how to integrate Weightslab in a Lightning workflow and scale to multiple GPUs.
 
 Minimal integration pattern
 ---------------------------
 
-1. Wrap components with WeightsLab:
+1. Wrap components with Weightslab:
 
    - ``model`` with ``flag="model"``
    - ``optimizer`` with ``flag="optimizer"``
    - ``data`` loaders with ``flag="data"``
    - ``loss`` and ``metric`` with ``flag="loss"`` / ``flag="metric"``
 
-2. Build a ``LightningModule`` that uses WeightsLab-wrapped objects.
+2. Build a ``LightningModule`` that uses Weightslab-wrapped objects.
 3. Use ``guard_training_context`` and ``guard_testing_context`` inside step methods.
-4. Start WeightsLab services before ``trainer.fit(...)``.
+4. Start Weightslab services before ``trainer.fit(...)``.
 
 LightningModule excerpt
 -----------------------
@@ -73,7 +73,7 @@ Single-GPU trainer setup
        logger=False,
    )
 
-``logger=False`` is intentional here because WeightsLab manages training signals directly.
+``logger=False`` is intentional here because Weightslab manages training signals directly.
 
 Multi-GPU (DDP) setup
 ---------------------
@@ -138,7 +138,7 @@ End-to-end sequence
 
    # 1) Wrap hyperparameters/model/data/optimizer/loss/metric
    # 2) Build LightningModule with wrapped objects
-   # 3) Start WeightsLab services
+   # 3) Start Weightslab services
    wl.serve(serving_grpc=False, serving_cli=False)
 
    # 4) Train with Lightning

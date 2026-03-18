@@ -1,7 +1,7 @@
 Logger and Signals
 ==================
 
-WeightsLab logger behavior is similar in spirit to TensorBoard: it tracks scalar evolution and per-sample context.
+Weightslab logger behavior is similar in spirit to TensorBoard: it tracks scalar evolution and per-sample context.
 
 What gets logged
 ----------------
