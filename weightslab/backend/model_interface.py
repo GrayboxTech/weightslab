@@ -67,7 +67,11 @@ class ModelInterface(NetworkWithOps):
                 registered in the global ledger. Defaults to True.
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
-            compute_dependencies (bool, optional): If True, computes the graph
+            compute_dependencies (bool, optional): If True, computes the
+                computational graph dependencies for the wrapped model (using
+                torch.fx or ONNX according to `use_onnx`) so that layer and
+                operation relationships can be analyzed by WeightsLab. Defaults
+                to False.
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
