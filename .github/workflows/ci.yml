@@ -132,7 +132,7 @@ jobs:
 
       - name: Verify installation
         run: |
-          python -c "import weightslab; print(f'weightslab imported successfully on Python {__import__('sys').version.split()[0]}')"
+          python -c "import sys, weightslab; print(f'weightslab imported successfully on Python {sys.version.split()[0]}')"
 
   test:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
