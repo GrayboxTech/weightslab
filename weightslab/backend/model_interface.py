@@ -91,7 +91,19 @@ class ModelInterface(NetworkWithOps):
         self.name = "Default Name" if name is None else name
         # Handle device resolution: if not specified, try to infer from model
         if not device:
-            device = model.device if hasattr(model, 'device') else 'cpu'
+            inferred_device = None
+            # Try to infer device from model parameters
+            try:
+                first_param = next(model.parameters())
+                inferred_device = first_param.device
+            except (StopIteration, AttributeError):
+                # If no parameters, try to infer from buffers
+                try:
+                    first_buffer = next(model.buffers())
+                    inferred_device = first_buffer.device
+                except (StopIteration, AttributeError):
+                    inferred_device = None
+            device = inferred_device or 'cpu'
 
         # Ensure device is a string
         if device and not isinstance(device, str):
