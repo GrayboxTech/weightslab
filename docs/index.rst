@@ -1,13 +1,13 @@
-WeightsLab Documentation
+Weightslab Documentation
 ========================
 
-WeightsLab is a Python SDK to inspect, monitor, and edit training behavior for computer vision workflows.
+Weightslab is a Python SDK to inspect, monitor, and edit training behavior for computer vision workflows.
 
 .. raw:: html
 
    <div class="wl-hero">
-     <img src="_static/logo-light.png" alt="WeightsLab logo" class="wl-hero-logo wl-only-light" />
-     <img src="_static/logo-dark.png" alt="WeightsLab logo" class="wl-hero-logo wl-only-dark" />
+     <img src="_static/logo-light.png" alt="Weightslab logo" class="wl-hero-logo wl-only-light" />
+     <img src="_static/logo-dark.png" alt="Weightslab logo" class="wl-hero-logo wl-only-dark" />
      <p class="wl-hero-subtitle">Inspect, edit, and optimize model training with a unified workflow.</p>
        <div class="wl-hero-cta-group">
           <a class="wl-hero-cta" href="quickstart.html">Install & Get Started</a>
@@ -22,7 +22,7 @@ WeightsLab is a Python SDK to inspect, monitor, and edit training behavior for c
       :link: quickstart
       :link-type: doc
 
-      Install, build, and run WeightsLab documentation locally in minutes.
+      Install, build, and run Weightslab documentation locally in minutes.
 
    .. grid-item-card:: 🧭 Four-Way Approach
       :link: four_way_approach
@@ -52,7 +52,7 @@ WeightsLab is a Python SDK to inspect, monitor, and edit training behavior for c
       :link: pytorch_lightning
       :link-type: doc
 
-      Integrate WeightsLab with Lightning, including multi-GPU configuration.
+      Integrate Weightslab with Lightning, including multi-GPU configuration.
 
    .. grid-item-card:: 🖥️ Weights Studio
       :link: weights_studio
@@ -60,7 +60,7 @@ WeightsLab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       Deploy and operate the UI: architecture, Docker, ports, and actions.
 
-.. admonition:: WeightsLab in one sentence
+.. admonition:: Weightslab in one sentence
    :class: note
 
    Wrap your training script once, then monitor, tag/discard, adjust, and improve continuously.
