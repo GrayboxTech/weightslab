@@ -41,7 +41,7 @@ class ModelInterface(NetworkWithOps):
             compute_dependencies: bool = False,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
-            **kwargs
+            **_
     ):
         """
         Initializes the WatcherEditor instance.
@@ -84,7 +84,7 @@ class ModelInterface(NetworkWithOps):
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
-        
+
         # Proxy class_names if available on the wrapped model
         if hasattr(model, 'class_names'):
              self.class_names = model.class_names
@@ -253,13 +253,13 @@ class ModelInterface(NetworkWithOps):
                                 try:
                                     self.load_state_dict(weights['model_state_dict'], strict=True)
                                     self.current_step = weights.get('step', -1)
-                                    
+
                                     # Restore RNG state if available
                                     checkpoint_rng_state = weights.get('rng_state')
                                     if checkpoint_rng_state:
                                         restore_rng_state(checkpoint_rng_state)
                                         logger.debug(f"Restored RNG state from checkpoint")
-                                        
+
                                     logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
                                 except Exception as e:
                                     logger.warning(f"Failed to load weights state dict: {e}")
