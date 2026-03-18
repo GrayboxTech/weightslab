@@ -86,7 +86,7 @@ serve
 
 **Purpose**
 
-Start WeightsLab backend services.
+Start Weightslab backend services.
 
 **Notes**
 

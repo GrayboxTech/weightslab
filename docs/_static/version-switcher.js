@@ -1,6 +1,17 @@
 (function () {
   'use strict';
 
+  function ensureDefaultTheme() {
+    try {
+      const storedTheme = window.localStorage.getItem('theme');
+      if (!storedTheme || storedTheme === 'auto') {
+        window.localStorage.setItem('theme', 'light');
+      }
+    } catch (error) {
+      return;
+    }
+  }
+
   function fetchVersions() {
     const candidates = [
       'versions.json',
@@ -83,6 +94,8 @@
       document.body.prepend(container);
     }
   }
+
+  ensureDefaultTheme();
 
   document.addEventListener('DOMContentLoaded', function () {
     fetchVersions().then(mountSelector).catch(function () {

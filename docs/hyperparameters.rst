@@ -7,7 +7,7 @@ Supported patterns
 ------------------
 
 - Register a Python dictionary.
-- Register a YAML file path and let WeightsLab watch for updates.
+- Register a YAML file path and let Weightslab watch for updates.
 
 Minimal examples
 ----------------

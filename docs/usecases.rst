@@ -8,7 +8,7 @@ This page walks through the real MNIST classification integration from:
 Goal
 ----
 
-Use WeightsLab to:
+Use Weightslab to:
 
 - track model/optimizer/loss/metrics,
 - attach stable sample IDs to each batch,
@@ -46,7 +46,7 @@ Why:
 Why:
 
 - ``model`` wrapping enables lifecycle tracking (age/steps, runtime edits).
-- ``optimizer`` wrapping keeps optimization state connected to WeightsLab services.
+- ``optimizer`` wrapping keeps optimization state connected to Weightslab services.
 
 3) Wrap datasets as tracked loaders
 -----------------------------------
@@ -91,7 +91,7 @@ Important behavior:
 
 Why ``reduction="none"``:
 
-- WeightsLab can retain per-sample losses before you reduce to a scalar.
+- Weightslab can retain per-sample losses before you reduce to a scalar.
 
 5) Training step with context guards
 ------------------------------------
@@ -149,7 +149,7 @@ Why:
 
 Why:
 
-- ``serve`` exposes WeightsLab services during training.
+- ``serve`` exposes Weightslab services during training.
 - ``keep_serving`` keeps background services available after loop completion.
 
 Practical checklist

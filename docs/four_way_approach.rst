@@ -1,7 +1,7 @@
 Four-Way SDK Approach
 =====================
 
-WeightsLab is organized around four complementary capabilities:
+Weightslab is organized around four complementary capabilities:
 
 1. Model interaction
 2. Data exploration
@@ -25,5 +25,5 @@ Typical integration flow
 - Register hyperparameters first so all components use one shared configuration source.
 - Wrap dataset/dataloader to expose sample IDs and per-sample operations.
 - Wrap model, optimizer, losses, and metrics.
-- Start WeightsLab services and run training.
+- Start Weightslab services and run training.
 - Use tags/discards/signals to iteratively improve data and model behavior.
