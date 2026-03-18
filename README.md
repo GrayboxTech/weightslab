@@ -75,7 +75,6 @@ The granular statistics and interactive paradigm enable powerful workflows:
 </ul>
 
 ## Getting Started
-
 ### Installation
 
 Define a Python environment (Python >= 3.10, <3.15)
