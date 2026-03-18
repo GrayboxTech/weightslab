@@ -17,8 +17,6 @@ Install WeightsLab
 Create and activate a virtual environment, then install WeightsLab in editable mode.
 
 .. code-block:: bash
-   cd ui
-   docker compose -f docker/docker-compose.yml up -d
 
    # From the repository root
    python -m venv .venv
