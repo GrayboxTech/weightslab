@@ -48,8 +48,9 @@ jobs:
             HEAD_SHA=${{ github.sha }}
           fi
 
-          # Get changed Python files in weightslab directory, exclude generated files
+          # Get changed Python files in weightslab directory, and ignore CI workflow YAML files
           CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
+            grep -v '^\.github/workflows/.*\.ya\?ml$' | \
             grep '^weightslab/.*\.py$' | \
             grep -v '_pb2\.py$' | \
             grep -v '_pb2_grpc\.py$' | \
