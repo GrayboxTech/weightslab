@@ -36,6 +36,7 @@ dependencies = [
   "zstandard>=0.22,<1",
   "h5py>=3.10,<4",
   "xxhash>=3.4,<4.1",
+  "tables>=3.9,<4",
 
   # PyTorch stack
   "torch>=2.1,<2.9; python_version < '3.13'",
@@ -72,13 +73,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Optional: agent service / LLM integrations
-agent = [
-  "langchain-core>=0.3,<2",
-  "langchain-ollama>=0.2,<2",
-  "langchain-openai>=0.2,<2",
-]
-
 # Optional: runtime backend for ONNX model execution
 onnxruntime = [
   "onnxruntime>=1.17,<2",
@@ -88,7 +82,6 @@ onnxruntime = [
 dev = [
   "grpcio-tools>=1.62,<2",
   "torchinfo>=1.8,<2",
-  "tables>=3.9,<4",
   "httpx>=0.27,<1",
 ]
 
