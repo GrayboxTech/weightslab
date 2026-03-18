@@ -57,12 +57,14 @@ dependencies = [
 
   # Utility used in examples and progress reporting
   "tqdm>=4.66,<5",
+
+  # Environment variable loading (used by agent service)
+  "python-dotenv>=1,<2",
 ]
 
 [project.optional-dependencies]
 # Optional: agent service / LLM integrations
 agent = [
-  "python-dotenv>=1,<2",
   "langchain-core>=0.3,<2",
   "langchain-ollama>=0.2,<2",
   "langchain-openai>=0.2,<2",
