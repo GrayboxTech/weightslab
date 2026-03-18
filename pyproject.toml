@@ -60,6 +60,11 @@ dependencies = [
 
   # Environment variable loading (used by agent service)
   "python-dotenv>=1,<2",
+
+  # Agent service runtime deps (imported by default module graph)
+  "langchain-core>=0.3,<2",
+  "langchain-ollama>=0.2,<2",
+  "langchain-openai>=0.2,<2",
 ]
 
 [project.optional-dependencies]
