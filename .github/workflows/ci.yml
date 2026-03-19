@@ -221,7 +221,7 @@ jobs:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
     name: WeightsStudio CI
     needs: test
-    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
+    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@main
     with:
       weightslab_branch: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
 
