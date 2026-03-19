@@ -1,22 +1,35 @@
-weightslab.egg-info/*
-build/*
-dist/*
-logs/*
-root_log_dir/*
-weightslab/__pycache__/*
-tests/__pycache__/*
+# Ignore directories
+weightslab.egg-info
+build
+dist
+logs
+root_log_dir
+__pycache__
+venv
 
-__pycache__/*
-.history/*
-.lh/*
-.pytest_cache/*
-.ruff_cache/*
-.venv/*
-.vscode/*
+# Ignore hidden directories
+.history
+.lh
+.pytest_cache
+.ruff_cache
+.venv
+.vscode
+.vscode
+.venv
 
+# Ignore hidden files
+.env
 .DS_Store
-pkg_main.py
 
+# Ignore specific files
+experiment_service_pb2.py
+experiment_service_pb2_grpc.py
+settings.json
+laumch.json
+pkg_main.py
+_version.py
+
+# Ignore extensions
 *.onnx
 *.pt
 *.pth
@@ -28,19 +41,7 @@ pkg_main.py
 *.db
 *.ipynb_checkpoints
 *.code-workspace
-.vscode/
-venv/
-.venv/
-laumch.json
-settings.json
 
-_version.py
-__pycache__/
-
-experiment_service_pb2.py
-experiment_service_pb2_grpc.py
-
-.env
-
-docs/_build/
-docs/generated/
+# Ignore documentation build artifacts
+_build
+generated

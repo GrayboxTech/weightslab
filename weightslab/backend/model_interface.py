@@ -32,7 +32,7 @@ class ModelInterface(NetworkWithOps):
             self,
             model: th.nn.Module,
             dummy_input: th.Tensor | dict = None,
-            device: str = 'cpu',
+            device: str = None,
             print_graph: bool = False,
             print_graph_filename: str = None,
             name: str = None,
@@ -67,8 +67,11 @@ class ModelInterface(NetworkWithOps):
                 registered in the global ledger. Defaults to True.
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
-            compute_dependencies (bool, optional): If True, computes the graph
-            compute_dependencies (bool, optional): If True, computes the graph
+            compute_dependencies (bool, optional): If True, computes the
+                computational graph dependencies for the wrapped model (using
+                torch.fx or ONNX according to `use_onnx`) so that layer and
+                operation relationships can be analyzed by WeightsLab. Defaults
+                to False.
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
@@ -81,10 +84,6 @@ class ModelInterface(NetworkWithOps):
 
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
-        
-        # Proxy class_names if available on the wrapped model
-        if hasattr(model, 'class_names'):
-             self.class_names = model.class_names
 
         # Proxy class_names if available on the wrapped model
         if hasattr(model, 'class_names'):
@@ -94,6 +93,26 @@ class ModelInterface(NetworkWithOps):
         # # Disable tracking for implementation
         self.tracking_mode = TrackingMode.DISABLED
         self.name = "Default Name" if name is None else name
+        # Handle device resolution: if not specified, try to infer from model
+        if not device:
+            inferred_device = None
+            # Try to infer device from model parameters
+            try:
+                first_param = next(model.parameters())
+                inferred_device = first_param.device
+            except (StopIteration, AttributeError):
+                # If no parameters, try to infer from buffers
+                try:
+                    first_buffer = next(model.buffers())
+                    inferred_device = first_buffer.device
+                except (StopIteration, AttributeError):
+                    inferred_device = None
+            device = inferred_device or 'cpu'
+
+        # Ensure device is a string
+        if device and not isinstance(device, str):
+            device = str(device)
+
         self.device = device
         self.model = model.to(device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
@@ -234,13 +253,13 @@ class ModelInterface(NetworkWithOps):
                                 try:
                                     self.load_state_dict(weights['model_state_dict'], strict=True)
                                     self.current_step = weights.get('step', -1)
-                                    
+
                                     # Restore RNG state if available
                                     checkpoint_rng_state = weights.get('rng_state')
                                     if checkpoint_rng_state:
                                         restore_rng_state(checkpoint_rng_state)
                                         logger.debug(f"Restored RNG state from checkpoint")
-                                        
+
                                     logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
                                 except Exception as e:
                                     logger.warning(f"Failed to load weights state dict: {e}")

@@ -91,7 +91,7 @@ html_theme_options = {
 }
 
 # Build only the desired refs when using sphinx-multiversion.
-smv_branch_whitelist = r"^(main|dev)$"
+smv_branch_whitelist = r"^(main|dev|documentation)$"
 smv_tag_whitelist = r"^v\d+\.\d+\.\d+$"
 smv_remote_whitelist = r"^origin$"
 
