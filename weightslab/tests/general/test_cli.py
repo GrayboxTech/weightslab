@@ -302,7 +302,7 @@ class TestCLIServer(unittest.TestCase):
 
     def test_cli_serve_starts(self):
         """Test that CLI server starts successfully."""
-        result = cli_serve(cli_host='127.0.0.4', cli_port=2, spawn_client=False)
+        result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
         self.assertTrue(result['ok'])
             
         self.assertIn('host', result)

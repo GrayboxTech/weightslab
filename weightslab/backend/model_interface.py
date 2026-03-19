@@ -205,7 +205,7 @@ class ModelInterface(NetworkWithOps):
                         hp = None
                 if isinstance(hp, dict):
                     _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
-                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
+                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 100
                     if not _skip_checkpoint_load:
                         _skip_checkpoint_load = hp.get('skip_checkpoint_load', False)
         except Exception:
@@ -412,7 +412,14 @@ class ModelInterface(NetworkWithOps):
         for opt_name in get_optimizers():
             # Overwrite the optimizer with the same class and lr, updated
             opt = get_optimizer(opt_name)
-            lr = opt.get_lr()[0]
+
+            # Robust LR extraction: handle both OptimizerInterface and raw torch optimizers
+            if hasattr(opt, 'get_lr'):
+                lr = opt.get_lr()[0]
+            elif hasattr(opt, 'param_groups'):
+                lr = opt.param_groups[0]['lr']
+            else:
+                lr = 1e-3 # Fallback
             optimizer_class = type(opt.optimizer)
             _optimizer = optimizer_class(
                 model.parameters(),
@@ -421,23 +428,46 @@ class ModelInterface(NetworkWithOps):
 
             wl.watch_or_edit(_optimizer, flag='optimizer')
 
+    def _sync_dynamic_hyperparams(self):
+        """Sync dynamic hyperparameters from the ledger."""
+        hp_name = ledgers.resolve_hp_name()
+        hp = ledgers.get_hyperparams(hp_name)
+
+        # Audit mode
+        is_audit = False
+        try:
+            # Check for Audit Mode override to completely prevent checkpointing
+            if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
+                is_audit = True
+        except Exception:
+            pass
+
+        # Sync checkpoint auto-dump steps ratio if specified
+        if hp and not is_audit:
+            # Resolve the value from the proxy if it is one
+            new_ratio = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio')
+            val = new_ratio._resolve() if hasattr(new_ratio, '_resolve') else new_ratio
+            
+            if val is not None:
+                try:
+                    self._checkpoint_auto_every_steps = int(val)
+                    logger.info(f"Updated checkpoint auto-dump steps ratio to {self._checkpoint_auto_every_steps} based on hyperparameters")
+                except Exception as e:
+                    logger.warning(f"Failed to update checkpoint auto-dump steps ratio from hyperparameters: {e}")
+
+        return is_audit
+
     def _maybe_auto_dump(self):
         # Called from base class hook after step update.
         # Auto-dump: save model weights only (and architecture if changed).
         existing_manager = ledgers.get_checkpoint_manager()
         try:
             # Check for Audit Mode override to completely prevent checkpointing
-            is_audit = False
-            try:
-                hp_name = ledgers.resolve_hp_name()
-                hp = ledgers.get_hyperparams(hp_name)
-                if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
-                    is_audit = True
-            except Exception:
-                pass
-
+            is_audit = self._sync_dynamic_hyperparams()
             if is_audit or not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
+
+            # Only auto-dump if we have a checkpoint manager and we're in training mode with a positive auto-dump ratio
             batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
@@ -464,6 +494,7 @@ class ModelInterface(NetworkWithOps):
             pass
 
     def update_optimizer(self):
+        """Public method to update the optimizer, can be called after architecture changes."""
         try:
             self._update_optimizer()
         except Exception as e:
