@@ -262,15 +262,27 @@ class DataService:
                     logger.debug(f"[DataService] Dataset '{name}' already has aspect_ratio={ds.aspect_ratio}")
                     continue
 
-                # Load first image to deduce ratio
+                # Load a few images to deduce if ratio is consistent (important for mixed-modal)
                 try:
                     if len(dataset) > 0:
-                        pil_img = load_raw_image(dataset, 0)
-                        if pil_img:
-                            w, h = pil_img.size
-                            ratio = w / h if h > 0 else 1.0
-                            ds.aspect_ratio = ratio
-                            logger.info(f"[DataService] Deduced aspect_ratio={ratio:.2f} for dataset '{name}' from first sample.")
+                        ratios = []
+                        for i in range(min(5, len(dataset))):
+                            pil_img = load_raw_image(dataset, i)
+                            if pil_img:
+                                w, h = pil_img.size
+                                ratios.append(w / h if h > 0 else 1.0)
+                        
+                        if ratios:
+                            # If ratios are inconsistent (mixed-modal like Camera + LiDAR BEV), 
+                            # don't set a global aspect_ratio to avoid squashing.
+                            is_consistent = all(abs(r - ratios[0]) < 0.1 for r in ratios)
+                            if is_consistent:
+                                ratio = ratios[0]
+                                ds.aspect_ratio = ratio
+                                logger.info(f"[DataService] Deduced consistent aspect_ratio={ratio:.2f} for dataset '{name}' from samples.")
+                            else:
+                                ds.aspect_ratio = None
+                                logger.info(f"[DataService] Mixed aspect ratios detected for dataset '{name}'. Leaving aspect_ratio unset.")
                 except Exception as e:
                     logger.debug(f"[DataService] Failed to deduce aspect_ratio for dataset '{name}': {e}")
 
