@@ -446,8 +446,13 @@ class DataSampleTrackingWrapper(Dataset):
         # Distinguish between Individual Access (id provided)
         # and Bulk Access (index only, e.g. from DataLoader)
         if id is None:
-            # Bulk mode: Return exactly what the underlying dataset yields
-            return self.wrapped_dataset[index]
+            # Resolve id from physical index using our representative map
+            # This ensures we always apply plucking/normalization logic
+            if index < len(self.physical_uids):
+                id = self.physical_uids[index]
+            else:
+                # Fallback to direct raw access if index out of bounds for physical map
+                return self.wrapped_dataset[index]
 
         # Individual/Plucked access
         sid = str(id)

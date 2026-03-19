@@ -1492,11 +1492,11 @@ def save_signals(
     else:
         losses_data = None
     # # Process targets
-    if target_np is not None and target_np.ndim == 1 and target_np.size > len(batch_ids_np):
+    if target_np is not None and target_np.ndim == 1:
         target_np = target_np[:, np.newaxis]
-    if pred_np is not None and pred_np.ndim == 1 and pred_np.size > len(batch_ids_np):
+    if pred_np is not None and pred_np.ndim == 1:
         pred_np = pred_np[:, np.newaxis]
-    if pred_raw_np is not None and pred_raw_np.ndim == 1 and pred_raw_np.size > len(batch_ids_np):
+    if pred_raw_np is not None and pred_raw_np.ndim == 1:
         pred_raw_np = pred_raw_np[:, np.newaxis]
 
     # Enqueue to dataframe manager buffer for efficientcy

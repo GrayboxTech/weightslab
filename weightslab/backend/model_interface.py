@@ -412,7 +412,14 @@ class ModelInterface(NetworkWithOps):
         for opt_name in get_optimizers():
             # Overwrite the optimizer with the same class and lr, updated
             opt = get_optimizer(opt_name)
-            lr = opt.get_lr()[0]
+
+            # Robust LR extraction: handle both OptimizerInterface and raw torch optimizers
+            if hasattr(opt, 'get_lr'):
+                lr = opt.get_lr()[0]
+            elif hasattr(opt, 'param_groups'):
+                lr = opt.param_groups[0]['lr']
+            else:
+                lr = 1e-3 # Fallback
             optimizer_class = type(opt.optimizer)
             _optimizer = optimizer_class(
                 model.parameters(),
