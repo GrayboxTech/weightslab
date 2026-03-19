@@ -198,83 +198,102 @@ jobs:
 
   trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
-    name: Trigger WeightsStudio CI (repository_dispatch)
+    name: Trigger WeightsStudio CI (workflow_dispatch)
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch ws-ci workflow in weights_studio
-        env:
-          WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
+      - name: Resolve target branch
+        id: resolve-target
         run: |
-          if [ -z "${WS_TOKEN}" ]; then
-            echo "WEIGHTS_STUDIO_API_TOKEN not set; cannot dispatch WeightsStudio CI."
-            exit 1
-          fi
-
           TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
-          EVENT_TYPE="weightslab_ci_triggered"
-          DISPATCH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
 
-          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/dispatches" \
-            -H "Authorization: Bearer ${WS_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/json" \
-            -d "{\"event_type\":\"${EVENT_TYPE}\",\"client_payload\":{\"weightslab_branch\":\"${TARGET_BRANCH}\",\"weightslab_sha\":\"${GITHUB_SHA}\",\"weightslab_repo\":\"${GITHUB_REPOSITORY}\"}}"
+      - name: Dispatch ws-ci workflow in weights_studio
+        uses: actions/github-script@v7
+        env:
+          TARGET_BRANCH: ${{ steps.resolve-target.outputs.branch }}
+        with:
+          github-token: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
+          script: |
+            const owner = 'GrayboxTech';
+            const repo = 'weights_studio';
+            const workflow_id = 'ws-ci.yml';
+            const branch = process.env.TARGET_BRANCH;
 
-          echo "WeightsStudio repository_dispatch sent for branch ${TARGET_BRANCH}. Waiting for ws-ci run to start..."
+            if (!branch) {
+              core.setFailed('Missing TARGET_BRANCH');
+              return;
+            }
 
-          WS_RUN_ID=""
-          for attempt in $(seq 1 60); do
-            RUNS_JSON="$(curl -fSs "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/runs?event=repository_dispatch&branch=${TARGET_BRANCH}&per_page=20" \
-              -H "Authorization: Bearer ${WS_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28")"
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const dispatchTs = new Date().toISOString();
 
-            WS_RUN_ID="$(printf '%s' "${RUNS_JSON}" | jq -r --arg ts "${DISPATCH_TS}" '.workflow_runs | map(select(.created_at >= $ts)) | sort_by(.created_at) | last | .id // empty')"
+            core.info(`Dispatching ${workflow_id} on ${owner}/${repo}@${branch}`);
 
-            if [ -n "${WS_RUN_ID}" ]; then
-              echo "Detected ws-ci run id: ${WS_RUN_ID}"
-              break
-            fi
+            await github.request('POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', {
+              owner,
+              repo,
+              workflow_id,
+              ref: branch,
+            });
 
-            echo "Waiting for ws-ci run to appear (attempt ${attempt}/60)..."
-            sleep 5
-          done
+            let runId = null;
 
-          if [ -z "${WS_RUN_ID}" ]; then
-            echo "Could not detect a ws-ci run in weights_studio after dispatch."
-            exit 1
-          fi
+            for (let attempt = 1; attempt <= 60; attempt++) {
+              const runsResp = await github.request('GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs', {
+                owner,
+                repo,
+                workflow_id,
+                event: 'workflow_dispatch',
+                branch,
+                per_page: 20,
+              });
 
-          echo "Waiting for ws-ci run ${WS_RUN_ID} completion..."
-          for attempt in $(seq 1 120); do
-            RUN_JSON="$(curl -fSs "https://api.github.com/repos/GrayboxTech/weights_studio/actions/runs/${WS_RUN_ID}" \
-              -H "Authorization: Bearer ${WS_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28")"
+              const runs = runsResp.data.workflow_runs || [];
+              const candidates = runs
+                .filter((run) => run.created_at >= dispatchTs)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-            WS_STATUS="$(printf '%s' "${RUN_JSON}" | jq -r '.status // ""')"
+              if (candidates.length > 0) {
+                runId = candidates[0].id;
+                core.info(`Detected ws-ci run id: ${runId}`);
+                break;
+              }
 
-            WS_CONCLUSION="$(printf '%s' "${RUN_JSON}" | jq -r '.conclusion // ""')"
+              core.info(`Waiting for ws-ci run to appear (attempt ${attempt}/60)...`);
+              await sleep(5000);
+            }
 
-            echo "ws-ci status: ${WS_STATUS}, conclusion: ${WS_CONCLUSION}"
+            if (!runId) {
+              core.setFailed('Could not detect ws-ci run in weights_studio after dispatch.');
+              return;
+            }
 
-            if [ "${WS_STATUS}" = "completed" ]; then
-              if [ "${WS_CONCLUSION}" = "success" ]; then
-                echo "WeightsStudio ws-ci completed successfully."
-                exit 0
-              fi
+            for (let attempt = 1; attempt <= 120; attempt++) {
+              const runResp = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', {
+                owner,
+                repo,
+                run_id: runId,
+              });
 
-              echo "WeightsStudio ws-ci failed with conclusion: ${WS_CONCLUSION}"
-              exit 1
-            fi
+              const status = runResp.data.status || '';
+              const conclusion = runResp.data.conclusion || '';
 
-            sleep 10
-          done
+              core.info(`ws-ci status: ${status}, conclusion: ${conclusion}`);
 
-          echo "Timed out waiting for WeightsStudio ws-ci completion."
-          exit 1
+              if (status === 'completed') {
+                if (conclusion === 'success') {
+                  core.info('WeightsStudio ws-ci completed successfully.');
+                  return;
+                }
+                core.setFailed(`WeightsStudio ws-ci failed with conclusion: ${conclusion}`);
+                return;
+              }
+
+              await sleep(10000);
+            }
+
+            core.setFailed('Timed out waiting for WeightsStudio ws-ci completion.');
 
   build-and-publish-dev:
     if: ${{ github.event_name == 'pull_request' }}
