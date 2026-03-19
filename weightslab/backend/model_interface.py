@@ -41,7 +41,7 @@ class ModelInterface(NetworkWithOps):
             compute_dependencies: bool = False,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
-            **kwargs
+            **_
     ):
         """
         Initializes the WatcherEditor instance.
@@ -67,7 +67,11 @@ class ModelInterface(NetworkWithOps):
                 registered in the global ledger. Defaults to True.
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
-            compute_dependencies (bool, optional): If True, computes the graph
+            compute_dependencies (bool, optional): If True, computes the
+                computational graph dependencies for the wrapped model (using
+                torch.fx or ONNX according to `use_onnx`) so that layer and
+                operation relationships can be analyzed by WeightsLab. Defaults
+                to False.
             weak (bool, optional): If True, registers the model with a weak
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
@@ -91,7 +95,19 @@ class ModelInterface(NetworkWithOps):
         self.name = "Default Name" if name is None else name
         # Handle device resolution: if not specified, try to infer from model
         if not device:
-            device = model.device if hasattr(model, 'device') else 'cpu'
+            inferred_device = None
+            # Try to infer device from model parameters
+            try:
+                first_param = next(model.parameters())
+                inferred_device = first_param.device
+            except (StopIteration, AttributeError):
+                # If no parameters, try to infer from buffers
+                try:
+                    first_buffer = next(model.buffers())
+                    inferred_device = first_buffer.device
+                except (StopIteration, AttributeError):
+                    inferred_device = None
+            device = inferred_device or 'cpu'
 
         # Ensure device is a string
         if device and not isinstance(device, str):

@@ -5,7 +5,7 @@ on:
     branches: [ main, dev ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, dev ]
     types: [ opened, reopened, ready_for_review ]
   workflow_dispatch:
 
@@ -24,7 +24,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+
+      - name: Ensure cache directories exist
+        run: |
+          mkdir -p ~/.cache/pip
+          mkdir -p ~/.cache/ruff
 
       - name: Cache pip and Ruff
         uses: actions/cache@v4
@@ -48,8 +52,9 @@ jobs:
             HEAD_SHA=${{ github.sha }}
           fi
 
-          # Get changed Python files in weightslab directory, exclude generated files
+          # Get changed Python files in weightslab directory, and ignore CI workflow YAML files
           CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
+            grep -v '^\.github/workflows/.*\.ya\?ml$' | \
             grep '^weightslab/.*\.py$' | \
             grep -v '_pb2\.py$' | \
             grep -v '_pb2_grpc\.py$' | \
@@ -103,6 +108,10 @@ jobs:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     needs: code-quality
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ github.event_name == 'pull_request' && fromJson('["3.10","3.11","3.12","3.13","3.14"]') || fromJson('["3.10"]') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -110,14 +119,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
+
+      - name: Ensure pip cache directory exists
+        run: mkdir -p ~/.cache/pip
 
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
           restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}
             ${{ runner.os }}-pip
 
       - name: Install project dependencies
@@ -127,12 +140,16 @@ jobs:
 
       - name: Verify installation
         run: |
-          python -c "import weightslab; print(f'weightslab imported successfully')"
+          python -c "import sys, weightslab; print(f'weightslab imported successfully on Python {sys.version.split()[0]}')"
 
   test:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     needs: install
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ github.event_name == 'pull_request' && fromJson('["3.10","3.11","3.12","3.13","3.14"]') || fromJson('["3.10"]') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -140,14 +157,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
+
+      - name: Ensure pip cache directory exists
+        run: mkdir -p ~/.cache/pip
 
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
           restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}
             ${{ runner.os }}-pip
 
       - name: Install project dependencies
@@ -175,36 +196,90 @@ jobs:
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m unittest discover -s ./weightslab/tests/integrations -v
 
-      - name: Trigger WeightsStudio CI
+  trigger-weightsstudio-dispatch:
+    if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
+    name: Trigger WeightsStudio CI (repository_dispatch)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch ws-ci workflow in weights_studio
         env:
           WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
         run: |
           if [ -z "${WS_TOKEN}" ]; then
-            echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
-            exit 0
+            echo "WEIGHTS_STUDIO_API_TOKEN not set; cannot dispatch WeightsStudio CI."
+            exit 1
           fi
 
-          # Trigger the ws-ci workflow in the weights_studio repository on main.
-          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
+          TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
+          EVENT_TYPE="weightslab_ci_triggered"
+          DISPATCH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/dispatches" \
             -H "Authorization: Bearer ${WS_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
             -H "Content-Type: application/json" \
-            -d '{"ref":"main"}'
+            -d "{\"event_type\":\"${EVENT_TYPE}\",\"client_payload\":{\"weightslab_branch\":\"${TARGET_BRANCH}\",\"weightslab_sha\":\"${GITHUB_SHA}\",\"weightslab_repo\":\"${GITHUB_REPOSITORY}\"}}"
 
-          echo "WeightsStudio workflow dispatch requested successfully."
+          echo "WeightsStudio repository_dispatch sent for branch ${TARGET_BRANCH}. Waiting for ws-ci run to start..."
 
-  weightsstudio-ci:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
-    name: WeightsStudio CI
-    needs: test
-    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
-    with:
-      weightslab_branch: ${{ (github.head_ref || github.ref_name) == 'main' && 'main' || 'dev' }}
+          WS_RUN_ID=""
+          for attempt in $(seq 1 60); do
+            RUNS_JSON="$(curl -fSs "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/runs?event=repository_dispatch&branch=${TARGET_BRANCH}&per_page=20" \
+              -H "Authorization: Bearer ${WS_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28")"
+
+            WS_RUN_ID="$(printf '%s' "${RUNS_JSON}" | jq -r --arg ts "${DISPATCH_TS}" '.workflow_runs | map(select(.created_at >= $ts)) | sort_by(.created_at) | last | .id // empty')"
+
+            if [ -n "${WS_RUN_ID}" ]; then
+              echo "Detected ws-ci run id: ${WS_RUN_ID}"
+              break
+            fi
+
+            echo "Waiting for ws-ci run to appear (attempt ${attempt}/60)..."
+            sleep 5
+          done
+
+          if [ -z "${WS_RUN_ID}" ]; then
+            echo "Could not detect a ws-ci run in weights_studio after dispatch."
+            exit 1
+          fi
+
+          echo "Waiting for ws-ci run ${WS_RUN_ID} completion..."
+          for attempt in $(seq 1 120); do
+            RUN_JSON="$(curl -fSs "https://api.github.com/repos/GrayboxTech/weights_studio/actions/runs/${WS_RUN_ID}" \
+              -H "Authorization: Bearer ${WS_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28")"
+
+            WS_STATUS="$(printf '%s' "${RUN_JSON}" | jq -r '.status // ""')"
+
+            WS_CONCLUSION="$(printf '%s' "${RUN_JSON}" | jq -r '.conclusion // ""')"
+
+            echo "ws-ci status: ${WS_STATUS}, conclusion: ${WS_CONCLUSION}"
+
+            if [ "${WS_STATUS}" = "completed" ]; then
+              if [ "${WS_CONCLUSION}" = "success" ]; then
+                echo "WeightsStudio ws-ci completed successfully."
+                exit 0
+              fi
+
+              echo "WeightsStudio ws-ci failed with conclusion: ${WS_CONCLUSION}"
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "Timed out waiting for WeightsStudio ws-ci completion."
+          exit 1
 
   build-and-publish-dev:
     if: ${{ github.event_name == 'pull_request' }}
     name: Build & Publish Dev (TestPyPI)
-    needs: weightsstudio-ci
+    needs: trigger-weightsstudio-dispatch
     runs-on: ubuntu-latest
     permissions:
       contents: read

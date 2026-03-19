@@ -116,20 +116,28 @@ body[data-theme="dark"] .wl-only-dark {
   gap: 0.5rem;
   margin: 0 0 0.8rem;
   padding: 0.35rem 0.6rem;
-  border: 1px solid rgba(95, 115, 147, 0.4);
+  border: 1px solid var(--color-background-border);
   border-radius: 0.55rem;
-  background: rgba(95, 115, 147, 0.08);
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
 }
 
 .wl-version-switcher label {
   font-size: 0.86rem;
   font-weight: 600;
+  color: var(--color-foreground-primary);
 }
 
 .wl-version-switcher select {
   min-width: 8.5rem;
   padding: 0.22rem 0.35rem;
   border-radius: 0.4rem;
-  border: 1px solid rgba(95, 115, 147, 0.6);
-  background: transparent;
+  border: 1px solid var(--color-background-border);
+  background: var(--color-background-primary);
+  color: var(--color-foreground-primary);
+}
+
+.wl-version-switcher select option {
+  background: var(--color-background-primary);
+  color: var(--color-foreground-primary);
 }
