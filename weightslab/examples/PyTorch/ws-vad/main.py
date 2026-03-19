@@ -428,6 +428,9 @@ if __name__ == "__main__":
 
     # 2. Data
     data_root = parameters.get("data_root")
+    if data_root is not None:
+        data_root = str(data_root)
+
     if not data_root or not os.path.exists(data_root):
         data_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "mvtec_capsule"))
     

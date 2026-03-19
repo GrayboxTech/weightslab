@@ -421,10 +421,13 @@ class ModelInterface(NetworkWithOps):
 
         # Sync checkpoint auto-dump steps ratio if specified
         if hp and not is_audit:
+            # Resolve the value from the proxy if it is one
             new_ratio = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio')
-            if new_ratio is not None:
+            val = new_ratio._resolve() if hasattr(new_ratio, '_resolve') else new_ratio
+            
+            if val is not None:
                 try:
-                    self._checkpoint_auto_every_steps = int(new_ratio)
+                    self._checkpoint_auto_every_steps = int(val)
                     logger.info(f"Updated checkpoint auto-dump steps ratio to {self._checkpoint_auto_every_steps} based on hyperparameters")
                 except Exception as e:
                     logger.warning(f"Failed to update checkpoint auto-dump steps ratio from hyperparameters: {e}")

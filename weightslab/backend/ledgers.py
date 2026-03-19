@@ -76,7 +76,7 @@ class Proxy:
             self._key = key
             self._default = default
 
-        def get(self, default: Any = None) -> Any:
+        def _resolve(self, default: Any = None) -> Any:
             parent_obj = self._parent.get()
             if parent_obj is None:
                 return self._default if default is None else default
@@ -87,6 +87,20 @@ class Proxy:
             except Exception:
                 return self._default if default is None else default
 
+        def get(self, *args, **kwargs) -> Any:
+            """Retrieve the current value of this proxy.
+            If arguments are provided, it assumes the value is a dict-like and delegates the get() call.
+            """
+            v = self._resolve()
+            if not args and not kwargs:
+                return v
+            if hasattr(v, 'get'):
+                return v.get(*args, **kwargs)
+            # Fallback for the proxy's own resolve-with-default logic
+            if len(args) == 1 and not kwargs:
+                return self._resolve(default=args[0])
+            raise AttributeError(f"'{type(v).__name__}' object has no attribute 'get'")
+
         def set(self, value: Any) -> None:
             parent_obj = self._parent.get()
             if parent_obj is None:
@@ -94,181 +108,187 @@ class Proxy:
             parent_obj[self._key] = value
 
         def __call__(self) -> Any:
-            return self.get()
+            return self._resolve()
 
         def __repr__(self) -> str:
-            return f"ValueProxy(key={self._key!r}, value={self.get()!r})"
+            return f"ValueProxy(key={self._key!r}, value={self._resolve()!r})"
 
         def __str__(self) -> str:
-            v = self.get()
+            v = self._resolve()
             return "" if v is None else str(v)
 
         def __fspath__(self) -> str:
-            v = self.get()
+            v = self._resolve()
             if v is None:
                 raise TypeError("ValueProxy resolved to None")
             return os.fspath(v)
 
         def __bool__(self) -> bool:
-            return bool(self.get())
+            return bool(self._resolve())
 
         @staticmethod
         def _unwrap(other: Any) -> Any:
-            return other.get() if isinstance(other, Proxy._ValueProxy) else other
+            return other._resolve() if isinstance(other, Proxy._ValueProxy) else other
 
         def __eq__(self, other: Any) -> bool:
             other_val = self._unwrap(other)
-            return self.get() == other_val
+            return self._resolve() == other_val
 
         def __ne__(self, other: Any) -> bool:
             return not self.__eq__(other)
 
         def __lt__(self, other: Any) -> bool:
             other_val = self._unwrap(other)
-            return self.get() < other_val
+            return self._resolve() < other_val
 
         def __le__(self, other: Any) -> bool:
             other_val = self._unwrap(other)
-            return self.get() <= other_val
+            return self._resolve() <= other_val
 
         def __gt__(self, other: Any) -> bool:
             other_val = self._unwrap(other)
-            return self.get() > other_val
+            return self._resolve() > other_val
 
         def __ge__(self, other: Any) -> bool:
             other_val = self._unwrap(other)
-            return self.get() >= other_val
+            return self._resolve() >= other_val
 
         def __hash__(self) -> int:
-            return hash(self.get())
+            return hash(self._resolve())
 
         def __int__(self) -> int:
-            return int(self.get())
+            return int(self._resolve())
 
         def __float__(self) -> float:
-            return float(self.get())
+            return float(self._resolve())
 
         def __index__(self) -> int:
-            return int(self.get())
+            v = self._resolve()
+            if isinstance(v, (int, bool)):
+                return int(v)
+            # Raising TypeError instead of ValueError is critical:
+            # - ValueError in __index__ causes os.path.exists() to return False silently for string paths.
+            # - TypeError causes a crash, forcing explicit cast str(proxy) which is the correct fix for paths.
+            raise TypeError(f"'{type(v).__name__}' object (ValueProxy wrapping {v!r}) cannot be interpreted as an integer")
 
         def __add__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() + other_val
+            return self._resolve() + other_val
 
         def __radd__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val + self.get()
+            return other_val + self._resolve()
 
         def __mul__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() * other_val
+            return self._resolve() * other_val
 
         def __rmul__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val * self.get()
+            return other_val * self._resolve()
 
         def __sub__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() - other_val
+            return self._resolve() - other_val
 
         def __rsub__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val - self.get()
+            return other_val - self._resolve()
 
         def __truediv__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() / other_val
+            return self._resolve() / other_val
 
         def __rtruediv__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val / self.get()
+            return other_val / self._resolve()
 
         def __floordiv__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() // other_val
+            return self._resolve() // other_val
 
         def __rfloordiv__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val // self.get()
+            return other_val // self._resolve()
 
         def __mod__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() % other_val
+            return self._resolve() % other_val
 
         def __rmod__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val % self.get()
+            return other_val % self._resolve()
 
         def __pow__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() ** other_val
+            return self._resolve() ** other_val
 
         def __rpow__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val ** self.get()
+            return other_val ** self._resolve()
 
         def __divmod__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return divmod(self.get(), other_val)
+            return divmod(self._resolve(), other_val)
 
         def __rdivmod__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return divmod(other_val, self.get())
+            return divmod(other_val, self._resolve())
 
         def __and__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() & other_val
+            return self._resolve() & other_val
 
         def __rand__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val & self.get()
+            return other_val & self._resolve()
 
         def __or__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() | other_val
+            return self._resolve() | other_val
 
         def __ror__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val | self.get()
+            return other_val | self._resolve()
 
         def __xor__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() ^ other_val
+            return self._resolve() ^ other_val
 
         def __rxor__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val ^ self.get()
+            return other_val ^ self._resolve()
 
         def __lshift__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() << other_val
+            return self._resolve() << other_val
 
         def __rlshift__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val << self.get()
+            return other_val << self._resolve()
 
         def __rshift__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return self.get() >> other_val
+            return self._resolve() >> other_val
 
         def __rrshift__(self, other: Any) -> Any:
             other_val = self._unwrap(other)
-            return other_val >> self.get()
+            return other_val >> self._resolve()
 
         def __neg__(self) -> Any:
-            return -self.get()
+            return -self._resolve()
 
         def __pos__(self) -> Any:
-            return +self.get()
+            return +self._resolve()
 
         def __abs__(self) -> Any:
-            return abs(self.get())
+            return abs(self._resolve())
 
         def __invert__(self) -> Any:
-            return ~self.get()
+            return ~self._resolve()
 
         def __getattr__(self, item: str) -> Any:
-            v = self.get()
+            v = self._resolve()
             if v is None:
                 raise AttributeError("ValueProxy target not set")
             return getattr(v, item)
