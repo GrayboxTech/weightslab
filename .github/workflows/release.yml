@@ -2,7 +2,6 @@ name: Release CI
 
 on:
   push:
-    branches: [ main, dev ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
