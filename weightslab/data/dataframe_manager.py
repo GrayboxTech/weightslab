@@ -508,15 +508,6 @@ class LedgeredDataFrameManager:
             # Filter for efficiency
             mask_total = (self._df[SampleStats.Ex.ORIGIN.value] == origin) & (self._df[SampleStats.Ex.GROUP_ID.value].isin(group_ids))
             if not mask_total.any():
-                unique_origins = self._df[SampleStats.Ex.ORIGIN.value].unique() if not self._df.empty else []
-                
-                # Let's see if group IDs exist at all regardless of origin
-                if not self._df.empty:
-                    mask_group_only = self._df[SampleStats.Ex.GROUP_ID.value].isin(group_ids)
-                    if mask_group_only.any():
-                        found_origins = self._df.loc[mask_group_only, SampleStats.Ex.ORIGIN.value].unique()
-                    else:
-                        sample_gids = self._df[SampleStats.Ex.GROUP_ID.value].dropna().head(5).tolist()
                 return
 
             # Faster lookup

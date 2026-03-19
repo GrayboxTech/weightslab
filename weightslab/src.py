@@ -191,6 +191,7 @@ def _get_step(step: int | None = None) -> int:
                 and add a `current_step` attribute to the model for future tracking.
     """
     # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
+    m = None
     full_list = list_models()
     if full_list:
         # Prefer "experiment" or "main" or the first one
@@ -1641,11 +1642,9 @@ def save_group_signals(
         key = k if k.startswith("signals//") else f"signals//{k}"
 
         # Detect if this is a batch vector matching group_ids
-        is_batch = False
         val_to_log = v
 
         if hasattr(v, '__len__') and not isinstance(v, (str, dict)) and len(v) == len(group_ids):
-            is_batch = True
             if hasattr(v, 'detach'):
                 v = v.detach().cpu().numpy()
             batch_signals[key] = v

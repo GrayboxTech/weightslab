@@ -259,11 +259,9 @@ def train_step(loader, model, optimizer, cls_criterion, contrastive_criterion, d
             inputs_flat = torch.cat([img.float() for img in images], dim=0).to(device)
             labels_flat = torch.cat([torch.tensor(l).float() if not isinstance(l, torch.Tensor) else l.float() for l in labels], dim=0).view(-1, 1).to(device)
             
-            # Flatten our global UIDs matching the blocked torch.cat order
             uids_flat = list(metadata["uids"][0]) + list(metadata["uids"][1])
             group_ids_list = list(metadata["group_id"])
-            group_ids_flat = group_ids_list + group_ids_list
-                
+                 
             optimizer.zero_grad()
             cls_logits, recon, embed = model(inputs_flat)
             
@@ -337,10 +335,8 @@ def evaluate_all(loader, model, cls_criterion, contrastive_criterion, metric, de
         for images, ids, labels, metadata in loader:
             inputs_flat = torch.cat([img.float() for img in images], dim=0).to(device)
             labels_flat = torch.cat([torch.tensor(l).float() if not isinstance(l, torch.Tensor) else l.float() for l in labels], dim=0).view(-1, 1).to(device)
-            
             uids_flat = list(metadata["uids"][0]) + list(metadata["uids"][1])
             group_ids_list = list(metadata["group_id"])
-            group_ids_flat = group_ids_list + group_ids_list
             
             cls_logits, recon, embed = model(inputs_flat)
             
