@@ -196,27 +196,6 @@ jobs:
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m unittest discover -s ./weightslab/tests/integrations -v
 
-      - name: Trigger WeightsStudio CI
-        if: ${{ matrix.python-version == '3.10' && ((github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev'))) }}
-        env:
-          WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-        run: |
-          if [ -z "${WS_TOKEN}" ]; then
-            echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
-            exit 0
-          fi
-
-          TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
-
-          # Trigger the ws-ci workflow in the weights_studio repository on the matching target branch.
-          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
-            -H "Authorization: Bearer ${WS_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d "{\"ref\":\"${TARGET_BRANCH}\"}"
-
-          echo "WeightsStudio workflow dispatch requested successfully on ${TARGET_BRANCH}."
-
   weightsstudio-ci:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
     name: WeightsStudio CI
