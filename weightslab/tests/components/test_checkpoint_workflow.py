@@ -357,8 +357,7 @@ class CheckpointSystemTests(unittest.TestCase):
             transforms.Normalize((0.1307,), (0.3081,))
         ])
         full_dataset = datasets.MNIST(
-            # root=os.path.join(cls.temp_dir, 'data'),
-            root='C:/Users/GuillaumePelluet/Desktop/mnist_data/',
+            root=os.path.join(cls.temp_dir, 'mnist_data'),
             train=False,
             download=True,
             transform=transform
