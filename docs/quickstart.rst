@@ -35,6 +35,7 @@ For a full visual workflow (agent, samples, tags, discard/restore, plots), deplo
 Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
 
 .. code-block:: bash
+
    cd ui
    docker compose -f docker/docker-compose.yml up -d
 
