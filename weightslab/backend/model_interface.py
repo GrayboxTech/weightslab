@@ -420,6 +420,12 @@ class ModelInterface(NetworkWithOps):
                 lr = opt.param_groups[0]['lr']
             else:
                 lr = 1e-3 # Fallback
+
+            # If we don't have a valid optimizer or can't extract LR, skip updating
+            if opt == None:
+                return
+
+            # Create a new optimizer instance with the same class, but updated parameters and lr
             optimizer_class = type(opt.optimizer)
             _optimizer = optimizer_class(
                 model.parameters(),
@@ -447,7 +453,7 @@ class ModelInterface(NetworkWithOps):
             # Resolve the value from the proxy if it is one
             new_ratio = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio')
             val = new_ratio._resolve() if hasattr(new_ratio, '_resolve') else new_ratio
-            
+
             if val is not None:
                 try:
                     self._checkpoint_auto_every_steps = int(val)
