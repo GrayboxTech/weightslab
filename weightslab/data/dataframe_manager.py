@@ -37,6 +37,7 @@ class LedgeredDataFrameManager:
         self._df: pd.DataFrame = pd.DataFrame()
         self._store: H5DataFrameStore | None = None
         self._array_store: H5ArrayStore | None = None
+        self._origin_revisions: Dict[str, int] = {}
         self._pending: set[int] = set()
         self._force_flush = False
         self._flush_interval = flush_interval
@@ -113,6 +114,37 @@ class LedgeredDataFrameManager:
             if self._enable_h5_persistence:
                 self._array_store = array_store
 
+    def _bump_origin_revisions(self, origins: Sequence[Any]) -> None:
+        for origin in origins:
+            if origin is None or pd.isna(origin):
+                continue
+            origin_key = str(origin)
+            self._origin_revisions[origin_key] = self._origin_revisions.get(origin_key, 0) + 1
+
+    def _collect_affected_origins(self, df_norm: pd.DataFrame, origin: str | None = None) -> set[str]:
+        affected_origins: set[str] = set()
+
+        if origin is not None:
+            affected_origins.add(str(origin))
+
+        if "origin" in df_norm.columns:
+            affected_origins.update(str(value) for value in df_norm["origin"].dropna().unique())
+
+        if self._df.empty or "origin" not in self._df.columns:
+            return affected_origins
+
+        existing_idx = df_norm.index.intersection(self._df.index)
+        if len(existing_idx) == 0:
+            return affected_origins
+
+        existing_origins = self._df.loc[existing_idx, "origin"]
+        if isinstance(existing_origins, pd.Series):
+            affected_origins.update(str(value) for value in existing_origins.dropna().unique())
+        elif existing_origins is not None and not pd.isna(existing_origins):
+            affected_origins.add(str(existing_origins))
+
+        return affected_origins
+
     def get_array_store(self) -> H5ArrayStore | None:
         """Get the array store instance."""
         return self._array_store
@@ -122,6 +154,7 @@ class LedgeredDataFrameManager:
         with self._lock:
             if store is not None:
                 self.set_store(store)
+            self._origin_revisions.setdefault(str(origin), 0)
 
         # Upsert initial data
         self.upsert_df(df, origin)
@@ -209,6 +242,8 @@ class LedgeredDataFrameManager:
             pass
 
         with self._lock:
+            affected_origins = self._collect_affected_origins(df_norm, origin=origin)
+
             # Align columns: Ensure the global dataframe has all columns present in the update
             missing_cols = df_norm.columns.difference(self._df.columns)
             if len(missing_cols) > 0:
@@ -254,6 +289,7 @@ class LedgeredDataFrameManager:
 
             # Flag index to be flushed later (outside lock) to minimize lock time
             self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
+            self._bump_origin_revisions(affected_origins)
 
     def mark_dirty(self, sample_id: int):
         with self._lock:
@@ -487,6 +523,11 @@ class LedgeredDataFrameManager:
                     if len(self._df.columns) != len(df_local.columns):
                         self._df = self._df.reindex(columns=df_local.columns)
                     self._df.loc[df_local.index, df_local.columns] = df_local
+            self._bump_origin_revisions([origin])
+
+    def get_origin_revision(self, origin: str) -> int:
+        with self._lock:
+            return int(self._origin_revisions.get(str(origin), 0))
 
     def get_row(self, origin: str, sample_id: int) -> pd.Series | None:
         with self._lock:

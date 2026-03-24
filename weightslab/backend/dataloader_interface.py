@@ -92,6 +92,8 @@ class WeightsLabDataSampler(Sampler):
         self.offset = max(0, offset)
         self.batch_size = batch_size
         self.drop_last = drop_last
+        self._deny_listed_uids_cache: set[str] = set()
+        self._deny_list_revision: Optional[tuple[str, int]] = None
 
     def _get_deny_listed_uids(self) -> set:
         """Get set of deny-listed UIDs from tracked dataset."""
@@ -100,10 +102,54 @@ class WeightsLabDataSampler(Sampler):
             try:
                 df_view = self.tracked_dataset._get_df_view()
                 if not df_view.empty and SampleStatsEx.DISCARDED.value in df_view.columns:
-                    deny_listed_uids = set(df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index)
+                    deny_listed_uids = {
+                        str(uid)
+                        for uid in df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index
+                    }
             except Exception:
                 pass
         return deny_listed_uids
+
+    def _get_deny_list_revision(self) -> Optional[tuple[str, int]]:
+        """Return a cheap revision token for discard-state refreshes."""
+        try:
+            origin = getattr(self.tracked_dataset, "_dataset_split", None)
+            df_manager = get_dataframe()
+            if origin and df_manager is not None and hasattr(df_manager, "get_origin_revision"):
+                return ("origin", int(df_manager.get_origin_revision(origin)))
+        except Exception:
+            pass
+
+        try:
+            denied_count = getattr(self.tracked_dataset, "denied_sample_cnt", None)
+            if denied_count is not None:
+                return ("count", int(denied_count))
+        except Exception:
+            pass
+
+        return None
+
+    def _refresh_deny_list_cache(self, force: bool = False) -> set[str]:
+        """Refresh deny-list cache only when the shared ledger changed."""
+        revision = self._get_deny_list_revision()
+        if not force and revision is not None and revision == self._deny_list_revision:
+            return self._deny_listed_uids_cache
+
+        self._deny_listed_uids_cache = self._get_deny_listed_uids()
+        self._deny_list_revision = revision
+        return self._deny_listed_uids_cache
+
+    def _is_deny_listed(self, idx: int) -> bool:
+        """Check whether an index is currently deny-listed."""
+        if self.tracked_dataset is None or not hasattr(self.tracked_dataset, "unique_ids"):
+            return False
+
+        try:
+            uid = str(self.tracked_dataset.unique_ids[idx])
+        except Exception:
+            return False
+
+        return uid in self._refresh_deny_list_cache()
 
     def _generate_indices(self):
         """Generate base indices (shuffled or sequential)."""
@@ -114,44 +160,28 @@ class WeightsLabDataSampler(Sampler):
             indices = list(range(n))
         return indices
 
-    def _filter_indices(self, indices):
-        """Filter out deny-listed and offset indices."""
-        deny_listed_uids = self._get_deny_listed_uids()
-
-        # Filter and apply offset
-        filtered = []
+    def _iter_filtered_indices(self, indices):
+        """Yield indices lazily so new discards are respected mid-epoch."""
         skipped = 0
 
         for idx in indices:
-            # Check if deny-listed
-            if self.tracked_dataset is not None and hasattr(self.tracked_dataset, "unique_ids"):
-                try:
-                    uid = int(self.tracked_dataset.unique_ids[idx])
-                    if uid in deny_listed_uids:
-                        continue
-                except Exception:
-                    pass
+            if self._is_deny_listed(idx):
+                continue
 
-            # Apply offset
             if skipped < self.offset:
                 skipped += 1
                 continue
 
-            filtered.append(idx)
-
-        return filtered
+            yield idx
 
     def __iter__(self):
         """Iterate over indices or batches of indices."""
-        # Generate and filter indices
         indices = self._generate_indices()
-        filtered_indices = self._filter_indices(indices)
+        filtered_indices = self._iter_filtered_indices(indices)
 
-        # If no batching, yield individual indices
         if self.batch_size is None:
             yield from filtered_indices
         else:
-            # Yield batches
             batch = []
             for idx in filtered_indices:
                 batch.append(idx)
@@ -159,7 +189,6 @@ class WeightsLabDataSampler(Sampler):
                     yield list(batch)
                     batch = []
 
-            # Yield remaining batch if not dropping last
             if batch and not self.drop_last:
                 yield list(batch)
 
@@ -169,7 +198,7 @@ class WeightsLabDataSampler(Sampler):
         total = len(self.data_source)
 
         # Subtract deny-listed samples
-        deny_listed_uids = self._get_deny_listed_uids()
+        deny_listed_uids = self._refresh_deny_list_cache()
         total -= len(deny_listed_uids)
 
         # Subtract offset

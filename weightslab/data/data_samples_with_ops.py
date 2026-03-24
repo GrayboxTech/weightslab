@@ -136,7 +136,7 @@ class DataSampleTrackingWrapper(Dataset):
         tags_mapping: Optional[Dict[str, int]] = None,
         stats_store: Optional[H5DataFrameStore] = None,
         enable_h5_persistence: bool = True,
-        loader_name: Optional[str] = 'unknown',
+        loader_name: Optional[str] = None,
         array_autoload_arrays: bool = False,
         array_return_proxies: bool = True,
         array_use_cache: bool = True,
@@ -223,6 +223,8 @@ class DataSampleTrackingWrapper(Dataset):
         # Detect dataset split for H5 storage
         original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
         split = self.loader_name or _detect_dataset_split(original_ds)
+        if split == 'unknown' and not self.loader_name:
+            split = f"unknown_{type(original_ds).__name__.lower()}_{id(original_ds)}"
         for idx, uid in enumerate(self.unique_ids):
             uid_str = str(uid)
             if uid_str not in seen_uid:
