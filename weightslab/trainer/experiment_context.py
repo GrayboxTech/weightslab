@@ -1,4 +1,5 @@
 import logging
+import time
 
 from weightslab.components.global_monitoring import pause_controller
 
@@ -34,11 +35,16 @@ class ExperimentContext:
     def exp_name(self):
         return self._exp_name
 
-    def ensure_components(self):
+    def ensure_components(self, force: bool = False):
         """Ensure ledger-backed components are resolved and available on
         `self` (model, train/test dataloaders, optimizer, hyperparams,
-        logger). Raises RuntimeError when mandatory components are missing.
+        logger). 
         """
+        # Simple caching to avoid thrashing the ledger on every RPC call
+        now = time.time()
+        if not force and self._components and (now - getattr(self, '_last_resolve_time', 0) < 5.0):
+            return
+
         from weightslab.backend.ledgers import (
             get_checkpoint_manager,
             list_checkpoint_managers,
@@ -149,6 +155,7 @@ class ExperimentContext:
             "df_manager": df_manager
         }
         self._components.update(data_loaders)  # add all dataloaders found
+        self._last_resolve_time = now
 
         # Build hyper-parameter descriptors used by the protocol. Use
         # ledger-backed hyperparams when available, with safe fallbacks.

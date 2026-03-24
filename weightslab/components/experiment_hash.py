@@ -229,6 +229,7 @@ class ExperimentHashGenerator:
         Returns:
             str: Hash of data state (8 bytes)
         """
+        import pandas as pd
         try:
             # Extract components
             uids = list(data_state.get(SampleStatsEx.DISCARDED.value, dict()).keys())
@@ -239,7 +240,10 @@ class ExperimentHashGenerator:
             # Sort UIDs and include discard status and tags
             data_info = []
             for uid in sorted(uids, key=lambda value: str(value)):
-                is_discarded = discarded[uid]
+                val = discarded.get(uid, False)
+                # Handle potential NaN or None: treat as False
+                is_discarded = bool(val) if pd.notna(val) else False
+                
                 uid_tags = sorted(tags.get(uid, []))
                 data_info.append(f"{uid}:d{int(is_discarded)}:t{','.join(uid_tags)}")
 

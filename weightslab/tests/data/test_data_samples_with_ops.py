@@ -37,7 +37,7 @@ class SimpleDataset(Dataset):
     def __getitem__(self, idx):
         # Return random data with shape (3, 32, 32) to simulate images
         data = np.random.randn(3, 32, 32).astype(np.float32)
-        uid = np.random.randn(1)
+        uid = str(idx) # Consistent with string UID preference
         label = idx % 10  # Simulate 10 classes
         return data, uid, label
 
@@ -121,6 +121,8 @@ class TestDataSampleTrackingWrapperInit(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -181,6 +183,8 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -233,6 +237,8 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -372,6 +378,8 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -459,6 +467,8 @@ class TestDataSampleTrackingWrapperStateDict(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -506,6 +516,8 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -595,6 +607,8 @@ class TestDataSampleTrackingWrapperDuplicateDetection(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 

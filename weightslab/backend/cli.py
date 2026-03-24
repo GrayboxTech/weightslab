@@ -141,12 +141,12 @@ def _handle_command(cmd: str) -> Any:
         name = resolve_hp_name()
         if verb == 'pause' or verb == 'p':
             pause_controller.pause()
-            set_hyperparam(name, 'is_training', False)
+            set_hyperparam(name=name, value=False, key_path='is_training')
             return {'ok': True, 'action': 'paused'}
 
         if verb == 'resume' or verb == 'r':
             pause_controller.resume()
-            set_hyperparam(name, 'is_training', True)
+            set_hyperparam(name=name, value=True, key_path='is_training')
             return {'ok': True, 'action': 'resumed'}
 
         if verb == 'status':
@@ -594,7 +594,7 @@ def _handle_command(cmd: str) -> Any:
                     try:
                         # Try different methods to add tags - with new tag system, use set() method
                         sample_id = str(uid) if uid.isdigit() else uid
-                        
+
                         if hasattr(dataset, 'set') and callable(dataset.set):
                             # New tag system: use set() to create tags_<tagname> column
                             dataset.set(sample_id=sample_id, stat_name="tags", value=tag)
@@ -686,7 +686,7 @@ def _handle_command(cmd: str) -> Any:
 
                 # apply change
                 try:
-                    set_hyperparam(hp_name, key, value)
+                    set_hyperparam(name=hp_name, value=value, key_path=key)
                     return {'ok': True, 'hp_name': hp_name, 'key': key, 'value': value}
                 except Exception as e:
                     return {'ok': False, 'error': str(e)}
@@ -695,7 +695,7 @@ def _handle_command(cmd: str) -> Any:
 
         # Editing hyperparameters via CLI is intentionally disabled.
         return {'ok': False, 'error': f'unknown_command: {verb}'}
-    
+
     except Exception as e:
         return {'ok': False, 'error': str(e)}
 
@@ -779,7 +779,7 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
     srv = None
     last_error = None
     max_attempts = 10
-    
+
     for attempt in range(max_attempts):
         try_port = cli_port + attempt
         try:
@@ -812,7 +812,7 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
                 # All attempts failed
                 logger.exception("cli_bind_failed_all_attempts")
                 return {'ok': False, 'error': f'bind_failed after {max_attempts} attempts. Last error: {e}. Port {cli_port} may be in use or require admin privileges.'}
-    
+
     if srv is None:
         return {'ok': False, 'error': f'bind_failed: {last_error}'}
 

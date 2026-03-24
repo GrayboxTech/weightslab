@@ -1,4 +1,5 @@
 import os
+import time
 import grpc
 import logging
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
@@ -109,7 +110,7 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
 # -----------------------------------------------------------------------------
-def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: int = 50051, **_):
+def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port: int = 50051, **_):
     """Configure trainer services such as gRPC server.
     Args:
         n_workers_grpc (int): Number of threads for the gRPC server.
@@ -122,18 +123,34 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "[::]", grpc_port: i
     grpc_port = int(os.getenv("GRPC_BACKEND_PORT", grpc_port))
 
     def serving_thread_callback():
-        server = grpc.server(
-            futures.ThreadPoolExecutor(
-                thread_name_prefix="WL-gRPC-Worker",
-                max_workers=n_workers_grpc
-            )
-        )
-        servicer = trainer.ExperimentServiceServicer()
-        pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f'{grpc_host}:'+ str(grpc_port))  # guarantees IPv4 connectivity from containers.
+        logger.info("[gRPC] Thread callback started")
         try:
+            server = grpc.server(
+                futures.ThreadPoolExecutor(
+                    thread_name_prefix="WL-gRPC-Worker",
+                    max_workers=n_workers_grpc
+                )
+            )
+            logger.info("[gRPC] Server object created")
+            servicer = trainer.ExperimentServiceServicer()
+            pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
+            logger.info("[gRPC] Servicer added")
+            
+            # Bind to host:port
+            bind_addr = f'{grpc_host}:{grpc_port}'
+            logger.info(f"[gRPC] Attempting to bind to {bind_addr}")
+            bound_port = server.add_insecure_port(bind_addr)
+            
+            if bound_port == 0:
+                logger.error(f"[gRPC] Failed to bind to {bind_addr}. Port might be in use.")
+                return
+
+            logger.info(f"[gRPC] Port {bound_port} bound successfully.")
             server.start()
+            logger.info(f"[gRPC] Server started and listening on {bind_addr}")
             server.wait_for_termination()
+        except Exception as e:
+            logger.exception(f"[gRPC] Critical error in gRPC thread: {e}")
         except KeyboardInterrupt:
             force_kill_all_python_processes()
 

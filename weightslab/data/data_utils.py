@@ -450,7 +450,7 @@ def _extract_slice_from_4d(np_img: np.ndarray, slice_idx: int = None) -> np.ndar
     return np_img[slice_idx]  # Returns (H, W) or (H, W, C)
 
 
-def _get_image_array_and_metadata(wrapped, index) -> tuple:
+def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
     """Load image array from dataset and return (array, is_volumetric, original_shape).
 
     Returns:
@@ -460,8 +460,26 @@ def _get_image_array_and_metadata(wrapped, index) -> tuple:
         - original_shape: tuple of original shape AFTER any channel-first transposition
     """
     np_img = wrapped[index]
-    if isinstance(np_img, (list, tuple)):
-        np_img = np_img[0]
+    if isinstance(np_img, (list, tuple)) and len(np_img) > 0:
+        pixels = np_img[0]
+        if isinstance(pixels, (list, tuple)):
+            # Case A: WeightsLab RAW container OR custom raw group list.
+            # We must pluck from the first element.
+            if len(pixels) > rank:
+                np_img = pixels[rank]
+            else:
+                np_img = pixels[0]
+        elif len(np_img) >= 2 and isinstance(np_img[1], str):
+            # Case B: WeightsLab PLUCKED container (pixels, id, target, ...)
+            # The first element is already the correctly plucked member.
+            np_img = pixels
+        else:
+            # Case C: Standard raw group list / tuple where elements are NOT nested lists.
+            # (e.g. torchvision's (Img, Target))
+            if len(np_img) > rank:
+                np_img = np_img[rank]
+            else:
+                np_img = np_img[0]
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
 
@@ -510,7 +528,7 @@ def to_uint8(np_img: np.ndarray) -> np.ndarray:
     return np_img.astype(np.uint8)
 
 
-def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
+def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Image.Image:
     """Load raw image from dataset at given index.
 
     For 4D volumetric data (Z, H, W, C) or (Z, H, W), extracts a single slice.
@@ -520,6 +538,7 @@ def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
         dataset: Dataset object
         index: Sample index
         slice_idx: Specific Z-slice to extract (None = middle slice)
+        rank: Member rank for grouped data
 
     Returns:
         PIL Image of the 2D slice
@@ -536,7 +555,7 @@ def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
         img = Image.open(img_path)
         return img.convert("RGB")
     elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
-        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index)
+        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
 
         # Handle 4D volumetric data
         if is_volumetric:
@@ -576,7 +595,7 @@ def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
         raise ValueError("Dataset type not supported for raw image extraction.")
 
 
-def load_raw_image_array(dataset, index) -> tuple:
+def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
     """Load raw image array from dataset and return (array, is_volumetric, original_shape).
 
     Returns the full array (including 4D if present) for serialization to WS.
@@ -588,7 +607,7 @@ def load_raw_image_array(dataset, index) -> tuple:
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
 
     if hasattr(wrapped, '__getitem__'):
-        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index)
+        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
 
         # Extract middle slice for thumbnail
         if is_volumetric:

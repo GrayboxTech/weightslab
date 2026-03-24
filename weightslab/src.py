@@ -5,6 +5,8 @@ level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 """
 import gc
 import os
+import sys
+import ctypes
 import time
 import types
 import logging
@@ -28,7 +30,35 @@ from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
+
+
+def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
+    """CPython-specific: find every local variable in the *caller's* caller frame
+    that points to *original_obj* and rebind it to *new_obj* in-place.
+
+    This lets ``wl.watch_or_edit(parameters, ...)`` (without capturing the return
+    value) transparently replace ``parameters`` with the returned Proxy in the
+    calling scope.  Silently does nothing on non-CPython runtimes.
+    """
+    try:
+        # frame 0 = _rebind_caller_local
+        # frame 1 = watch_or_edit  (or whatever internal caller)
+        # frame 2 = user code
+        frame = sys._getframe(2)
+        changed = False
+        for name, val in list(frame.f_locals.items()):
+            if val is original_obj:
+                frame.f_locals[name] = new_obj
+                changed = True
+        if changed:
+            ctypes.pythonapi.PyFrame_LocalsToFast(
+                ctypes.py_object(frame), ctypes.c_int(0)
+            )
+    except Exception:
+        pass
 from weightslab.backend.ledgers import list_models, get_model as _gm
+from weightslab.components import global_monitoring
+from tqdm import tqdm
 
 
 # Get global logger
@@ -123,6 +153,7 @@ class SignalContext:
         """True if running during training (triggered by a metric)."""
         return self.subscribed_value is not None
 
+
 # #####################################################################################################################
 # WEIGHTSLAB INTERNAL FUNCTIONS FOR LOGGING, SIGNAL EXTRACTION, WRAPPING, ETC. (not typically called directly by users)
 # #####################################################################################################################
@@ -145,7 +176,6 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
-# Set age function if not present for better compatibility with checkpoint manager patterns
 def _get_age(self):
     return self.current_step
 
@@ -161,6 +191,7 @@ def _get_step(step: int | None = None) -> int:
                 and add a `current_step` attribute to the model for future tracking.
     """
     # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
+    m = None
     full_list = list_models()
     if full_list:
         # Prefer "experiment" or "main" or the first one
@@ -297,6 +328,24 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
             pass
 
 
+def _update_log_directory(new_log_dir: str):
+    """
+        Move the current log file to a new directory and update the file handler.
+
+        This is useful for setting a user-specified log directory after initial
+        setup with a temporary file. The function will:
+        - Move the existing log file to the new directory (if it exists)
+        - Update the logging FileHandler to point to the new location
+    """
+
+    # Update logging directory to use root_log_dir after parameters registration
+    hp = get_hyperparams()
+    try:
+        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
+    except Exception as e:
+        logger.debug(f"Could not update log directory: {e}")
+
+
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     """
         Wrapper for forward methods to log and save statistics.
@@ -311,6 +360,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Remove parameters
     _ = kw.pop('flag', None)
     ids = kw.pop('batch_ids', None)
+    group_ids = kw.pop('group_id', None)
     preds = kw.pop('preds', None)
     batch_scalar = kw.pop('signals', None)
     preds_raw = a[0] if len(a) > 0 else None
@@ -318,6 +368,26 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
+
+    # discarded samples/tainted groups from the loss tensor.
+    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
+
+    if origin and ids is not None and hasattr(out, 'device') and out.ndim > 0:
+        try:
+            # Multi-sample Group Masking
+            if group_ids is not None:
+                mask = get_active_group_mask(group_ids, origin).to(out.device)
+                if len(mask) == len(out):
+                    out = out * mask
+
+            # Per-sample Individual Masking
+            else:
+                mask = get_active_sample_mask(ids, origin).to(out.device)
+                if len(mask) == len(out):
+                    out = out * mask
+        except Exception as e:
+            logger.debug(f"Automatic backend discard masking failed: {e}")
+
     if kwargs.get('per_sample', False):
         if out.ndim > 1:
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
@@ -334,7 +404,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     dynamic_updates = {}
     ids_np = None
     if ids is not None:
-        ids_np = ids.detach().cpu().numpy() if hasattr(ids, 'detach') else np.asarray(ids)
+        if hasattr(ids, 'detach'):
+            ids_np = ids.detach().cpu().numpy()
+        else:
+            try:
+                # Handle list of tensors (common in Siamese/multi-output)
+                ids_np = np.array([i.detach().cpu().numpy() if hasattr(i, 'detach') else i for i in ids])
+            except Exception:
+                ids_np = np.asarray(ids)
 
     if ids_np is not None:
          # Identify Subscribers for this specific signal (reg_name)
@@ -432,24 +509,6 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     return out
 
 
-def _update_log_directory(new_log_dir: str):
-    """
-        Move the current log file to a new directory and update the file handler.
-
-        This is useful for setting a user-specified log directory after initial
-        setup with a temporary file. The function will:
-        - Move the existing log file to the new directory (if it exists)
-        - Update the logging FileHandler to point to the new location
-    """
-
-    # Update logging directory to use root_log_dir after parameters registration
-    hp = get_hyperparams()
-    try:
-        set_log_directory(str(hp.get('root_log_dir', new_log_dir)))
-    except Exception as e:
-        logger.debug(f"Could not update log directory: {e}")
-
-
 # ##############################################################################################################
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
@@ -497,7 +556,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # receive a stable handle that will be updated in-place when the
         # real wrapper is registered. `get_model` will create a Proxy if
         # the name is not yet present.
-        proxy = get_model()
+        _model = get_model()
 
         # Architecture operations require dependencies to be available.
         # Keep backward-compatible behavior by enabling dependency computation
@@ -510,10 +569,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Register logger in backend for model training
         LoggerQueue()
 
+        # No rebind here since the model wrapper is designed to be a drop-in replacement for the original model
+
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
-        return proxy if proxy != None else wrapper
+        return _model if _model != None else wrapper
 
     # DataLoader
     elif 'data' in flag.lower() or flag.lower() == 'dataset' or flag.lower() == 'dataloader' or (hasattr(obj, '__name__') and 'data' in obj.__name__.lower()):
@@ -522,9 +583,9 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # real wrapper is registered. `get_dataloader` will create a Proxy if
         # the name is not yet present.\[]
         try:
-            proxy = get_dataloader(kwargs.get('loader_name', DEFAULT_NAME))
+            _dataloader = get_dataloader(kwargs.get('loader_name', DEFAULT_NAME))
         except Exception:
-            proxy = None
+            _dataloader = None
 
         # Auto-inject root_log_dir from hyperparameters if not provided
         if kwargs is None or 'root_log_dir' not in kwargs:
@@ -553,12 +614,14 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = DataLoaderInterface(obj, **kwargs)
-        proxy.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
+        _dataloader.__pl_saved_kwargs = kwargs  # Force pytorch lightning compatibility
 
-        # Prefer returning the proxy (if one exists) so external callers hold
-        # a stable reference that will see updates. If no proxy was
+        # There is not rebind here because obj can be a dataloader or a dataset
+
+        # Prefer returning the _dataloader (if one exists) so external callers hold
+        # a stable reference that will see updates. If no _dataloader was
         # obtainable, return the wrapper itself.
-        return proxy if proxy != None else wrapper
+        return _dataloader if _dataloader != None else wrapper
 
     # Optimizer
     elif 'optimizer' in flag.lower() or (hasattr(obj, '__name__') and 'opt' in obj.__name__.lower()):
@@ -567,31 +630,37 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # real wrapper is registered. `get_optimizer` will create a Proxy if
         # the name is not yet present.
         try:
-            proxy = get_optimizer()
+            _opt = get_optimizer()
         except Exception:
-            proxy = None
+            _opt = None
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = OptimizerInterface(obj, **kwargs)
 
+        # rebind caller,, i.e., in-place update
+        _rebind_caller_local(obj, _opt)
+
         # Prefer returning the proxy (if one exists) so external callers hold
         # a stable reference that will see updates. If no proxy was
         # obtainable, return the wrapper itself.
-        return proxy if proxy != None else wrapper
+        return _opt
 
     # Logger
     elif 'logger' in flag.lower() or (hasattr(obj, '__name__') and 'log' in obj.__name__.lower()):
         # Ensure there's a proxy placeholder if callers already requested the logger
         try:
-            proxy = get_logger()
+            _logger = get_logger()
         except Exception:
-            proxy = None
+            _logger = None
 
         # Register the logger into the ledger. This will update any proxy in-place.
         register_logger(obj)
 
+        # rebind caller,, i.e., in-place update
+        _rebind_caller_local(obj, _logger)
+
         # Return a stable handle (proxy) when available, otherwise the registered logger
-        return proxy if proxy != None else obj
+        return _logger
 
     # Signals
     # # Loss
@@ -619,14 +688,16 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             except Exception:
                 pass
 
-            # return proxy if exists else the object
-            try:
-                return get_signal(reg_name)
-            except Exception:
-                return obj
+            # rebind caller, i.e., in-place update
+            _loss = get_signal(reg_name)
+            _rebind_caller_local(obj, _loss)
+
+            return _loss
+
         except Exception:
             # fall back to hyperparams branch if something unexpected
             pass
+
     # # Metric
     elif 'metric' in flag.lower() or flag.lower() in ('signal', 'signals', 'watch'):
         # derive registration name from second part of flag if provided
@@ -659,11 +730,12 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             except Exception:
                 pass
 
-            # return proxy if exists else the object
-            try:
-                return get_signal(reg_name)
-            except Exception:
-                return obj
+            # rebind caller, i.e., in-place update
+            _metric = get_signal(reg_name)
+            _rebind_caller_local(obj, _metric)
+
+            return _metric
+
         except Exception:
             # fall back to hyperparams branch if something unexpected
             pass
@@ -735,6 +807,8 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                     # Normal registration if no checkpoint hyperparameters were loaded
                     if isinstance(obj, str):
                         path = obj
+                        # ensure proxy placeholder exists before registering
+                        _hp = get_hyperparams()
                         # register empty/defaults if provided in kwargs
                         if defaults:
                             register_hyperparams(defaults)
@@ -751,9 +825,13 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             _update_log_directory(new_log_dir)
 
                         # return the ledger handle (proxy or dict)
-                        return get_hyperparams()
+                        _hp = get_hyperparams()
+                        _rebind_caller_local(obj, _hp)
+                        return _hp
 
                     elif isinstance(obj, dict):
+                        # ensure proxy placeholder exists before registering
+                        get_hyperparams()
                         register_hyperparams(obj)
 
                         # Update log directory if root_log_dir provided in hyperparameters or defaults
@@ -765,7 +843,9 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                         if new_log_dir:
                             _update_log_directory(new_log_dir)
 
-                        return get_hyperparams()
+                        _hp = get_hyperparams()
+                        _rebind_caller_local(obj, _hp)
+                        return _hp
                     else:
                         # unsupported type for hp; attempt best-effort registration
                         try:
@@ -780,11 +860,15 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                             if new_log_dir:
                                 _update_log_directory(new_log_dir)
 
-                            return get_hyperparams()
+                            _hp = get_hyperparams()
+                            _rebind_caller_local(obj, _hp)
+                            return _hp
                         except Exception:
                             raise ValueError('Unsupported hyperparams object; provide dict or YAML path')
 
-                return get_hyperparams()
+                _hp = get_hyperparams()
+                _rebind_caller_local(obj, _hp)
+                return _hp
             except Exception:
                 # bubble up original error
                 raise
@@ -795,22 +879,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 # ##############################################################################################################
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
-
-def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
-    """Start WeightsLab services.
-
-    Args:
-        serving_cli: Start the interactive CLI server.
-        serving_grpc: Start the gRPC server.
-        **kwargs: Extra server options passed to underlying backends.
-    """
-
-    if serving_grpc:
-        grpc_serve(**kwargs)
-
-    if serving_cli:
-        cli_serve(**kwargs)
-
 
 def _move_to_cpu(value: Any) -> Any:
     """Recursively move tensor containers to CPU."""
@@ -889,6 +957,22 @@ def _release_gpu_resources() -> None:
                 pass
 
 
+def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
+    """Start WeightsLab services.
+
+    Args:
+        serving_cli: Start the interactive CLI server.
+        serving_grpc: Start the gRPC server.
+        **kwargs: Extra server options passed to underlying backends.
+    """
+
+    if serving_grpc:
+        grpc_serve(**kwargs)
+
+    if serving_cli:
+        cli_serve(**kwargs)
+
+
 def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
     """Keep process alive while background WeightsLab services are running.
 
@@ -912,7 +996,7 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down WeightsLab services.")
 
-#  Signal Definition & Computation Helpers
+
 def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
     Decorator that registers a custom signal function.
@@ -1361,7 +1445,11 @@ def save_signals(
             return
 
     # Convert tensors to numpy for lightweight buffering
-    batch_ids_np = batch_ids.detach().cpu().numpy().astype(str) if isinstance(batch_ids, th.Tensor) else np.asarray(batch_ids)
+    # Convert tensors to numpy for lightweight buffering, forcing to strings for consistent ledger indexing
+    if isinstance(batch_ids, th.Tensor):
+        batch_ids_np = batch_ids.detach().cpu().numpy().astype(str)
+    else:
+        batch_ids_np = np.asarray(batch_ids).astype(str)
     if preds is not None:
         pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
         if np.issubdtype(pred_np.dtype, np.floating):
@@ -1420,6 +1508,195 @@ def save_signals(
         losses=losses_data,
         step=step
     )
+
+
+def get_active_group_mask(
+    group_ids: list[str],
+    origin: str,
+) -> th.Tensor:
+    """Return a boolean mask (one entry per group_id) indicating active (non-tainted) groups.
+
+    A group is "tainted" when at least one of its members has been marked as
+    discarded in the UI. Tainted groups should be excluded from group-level loss
+    computations so the model is not updated based on broken pairs/triplets.
+
+    This should be called **before** `.mean()` in your training step, so the
+    gradient for tainted groups is properly zeroed, not just suppressed in the UI.
+
+    Args:
+        group_ids: List of group ID strings for the current batch (one per pair/group).
+        origin: Dataset split name matching the ledger (e.g. 'train_loader').
+
+    Returns:
+        A float tensor of shape (len(group_ids),) with 1.0 for active groups
+        and 0.0 for tainted groups. Safe to multiply against your loss vector.
+
+    Example::
+
+        # Cosine embedding loss — one value per pair in the batch
+        loss_embed = loss_cosine(e1, e2, y)            # shape: (B/2,)
+        group_mask = wl.get_active_group_mask(group_ids, origin="train_loader")
+        # Zero out tainted pairs so they don't update weights
+        n_active = group_mask.sum().clamp(min=1)
+        loss_embed = (loss_embed * group_mask).sum() / n_active
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    group_ids = [str(g) for g in group_ids]
+    mask = th.ones(len(group_ids), dtype=th.float32)
+
+    if DATAFRAME_M is None or not hasattr(DATAFRAME_M, 'get_tainted_group_ids'):
+        return mask
+
+    try:
+        tainted = DATAFRAME_M.get_tainted_group_ids(group_ids, origin)
+        if tainted:
+            for i, gid in enumerate(group_ids):
+                if gid in tainted:
+                    mask[i] = 0.0
+    except Exception:
+        pass  # Fail-safe: if check fails, treat all groups as active
+
+    return mask
+
+
+def get_active_sample_mask(
+    sample_ids: list[str],
+    origin: str,
+) -> th.Tensor:
+    """Return a boolean mask (one entry per sample_id) indicating active (non-discarded) samples.
+
+    This ensures that any sample marked as discarded in the UI is immediately
+    excluded from per-sample loss calculations, even if it is already in the
+    current training batch (before the sampler's next epoch refresh).
+
+    Args:
+        sample_ids: List of sample ID strings/ints for the current batch.
+        origin: Dataset split name (e.g. 'train_loader').
+
+    Returns:
+        A float tensor of shape (len(sample_ids),) with 1.0 for active samples
+        and 0.0 for discarded samples.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    sample_ids = [str(sid) for sid in sample_ids]
+    mask = th.ones(len(sample_ids), dtype=th.float32)
+
+    if DATAFRAME_M is None or not hasattr(DATAFRAME_M, 'get_discarded_sample_ids'):
+        return mask
+
+    try:
+        discarded_ids = DATAFRAME_M.get_discarded_sample_ids(sample_ids, origin)
+        if discarded_ids:
+            for i, sid in enumerate(sample_ids):
+                if sid in discarded_ids:
+                    mask[i] = 0.0
+    except Exception:
+        pass
+
+    return mask
+
+
+def save_group_signals(
+    signals: dict,
+    group_ids: list[str] | th.Tensor,
+    origin: str = 'train',
+    step: int | None = None,
+    log: bool = True
+):
+    """
+    Save and broadcast group-level statistics (e.g., contrastive loss for an image pair).
+
+    Args:
+        signals: Dictionary of {name: value} metrics for the group.
+        group_ids: List of group IDs the signals belong to.
+        origin: Split name ('train', 'val').
+        step: Optional training step.
+        log: Whether to log to the global metrics dashboard.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    # Get current model step
+    step = _get_step(step=step)
+
+    # Convert to standard format
+    # Convert to standard format, forcing to strings for consistent ledger indexing
+    if isinstance(group_ids, th.Tensor):
+        group_ids = group_ids.detach().cpu().numpy().astype(str).tolist()
+    else:
+        group_ids = [str(gid) for gid in group_ids]
+
+    # Process signals and handle batches
+    batch_signals = {}
+    scalar_signals = {}
+
+    for k, v in signals.items():
+        # Prefix for UI grouping
+        key = k if k.startswith("signals//") else f"signals//{k}"
+
+        # Detect if this is a batch vector matching group_ids
+        val_to_log = v
+
+        if hasattr(v, '__len__') and not isinstance(v, (str, dict)) and len(v) == len(group_ids):
+            if hasattr(v, 'detach'):
+                v = v.detach().cpu().numpy()
+            batch_signals[key] = v
+            val_to_log = np.mean(v)
+        else:
+            if hasattr(v, 'item'):
+                v = v.item()
+            scalar_signals[key] = v
+            val_to_log = v
+
+        # Log mean/scalar to dashboard
+        if log:
+            _log_signal(float(val_to_log), None, k, step=step)
+
+    # --- Group-discard filtering ---
+    # If any member of a group is discarded, skip the group loss for that group.
+    # Per-sample losses (e.g. classification) are still computed since samples stay in the batch.
+    tainted_group_ids: set = set()
+    if DATAFRAME_M is not None and hasattr(DATAFRAME_M, 'get_tainted_group_ids'):
+        try:
+            tainted_group_ids = DATAFRAME_M.get_tainted_group_ids(group_ids, origin)
+        except Exception:
+            pass  # Never block training on best-effort discard check
+
+    # Broadcast to all members in ledger (skip tainted groups)
+    all_updates = []
+    active_group_ids = []
+    for i, gid in enumerate(group_ids):
+        if gid in tainted_group_ids:
+            continue  # Skip: at least one member was discarded; group loss is undefined
+
+        # We also record the last seen step for all members
+        updates = scalar_signals.copy()
+        for k, v_batch in batch_signals.items():
+            updates[k] = v_batch[i]
+
+        if step is not None:
+            updates[SampleStatsEx.LAST_SEEN.value] = step
+
+        all_updates.append(updates)
+        active_group_ids.append(gid)
+
+    if not active_group_ids:
+        return  # All groups were tainted; nothing to write
+
+    # Bulk update for performance (avoids repeated dataframe scans)
+    DATAFRAME_M.update_by_groups_bulk(origin=origin, group_ids=active_group_ids, updates_list=all_updates)
+
+
+def clear_all():
+    """Clear all WeightsLab registries (models, dataloaders, etc.)."""
+    ledgers.clear_all()
 
 
 # ##############################################################################################################
