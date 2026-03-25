@@ -68,10 +68,6 @@ The granular statistics and interactive paradigm enable powerful workflows:
 
 ## Getting Started
 
-> [!IMPORTANT]
-> For detailed installation guide, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
-
-
 ### Installation
 
 Define a Python environment (Python >= 3.10, <3.15)
@@ -91,6 +87,10 @@ Deploy our interface with Docker:
 cd ./ui
 docker compose up -d
 ```
+
+> [!IMPORTANT]
+> For a detailed installation guide, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+
 
 ## Documentation (API + SDK)
 
