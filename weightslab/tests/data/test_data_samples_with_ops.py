@@ -16,12 +16,19 @@ import weightslab as wl
 from torch.utils.data import Dataset
 from unittest.mock import patch
 
+import weightslab.data.data_samples_with_ops as _dswo
 from weightslab.data.data_samples_with_ops import (
     DataSampleTrackingWrapper,
     _has_regex_symbols,
     _match_column_patterns,
     _filter_columns_with_patterns,
 )
+
+
+def _reset_global_uid_state():
+    """Reset module-level UID globals to avoid cross-test contamination."""
+    _dswo._UID_CNT = 0
+    _dswo._GLOBAL_UID_REGISTRY.clear()
 
 
 class SimpleDataset(Dataset):
@@ -101,6 +108,7 @@ class TestDataSampleTrackingWrapperInit(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
@@ -161,6 +169,7 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
@@ -214,6 +223,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
@@ -350,6 +360,7 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
@@ -437,6 +448,7 @@ class TestDataSampleTrackingWrapperStateDict(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=5)
 
@@ -484,6 +496,7 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
@@ -574,6 +587,7 @@ class TestDataSampleTrackingWrapperDuplicateDetection(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
 
         # Initialize HP
@@ -626,6 +640,7 @@ class TestDataSampleTrackingWrapperEquality(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=10)
 
@@ -689,6 +704,7 @@ class TestDataSampleTrackingWrapperAsRecords(unittest.TestCase):
 
     def setUp(self):
         """Create a temporary directory for logs."""
+        _reset_global_uid_state()
         self.temp_dir = tempfile.mkdtemp()
         self.dataset = SimpleDataset(size=5)
 
