@@ -92,7 +92,7 @@ weightslab = "weightslab.cli:main"
 Homepage = "https://github.com/GrayboxTech/weightslab"
 
 [tool.setuptools.package-data]
-"weightslab.ui" = ["*.yml", "*.yaml"]
+"weightslab.ui" = ["*.yml", "*.yaml", "*.sh", "*.ps1"]
 
 [tool.setuptools.packages.find]
 where = ["."]
