@@ -17,6 +17,8 @@ Install WeightsLab
 Create and activate a virtual environment, then install WeightsLab in editable mode.
 
 .. code-block:: bash
+   cd ui
+   docker compose -f docker/docker-compose.yml up -d
 
    # From the repository root
    python -m venv .venv
@@ -26,17 +28,6 @@ Create and activate a virtual environment, then install WeightsLab in editable m
    # source .venv/bin/activate
 
    python -m pip install weightslab
-
-
-Use Weightslab Studio (UI)
------------------------
-
-For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the Weights Studio web app via Docker Compose. This will start both the UI and Envoy proxy, which routes data to your training script's gRPC server.:
-Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
-
-.. code-block:: bash
-   cd ui
-   docker compose -f docker/docker-compose.yml up -d
 
 
 Optional: build docs locally
@@ -84,6 +75,17 @@ Useful first commands:
 - ``pause`` / ``resume``: toggle training state safely.
 - ``hp`` and ``hp <name>``: inspect hyperparameter sets.
 - ``set_hp [hp_name] <key.path> <value>``: update one hyperparameter value.
+
+
+Use Weightslab Studio (UI)
+-----------------------
+
+For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the Weights Studio web app via Docker Compose. This will start both the UI and Envoy proxy, which routes data to your training script's gRPC server.:
+Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
+
+.. code-block:: bash
+
+   docker compose -f docker/docker-compose.yml up -d
 
 
 Recommended next reading
