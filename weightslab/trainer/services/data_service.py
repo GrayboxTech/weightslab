@@ -717,10 +717,22 @@ class DataService:
             raw_shape, data_stats = [], []
             raw_data_bytes = b""
 
-            # ====== Step 1: Load dataset ======
-            dataset = self._get_dataset(origin)
+            # ====== Step 1: Request mode ======
+            metadata_only_request = (
+                (not bool(request.include_raw_data))
+                and (not bool(getattr(request, 'include_transformed_data', False)))
+                and bool(list(getattr(request, 'stats_to_retrieve', [])))
+            )
 
-            # ====== Step 2: Determine task type ======
+            skip_label_for_request = metadata_only_request
+            skip_prediction_for_request = metadata_only_request
+
+            # ====== Step 2: Load dataset lazily (avoid unnecessary IO for metadata-only) ======
+            needs_dataset = bool(request.include_raw_data) or (not skip_label_for_request)
+            dataset = self._get_dataset(origin) if needs_dataset else None
+
+            # ====== Step 3: Determine task type ======
+
             label = row.get(SampleStatsEx.TARGET.value)
             is_label_empty = False
             if label is None:
@@ -732,7 +744,7 @@ class DataService:
                 if math.isnan(label):
                     is_label_empty = True
 
-            if is_label_empty and dataset:
+            if is_label_empty and dataset and not skip_label_for_request:
                 label = load_label(dataset, sample_id)
 
             ds = getattr(dataset, "wrapped_dataset", dataset)
@@ -749,6 +761,9 @@ class DataService:
             # 3. Explicit property on Model
             elif model and hasattr(model, "task_type") and getattr(model, "task_type"):
                 task_type = str(getattr(model, "task_type")).strip().lower()
+            elif metadata_only_request:
+                # Metadata-only: avoid expensive label-based heuristics.
+                task_type = "unknown"
             else:
                 # 4. Safe Heuristic evaluation
                 task_type = "classification"  # Default fallback
@@ -831,7 +846,7 @@ class DataService:
             )
 
             # ====== Step 7: Process labels ======
-            if task_type != "classification":
+            if not skip_label_for_request and task_type != "classification":
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
                 label_arr = to_numpy_safe(label_raw)
                 if label_arr is None:
@@ -907,7 +922,7 @@ class DataService:
                             thumbnail=b""
                         )
                     )
-            elif label is not None:
+            elif not skip_label_for_request and label is not None:
                 # Classification / other scalar-like labels
 
                 # Handle dictionary labels (e.g. detection targets)
@@ -956,6 +971,9 @@ class DataService:
 
             # ====== Step 8: Process predictions ======
             pred = row.get(SampleStatsEx.PREDICTION.value)
+            if skip_prediction_for_request:
+                pred = None
+
             if task_type != "classification" and pred is not None:
                 try:
                     pred_arr = np.asarray(pred)
@@ -1030,7 +1048,7 @@ class DataService:
                     original_size = middle_pil.size
                     target_width = original_size[0]
                     target_height = original_size[1]
-                    # Check for explicit aspect ratio on dataset (favors true ratio over squashed model input)
+                 # Check for explicit aspect ratio on dataset (favors true ratio over squashed model input)
                     aspect_ratio = getattr(ds, "aspect_ratio", None)
                     if aspect_ratio is not None:
                         # Normalize target dimensions to honor explicit ratio before scaling
