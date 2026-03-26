@@ -6,7 +6,7 @@ on:
     tags: [ 'v*' ]
   pull_request:
     branches: [ main, dev ]
-    types: [ opened, reopened, ready_for_review ]
+    types: [opened, reopened, ready_for_review, synchronize]
   workflow_dispatch:
 
 jobs:
@@ -24,6 +24,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Ensure cache directories exist
+        run: |
+          mkdir -p ~/.cache/pip
+          mkdir -p ~/.cache/ruff
 
       - name: Ensure cache directories exist
         run: |
