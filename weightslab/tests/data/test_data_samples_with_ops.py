@@ -44,7 +44,7 @@ class SimpleDataset(Dataset):
     def __getitem__(self, idx):
         # Return random data with shape (3, 32, 32) to simulate images
         data = np.random.randn(3, 32, 32).astype(np.float32)
-        uid = np.random.randn(1)
+        uid = str(idx) # Consistent with string UID preference
         label = idx % 10  # Simulate 10 classes
         return data, uid, label
 
@@ -129,6 +129,8 @@ class TestDataSampleTrackingWrapperInit(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -190,6 +192,8 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -244,17 +248,20 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
     def test_binary_tag_labeling(self):
         """Test tag-based labeling with individual boolean tag columns.
-        
+
         Tags are now stored as individual boolean columns (tags_tagname) instead of
         a single comma-separated string. This test verifies that tagging creates the
         appropriate columns and that the tags are correctly stored and retrieved.
         """
 
+        self.temp_dir = tempfile.mkdtemp()
         tags_mapping = {"target_tag": 1, "non_target_tag": 0}
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -276,7 +283,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
 
         # Set target_tag for first sample
         wrapper.set(sample_id=sample_id_0, stat_name="tags", value='target_tag')
-        
+
         # Verify tag column was created
         df = wrapper.get_dataframe()
         self.assertIn('tag:target_tag', df.columns, "tag:target_tag column should exist")
@@ -293,12 +300,13 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
 
     def test_binary_tag_labeling_single_tag(self):
         """Test binary tag-based labeling with a single target tag.
-        
+
         When tags_mapping has only 1 tag, it's binary classification:
         - tag matches → 1
         - tag doesn't match (or no tags) → 0
         """
 
+        self.temp_dir = tempfile.mkdtemp()
         tags_mapping = {"target_tag": 1}  # Binary: only 1 tag in mapping
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -314,20 +322,21 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         # Set target_tag on sample 0
         wrapper.set(sample_id=sample_id_0, stat_name="tags", value='target_tag')
 
-        # Verify tags were set  
+        # Verify tags were set
         df = wrapper.get_dataframe()
         self.assertIn('tag:target_tag', df.columns)
         self.assertEqual(df.loc[sample_id_0, 'tag:target_tag'], 1)
 
     def test_tag_parsing_comma_and_semicolon(self):
         """Test that tags can be separated by commas, semicolons, or both.
-        
+
         The tag parsing should handle:
         - "tag1,tag2,tag3" → creates tag:tag1, tag:tag2, tag:tag3
         - "tag1;tag2;tag3" → creates tag:tag1, tag:tag2, tag:tag3
         - "tag1, tag2; tag3" → creates tag:tag1, tag:tag2, tag:tag3 (trims whitespace)
         """
 
+        self.temp_dir = tempfile.mkdtemp()
         tags_mapping = {"tag1": 1, "tag2": 2, "tag3": 3}
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
@@ -381,6 +390,8 @@ class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -469,6 +480,8 @@ class TestDataSampleTrackingWrapperStateDict(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -517,6 +530,8 @@ class TestDataSampleTrackingWrapperUtilities(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -607,6 +622,8 @@ class TestDataSampleTrackingWrapperDuplicateDetection(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary files."""
         import shutil
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 

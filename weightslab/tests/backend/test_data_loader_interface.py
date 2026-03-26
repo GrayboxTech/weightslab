@@ -1,7 +1,9 @@
 import math
+import tempfile
 import unittest
 import torch
 import numpy as np
+import pandas as pd
 
 from torch.utils.data import TensorDataset, DataLoader, Subset, Dataset, get_worker_info
 from torchvision import datasets, transforms
@@ -141,6 +143,92 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         self.assertGreaterEqual(len(train_worker_ids), 2)
         self.assertGreaterEqual(len(test_worker_ids), 2)
+
+    def test_sampler_skips_new_discards_mid_epoch(self):
+        dataset = TensorDataset(
+            torch.arange(6, dtype=torch.float32).unsqueeze(1),
+            torch.arange(6, dtype=torch.long),
+        )
+        root_log_dir = tempfile.mkdtemp()
+
+        try:
+            iface = DataLoaderInterface(
+                dataset,
+                batch_size=2,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=False,
+                root_log_dir=root_log_dir,
+                compute_hash=False,
+            )
+
+            _, _, labels_1 = next(iface)
+            self.assertEqual(labels_1.tolist(), [0, 1])
+
+            discarded_uid = str(iface.tracked_dataset.unique_ids[2])
+            ledgers.get_dataframe().upsert_df(
+                pd.DataFrame([
+                    {"sample_id": discarded_uid, "discarded": True}
+                ]).set_index("sample_id"),
+                force_flush=True,
+            )
+
+            _, _, labels_2 = next(iface)
+            _, _, labels_3 = next(iface)
+
+            self.assertEqual(labels_2.tolist(), [3, 4])
+            self.assertEqual(labels_3.tolist(), [5])
+        finally:
+            import shutil
+            shutil.rmtree(root_log_dir, ignore_errors=True)
+
+    def test_sampler_skips_new_discards_mid_epoch_with_shuffle(self):
+        dataset = TensorDataset(
+            torch.arange(8, dtype=torch.float32).unsqueeze(1),
+            torch.arange(8, dtype=torch.long),
+        )
+        root_log_dir = tempfile.mkdtemp()
+
+        try:
+            seed_everything(123)
+            iface = DataLoaderInterface(
+                dataset,
+                batch_size=2,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=False,
+                root_log_dir=root_log_dir,
+                compute_hash=False,
+            )
+
+            iterator = iter(iface.dataloader)
+            _, _, labels_1 = next(iterator)
+            first_batch_labels = labels_1.tolist()
+
+            remaining_candidates = sorted(set(range(len(dataset))) - set(first_batch_labels))
+            self.assertTrue(remaining_candidates, "Expected at least one label outside the first batch")
+
+            discarded_label = remaining_candidates[0]
+            discarded_uid = str(iface.tracked_dataset.unique_ids[discarded_label])
+            ledgers.get_dataframe().upsert_df(
+                pd.DataFrame([
+                    {"sample_id": discarded_uid, "discarded": True}
+                ]).set_index("sample_id"),
+                force_flush=True,
+            )
+
+            remaining_labels = []
+            for _, _, batch_labels in iterator:
+                remaining_labels.extend(batch_labels.tolist())
+
+            self.assertNotIn(discarded_label, remaining_labels)
+            self.assertEqual(
+                sorted(first_batch_labels + remaining_labels),
+                [label for label in range(len(dataset)) if label != discarded_label],
+            )
+        finally:
+            import shutil
+            shutil.rmtree(root_log_dir, ignore_errors=True)
 
 
 class TestDataLoaderReproducibility(unittest.TestCase):

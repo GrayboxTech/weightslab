@@ -24,7 +24,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+
+      - name: Ensure cache directories exist
+        run: |
+          mkdir -p ~/.cache/pip
+          mkdir -p ~/.cache/ruff
 
       - name: Ensure cache directories exist
         run: |
@@ -197,39 +201,109 @@ jobs:
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m unittest discover -s ./weightslab/tests/integrations -v
 
-      - name: Trigger WeightsStudio CI
-        if: ${{ matrix.python-version == '3.10' && ((github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev'))) }}
-        env:
-          WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-        run: |
-          if [ -z "${WS_TOKEN}" ]; then
-            echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
-            exit 0
-          fi
-
-          TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
-
-          # Trigger the ws-ci workflow in the weights_studio repository on the matching target branch.
-          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
-            -H "Authorization: Bearer ${WS_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d "{\"ref\":\"${TARGET_BRANCH}\"}"
-
-          echo "WeightsStudio workflow dispatch requested successfully on ${TARGET_BRANCH}."
-
-  weightsstudio-ci:
+  trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
-    name: WeightsStudio CI
+    name: Trigger WeightsStudio CI (workflow_dispatch)
     needs: test
-    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
-    with:
-      weightslab_branch: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve target branch
+        id: resolve-target
+        run: |
+          TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
+          echo "branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch ws-ci workflow in weights_studio
+        uses: actions/github-script@v7
+        env:
+          TARGET_BRANCH: ${{ steps.resolve-target.outputs.branch }}
+        with:
+          github-token: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
+          script: |
+            const owner = 'GrayboxTech';
+            const repo = 'weights_studio';
+            const workflow_id = 'ws-ci.yml';
+            const branch = process.env.TARGET_BRANCH;
+
+            if (!branch) {
+              core.setFailed('Missing TARGET_BRANCH');
+              return;
+            }
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const dispatchTs = new Date().toISOString();
+
+            core.info(`Dispatching ${workflow_id} on ${owner}/${repo}@${branch}`);
+
+            await github.request('POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', {
+              owner,
+              repo,
+              workflow_id,
+              ref: branch,
+            });
+
+            let runId = null;
+
+            for (let attempt = 1; attempt <= 60; attempt++) {
+              const runsResp = await github.request('GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs', {
+                owner,
+                repo,
+                workflow_id,
+                event: 'workflow_dispatch',
+                branch,
+                per_page: 20,
+              });
+
+              const runs = runsResp.data.workflow_runs || [];
+              const candidates = runs
+                .filter((run) => run.created_at >= dispatchTs)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              if (candidates.length > 0) {
+                runId = candidates[0].id;
+                core.info(`Detected ws-ci run id: ${runId}`);
+                break;
+              }
+
+              core.info(`Waiting for ws-ci run to appear (attempt ${attempt}/60)...`);
+              await sleep(5000);
+            }
+
+            if (!runId) {
+              core.setFailed('Could not detect ws-ci run in weights_studio after dispatch.');
+              return;
+            }
+
+            for (let attempt = 1; attempt <= 120; attempt++) {
+              const runResp = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', {
+                owner,
+                repo,
+                run_id: runId,
+              });
+
+              const status = runResp.data.status || '';
+              const conclusion = runResp.data.conclusion || '';
+
+              core.info(`ws-ci status: ${status}, conclusion: ${conclusion}`);
+
+              if (status === 'completed') {
+                if (conclusion === 'success') {
+                  core.info('WeightsStudio ws-ci completed successfully.');
+                  return;
+                }
+                core.setFailed(`WeightsStudio ws-ci failed with conclusion: ${conclusion}`);
+                return;
+              }
+
+              await sleep(10000);
+            }
+
+            core.setFailed('Timed out waiting for WeightsStudio ws-ci completion.');
 
   build-and-publish-dev:
     if: ${{ github.event_name == 'pull_request' }}
     name: Build & Publish Dev (TestPyPI)
-    needs: weightsstudio-ci
+    needs: trigger-weightsstudio-dispatch
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import threading
 
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
@@ -35,6 +35,7 @@ from weightslab.data.sample_stats import (
 
 
 # Global logger
+logging.getLogger("PIL").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 global _UID_CNT
 _UID_CNT = 0
@@ -136,7 +137,7 @@ class DataSampleTrackingWrapper(Dataset):
         tags_mapping: Optional[Dict[str, int]] = None,
         stats_store: Optional[H5DataFrameStore] = None,
         enable_h5_persistence: bool = True,
-        loader_name: Optional[str] = 'unknown',
+        loader_name: Optional[str] = None,
         array_autoload_arrays: bool = False,
         array_return_proxies: bool = True,
         array_use_cache: bool = True,
@@ -146,6 +147,15 @@ class DataSampleTrackingWrapper(Dataset):
         keep_leakages: bool = False,
         **_,
     ):
+        if len(wrapped_dataset) == 0:
+            logger.warning(f"Wrapped dataset for split '{loader_name}' is empty. DataSampleTrackingWrapper will be initialized but no samples will be tracked.")
+            raise ValueError("Wrapped dataset is empty. Please provide a non-empty dataset to DataSampleTrackingWrapper.")
+
+        # Helper maps for grouped data
+        self._sid_to_physical_idx = {}
+        self._sid_to_member_rank = {}
+        self.physical_uids = [] # Representative ID for each physical index (used for DataLoader)
+
         # Set name
         self.loader_name = loader_name
 
@@ -223,6 +233,8 @@ class DataSampleTrackingWrapper(Dataset):
         # Detect dataset split for H5 storage
         original_ds = wrapped_dataset.dataset if isinstance(wrapped_dataset, Subset) else wrapped_dataset
         split = self.loader_name or _detect_dataset_split(original_ds)
+        if split == 'unknown' and not self.loader_name:
+            split = f"unknown_{type(original_ds).__name__.lower()}_{id(original_ds)}"
         for idx, uid in enumerate(self.unique_ids):
             uid_str = str(uid)
             if uid_str not in seen_uid:
@@ -277,63 +289,92 @@ class DataSampleTrackingWrapper(Dataset):
 
         # Initialize DataFrame as single source of truth
         # Start with defaults for all UIDs (single dict build per row to trim overhead)
-        sample_ids = [str(uid) for uid in self.unique_ids]
+        # Note: We now iterate through PHYSICAL indices and expand rows if multiple UIDs are found.
+        # This decouples len(self) from len(wrapped_dataset).
 
         default_data = []
-        uids = {}
+        expanded_uids = []
+        physical_uids = []
+
         logger.info(
-            f"Preloading sample statistics for {len(sample_ids)} samples in split '{self._dataset_split}' with preload_labels={preload_labels}, preload_metadata={preload_metadata}, preload_uids={preload_uids}..." +
-            f" This may take some time depending on the dataset and preload options. Set preload options to False to skip and initialize stats on demand (will be slower on first access but faster initialization)."
+            f"Preloading sample statistics for PHYSICAL indices in split '{split}' with preload_labels={preload_labels}, preload_metadata={preload_metadata}..."
         )
-        for sid in tqdm(sample_ids, desc=f"Preloading samples for split '{self._dataset_split}'"):
-            data = SampleStats.DEFAULTS.copy()  # Start with default stats for this sample
-            data.update(
-                {
-                        SampleStatsEx.SAMPLE_ID.value: sid,
-                        SampleStatsEx.ORIGIN.value: self._dataset_split
-                }
-            )
-            if preload_labels:
-                # Attempt to load label for this sample and store in defaults (will be None if not available)
-                try:
-                    label = load_label(self, sid)
-                    data[SampleStatsEx.TARGET.value] = label
-                except Exception as e:
-                    logger.debug(f"Could not preload label for sample {sid}: {e}")
 
-            if preload_metadata:
-                # Attempt to load metadata for this sample and store in defaults (will be None if not available)
-                try:
-                    metadata = load_metadata(self, sid)
-                    if metadata is not None:
-                        data.update(metadata)
-                        
-                        # Generic Metadata Exploder: 
-                        # Automatically flatten nested dicts into sortable ledger columns.
-                        # e.g. metadata = {"relation": {"id": 1}} -> column "relation:id" = 1
-                        if isinstance(metadata, dict):
-                            for k, v in list(metadata.items()):
-                                if isinstance(v, dict):
-                                    for sub_key, sub_val in v.items():
-                                        data[f"{k}:{sub_key}"] = sub_val
-                except Exception as e:
-                    logger.debug(f"Could not preload metadata for sample {sid}: {e}")
+        n_physical = len(wrapped_dataset)
+        for p_idx in tqdm(range(n_physical), desc=f"Initializing ledger for split '{split}'"):
+            # 1. Fetch metadata to detect groups
+            # We use physical index here since we are building the map
+            # We bypass the wrapper and call wrapped_dataset directly to avoid recursion
+            try:
+                raw_item = wrapped_dataset[p_idx]
+            except Exception as e:
+                logger.error(f"Failed to load physical index {p_idx} during initialization: {e}")
+                continue
 
-            if preload_uids:
-                # Attempt to load metadata for this sample and store in defaults (will be None if not available)
-                try:
-                    uid = load_uid(self, sid)
-                    uid = str(uid)  # Ensure UID is a string for consistent handling
-                    data[SampleStatsEx.SAMPLE_ID.value] = uid
-                    uids[sid] = uid
-                except Exception as e:
-                    logger.debug(f"Could not preload sample_id for sample {sid}: {e}")
-            default_data.append(data)
+            # Parse standard format: (data, target) or (data, uid, target) or (data, uid, target, metadata)
+            metadata = {}
+            if isinstance(raw_item, tuple) and len(raw_item) > 3:
+                # Merge all metadata dicts found from index 3 onwards
+                for m in raw_item[3:]:
+                    if isinstance(m, dict):
+                        metadata.update(m)
 
-        # Map new uids if exist
-        if len(uids) > 0:
-            self.unique_ids = list(uids.values())
-            self.unique_id_to_index = {self.unique_ids[i]: i for i in range(len(self.unique_ids))}
+            # Detect UIDs from metadata or generate them
+            uids = metadata.get('uids')
+            if uids is None:
+                # Fallback to the single UID that would have been generated
+                # (We use the one already generated in _generate_uids for this physical index)
+                uids = [str(self.unique_ids[p_idx])]
+
+            # Detect Group ID
+            group_id = metadata.get('group_id')
+            if group_id is None:
+                group_id = uids[0] # Default group_id to first sample ID
+
+            # Store first UID as the representative for this physical index
+            physical_uids.append(uids[0])
+
+            # 2. Register each sample in this group
+            for rank, sid in enumerate(uids):
+                sid = str(sid)
+                expanded_uids.append(sid)
+                self._sid_to_physical_idx[sid] = p_idx
+                self._sid_to_member_rank[sid] = rank
+
+                # Build ledger row
+                row = SampleStats.DEFAULTS.copy()
+                row.update({
+                    SampleStatsEx.SAMPLE_ID.value: sid,
+                    SampleStatsEx.ORIGIN.value: split,
+                    SampleStatsEx.GROUP_ID.value: str(group_id),
+                    SampleStatsEx.MEMBER_RANK.value: rank
+                })
+
+                # Preload labels/targets if requested
+                if preload_labels:
+                    # In grouped cases, the target might be a list matching UIDs
+                    target_payload = raw_item[2] if isinstance(raw_item, tuple) and len(raw_item) > 2 else None
+                    if isinstance(target_payload, (list, tuple)) and len(target_payload) == len(uids):
+                        row[SampleStatsEx.TARGET.value] = target_payload[rank]
+                    else:
+                        row[SampleStatsEx.TARGET.value] = target_payload
+
+                # Apply metadata flattening
+                if metadata:
+                    # Do not overwrite standard managed keys with raw un-casted metadata payload
+                    safe_meta = {k: v for k, v in metadata.items() if k not in {SampleStatsEx.GROUP_ID.value, SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.ORIGIN.value}}
+                    row.update(safe_meta)
+                    for k, v in list(safe_meta.items()):
+                        if isinstance(v, dict):
+                            for sub_key, sub_val in v.items():
+                                row[f"{k}:{sub_key}"] = sub_val
+
+                default_data.append(row)
+
+        # Update the unique_ids array to reflect the expanded (flat) sample set
+        self.unique_ids = np.array(expanded_uids, dtype=object)
+        self.unique_id_to_index = {uid: i for i, uid in enumerate(self.unique_ids)}
+        self.physical_uids = np.array(physical_uids, dtype=object)
 
         # Register this split with the global ledger manager (shared across loaders) and load existing data
         if ledger_manager != None:
@@ -386,14 +427,14 @@ class DataSampleTrackingWrapper(Dataset):
 
     def __getitem__(self, index: int, id: int = None):
         if index is None and id is not None:
-            index = self.unique_id_to_index[id]
-        if index is not None and id is None:
-            id = self.unique_ids[index]
-        return self._getitem_raw(index=index)
+            index = self.unique_id_to_index.get(id)
+        # We don't infer ID from index here because we want _getitem_raw to know
+        # if this was a bulk call (index only) or an individual call (ID provided).
+        return self._getitem_raw(index=index, id=id)
 
     def __len__(self):
-        # wrapped_dataset is already deduplicated, just subtract denied samples
-        return len(self.wrapped_dataset)
+        # We return the number of PHYSICAL items (groups) to the DataLoader
+        return len(self.physical_uids)
 
     def _getitem_raw(self, index: int = None, id: int = None):
         """
@@ -403,36 +444,60 @@ class DataSampleTrackingWrapper(Dataset):
          - If it returns two elements (data, label), we return (data, id, label).
          - If it returns more than two elements, we assume the format is (data, uids, targets, **metadata) and return (data, id, target, *metadata).
            In this case, we also override the target with tag-based labels if use_tags is enabled.
-
-         The unique ID is determined by the provided index or id parameter. If both are provided, index takes precedence.
-         The method ensures consistent handling of different dataset output formats and integrates tag-based labeling when configured.
         """
-        if index is None and id is not None:
-            index = self.unique_id_to_index[id]
-        data = self.wrapped_dataset[index]  # Get format (data, uids, targets, **metadata)
-        id = self.unique_ids[index]
+        # Distinguish between Individual Access (id provided)
+        # and Bulk Access (index only, e.g. from DataLoader)
+        if id is None:
+            # Resolve id from physical index using our representative map
+            # This ensures we always apply plucking/normalization logic
+            if index < len(self.physical_uids):
+                id = self.physical_uids[index]
+            else:
+                # Fallback to direct raw access if index out of bounds for physical map
+                return self.wrapped_dataset[index]
 
-        # Ensure data is a tuple for consistent handling
-        if not isinstance(data, tuple):
-            data = (data,)
-            raise ValueError("Unexpected empty data returned by wrapped_dataset.__getitem__")
-        elif len(data) == 1:  # For single element (unsupervised): return (item, id)
-            return data[0], id
-        elif len(data) == 2:  # For (data, label) format: return (data, id, label)
-            return data[0], id, data[1]
+        # Individual/Plucked access
+        sid = str(id)
+        p_idx = self._sid_to_physical_idx.get(sid)
+        rank = self._sid_to_member_rank.get(sid, 0)
 
-        # Element extraction
-        # # First, always the input data
-        item = data[0]
+        if p_idx is None:
+            # Fallback if ID is not in grouped map
+            p_idx = index
+            rank = 0
 
-        # # Second, if multiple elements: second is uids, pass as already updated in self.unique_ids
-        # id = data[1]
+        # 1. Fetch from wrapped dataset
+        data = self.wrapped_dataset[p_idx]
 
-        # # Third, is target/label
-        target = data[2]
+        # 2. Pluck specific member
+        # Standard format: (pixels, target) or (pixels, uids, targets, ...)
+        if isinstance(data, (tuple, list)):
+            pixels = data[0]
+            if id is not None and isinstance(pixels, (list, tuple)) and len(pixels) > rank:
+                item = pixels[rank]
+            else:
+                item = pixels
 
-        # # Finally, any additional elements (e.g., boxes, masks) are metadata
-        rest = data[3:] if len(data) > 3 else ()
+            # Resolve target and 'rest' based on tuple length
+            if len(data) >= 3:
+                # WeightsLab format: (pixels, uids, targets, ...)
+                target = data[2]
+                rest = data[3:]
+            elif len(data) == 2:
+                # Standard format: (pixels, target)
+                target = data[1]
+                rest = data[2:]
+            else:
+                # Single element (unsupervised)
+                target = None
+                rest = data[1:]
+
+            if id is not None and isinstance(target, (list, tuple)) and len(target) > rank:
+                target = target[rank]
+        else:
+            item = data
+            target = None
+            rest = ()
 
         # For single element (unsupervised): return (item, id)
         # Override target with tag-based label if use_tags is enabled
@@ -600,7 +665,7 @@ class DataSampleTrackingWrapper(Dataset):
         # Use ThreadPoolExecubased on your system (typically CPU count)
         with ThreadPoolExecutor(thread_name_prefix="unique_id_generator") as executor:
             # Submit all tasks
-            futures = {executor.submit(compute_id, idx): idx for idx in range(n_samples)}
+            futures = {executor.submit(compute_id, idx): idx for idx in trange(n_samples, desc="Generating unique IDs", unit="sample")}
 
             # Collect results as they complete
             for future in as_completed(futures):
@@ -870,8 +935,13 @@ class DataSampleTrackingWrapper(Dataset):
     def get_dataframe(self, limit: int = -1) -> pd.DataFrame:
         return self._get_stats_dataframe(limit=limit)
 
-    def get_index_from_sample_id(self, sample_id: int) -> int:
-        return self.unique_id_to_index[sample_id]
+    def get_index_from_sample_id(self, sample_id: str) -> int:
+        return self.unique_id_to_index[str(sample_id)]
+
+    def get_physical_location(self, sample_id: str) -> tuple:
+        """Return (physical_index, member_rank) for a given sample ID."""
+        sid = str(sample_id)
+        return self._sid_to_physical_idx[sid], self._sid_to_member_rank[sid]
 
     def get_sample_id_at_index(self, index: int) -> int:
         return self.unique_ids[index]
