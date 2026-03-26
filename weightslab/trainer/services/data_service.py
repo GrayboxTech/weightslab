@@ -832,10 +832,13 @@ class DataService:
 
             # ====== Step 7: Process labels ======
             if task_type != "classification":
-                if label is None:
-                    label_arr = np.asarray(row.get(SampleStatsEx.TARGET.value))
-                else:
-                    label_arr = label
+                label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
+                label_arr = to_numpy_safe(label_raw)
+                if label_arr is None:
+                    try:
+                        label_arr = np.asarray(label_raw)
+                    except Exception:
+                        label_arr = np.array([])
 
                 # Treat label as segmentation mask -> array stat
                 data_stats.append(

@@ -193,7 +193,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="test_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(10)),
+            samples_ids=[str(i) for i in range(10)],
             sample_origins=["test"] * 10
         )
         
@@ -211,9 +211,9 @@ class TestGRPCTagOperations(unittest.TestCase):
             # Check first 10 samples have the tag
             for sample_id in range(10):
                 if isinstance(df.index, pd.MultiIndex):
-                    value = df.loc[("test", sample_id), tag_col]
+                    value = df.loc[("test", str(sample_id)), tag_col]
                 else:
-                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                     if mask.any():
                         value = df.loc[mask, tag_col].iloc[0]
                     else:
@@ -234,7 +234,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="difficult",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(5)),
+            samples_ids=[str(i) for i in range(5)],
             sample_origins=["test"] * 5
         )
         
@@ -249,7 +249,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="outlier",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(5, 10)),
+            samples_ids=[str(i) for i in range(5, 10)],
             sample_origins=["test"] * 5
         )
         
@@ -274,7 +274,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="test_tag",
             bool_value=False,
             type=SampleEditType.EDIT_REMOVE,
-            samples_ids=list(range(5)),
+            samples_ids=[str(i) for i in range(5)],
             sample_origins=["test"] * 5
         )
         
@@ -288,9 +288,9 @@ class TestGRPCTagOperations(unittest.TestCase):
         
         for sample_id in range(5):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), tag_col]
+                value = df.loc[("test", str(sample_id)), tag_col]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                 else:
@@ -301,9 +301,9 @@ class TestGRPCTagOperations(unittest.TestCase):
         # But samples 5-9 should still have it
         for sample_id in range(5, 10):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), tag_col]
+                value = df.loc[("test", str(sample_id)), tag_col]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                 else:
@@ -324,7 +324,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="",
             bool_value=False,
             type=SampleEditType.EDIT_REMOVE,
-            samples_ids=[0],  # Just need one sample as reference
+            samples_ids=["0"],  # Just need one sample as reference
             sample_origins=["test"]
         )
         
@@ -348,7 +348,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="",
             bool_value=True,  # True = discarded
             type=SampleEditType.EDIT_OVERRIDE,
-            samples_ids=list(range(10, 15)),
+            samples_ids=[str(i) for i in range(10, 15)],
             sample_origins=["test"] * 5
         )
         
@@ -360,9 +360,9 @@ class TestGRPCTagOperations(unittest.TestCase):
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 15):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
@@ -379,7 +379,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="",
             bool_value=False,  # False = restored
             type=SampleEditType.EDIT_OVERRIDE,
-            samples_ids=list(range(10, 13)),
+            samples_ids=[str(i) for i in range(10, 13)],
             sample_origins=["test"] * 3
         )
         
@@ -391,9 +391,9 @@ class TestGRPCTagOperations(unittest.TestCase):
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 13):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
@@ -404,9 +404,9 @@ class TestGRPCTagOperations(unittest.TestCase):
         # But 13-14 should still be discarded
         for sample_id in range(13, 15):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
@@ -427,7 +427,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="batch_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(50)),
+            samples_ids=[str(i) for i in range(50)],
             sample_origins=["test"] * 50
         )
         
@@ -444,13 +444,13 @@ class TestGRPCTagOperations(unittest.TestCase):
         for sample_id in range(50):
             if isinstance(df.index, pd.MultiIndex):
                 try:
-                    value = df.loc[("test", sample_id), tag_col]
+                    value = df.loc[("test", str(sample_id)), tag_col]
                     if value:
                         success_count += 1
                 except KeyError:
                     pass
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                     if value:
