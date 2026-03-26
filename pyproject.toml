@@ -85,8 +85,14 @@ dev = [
   "httpx>=0.27,<1",
 ]
 
+[project.scripts]
+weightslab = "weightslab.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/GrayboxTech/weightslab"
+
+[tool.setuptools.package-data]
+"weightslab.ui" = ["*.yml", "*.yaml"]
 
 [tool.setuptools.packages.find]
 where = ["."]
