@@ -100,15 +100,6 @@ docker compose up -d
 > For a detailed installation guide, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 
-## Documentation (API + SDK)
-
-* <div>
-  <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
-    <p>Documentation</p>
-  </a>
-</div>
-
-
 ## Cookbook
 
 Check out our materials, which include examples ranging from toys to more complex models and experiments.
@@ -118,6 +109,15 @@ Quickstart examples:
 - [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-segmentation)
 - [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-detection)
 - [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch_Lightning/ws-classification)
+
+
+## Documentation (API + SDK)
+
+* <div>
+  <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
+    <p>Documentation</p>
+  </a>
+</div>
 
 
 ## Community
