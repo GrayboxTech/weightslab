@@ -1,6 +1,8 @@
 # Ignore directories
 weightslab.egg-info
 build
+agents
+
 dist
 logs
 root_log_dir
