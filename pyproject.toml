@@ -86,7 +86,7 @@ dev = [
 ]
 
 [project.scripts]
-weightslab = "weightslab.cli:main"
+weightslab = "weightslab.ui_docker_bridge:main"
 
 [project.urls]
 Homepage = "https://github.com/GrayboxTech/weightslab"
