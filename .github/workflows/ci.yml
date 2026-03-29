@@ -199,7 +199,7 @@ jobs:
             echo "::group::Running tests in ${dir}"
             python -m unittest discover -s "${dir}" -p "test_*.py" -t . -v
             echo "::endgroup::"
-          done < <(find "${TEST_ROOT}" -mindepth 1 -maxdepth 1 -type d | sort)
+          done < <(find "${TEST_ROOT}" -mindepth 1 -maxdepth 1 -type d -not -name '__pycache__' | sort)
 
   trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
