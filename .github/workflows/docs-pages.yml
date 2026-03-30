@@ -2,12 +2,12 @@ name: Docs (GitHub Pages) CI
 
 on:
   push:
-    branches: [documentation, dev, main]
+    branches: [documentation]
     tags:
-      - 'v*'
+      - "v*"
   pull_request:
-    branches: [main]
-    types: [opened, reopened, ready_for_review]
+    branches: [main, dev]
+    types: [closed]
   workflow_dispatch:
 
 permissions:
