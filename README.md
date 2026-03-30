@@ -15,7 +15,7 @@
 
 <div align="center">
 
-[![Tests](https://github.com/GrayboxTech/weightslab/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/huggingface/lerobot/actions/workflows/nightly.yml?query=branch%3Amain)
+[![Tests](https://github.com/GrayboxTech/weightslab/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GrayboxTech/weightslab/actions/workflows/ci.yml?query=branch%3Amain)
 [![Python versions](https://img.shields.io/badge/python-3.10|3.15-5865F2?style=flat&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/GrayboxTech/weightslab/blob/main/LICENSE)
 [![Status](https://img.shields.io/badge/status-release-5865F2?style=flat&logoColor=white)](https://pypi.org/project/weightslab/)
@@ -26,10 +26,9 @@
 
 
 
-</pred>
-</pred style="font-style: italic;">
-WeightsLab — Inspect, Edit, and Evolve Neural Networks
-By Graybx.
+<pre>
+<i>WeightsLab — Inspect, Edit, and Evolve Neural Networks
+By Graybx.</i>
 </pre>
 </div>
 
@@ -80,19 +79,20 @@ The granular statistics and interactive paradigm enable powerful workflows:
 Define a Python environment (Python >= 3.10, <3.15)
 ```bash
 python -m venv weightslab_venv
+# Windows PowerShell
 ./weightslab_venv/Scripts/activate
+# Linux/macOS
+# source weightslab_venv/bin/activate
 ```
-Or install directly on your machine.
 
 Install our framework:
 ```bash
 python -m pip install weightslab
 ```
 
-Deploy our interface with Docker:
+Launch the Weights Studio UI (requires Docker):
 ```bash
-cd ./ui
-docker compose up -d
+weightslab ui launch
 ```
 
 > [!IMPORTANT]
