@@ -56,21 +56,25 @@ The granular statistics and interactive paradigm enable powerful workflows:
 
 ## Play our demo below:
 
-<div>
-  <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
-    <p>BDD SANDBOX</p>
-  </a>
-  <a href="https://www.loom.com/share/5d04822a0933427d971d320f64687730">
-    <p>VLA SANDBOX</p>
-  </a>
-</div>
-
+<ul class="tabbed">
+  <li>
+      <a href="https://sandbox.graybx.com/vla">
+      <p style="text-indent:20px;">MNIST</p>
+    </a>
+  </li>
+  <li>
+      <a href="https://sandbox.graybx.com/vla">
+      <p style="text-indent:20px;">VLA</p>
+    </a>
+  </li>
+  <li>
+      <a href="https://sandbox.graybx.com/bdd8k/clean">
+      <p style="text-indent:20px;">BDD</p>
+    </a>
+  </li>
+</ul>
 
 ## Getting Started
-
-> [!IMPORTANT]
-> For detailed installation guide, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
-
 
 ### Installation
 
@@ -92,13 +96,8 @@ cd ./ui
 docker compose up -d
 ```
 
-## Documentation (API + SDK)
-
-* <div>
-  <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
-    <p>Documentation</p>
-  </a>
-</div>
+> [!IMPORTANT]
+> For a detailed installation guide, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 
 ## Cookbook
@@ -110,6 +109,15 @@ Quickstart examples:
 - [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-segmentation)
 - [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-detection)
 - [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch_Lightning/ws-classification)
+
+
+## Documentation (API + SDK)
+
+* <div>
+  <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
+    <p>Documentation</p>
+  </a>
+</div>
 
 
 ## Community

@@ -30,10 +30,10 @@ class _FakeDFManager:
         self.df = df.copy()
 
     def get_combined_df(self):
-        return self.df.copy()
+        return self.df.reset_index().copy()
 
     def get_df_view(self):
-        return self.df.copy()\
+        return self.df.reset_index().copy()\
 
     def flush(self):
         return None
@@ -238,7 +238,7 @@ class TestGRPCWeightsStudioSDKState(unittest.TestCase):
         )
 
         df_manager = _FakeDFManager(df)
-        ctx = _FakeCtx(components={})
+        ctx = _FakeCtx(components={"df_manager": df_manager})
 
         ds = DataService.__new__(DataService)
         ds._ctx = ctx
@@ -265,7 +265,7 @@ class TestGRPCWeightsStudioSDKState(unittest.TestCase):
         servicer = self._make_servicer_with_real_data_service(data_service)
 
         request = pb2.DataEditsRequest(
-            stat_name=SampleStatsEx.TAG.value,
+            stat_name="tags",
             string_value="focus",
             float_value=0,
             bool_value=False,

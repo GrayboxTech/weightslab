@@ -1,6 +1,4 @@
-# Global Docker Compose configuration for Weights Studio
 services:
-  # Envoy proxy for gRPC-Web
   envoy:
     image: envoyproxy/envoy:v1.28-latest
     container_name: weights_studio_envoy
@@ -8,7 +6,7 @@ services:
       - "${ENVOY_PORT:-8080}:${ENVOY_PORT:-8080}"
       - "${ENVOY_ADMIN_PORT:-9901}:${ENVOY_ADMIN_PORT:-9901}"
     volumes:
-      - ../envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ${WS_ENVOY_CONFIG}:/etc/envoy/envoy.yaml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: [ "/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml" ]
@@ -22,7 +20,6 @@ services:
       - weights_studio_network
     restart: unless-stopped
 
-  # Weights Studio frontend (production static server)
   weights_studio:
     image: guillaumep2705/weightslab:latest
     container_name: weights_studio_frontend
