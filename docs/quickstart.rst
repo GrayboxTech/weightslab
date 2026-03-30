@@ -9,38 +9,33 @@ Prerequisites
 
 - Python 3.10+ installed.
 - A virtual environment tool (``venv`` or Conda).
+- `Docker <https://docs.docker.com/get-docker/>`_ installed and running (required for the UI only).
 - Your training project available locally.
 
 Install WeightsLab
 ------------------
 
-Create and activate a virtual environment, then install WeightsLab in editable mode.
+Create and activate a virtual environment, then install WeightsLab from PyPI:
 
 .. code-block:: bash
 
-   # From the repository root
    python -m venv .venv
+
+   # Linux / macOS
+   source .venv/bin/activate
    # Windows PowerShell
-   .\.venv\Scripts\Activate.ps1
-   # Linux/macOS
-   # source .venv/bin/activate
+   # .\.venv\Scripts\Activate.ps1
 
-   python -m pip install weightslab
-
-
-Optional: build docs locally
-----------------------------
-
-.. code-block:: bash
-
-   pip install -r docs/requirements.txt
-   sphinx-build -b html docs docs/_build/html
+   pip install weightslab
 
 
 Launch WeightsLab services from your training script
 ----------------------------------------------------
 
-At minimum, enable gRPC + CLI so the UI and local console can interact with your run. CLI will allow you to inspect and adjust hyperparameters on the fly, modify model architecture, and debug parameters, while gRPC serves data to the UI for monitoring and sample tagging.
+At minimum, enable gRPC + CLI so the UI and local console can interact with your run.
+CLI will allow you to inspect and adjust hyperparameters on the fly, modify model
+architecture, and debug parameters, while gRPC serves data to the UI for monitoring
+and sample tagging.
 
 .. code-block:: python
 
@@ -52,7 +47,7 @@ At minimum, enable gRPC + CLI so the UI and local console can interact with your
    # Keep services alive while training is running.
    wl.keep_serving()
 
-If you want to run the CLI on another process, run:
+If you want to run the CLI on a separate process, run:
 
 .. code-block:: bash
 
@@ -75,15 +70,75 @@ Useful first commands:
 - ``set_hp [hp_name] <key.path> <value>``: update one hyperparameter value.
 
 
-Use Weightslab Studio (UI)
+Use Weights Studio (UI)
 -----------------------
 
-For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the Weights Studio web app via Docker Compose. This will start both the UI and Envoy proxy, which routes data to your training script's gRPC server.:
-Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
+For a full visual workflow (agent, samples, tags, discard/restore, plots), launch the
+Weights Studio web app with:
 
 .. code-block:: bash
 
-   docker compose -f docker/docker-compose.yml up -d
+   weightslab ui launch
+
+This pulls the latest UI images and starts the containers in the background.
+The studio will be accessible at ``http://localhost:5173`` (default port).
+
+When you are done, stop the containers:
+
+.. code-block:: bash
+
+   weightslab ui stop
+
+To fully remove the containers **and** their images (e.g. to free disk space or
+upgrade to a newer release):
+
+.. code-block:: bash
+
+   weightslab ui drop
+
+
+Configure the AI agent
+----------------------
+
+The Weights Studio UI includes an AI agent that can query and manipulate your data
+using natural language. The agent needs an LLM provider to work.
+
+1. Copy the environment template and fill in at least one API key:
+
+.. code-block:: bash
+
+   cp .env.template .env
+
+.. code-block:: bash
+
+   # .env — set one or more keys depending on the provider you want to use
+   OPENROUTER_API_KEY=sk-or-...
+   GOOGLE_API_KEY=AI...
+   OPENAI_API_KEY=sk-...
+
+2. Choose your provider and model in ``agent_config.yaml``:
+
+.. code-block:: yaml
+
+   agent:
+     # 'openrouter', 'google', 'openai', or 'ollama' (local, no key needed)
+     provider: openrouter
+
+     # Remote models
+     openrouter_model: meta-llama/llama-3.3-70b-instruct
+     google_model: gemini-1.5-flash
+     openai_model: gpt-4o-mini
+
+     # Local fallback (requires Ollama running)
+     ollama_model: qwen2.5:3b-instruct
+     fallback_to_local: true
+
+If no API key is provided, the agent falls back to a local
+`Ollama <https://ollama.com/>`_ model (``qwen2.5:3b-instruct``). This requires
+Ollama to be installed and running — slower, but no key needed.
+
+If neither API keys nor Ollama are available, the agent is disabled but
+everything else works normally.
 
 
 Recommended next reading
