@@ -327,6 +327,42 @@ class ExperimentService:
                 message=f"Error: {str(e)}"
             )
 
+    def _get_live_hyper_parameter_descs(self, components):
+        hyper_parameter_descs = list(get_hyper_parameters_pb(self._ctx.hyper_parameters))
+
+        trainer = components.get("trainer") if components else None
+        if trainer is None or not hasattr(trainer, "is_paused"):
+            return hyper_parameter_descs
+
+        is_training = not trainer.is_paused()
+
+        hp_name = self._ctx.exp_name or resolve_hp_name()
+        if hp_name:
+            try:
+                hp = get_hyperparams(hp_name)
+                current_is_training = bool(hp.get("is_training", False)) if hasattr(hp, "get") else None
+                if current_is_training is not None and current_is_training != is_training:
+                    set_hyperparam(name=hp_name, key_path="is_training", value=is_training)
+            except Exception:
+                logger.debug("Failed to resync ledger is_training for %s", hp_name, exc_info=True)
+
+        for desc in hyper_parameter_descs:
+            if desc.name == "is_training" or desc.label in {"is_training", "Is Training"}:
+                desc.type = "number"
+                desc.numerical_value = 1.0 if is_training else 0.0
+                desc.ClearField("string_value")
+                return hyper_parameter_descs
+
+        hyper_parameter_descs.append(
+            pb2.HyperParameterDesc(
+                label="Is Training",
+                name="is_training",
+                type="number",
+                numerical_value=1.0 if is_training else 0.0,
+            )
+        )
+        return hyper_parameter_descs
+
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
     def ExperimentCommand(self, request, context):
@@ -356,7 +392,6 @@ class ExperimentService:
                         key_path="training_steps_to_do",
                         value=hyper_parameters.training_steps_to_do
                     )
-
                 if hyper_parameters.HasField("learning_rate"):
                     set_hyperparam(
                         name=hp_name,
@@ -369,14 +404,12 @@ class ExperimentService:
                         key_path="data.train_loader.batch_size",
                         value=hyper_parameters.batch_size
                     )
-
                 if hyper_parameters.HasField("full_eval_frequency"):
                     set_hyperparam(
                         name=hp_name,
                         key_path="eval_full_to_train_steps_ratio",
                         value=hyper_parameters.full_eval_frequency
                     )
-
                 if hyper_parameters.HasField("checkpont_frequency"):
                     set_hyperparam(
                         name=hp_name,
@@ -485,7 +518,7 @@ class ExperimentService:
         response = pb2.CommandResponse(success=True, message="")
         if request.get_hyper_parameters:
             response.hyper_parameters_descs.extend(
-                get_hyper_parameters_pb(self._ctx.hyper_parameters)
+                self._get_live_hyper_parameter_descs(components)
             )
 
         if request.get_interactive_layers:

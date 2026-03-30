@@ -74,7 +74,10 @@ class PauseController:
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
-        self._event.wait()   # releases GIL while waiting
+        # Use timeout to allow signal handlers (Ctrl+C, SIGTERM) to be processed
+        while not self._event.wait(timeout=1):
+            # Timeout occurred, loop back to check pause state and allow signals to be handled
+            pass
 
     def pause(self):
         self._event.clear()
