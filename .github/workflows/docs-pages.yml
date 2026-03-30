@@ -4,10 +4,20 @@ on:
   push:
     branches: [documentation, dev, main]
     tags:
-      - "v*"
+      - 'v*'
   pull_request:
-    branches: [main, dev]
+    branches: [main]
+    types: [opened, reopened, ready_for_review]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-pages-${{ github.ref }}
+  cancel-in-progress: true
   
 jobs:
   build:
