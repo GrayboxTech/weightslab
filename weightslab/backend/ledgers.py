@@ -10,6 +10,7 @@ update" workflow described by the user.
 
 from __future__ import annotations
 
+import traceback
 import threading
 import weakref
 import logging
@@ -26,6 +27,16 @@ logger = logging.getLogger(__name__)
 # Default registry name for single-experiment workflows.
 # TODO: For parallel experiments (future), implement dynamic naming or experiment_id param.
 DEFAULT_NAME = "main"
+
+
+def _rebuild_proxy(obj: Any) -> "Proxy":
+    proxy = Proxy()
+    proxy._obj = obj
+    return proxy
+
+
+def _rebuild_value_proxy(parent: "Proxy", key: Any, default: Any = None) -> "Proxy._ValueProxy":
+    return Proxy._ValueProxy(parent, key, default)
 
 
 class Proxy:
@@ -64,6 +75,9 @@ class Proxy:
             except Exception:
                 pass
 
+    def __reduce_ex__(self, protocol):
+        return (_rebuild_proxy, (self._obj,))
+
     class _ValueProxy:
         """Live proxy over a key inside a proxied mapping.
 
@@ -75,6 +89,14 @@ class Proxy:
             self._parent = parent
             self._key = key
             self._default = default
+
+        @property
+        def __class__(self):
+            """Report the wrapped value class so isinstance() checks track the live value."""
+            value = self._resolve()
+            if value is not None:
+                return type(value)
+            return type(self)
 
         def _resolve(self, default: Any = None) -> Any:
             parent_obj = self._parent.get()
@@ -109,6 +131,9 @@ class Proxy:
 
         def __call__(self) -> Any:
             return self._resolve()
+
+        def __reduce_ex__(self, protocol):
+            return (_rebuild_value_proxy, (self._parent, self._key, self._default))
 
         def __repr__(self) -> str:
             return f"ValueProxy(key={self._key!r}, value={self._resolve()!r})"
@@ -458,11 +483,13 @@ class Proxy:
         try:
             return next(self._obj)
         except Exception:
+            traceback.print_exc()
             # clear cached iterator so future next(proxy) restarts
             try:
-                delattr(self, '_iterator')
+                if hasattr(self, '_iterator'):
+                    delattr(self, '_iterator')
             except Exception:
-                pass
+                traceback.print_exc()
         raise StopIteration
 
     # Context manager support so `with proxy as x:` works when the proxy

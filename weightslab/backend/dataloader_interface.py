@@ -15,6 +15,7 @@ It also supports:
   hyperparameters
 - checkpoint-based data loading and reproducible iterator restoration
 """
+import os
 import torch
 import logging
 from typing import Any, Iterator, Optional
@@ -37,6 +38,42 @@ from weightslab.data.sample_stats import SampleStatsEx
 
 # Get Global Logger
 logger = logging.getLogger(__name__)
+
+
+_DENY_LIST_REFRESH_INTERVAL = 32
+
+
+def _resolve_safe_num_workers(dataset: Any, num_workers: int, loader_name: Optional[str] = None) -> int:
+    """Clamp worker count for datasets that cannot be pickled by Windows spawn."""
+    try:
+        requested_num_workers = int(num_workers)
+    except Exception:
+        requested_num_workers = 0
+
+    if requested_num_workers <= 0 or os.name != "nt":
+        return max(0, requested_num_workers)
+
+    wrapped_dataset = dataset
+    while hasattr(wrapped_dataset, "wrapped_dataset"):
+        next_dataset = getattr(wrapped_dataset, "wrapped_dataset", None)
+        if next_dataset is None or next_dataset is wrapped_dataset:
+            break
+        wrapped_dataset = next_dataset
+
+    dataset_cls = type(wrapped_dataset)
+    dataset_module = getattr(dataset_cls, "__module__", "")
+    if dataset_module in {"__main__", "__mp_main__"}:
+        dataset_name = getattr(dataset_cls, "__name__", repr(dataset_cls))
+        loader_label = loader_name or "unnamed"
+        logger.warning(
+            "Forcing num_workers=0 for loader '%s' because dataset %s is defined in %s and cannot be pickled by Windows multiprocessing. Move the dataset class into its own importable module file and import it from your main script if you want num_workers > 0.",
+            loader_label,
+            dataset_name,
+            dataset_module,
+        )
+        return 0
+
+    return requested_num_workers
 
 
 class WeightsLabDataSampler(Sampler):
@@ -163,15 +200,37 @@ class WeightsLabDataSampler(Sampler):
     def _iter_filtered_indices(self, indices):
         """Yield indices lazily so new discards are respected mid-epoch."""
         skipped = 0
+        unique_ids = getattr(self.tracked_dataset, "unique_ids", None)
+        deny_listed_uids = self._refresh_deny_list_cache()
+        deny_list_revision = self._deny_list_revision
+        polled_since_refresh = 0
 
         for idx in indices:
-            if self._is_deny_listed(idx):
-                continue
+            if unique_ids is not None:
+                should_refresh = False
+                current_revision = self._get_deny_list_revision()
+
+                if current_revision is not None:
+                    should_refresh = current_revision != deny_list_revision
+                else:
+                    polled_since_refresh += 1
+                    should_refresh = polled_since_refresh >= _DENY_LIST_REFRESH_INTERVAL
+
+                if should_refresh:
+                    deny_listed_uids = self._refresh_deny_list_cache(force=current_revision is None)
+                    deny_list_revision = self._deny_list_revision
+                    polled_since_refresh = 0
+
+                try:
+                    if str(unique_ids[idx]) in deny_listed_uids:
+                        continue
+                except Exception:
+                    pass
 
             if skipped < self.offset:
                 skipped += 1
                 continue
-
+ 
             yield idx
 
     def __iter__(self):
@@ -346,6 +405,7 @@ class DataLoaderInterface:
                 batch_size=batch_size,
                 drop_last=drop_last,
             )
+            num_workers = _resolve_safe_num_workers(self.tracked_dataset, num_workers, loader_name)
 
             # Finally, construct dataloader using our batch_sampler
             self.dataloader = DataLoader(
@@ -877,6 +937,11 @@ class DataLoaderInterface:
                 )
                 self._mutable_batch_sampler = sampler
                 self._sample_offset = 0
+                num_workers = _resolve_safe_num_workers(
+                    self.tracked_dataset,
+                    num_workers,
+                    getattr(self, "_ledger_name", None),
+                )
 
                 # Rebuild dataloader with offset sampler
                 self.dataloader = DataLoader(
@@ -945,6 +1010,11 @@ class DataLoaderInterface:
                 drop_last = kwargs.pop("drop_last", False)
                 pin_memory = kwargs.pop("pin_memory", False)
                 collate_fn = kwargs.pop("collate_fn", None)
+                num_workers = _resolve_safe_num_workers(
+                    self.tracked_dataset,
+                    num_workers,
+                    getattr(self, "_ledger_name", None),
+                )
 
                 # Rebuild sampler & dataloader if we had one
                 if getattr(self, "_mutable_batch_sampler", None) is not None:
