@@ -4,7 +4,7 @@ on:
   push:
     branches: [documentation, dev, main]
     tags:
-      - 'v*'
+      - "v*"
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
@@ -13,6 +13,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  pull-requests: read
 
 concurrency:
   group: docs-pages-${{ github.ref }}
