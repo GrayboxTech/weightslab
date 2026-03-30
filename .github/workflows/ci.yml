@@ -174,27 +174,27 @@ jobs:
       - name: Install project dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .
+          python -m pip install -e .
 
-      - name: Run unit tests - General
+      - name: Run unit tests (dynamic by test directories)
+        shell: bash
         run: |
+          set -euo pipefail
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
 
-      - name: Run unit tests - Model
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/model -v
+          TEST_ROOT="./weightslab/tests"
 
-      - name: Run unit tests - Data
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/data -v
+          # Run tests directly under tests/ first (if any).
+          echo "::group::Running tests in ${TEST_ROOT}"
+          python -m unittest discover -s "${TEST_ROOT}" -p "test_*.py" -t . -v
+          echo "::endgroup::"
 
-      - name: Run unit tests - Integrations
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/integrations -v
+          # Then run each first-level subdirectory as its own suite.
+          while IFS= read -r dir; do
+            echo "::group::Running tests in ${dir}"
+            python -m unittest discover -s "${dir}" -p "test_*.py" -t . -v
+            echo "::endgroup::"
+          done < <(find "${TEST_ROOT}" -mindepth 1 -maxdepth 1 -type d | sort)
 
   trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}

@@ -148,6 +148,9 @@ def is_copy_metadata_column_name(column_name: str) -> bool:
 
 
 def is_protected_metadata_name(column_name: str) -> bool:
+    """
+        Determine if a metadata column name is protected (cannot be edited by user). Exception if contains "@" to allow editing of copied columns.
+    """
     name = str(column_name or "").strip()
     if not name:
         return False
@@ -163,7 +166,12 @@ def is_protected_metadata_name(column_name: str) -> bool:
         r"signals",
     ]
     family_regex = rf"^({'|'.join(prefixed_families)})(?:$|[:/_\\-].*)"
-    return bool(re.match(family_regex, name, flags=re.IGNORECASE))
+    protected = bool(re.match(family_regex, name, flags=re.IGNORECASE))
+
+    if protected and '@' not in name:
+        return True
+
+    return False
 
 
 class DataService:
@@ -779,7 +787,7 @@ class DataService:
             exclude_cols = {
                 SampleStatsEx.SAMPLE_ID.value,
                 SampleStatsEx.ORIGIN.value,
-                SampleStatsEx.TARGET.value,
+                SampleStatsEx.TARGET.value if not skip_label_for_request else None,
                 SampleStatsEx.PREDICTION.value,
                 SampleStatsEx.TASK_TYPE.value,
             }
@@ -1027,6 +1035,7 @@ class DataService:
                     original_size = middle_pil.size
                     target_width = original_size[0]
                     target_height = original_size[1]
+
                     # Check for explicit aspect ratio on dataset (favors true ratio over squashed model input)
                     aspect_ratio = getattr(ds, "aspect_ratio", None)
                     if aspect_ratio is not None:
@@ -1035,6 +1044,7 @@ class DataService:
                     else:
                         aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
 
+                    # Resize logic:
                     if request.resize_width < 0 and request.resize_height < 0:
                         percent = abs(request.resize_width) / 100.0
                         target_width = int(target_width * percent)
@@ -1048,7 +1058,7 @@ class DataService:
                             target_width = w_limit
                             target_height = int(target_width / aspect_ratio)
                     elif request.resize_width == 0 and request.resize_height == 0:
-                        target_height = 360
+                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 720))  # Default full resolution image is 720p on the longest side, but can be overridden by env var
                         target_width = int(target_height * aspect_ratio)
 
                     # Ensure dimensions are at least 1x1

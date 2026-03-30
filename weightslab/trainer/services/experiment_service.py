@@ -1,6 +1,7 @@
 import time
 import types
 import logging
+import threading
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import weightslab_rlock
@@ -21,10 +22,16 @@ class ExperimentService:
     and handles general experiment-related commands.
     """
 
+    # Limit concurrent GetLatestLoggerData calls to 3 to avoid piling up under slow I/O
+    _logger_data_semaphore = threading.Semaphore(3)
+
     def __init__(self, ctx):
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
+        # Per-instance in-flight counter for GetLatestLoggerData
+        self._logger_data_in_flight = 0
+        self._logger_data_counter_lock = threading.Lock()
 
     # -------------------------------------------------------------------------
     # Logger queue sync for WeightsStudio
@@ -36,10 +43,52 @@ class ExperimentService:
         - If request_full_history is False: returns only new data from the queue since last request
         - If break_by_slices is True: returns per-sample data filtered by tags
         """
+        _t0 = time.monotonic()
+
+        with self._logger_data_counter_lock:
+            self._logger_data_in_flight += 1
+            _in_flight = self._logger_data_in_flight
+
+        logger.debug("GetLatestLoggerData: start (in_flight=%d, full_history=%s)",
+                     _in_flight, request.request_full_history)
+
+        # Concurrency cap: if already 3 calls in-flight, reject immediately
+        acquired = self._logger_data_semaphore.acquire(blocking=False)
+        if not acquired:
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            logger.warning("GetLatestLoggerData: concurrency cap hit (in_flight=%d), dropping after %.1fms",
+                           _in_flight, elapsed_ms)
+            with self._logger_data_counter_lock:
+                self._logger_data_in_flight -= 1
+            return pb2.GetLatestLoggerDataResponse(points=[])
+
+        try:
+            return self._get_latest_logger_data_impl(request, context)
+        except Exception:
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            logger.exception("GetLatestLoggerData: handler exception after %.1fms (in_flight=%d)",
+                             elapsed_ms, _in_flight)
+            raise
+        finally:
+            self._logger_data_semaphore.release()
+            with self._logger_data_counter_lock:
+                self._logger_data_in_flight -= 1
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            _active = context.is_active()
+            _level = logger.warning if elapsed_ms > 2000 else logger.debug
+            _level("GetLatestLoggerData: done elapsed=%.1fms in_flight_peak=%d client_active=%s",
+                   elapsed_ms, _in_flight, _active)
+
+    def _get_latest_logger_data_impl(self, request, context):
         self._ctx.ensure_components()
         components = self._ctx.components
         signal_logger = components.get("signal_logger")
         if signal_logger ==  None:
+            return pb2.GetLatestLoggerDataResponse(points=[])
+
+        # Drop the request early if the client already disconnected
+        if not context.is_active():
+            logger.debug("GetLatestLoggerData: client cancelled before processing")
             return pb2.GetLatestLoggerDataResponse(points=[])
 
         points = []
@@ -102,7 +151,17 @@ class ExperimentService:
         if request.request_full_history:
             # Return full history
             max_points = request.max_points or 10000
+            # Cancellation guard before the potentially heavy history fetch
+            if not context.is_active():
+                logger.debug("GetLatestLoggerData: client cancelled before get_signal_history")
+                return pb2.GetLatestLoggerDataResponse(points=[])
+            _th = time.monotonic()
             history = signal_logger.get_signal_history()
+            _th_ms = (time.monotonic() - _th) * 1000
+            if _th_ms > 500:
+                logger.warning("get_signal_history() took %.1fms (slow — possible lock contention)", _th_ms)
+            else:
+                logger.debug("get_signal_history() took %.1fms", _th_ms)
 
             # Normalize history to grouped list format:
             # - Legacy: List[signal_entry]
@@ -157,7 +216,14 @@ class ExperimentService:
                     )
         else:
             # Return only queue (new data since last poll)
+            if not context.is_active():
+                logger.debug("GetLatestLoggerData: client cancelled before get_and_clear_queue")
+                return pb2.GetLatestLoggerDataResponse(points=[])
+            _tq = time.monotonic()
             queue_data = signal_logger.get_and_clear_queue()
+            _tq_ms = (time.monotonic() - _tq) * 1000
+            if _tq_ms > 200:
+                logger.warning("get_and_clear_queue() took %.1fms (slow — possible lock contention)", _tq_ms)
             for s in queue_data:
                 points.append(
                     pb2.LoggerDataPoint(

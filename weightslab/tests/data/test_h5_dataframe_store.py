@@ -29,6 +29,7 @@ class TestH5DataFrameStore(unittest.TestCase):
         eval_df = pd.DataFrame(
             {
                 "sample_id": [3],
+
                 f"{SampleStatsEx.TAG.value}:b": 1,
                 SampleStatsEx.DISCARDED.value: [False],
             }

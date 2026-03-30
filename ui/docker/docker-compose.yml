@@ -12,6 +12,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: [ "/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml" ]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9901/ready | grep -q LIVE"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     networks:
       - weights_studio_network
     restart: unless-stopped
