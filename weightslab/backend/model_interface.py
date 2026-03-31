@@ -112,9 +112,8 @@ class ModelInterface(NetworkWithOps):
         # Ensure device is a string
         if device and not isinstance(device, str):
             device = str(device)
-
-        self.device = device
-        self.model = model.to(device) if hasattr(model, 'to') else model
+        self.device = 'cpu' if device == 'auto' and not th.cuda.is_available() else 'cuda'
+        self.model = model.to(self.device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
 
         # Generate dummy input if not provided and sanity check
@@ -128,9 +127,9 @@ class ModelInterface(NetworkWithOps):
 
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
-                self.dummy_input = dummy_input.to(device)
+                self.dummy_input = dummy_input.to(self.device)
             else:
-                self.dummy_input = th.randn(model.input_shape).to(device)
+                self.dummy_input = th.randn(model.input_shape).to(self.device)
 
         if compute_dependencies and not use_onnx:
             self.print_graph = print_graph
@@ -663,7 +662,7 @@ class ModelInterface(NetworkWithOps):
         # Register the dependencies
         self.register_dependencies(self.mapped_dependencies_with_ops)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, *args, **kwargs) -> th.Tensor:
         """
         Performs a forward pass through the wrapped model, optionally updating its age.
 
@@ -679,12 +678,9 @@ class ModelInterface(NetworkWithOps):
             th.Tensor: The output tensor from the model's forward pass.
         """
 
-        # Check device
-        if x.device != self.device:
-            x = x.to(self.device)
-
-        self.maybe_update_age(x)
-        out = self.model(x)
+        # Forward pass through the model with age update if applicable
+        out = self.model(*args, **kwargs)
+        self.maybe_update_age()
 
         return out
 

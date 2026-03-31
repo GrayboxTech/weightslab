@@ -1057,6 +1057,13 @@ class DataService:
                     target_width = original_size[0]
                     target_height = original_size[1]
 
+                    # Full-resolution modal requests use negative resize values (e.g. -100).
+                    # We cap them to a configurable max height while preserving aspect ratio.
+                    is_full_resolution = (
+                        (request.resize_width < 0 and abs(request.resize_width) >= 100)
+                        or (request.resize_height < 0 and abs(request.resize_height) >= 100)
+                    )
+
                     # Check for explicit aspect ratio on dataset (favors true ratio over squashed model input)
                     aspect_ratio = getattr(ds, "aspect_ratio", None)
                     if aspect_ratio is not None:
@@ -1082,6 +1089,18 @@ class DataService:
                         target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 720))  # Default full resolution image is 720p on the longest side, but can be overridden by env var
                         target_width = int(target_height * aspect_ratio)
 
+                    if is_full_resolution:
+                        max_modal_height = int(
+                            os.environ.get(
+                                "WL_MODAL_MAX_RESOLUTION",
+                                os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 720),
+                            )
+                        )
+                        if max_modal_height > 0 and target_height > max_modal_height:
+                            scale = max_modal_height / float(target_height)
+                            target_height = max_modal_height
+                            target_width = int(target_width * scale)
+
                     # Ensure dimensions are at least 1x1
                     target_width = max(1, target_width)
                     target_height = max(1, target_height)
@@ -1089,10 +1108,6 @@ class DataService:
                     # Resize middle slice for thumbnail if requested (maintain aspect ratio)
                     if target_width != original_size[0] or target_height != original_size[1]:
                         middle_pil = middle_pil.resize((target_width, target_height), Image.Resampling.LANCZOS)
-
-                    # Determine if this is a full-resolution request (modal) or thumbnail (grid)
-                    is_full_resolution = (request.resize_width < 0 and abs(request.resize_width) >= 100) or \
-                                        (request.resize_height < 0 and abs(request.resize_height) >= 100)
 
                     raw_data_bytes = b""
                     raw_shape = []

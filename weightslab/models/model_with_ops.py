@@ -147,12 +147,10 @@ class NetworkWithOps(nn.Module):
             layer.to(device, dtype, non_blocking, **kwargs)
         return self
 
-    def maybe_update_age(self, tracked_input: th.Tensor):
+    def maybe_update_age(self):
         if self.tracking_mode != TrackingMode.TRAIN:
             return
-        if not hasattr(tracked_input, 'batch_size'):
-            setattr(tracked_input, 'batch_size', tracked_input.shape[0])
-
+        
         # Increase model age at each forward pass during training
         self.increase_age()
 
