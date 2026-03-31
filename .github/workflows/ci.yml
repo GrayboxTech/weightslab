@@ -30,6 +30,11 @@ jobs:
           mkdir -p ~/.cache/pip
           mkdir -p ~/.cache/ruff
 
+      - name: Ensure cache directories exist
+        run: |
+          mkdir -p ~/.cache/pip
+          mkdir -p ~/.cache/ruff
+
       - name: Cache pip and Ruff
         uses: actions/cache@v4
         with:
