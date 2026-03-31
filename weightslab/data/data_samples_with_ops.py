@@ -445,18 +445,20 @@ class DataSampleTrackingWrapper(Dataset):
          - If it returns more than two elements, we assume the format is (data, uids, targets, **metadata) and return (data, id, target, *metadata).
            In this case, we also override the target with tag-based labels if use_tags is enabled.
         """
-        # Distinguish between Individual Access (id provided)
-        # and Bulk Access (index only, e.g. from DataLoader)
-        if id is None:
+        # Distinguish between Individual Access (id provided by the UI)
+        # and Bulk Access (index only, e.g. from DataLoader).
+        # We capture this before resolving id so that the plucking logic
+        # below can tell the two apart even after id is resolved.
+        is_bulk = id is None
+
+        if is_bulk:
             # Resolve id from physical index using our representative map
-            # This ensures we always apply plucking/normalization logic
             if index < len(self.physical_uids):
                 id = self.physical_uids[index]
             else:
                 # Fallback to direct raw access if index out of bounds for physical map
                 return self.wrapped_dataset[index]
 
-        # Individual/Plucked access
         sid = str(id)
         p_idx = self._sid_to_physical_idx.get(sid)
         rank = self._sid_to_member_rank.get(sid, 0)
@@ -469,11 +471,14 @@ class DataSampleTrackingWrapper(Dataset):
         # 1. Fetch from wrapped dataset
         data = self.wrapped_dataset[p_idx]
 
-        # 2. Pluck specific member
-        # Standard format: (pixels, target) or (pixels, uids, targets, ...)
+        # 2. Optionally pluck a specific group member.
+        # For bulk/DataLoader access we preserve the full grouped structure so
+        # the batch shape matches what callers (e.g. collate_fn) expect.
+        # For explicit per-sample access (id provided by the UI) we extract the
+        # individual element at `rank`.
         if isinstance(data, (tuple, list)):
             pixels = data[0]
-            if id is not None and isinstance(pixels, (list, tuple)) and len(pixels) > rank:
+            if not is_bulk and isinstance(pixels, (list, tuple)) and len(pixels) > rank:
                 item = pixels[rank]
             else:
                 item = pixels
@@ -492,7 +497,7 @@ class DataSampleTrackingWrapper(Dataset):
                 target = None
                 rest = data[1:]
 
-            if id is not None and isinstance(target, (list, tuple)) and len(target) > rank:
+            if not is_bulk and isinstance(target, (list, tuple)) and len(target) > rank:
                 target = target[rank]
         else:
             item = data
