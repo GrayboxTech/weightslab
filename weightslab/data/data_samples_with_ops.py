@@ -427,7 +427,7 @@ class DataSampleTrackingWrapper(Dataset):
 
     def __getitem__(self, index: int, id: int = None):
         if index is None and id is not None:
-            index = self.unique_id_to_index.get(id)
+            index = self.unique_id_to_index.get(str(id))
         # We don't infer ID from index here because we want _getitem_raw to know
         # if this was a bulk call (index only) or an individual call (ID provided).
         return self._getitem_raw(index=index, id=id)

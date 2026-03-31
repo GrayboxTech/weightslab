@@ -166,17 +166,28 @@ jobs:
 
           TEST_ROOT="./weightslab/tests"
 
-          # Run tests directly under tests/ first (if any).
-          echo "::group::Running tests in ${TEST_ROOT}"
-          python -m unittest discover -s "${TEST_ROOT}" -p "test_*.py" -t . -v
-          echo "::endgroup::"
-
-          # Then run each first-level subdirectory as its own suite.
+          # Run each first-level subdirectory as its own suite so each group is
+          # reported separately. The previous root-level recursive discover was
+          # removed because it re-ran the same subdirectory tests and doubled CI time.
           while IFS= read -r dir; do
             echo "::group::Running tests in ${dir}"
             python -m unittest discover -s "${dir}" -p "test_*.py" -t . -v
             echo "::endgroup::"
           done < <(find "${TEST_ROOT}" -mindepth 1 -maxdepth 1 -type d -not -name '__pycache__' | sort)
+
+          # Run any test files directly under tests/ (not inside a subdir).
+          mapfile -t root_tests < <(find "${TEST_ROOT}" -maxdepth 1 -name "test_*.py" | sort)
+          if [ "${#root_tests[@]}" -gt 0 ]; then
+            echo "::group::Running root-level tests in ${TEST_ROOT}"
+            modules=()
+            for f in "${root_tests[@]}"; do
+              # Convert ./weightslab/tests/test_foo.py -> weightslab.tests.test_foo
+              m="${f#./}"; m="${m%.py}"; m="${m//\//.}"
+              modules+=("$m")
+            done
+            python -m unittest "${modules[@]}" -v
+            echo "::endgroup::"
+          fi
 
   trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}

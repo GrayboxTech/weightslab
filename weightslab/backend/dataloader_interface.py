@@ -182,7 +182,14 @@ class WeightsLabDataSampler(Sampler):
             return False
 
         try:
-            uid = str(self.tracked_dataset.unique_ids[idx])
+            # Prefer physical_uids when available: after introducing grouped/physical
+            # indexing, __len__ returns len(physical_uids), so idx is a physical index
+            # and unique_ids (the expanded per-member list) would point at the wrong UID.
+            physical_uids = getattr(self.tracked_dataset, "physical_uids", None)
+            if physical_uids is not None:
+                uid = str(physical_uids[idx])
+            else:
+                uid = str(self.tracked_dataset.unique_ids[idx])
         except Exception:
             return False
 
@@ -201,12 +208,17 @@ class WeightsLabDataSampler(Sampler):
         """Yield indices lazily so new discards are respected mid-epoch."""
         skipped = 0
         unique_ids = getattr(self.tracked_dataset, "unique_ids", None)
+        # Prefer physical_uids: after grouped indexing __len__ returns
+        # len(physical_uids) so idx is a physical index; unique_ids is the
+        # expanded per-member list and would resolve the wrong UID.
+        physical_uids = getattr(self.tracked_dataset, "physical_uids", None)
+        uid_source = physical_uids if physical_uids is not None else unique_ids
         deny_listed_uids = self._refresh_deny_list_cache()
         deny_list_revision = self._deny_list_revision
         polled_since_refresh = 0
 
         for idx in indices:
-            if unique_ids is not None:
+            if uid_source is not None:
                 should_refresh = False
                 current_revision = self._get_deny_list_revision()
 
@@ -222,7 +234,7 @@ class WeightsLabDataSampler(Sampler):
                     polled_since_refresh = 0
 
                 try:
-                    if str(unique_ids[idx]) in deny_listed_uids:
+                    if str(uid_source[idx]) in deny_listed_uids:
                         continue
                 except Exception:
                     pass

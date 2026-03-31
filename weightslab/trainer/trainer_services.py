@@ -225,7 +225,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port
             server = grpc.server(
                 futures.ThreadPoolExecutor(
                     thread_name_prefix="WL-gRPC-Worker",
-                    max_workers=n_workers_grpc
+                    max_workers=_effective_workers
                 ),
                 interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)]
             )
