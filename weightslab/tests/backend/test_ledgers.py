@@ -1,4 +1,5 @@
 import gc
+import pickle
 import unittest
 
 from weightslab.backend.ledgers import GLOBAL_LEDGER, DEFAULT_NAME, Ledger, Proxy
@@ -191,6 +192,29 @@ class LedgerTests(unittest.TestCase):
         # Updating the underlying mapping is reflected through the live proxy.
         hp_handle["data_root"] = "C:/data/v2"
         self.assertEqual(data_root.get(), "C:/data/v2")
+
+    def test_proxy_pickles_and_restores(self):
+        proxy = Proxy({"flag": True, "count": 3})
+
+        payload = pickle.dumps(proxy)
+        restored = pickle.loads(payload)
+
+        self.assertIsInstance(restored, Proxy)
+        self.assertEqual(restored.get(), {"flag": True, "count": 3})
+        self.assertTrue(isinstance(restored, dict))
+
+    def test_value_proxy_pickles_and_preserves_live_behavior(self):
+        proxy = Proxy({"flag": True})
+        value_proxy = proxy.get("flag")
+
+        payload = pickle.dumps(value_proxy)
+        restored = pickle.loads(payload)
+
+        self.assertTrue(isinstance(restored, bool))
+        self.assertTrue(restored.get())
+        restored.set(False)
+        self.assertFalse(restored.get())
+        self.assertTrue(proxy.get("flag"))
 
     def test_proxy_get_key_explicit_plain_value_mode(self):
         """proxy=False returns a plain snapshot value."""
