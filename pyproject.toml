@@ -40,7 +40,7 @@ dependencies = [
 
   # PyTorch stack
   "torch>=2.1,<2.9; python_version < '3.13'",
-  "torch>=2.9,<3; python_version >= '3.13'",
+  "torch==2.9; python_version >= '3.13'",
   "torchvision>=0.16,<0.24; python_version < '3.13'",
   "torchvision>=0.24,<1; python_version >= '3.13'",
   "torchaudio>=2.1,<2.9; python_version < '3.13'",
@@ -58,7 +58,7 @@ dependencies = [
   "Pillow>=10,<12",
   "opencv-python>=4.8,<5",
   "graphviz>=0.20,<1",
-  "onnx>=1.15,<2",
+  "onnx>=1.15,<=1.20",
   "onnxscript>=0.6.2,<0.7",
 
   # Utility used in examples and progress reporting

@@ -35,6 +35,7 @@ class ModelInterface(NetworkWithOps):
             device: str = None,
             print_graph: bool = False,
             print_graph_filename: str = None,
+            opset_version: int = 17,
             name: str = None,
             register: bool = True,
             use_onnx: bool = False,
@@ -67,6 +68,7 @@ class ModelInterface(NetworkWithOps):
                 registered in the global ledger. Defaults to True.
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
+            opset_version (int, optional): The ONNX opset version to use if `use_onnx` is True. Defaults to 17.
             compute_dependencies (bool, optional): If True, computes the
                 computational graph dependencies for the wrapped model (using
                 torch.fx or ONNX according to `use_onnx`) so that layer and
@@ -156,7 +158,7 @@ class ModelInterface(NetworkWithOps):
                 self.generate_graph_vizu()
 
             # Generate the graph dependencies
-            self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
+            self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input, opset_version=opset_version)
 
         # Clean - Optionally register wrapper in global ledger
         if register:
@@ -619,7 +621,7 @@ class ModelInterface(NetworkWithOps):
                 filename=self.print_graph_filename
             )
 
-    def define_deps(self, use_onnx: bool = False, dummy_input: th.Tensor = None):
+    def define_deps(self, use_onnx: bool = False, dummy_input: th.Tensor = None, opset_version: int = 17):
         """Generates and registers the computational graph dependencies for the model.
 
         This method first calls `generate_graph_dependencies` to determine the
@@ -651,7 +653,8 @@ class ModelInterface(NetworkWithOps):
         else:
             self.dependencies_with_ops = generate_layer_dependencies_from_onnx(
                 self.model,
-                dummy_input=dummy_input
+                dummy_input=dummy_input,
+                opset_version=opset_version
             )
 
         # Map dependencies between layers and their operations

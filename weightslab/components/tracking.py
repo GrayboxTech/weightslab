@@ -135,18 +135,11 @@ class TriggersTracker(Tracker):
             self.device)
 
     def __hash__(self):
-        triggers_tuple = tuple(self.triggrs_by_neuron.tolist())
-        updates_tuple = tuple(self.updates_by_neuron.tolist())
-
-        # Convert device to string or another immutable representation
-        return hash(
-            (
-                str(self.device),
-                self.number_of_neurons.item(),
-                triggers_tuple,
-                updates_tuple
-            )
-        )
+        # Use identity-based hash (same as nn.Module default) so that this
+        # module can safely be used in sets during torch.export / ONNX tracing
+        # where tensors are replaced with fake/symbolic tensors whose .item()
+        # returns a SymInt that is unhashable.
+        return id(self)
 
     def __repr__(self) -> str:
         return "TriggersTracker[#%d]: [%s] & [%s]" % (\
