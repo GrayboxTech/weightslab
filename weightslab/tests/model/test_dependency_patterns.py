@@ -25,7 +25,7 @@ from weightslab.backend.model_interface import ModelInterface
 
 os.environ['WEIGHTSLAB_LOG_LEVEL'] = 'DEBUG'
 
-1
+
 class MinimalSAMEDependencies(nn.Module):
     """
     Tests SAME dependency type: Conv -> BN -> ReLU

@@ -1,10 +1,32 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock, patch
 
 import weightslab.trainer.trainer_services as trainer_services
 
+# Default per-test timeout in seconds.  Override with WL_TEST_TIMEOUT env var.
+import os
+_TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "30"))
 
-class TestExperimentServiceServicerDelegation(unittest.TestCase):
+
+class _TimeoutMixin:
+    """Mixin that wraps every test with a hard timeout so stuck gRPC
+    threads / infinite loops cannot block the whole CI run."""
+
+    def run(self, result=None):
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(super().run, result)
+        try:
+            fut.result(timeout=_TEST_TIMEOUT)
+        except FuturesTimeoutError:
+            if result is not None:
+                result.addError(self, (TimeoutError, TimeoutError(
+                    f"Test timed out after {_TEST_TIMEOUT}s"), None))
+        finally:
+            pool.shutdown(wait=False)
+
+
+class TestExperimentServiceServicerDelegation(_TimeoutMixin, unittest.TestCase):
     def test_servicer_delegates_to_subservices(self):
         exp_service = MagicMock()
         exp_service.model_service = MagicMock()
@@ -41,11 +63,13 @@ class TestExperimentServiceServicerDelegation(unittest.TestCase):
         exp_service.RestoreCheckpoint.assert_called_once_with(req, ctx)
 
 
-class TestGrpcServe(unittest.TestCase):
+class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
     def test_grpc_serve_starts_thread_and_server(self):
         fake_server = MagicMock()
 
         class _InstantThread:
+            """Mock Thread that runs the serving callback synchronously
+            but skips the watchdog callback (infinite ``while True`` loop)."""
             def __init__(self, target=None, daemon=None, name=None):
                 self._target = target
                 self.daemon = daemon
@@ -53,7 +77,9 @@ class TestGrpcServe(unittest.TestCase):
                 self.ident = 12345
 
             def start(self):
-                if self._target is not None:
+                # Only execute the gRPC serving thread; the watchdog
+                # contains an infinite loop that would block forever.
+                if self._target is not None and self.name == "WL-gRPC_Server":
                     self._target()
 
         with patch("weightslab.trainer.trainer_services.grpc.server", return_value=fake_server), \

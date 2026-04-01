@@ -1,4 +1,6 @@
+import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock
 import threading
 
@@ -10,9 +12,30 @@ from weightslab.trainer.services.data_service import DataService
 from weightslab.trainer.services.experiment_service import ExperimentService
 from weightslab.trainer.trainer_services import ExperimentServiceServicer
 
+_TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "30"))
+
+
+class _TimeoutMixin:
+    """Wraps every test with a hard timeout so stuck threads cannot block CI."""
+
+    def run(self, result=None):
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(super().run, result)
+        try:
+            fut.result(timeout=_TEST_TIMEOUT)
+        except FuturesTimeoutError:
+            if result is not None:
+                result.addError(self, (TimeoutError, TimeoutError(
+                    f"Test timed out after {_TEST_TIMEOUT}s"), None))
+        finally:
+            pool.shutdown(wait=False)
+
 
 class _MockContext:
     def add_callback(self, callback):
+        return True
+
+    def is_active(self):
         return True
 
 
@@ -74,7 +97,7 @@ class _FakeDFManager:
         )
 
 
-class TestGRPCWeightsStudioUserActions(unittest.TestCase):
+class TestGRPCWeightsStudioUserActions(_TimeoutMixin, unittest.TestCase):
     def _make_servicer(self):
         exp_service = MagicMock()
         exp_service.model_service = MagicMock()
@@ -223,7 +246,7 @@ class TestGRPCWeightsStudioUserActions(unittest.TestCase):
         self.assertIn("mean loss", response.analysis_result)
 
 
-class TestGRPCWeightsStudioSDKState(unittest.TestCase):
+class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
     def _make_real_data_service(self):
         index = pd.MultiIndex.from_tuples(
             [("test", "1"), ("test", "2"), ("test", "3")],
@@ -350,7 +373,7 @@ class TestGRPCWeightsStudioSDKState(unittest.TestCase):
         self.assertIn("available", response.message.lower())
 
 
-class TestGRPCLoggerOutputIntegration(unittest.TestCase):
+class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):
     def _make_exp_service_for_logger(self):
         signal_logger = MagicMock()
         df_manager = MagicMock()
@@ -360,6 +383,8 @@ class TestGRPCLoggerOutputIntegration(unittest.TestCase):
         exp_service._ctx = ctx
         exp_service.model_service = MagicMock()
         exp_service.data_service = MagicMock()
+        exp_service._logger_data_in_flight = 0
+        exp_service._logger_data_counter_lock = threading.Lock()
         return exp_service, signal_logger, df_manager
 
     def test_logger_plot_info_returns_expected_points(self):

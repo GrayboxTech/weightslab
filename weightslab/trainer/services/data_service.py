@@ -2,6 +2,7 @@ import io
 import time
 import logging
 import os
+import struct
 import traceback
 import threading
 import json
@@ -29,72 +30,18 @@ from weightslab.data.data_utils import load_label, load_raw_image, to_numpy_safe
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
 from weightslab.data.data_utils import load_raw_image_array
 
+# Image encoding / mask compression / proto helpers (extracted)
+from weightslab.trainer.services.data_image_utils import (
+    rle_encode_mask,
+    create_data_stat,
+    generate_thumbnail,
+    encode_image_webp,
+    resize_mask_nearest,
+)
+
 
 # Get global logger
 logger = logging.getLogger(__name__)
-
-
-def create_data_stat(name, stat_type, shape=None, value=None, value_string="", thumbnail=b""):
-    """Helper to create DataStat with all fields properly initialized.
-
-    Args:
-        name: Stat name
-        stat_type: Type string (scalar, array, string, etc)
-        shape: List of shape dimensions
-        value: List of float values
-        value_string: String value
-        thumbnail: Bytes object for thumbnail (default empty bytes)
-
-    Returns:
-        pb2.DataStat: Properly initialized DataStat
-    """
-    return pb2.DataStat(
-        name=name,
-        type=stat_type,
-        shape=shape or [],
-        value=value or [],
-        value_string=value_string,
-        thumbnail=thumbnail
-    )
-
-
-def generate_thumbnail(pil_image, max_size=(128, 128), quality=85):
-    """Generate a JPEG thumbnail from a PIL image.
-
-    Args:
-        pil_image: PIL Image object
-        max_size: Max dimensions (width, height) for thumbnail
-        quality: JPEG quality (1-95)
-
-    Returns:
-        bytes: JPEG thumbnail as bytes
-    """
-    try:
-        # Create a copy to avoid modifying original
-        thumb = pil_image.copy()
-
-        # Use LANCZOS for high-quality downsampling
-        thumb.thumbnail(max_size, Image.Resampling.LANCZOS)
-
-        # Convert to RGB if needed (JPEG doesn't support RGBA)
-        if thumb.mode in ('RGBA', 'LA', 'P'):
-            # Create white background
-            background = Image.new('RGB', thumb.size, (255, 255, 255))
-            if thumb.mode == 'P':
-                thumb = thumb.convert('RGBA')
-            if thumb.mode in ('RGBA', 'LA'):
-                background.paste(thumb, mask=thumb.split()[-1])  # Use alpha channel as mask
-                thumb = background
-        elif thumb.mode != 'RGB':
-            thumb = thumb.convert('RGB')
-
-        # Save as JPEG to buffer
-        buffer = io.BytesIO()
-        thumb.save(buffer, format='JPEG', quality=quality, optimize=True)
-        return buffer.getvalue()
-    except Exception as e:
-        logger.warning(f"Failed to generate thumbnail: {e}")
-        return b""
 
 
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
@@ -227,7 +174,145 @@ class DataService:
         # self._compute_custom_signals()
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
+        # =====================================================================
+        # Preview cache: pre-generate 64×64 WebP thumbnails + RLE masks for
+        # every sample in the dataset.
+        # Enabled by default (auto-builds on background thread).
+        # Disable with env var WL_PRELOAD_IMAGE_OVERVIEW=0.
+        # Max entries controlled by WL_MAX_PREVIEW_CACHE_SIZE (default: 2000).
+        # =====================================================================
+        self._preview_cache: dict[int, pb2.DataRecord] = {}
+        self._preview_cache_ready = threading.Event()
+        self._preview_cache_max = int(os.environ.get("WL_MAX_PREVIEW_CACHE_SIZE", "2000"))
+        preload_flag = os.environ.get("WL_PRELOAD_IMAGE_OVERVIEW", "1") != "0"
+        # Also honour the legacy hp_dict key
+        if not preload_flag:
+            preload_flag = bool((hp_dict or {}).get("preload_image_overview", False))
+        if preload_flag:
+            threading.Thread(
+                target=self._build_preview_cache,
+                name="WL-PreviewCache",
+                daemon=True,
+            ).start()
+        else:
+            self._preview_cache_ready.set()  # No preload → mark immediately ready
+
         logger.info("DataService initialized.")
+
+    # -----------------------------------------------------------------
+    # Preview cache builder (runs on background thread)
+    # -----------------------------------------------------------------
+    def _build_preview_cache(self) -> None:
+        """Pre-generate 64×64 thumbnail + RLE mask for every row in the DF.
+
+        Each entry is a lightweight ``DataRecord`` containing only:
+          • raw_data (bytes) — 64×64 WebP thumbnail
+          • target   (rle_mask) — RLE-encoded GT mask resized to 64×64
+          • origin, task_type, num_classes, class_names (metadata)
+        Respects ``_preview_cache_max`` to cap memory usage.
+        """
+        try:
+            df = self._all_datasets_df
+            if df is None or df.empty:
+                logger.info("[PreviewCache] Empty DF — nothing to cache.")
+                self._preview_cache_ready.set()
+                return
+
+            total = min(len(df), self._preview_cache_max)
+            logger.info("[PreviewCache] Building 64×64 preview cache for %d samples …", total)
+            t0 = time.time()
+
+            PREVIEW_SIZE = 64  # fixed low-res dimension
+            built = 0
+
+            for row_idx, (_, row) in enumerate(df.iterrows()):
+                if row_idx >= total:
+                    break
+                sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
+                origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
+                dataset = self._get_dataset(origin)
+                if dataset is None:
+                    continue
+
+                stats: list = []
+                try:
+                    ds = getattr(dataset, "wrapped_dataset", dataset)
+                    # --- Thumbnail image ---
+                    if hasattr(dataset, "get_physical_location"):
+                        ds_idx, member_rank = dataset.get_physical_location(sample_id)
+                    else:
+                        ds_idx = dataset.get_index_from_sample_id(sample_id)
+                        member_rank = 0
+
+                    _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    if pil_img is not None:
+                        ar = pil_img.size[0] / max(pil_img.size[1], 1)
+                        tw = max(1, int(PREVIEW_SIZE * ar)) if ar >= 1 else PREVIEW_SIZE
+                        th = PREVIEW_SIZE if ar >= 1 else max(1, int(PREVIEW_SIZE / ar))
+                        pil_thumb = pil_img.resize((tw, th), Image.Resampling.BILINEAR)
+                        buf = io.BytesIO()
+                        pil_save = pil_thumb.convert('RGB') if pil_thumb.mode not in ('RGB', 'RGBA') else pil_thumb
+                        pil_save.save(buf, format='WEBP', quality=50, method=0)
+                        thumb_bytes = buf.getvalue()
+                        buf.close()
+                        nc = len(pil_thumb.getbands())
+                        stats.append(create_data_stat('raw_data', 'bytes', shape=[th, tw, nc], thumbnail=thumb_bytes))
+                        del pil_thumb, pil_save, pil_img
+
+                    # --- GT mask ---
+                    label = load_label(dataset, sample_id)
+                    if label is not None:
+                        label_arr = to_numpy_safe(label)
+                        if label_arr is None:
+                            try:
+                                label_arr = np.asarray(label)
+                            except Exception:
+                                label_arr = None
+                        if label_arr is not None and label_arr.ndim >= 2:
+                            # Resize mask to 64×64 using nearest-neighbour (class IDs must stay exact)
+                            from PIL import Image as _PILImage
+                            h, w = label_arr.shape[:2]
+                            mask_pil = _PILImage.fromarray(label_arr.astype(np.uint8) if label_arr.ndim == 2 else label_arr.astype(np.uint8)[:, :, 0])
+                            mask_pil = mask_pil.resize((tw if 'tw' in dir() else PREVIEW_SIZE, th if 'th' in dir() else PREVIEW_SIZE), _PILImage.Resampling.NEAREST)
+                            mask_u8 = np.asarray(mask_pil, dtype=np.uint8)
+                            rle = rle_encode_mask(mask_u8.ravel())
+                            stats.append(create_data_stat('target', 'rle_mask', shape=list(mask_u8.shape), thumbnail=rle))
+                            del mask_pil, mask_u8
+
+                    # --- Metadata ---
+                    # Detect task type
+                    db_task = row.get(SampleStatsEx.TASK_TYPE.value)
+                    task_type = str(db_task).strip().lower() if db_task and str(db_task).strip().lower() not in ("none", "nan", "unknown", "") else "unknown"
+                    if task_type == "unknown" and label is not None:
+                        l_arr = to_numpy_safe(label)
+                        if l_arr is not None and l_arr.ndim >= 2 and l_arr.shape[-2] >= 16 and l_arr.shape[-1] >= 16:
+                            task_type = "segmentation"
+                    stats.append(create_data_stat('origin', 'string', shape=[1], value_string=origin))
+                    stats.append(create_data_stat('task_type', 'string', shape=[1], value_string=task_type))
+
+                    # num_classes
+                    nc_val = row.get('num_classes') or getattr(ds, "num_classes", None)
+                    if nc_val:
+                        stats.append(create_data_stat('num_classes', 'scalar', shape=[1], value=[float(nc_val)]))
+
+                    record = pb2.DataRecord(sample_id=str(sample_id), data_stats=stats)
+                    self._preview_cache[int(sample_id)] = record
+                    built += 1
+                except Exception as exc:
+                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id, exc)
+                    continue
+
+            elapsed = time.time() - t0
+            logger.info("[PreviewCache] Done: %d/%d cached in %.1fs (%.1f ms/sample)",
+                        built, total, elapsed, elapsed / max(built, 1) * 1000)
+        except Exception as exc:
+            logger.error("[PreviewCache] Failed: %s", exc, exc_info=True)
+        finally:
+            self._preview_cache_ready.set()
+
+    def _get_preview_record(self, sample_id: int) -> "pb2.DataRecord | None":
+        """Return a cached 64×64 preview record, or None if not available."""
+        return self._preview_cache.get(sample_id)
 
     def _deduce_and_set_aspect_ratios(self):
         """Automatically deduce and set aspect_ratio for all registered datasets.
@@ -720,6 +805,12 @@ class DataService:
         try:
             origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
             sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
+            logger.debug(f"Processing sample_id={sample_id} from origin={origin} with request: {request}")
+            # ===== Timing accumulators =====
+            t_image_load = 0.0
+            t_image_encode = 0.0
+            t_mask_encode = 0.0
+            t_label_convert = 0.0
 
             # ===== Step 0: Initialize Variables======
             raw_shape, data_stats = [], []
@@ -854,7 +945,9 @@ class DataService:
             )
 
             # ====== Step 7: Process labels ======
+            t_label_convert = 0.0
             if not skip_label_for_request and task_type != "classification":
+                t0_gt_conv = time.time()
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
                 label_arr = to_numpy_safe(label_raw)
                 if label_arr is None:
@@ -863,14 +956,22 @@ class DataService:
                     except Exception:
                         label_arr = np.array([])
 
-                # Treat label as segmentation mask -> array stat
+                # Ensure mask is uint8 (class IDs are 0-255) and RLE-encode for efficient transfer.
+                # RLE-encoded masks are ~100-500x smaller than float arrays for typical segmentation masks.
+                label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
+                t_label_convert = time.time() - t0_gt_conv
+
+                t0_rle = time.time()
+                rle_bytes = rle_encode_mask(label_u8.ravel()) if label_u8.size > 0 else b""
+                t_mask_encode += time.time() - t0_rle
+
                 data_stats.append(
                     create_data_stat(
                         name='target',
-                        stat_type='array',
+                        stat_type='rle_mask',
                         shape=list(label_arr.shape),
-                        value=label_arr.astype(float).ravel().tolist(),
-                        thumbnail=b""
+                        value=[],
+                        thumbnail=rle_bytes
                     )
                 )
 
@@ -984,15 +1085,17 @@ class DataService:
 
             if task_type != "classification" and pred is not None:
                 try:
-                    pred_arr = np.asarray(pred)
-                    # Add predicted mask stat
+                    t0_pmask = time.time()
+                    pred_arr = np.asarray(pred, dtype=np.uint8)
+                    rle_bytes = rle_encode_mask(pred_arr.ravel()) if pred_arr.size > 0 else b""
+                    t_mask_encode += time.time() - t0_pmask
                     data_stats.append(
                         create_data_stat(
                             name='pred_mask',
-                            stat_type='array',
+                            stat_type='rle_mask',
                             shape=list(pred_arr.shape),
-                            value=pred_arr.astype(float).ravel().tolist(),
-                            thumbnail=b""
+                            value=[],
+                            thumbnail=rle_bytes
                         )
                     )
                 except Exception:
@@ -1033,7 +1136,7 @@ class DataService:
 
             # ====== Step 9: Generate raw data bytes and thumbnail ======
             if request.include_raw_data and dataset is not None:
-
+                logger.debug(f"Loading raw data for sample_id={sample_id} from dataset for origin={origin}")
                 try:
                     # New grouped-aware location resolution
                     if hasattr(dataset, "get_physical_location"):
@@ -1048,7 +1151,9 @@ class DataService:
 
                 if ds_idx is not None:
                     # Pass the rank to load_raw_image_array so it plucks the right pixels
+                    t0 = time.time()
                     np_img, is_volumetric, original_shape, middle_pil = load_raw_image_array(dataset, ds_idx, rank=member_rank)
+                    t_image_load = time.time() - t0
                 else:
                     np_img, is_volumetric, original_shape, middle_pil = None, False, [], None
 
@@ -1107,7 +1212,10 @@ class DataService:
 
                     # Resize middle slice for thumbnail if requested (maintain aspect ratio)
                     if target_width != original_size[0] or target_height != original_size[1]:
-                        middle_pil = middle_pil.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                        # BILINEAR is ~2x faster than LANCZOS and sufficient for small thumbnails;
+                        # use LANCZOS only for full-resolution modal views where quality matters.
+                        _resample = Image.Resampling.LANCZOS if is_full_resolution else Image.Resampling.BILINEAR
+                        middle_pil = middle_pil.resize((target_width, target_height), _resample)
 
                     raw_data_bytes = b""
                     raw_shape = []
@@ -1118,6 +1226,7 @@ class DataService:
                         if not np_img_f32.flags['C_CONTIGUOUS']:
                             np_img_f32 = np.ascontiguousarray(np_img_f32)
                         raw_data_bytes = np_img_f32.tobytes()
+                        del np_img_f32  # Release float32 copy immediately
                         # Shape: [Z, H, W, C] using ORIGINAL 4D dimensions, not thumbnail dimensions
                         if len(original_shape) == 4:
                             if original_shape[1] > original_shape[-1]:
@@ -1128,10 +1237,30 @@ class DataService:
                                 raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]
                             logger.info(f"[Volumetric] Sending full res: np_img.shape={np_img.shape}, original_shape={original_shape}, raw_shape={raw_shape}, bytes={len(raw_data_bytes)}")
                     else:
-                        # Thumbnail for grid OR non-volumetric: Send JPEG of middle slice only
+                        # Thumbnail for grid OR non-volumetric: Send as compressed image bytes.
+                        # WebP is ~40-50% smaller than JPEG at equivalent visual quality and
+                        # all modern browsers support it. Use lower quality for small grid
+                        # thumbnails (fast decode, minimal bandwidth) and higher for modal.
+                        _quality = 80 if is_full_resolution else 65
+                        _webp_method = 4 if is_full_resolution else 2  # 0=fast … 6=slow+small
                         raw_buf = io.BytesIO()
-                        middle_pil.save(raw_buf, format='JPEG')
+                        t0_enc = time.time()
+                        try:
+                            # Ensure mode is WebP-compatible
+                            _save_img = middle_pil
+                            if _save_img.mode == 'P':
+                                _save_img = _save_img.convert('RGBA')
+                            _save_img.save(raw_buf, format='WEBP', quality=_quality, method=_webp_method)
+                        except Exception:
+                            # Fallback to JPEG if WebP is unavailable (missing libwebp)
+                            raw_buf = io.BytesIO()
+                            _save_img = middle_pil
+                            if _save_img.mode in ('RGBA', 'LA', 'P'):
+                                _save_img = _save_img.convert('RGB')
+                            _save_img.save(raw_buf, format='JPEG', quality=_quality, optimize=True)
                         raw_data_bytes = raw_buf.getvalue()
+                        raw_buf.close()  # Release underlying buffer
+                        t_image_encode = time.time() - t0_enc
                         # Shape: [H, W, C] for 3D RGB or [H, W] for 2D grayscale
                         num_channels = len(middle_pil.getbands())
                         if num_channels == 1:
@@ -1148,7 +1277,33 @@ class DataService:
                         )
                     )
 
+                    # Eagerly release intermediate image data to reduce peak memory
+                    # across concurrent thread-pool workers.
+                    del raw_data_bytes, middle_pil
+                    if np_img is not None:
+                        del np_img
+
             # ====== Step 10: Create DataRecord ======
+            total_time = time.time() - start_total
+
+            # Attach server-side timing breakdown so the frontend can display E2E metrics
+            timing_str = json.dumps({
+                "server_total_ms": round(total_time * 1000, 1),
+                "image_load_ms": round(t_image_load * 1000, 1),
+                "image_encode_ms": round(t_image_encode * 1000, 1),
+                "label_convert_ms": round(t_label_convert * 1000, 1),
+                "mask_rle_ms": round(t_mask_encode * 1000, 1),
+            })
+            data_stats.append(
+                create_data_stat(
+                    name='_timing',
+                    stat_type='string',
+                    shape=[],
+                    value_string=timing_str,
+                    thumbnail=b""
+                )
+            )
+
             record = pb2.DataRecord(sample_id=str(sample_id), data_stats=data_stats)
 
             return record
@@ -1751,8 +1906,22 @@ class DataService:
     def _process_get_data_samples(self, request, context):
         """
         Actual implementation of GetDataSamples.
-        Process the request and retrieve data samples from the dataframe.
+
+        Two optimisations:
+        1. **Preview-cache fast path** – If the preview cache has a 64×64
+           thumbnail for the requested sample *and* the request is for a tiny
+           resolution (both dims ≤ ``_PREVIEW_CACHE_THRESHOLD``), serve from
+           the cache instantly without touching the file system.
+        2. **Parallel batch processing** – All samples are submitted to the
+           thread pool at once so all 8 workers stay busy.  The chunk-size
+           env-var ``WL_BATCH_CHUNK_SIZE`` is kept for backward compat but
+           the default is now the full request size (all at once).
         """
+        _PREVIEW_CACHE_THRESHOLD = 80      # max px to consider a "preview" request
+        # Default: process ALL rows at once in the thread pool (workers = 8).
+        # Override with WL_BATCH_CHUNK_SIZE to throttle concurrency.
+        _BATCH_CHUNK_SIZE = int(os.environ.get("WL_BATCH_CHUNK_SIZE", "0"))  # 0 = all at once
+
         try:
             start_time = time.time()
             logger.debug(
@@ -1776,11 +1945,10 @@ class DataService:
             self._slowUpdateInternals()
 
             # Atomic snapshot of the current authoritative dataframe
-            # Readers don't need the global lock to slice a snapshot
             current_df = self._all_datasets_df
 
             if current_df is None or current_df.empty:
-                logger.warning(f"Internal dataframe is empty or not initialized.")
+                logger.warning("Internal dataframe is empty or not initialized.")
                 return pb2.DataSamplesResponse(
                     success=False,
                     message="Internal dataframe is empty or not initialized.",
@@ -1791,7 +1959,6 @@ class DataService:
             try:
                 df_slice = current_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()
             except IndexError:
-                # Handle cases where slicing goes out of bounds
                 return pb2.DataSamplesResponse(
                     success=False,
                     message=f"Index {request.start_index} out of bounds for dataframe size {len(current_df)}",
@@ -1799,7 +1966,7 @@ class DataService:
                 )
 
             if df_slice.empty:
-                logger.warning(f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}")
+                logger.warning("No samples found at index %s:%s", request.start_index, request.start_index + request.records_cnt)
                 return pb2.DataSamplesResponse(
                     success=False,
                     message=f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}",
@@ -1809,19 +1976,64 @@ class DataService:
             logger.debug(
                 "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)
 
-            # Build the data records list using shared executor
-            data_records = []
-            tasks = [(row, request, df_slice.columns) for _, row in df_slice.iterrows()]
+            # ---- Preview-cache fast path ----------------------------------
+            # If the caller is asking for preview-tier resolution (e.g. the
+            # low-res pass), try to serve every record from the in-memory
+            # cache.  A single cache miss aborts the fast path so we fall
+            # through to the standard pipeline.
+            is_preview_request = (
+                self._preview_cache
+                and abs(request.resize_width) <= _PREVIEW_CACHE_THRESHOLD
+                and abs(request.resize_height) <= _PREVIEW_CACHE_THRESHOLD
+            )
+            if is_preview_request:
+                cached_records: list = []
+                all_hit = True
+                for _, row in df_slice.iterrows():
+                    sid = int(row.get(SampleStatsEx.SAMPLE_ID.value, -1))
+                    rec = self._get_preview_record(sid)
+                    if rec is None:
+                        all_hit = False
+                        break
+                    cached_records.append(rec)
+                if all_hit and cached_records:
+                    elapsed = time.time() - start_time
+                    logger.debug("[PreviewCache] Served %d records in %.1fms", len(cached_records), elapsed * 1000)
+                    return pb2.DataSamplesResponse(
+                        success=True,
+                        message=f"Served {len(cached_records)} preview-cached records",
+                        data_records=cached_records,
+                    )
 
-            logger.debug("Processing %s samples at %s", len(tasks), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            data_records = self._data_executor.map(self._process_sample_row, tasks, timeout=120)
-            data_records = [r for r in data_records if r is not None]
-            logger.debug("Completed processing at %s in %.2f seconds\n", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time)
+            # ---- Parallel batch processing ---------------------------------
+            # Submit ALL rows to the thread pool at once so all 8 workers
+            # stay busy.  This avoids the old sequential-chunk bottleneck
+            # where each sub-batch had to finish before the next started.
+            data_records: list = []
+            rows_list = list(df_slice.iterrows())
+            n_rows = len(rows_list)
+            tasks = [(row, request, df_slice.columns) for _, row in rows_list]
 
-            if data_records is None or None in data_records:
+            effective_chunk = _BATCH_CHUNK_SIZE if _BATCH_CHUNK_SIZE > 0 else n_rows
+
+            for chunk_start in range(0, n_rows, effective_chunk):
+                chunk_end = min(chunk_start + effective_chunk, n_rows)
+                chunk_tasks = tasks[chunk_start:chunk_end]
+
+                logger.debug("Processing chunk [%d:%d] of %d at %s",
+                             chunk_start, chunk_end, n_rows,
+                             datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                chunk_results = list(self._data_executor.map(self._process_sample_row, chunk_tasks, timeout=120))
+                data_records.extend(r for r in chunk_results if r is not None)
+
+            logger.debug("Completed processing %d records at %s in %.2f seconds",
+                         len(data_records),
+                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time)
+
+            if not data_records:
                 return pb2.DataSamplesResponse(
                     success=False,
-                    message=f"Failed to retrieve samples: {tasks}",
+                    message="Failed to retrieve samples (all records None)",
                     data_records=[]
                 )
             return pb2.DataSamplesResponse(

@@ -115,7 +115,6 @@ def _handle_command(cmd: str) -> Any:
                     'list_loaders': 'List registered dataloader names in the ledger',
                     'list_uids': 'List data sample UIDs. Syntax: list_uids [loader_name] [--discarded] [--limit N]',
                     'dump': 'Return a sanitized dump of the ledger contents',
-                    'operate': 'Edit model architecture. Syntax: operate [<model_name>] <op_type:int> <layer_id:int> <nb|[list]>',
                     'plot_model': 'Show ASCII tree of model architecture. Syntax: plot_model [<model_name>]',
                     'discard': 'Discard data samples. Syntax: discard <uid> [uid2 ...] [--loader loader_name]',
                     'undiscard': 'Un-discard data samples. Syntax: undiscard <uid> [uid2 ...] [--loader loader_name]',
@@ -403,67 +402,6 @@ def _handle_command(cmd: str) -> Any:
             except Exception:
                 out['hyperparams'] = {}
             return {'ok': True, 'ledger': out}
-
-        if verb == 'operate':
-            # syntax:
-            #  - operate <op_type:int> <layer_id:int> <nb>
-            #  - operate <model_name> <op_type:int> <layer_id:int> <nb>
-            if len(parts) < 4:
-                return {'ok': False, 'error': 'usage: operate [<model_name>] <op_type> <layer_id> <nb|[list]>'}
-
-            # detect whether second token is model name or op_type
-            with weightslab_rlock:
-                try:
-                    op_type = int(parts[1])
-                    layer_id = int(parts[2])
-                    raw = ' '.join(parts[3:])
-                    try:
-                        nb = eval(raw, {}, {})
-                    except Exception:
-                        try:
-                            nb = int(parts[3])
-                        except Exception:
-                            nb = raw
-                    try:
-                        m = GLOBAL_LEDGER.get_model()
-                    except Exception:
-                        return {'ok': False, 'error': 'no_model_registered'}
-
-                    # Operate
-                    with m as mm:
-                        mm.operate(layer_id, nb, op_type)
-                    print(f'[cli] operated on model via context manager')
-                    print(f'[cli] new model info: {m}')
-
-                    return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': None}
-                except ValueError:
-                    # parts[1] is not an int => treat as model name
-                    model_name = parts[1]
-                    if len(parts) < 5:
-                        return {'ok': False, 'error': 'usage: operate <model_name> <op_type> <layer_id> <nb|[list]>'}
-                    try:
-                        op_type = int(parts[2])
-                        layer_id = int(parts[3])
-                    except Exception:
-                        return {'ok': False, 'error': 'op_type and layer_id must be ints'}
-                    raw = ' '.join(parts[4:])
-                    try:
-                        nb = eval(raw, {}, {})
-                    except Exception:
-                        try:
-                            nb = int(parts[4])
-                        except Exception:
-                            nb = raw
-                    try:
-                        m = GLOBAL_LEDGER.get_model(model_name)
-                    except Exception:
-                        return {'ok': False, 'error': f'model_not_found: {model_name}'}
-
-                    # Operate
-                    with m as mm:
-                        mm.operate(layer_id, nb, op_type)
-
-                    return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': model_name}
 
         if verb in ('discard', 'undiscard'):
             # Syntax: discard <uid> [uid2 ...] [--loader loader_name]

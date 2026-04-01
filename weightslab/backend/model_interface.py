@@ -112,7 +112,7 @@ class ModelInterface(NetworkWithOps):
         # Ensure device is a string
         if device and not isinstance(device, str):
             device = str(device)
-        self.device = 'cpu' if device == 'auto' and not th.cuda.is_available() else 'cuda'
+        self.device = 'cuda' if device == 'auto' and th.cuda.is_available() else (device or 'cpu')
         self.model = model.to(self.device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
 
