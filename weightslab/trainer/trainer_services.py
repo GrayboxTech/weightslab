@@ -222,12 +222,19 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port
             _effective_workers = n_workers_grpc or min(32, (os.cpu_count() or 1) + 4)
             logger.info("[gRPC] Creating ThreadPoolExecutor with %d worker threads (n_workers_grpc=%s)",
                         _effective_workers, n_workers_grpc)
+            # Allow large payloads for batches of HD images + segmentation masks.
+            # Default 4 MB is too small for 720p image grids with mask arrays.
+            _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024))  # 256 MB
             server = grpc.server(
                 futures.ThreadPoolExecutor(
                     thread_name_prefix="WL-gRPC-Worker",
                     max_workers=_effective_workers
                 ),
-                interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)]
+                interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)],
+                options=[
+                    ("grpc.max_send_message_length", _max_msg),
+                    ("grpc.max_receive_message_length", _max_msg),
+                ],
             )
             logger.info("[gRPC] Server object created")
             servicer = trainer.ExperimentServiceServicer()

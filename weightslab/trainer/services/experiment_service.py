@@ -74,7 +74,7 @@ class ExperimentService:
             with self._logger_data_counter_lock:
                 self._logger_data_in_flight -= 1
             elapsed_ms = (time.monotonic() - _t0) * 1000
-            _active = context.is_active()
+            _active = context.is_active() if context else True
             _level = logger.warning if elapsed_ms > 2000 else logger.debug
             _level("GetLatestLoggerData: done elapsed=%.1fms in_flight_peak=%d client_active=%s",
                    elapsed_ms, _in_flight, _active)
@@ -87,7 +87,7 @@ class ExperimentService:
             return pb2.GetLatestLoggerDataResponse(points=[])
 
         # Drop the request early if the client already disconnected
-        if not context.is_active():
+        if context and not context.is_active():
             logger.debug("GetLatestLoggerData: client cancelled before processing")
             return pb2.GetLatestLoggerDataResponse(points=[])
 
@@ -152,7 +152,7 @@ class ExperimentService:
             # Return full history
             max_points = request.max_points or 10000
             # Cancellation guard before the potentially heavy history fetch
-            if not context.is_active():
+            if context and not context.is_active():
                 logger.debug("GetLatestLoggerData: client cancelled before get_signal_history")
                 return pb2.GetLatestLoggerDataResponse(points=[])
             _th = time.monotonic()
@@ -216,7 +216,7 @@ class ExperimentService:
                     )
         else:
             # Return only queue (new data since last poll)
-            if not context.is_active():
+            if context and not context.is_active():
                 logger.debug("GetLatestLoggerData: client cancelled before get_and_clear_queue")
                 return pb2.GetLatestLoggerDataResponse(points=[])
             _tq = time.monotonic()

@@ -16,7 +16,11 @@ import unittest
 import tempfile
 import warnings
 import shutil
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
+
+# Per-test timeout (seconds). Heavy tests download MNIST + init model.
+_TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "120"))
 
 from weightslab.data.sample_stats import SampleStatsEx
 warnings.filterwarnings("ignore")
@@ -70,7 +74,23 @@ class SimpleCNN(nn.Module):
         return x
 
 
-class TestGRPCTagOperations(unittest.TestCase):
+class _TimeoutMixin:
+    """Wraps every test with a hard timeout so stuck threads cannot block CI."""
+
+    def run(self, result=None):
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(super().run, result)
+        try:
+            fut.result(timeout=_TEST_TIMEOUT)
+        except FuturesTimeoutError:
+            if result is not None:
+                result.addError(self, (TimeoutError, TimeoutError(
+                    f"Test timed out after {_TEST_TIMEOUT}s"), None))
+        finally:
+            pool.shutdown(wait=False)
+
+
+class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
     """Test suite for tag and discarded operations via gRPC"""
 
     @classmethod

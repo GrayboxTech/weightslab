@@ -22,9 +22,13 @@ static_resources:
                   prefix: "/"
                 route:
                   cluster: grpc_service
-                  timeout: 0s
+                  timeout: 300s
+                  retry_policy:
+                    retry_on: "unavailable,resource-exhausted"
+                    num_retries: 3
+                    per_try_timeout: 60s
                   max_stream_duration:
-                    grpc_timeout_header_max: 0s
+                    grpc_timeout_header_max: 300s
               cors:
                 allow_origin_string_match:
                 - prefix: "*"
@@ -45,11 +49,15 @@ static_resources:
 
   clusters:
   - name: grpc_service
-    connect_timeout: 0.25s
+    connect_timeout: 1s
     type: STRICT_DNS
     lb_policy: ROUND_ROBIN
     dns_lookup_family: V4_ONLY           # force IPv4 (avoids IPv6-only resolution issues)
     http2_protocol_options: {}          # enable HTTP/2 (required for gRPC)
+    circuit_breakers:
+      thresholds:
+      - max_requests: 64
+        max_pending_requests: 64
     load_assignment:
       cluster_name: grpc_service
       endpoints:
