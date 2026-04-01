@@ -34,8 +34,7 @@ from weightslab.data.sample_stats import (
 
 
 
-# Global logger
-logging.getLogger("PIL").setLevel(logging.INFO)
+# Module logger (dependency loggers are configured centrally via setup_logging)
 logger = logging.getLogger(__name__)
 global _UID_CNT
 _UID_CNT = 0
