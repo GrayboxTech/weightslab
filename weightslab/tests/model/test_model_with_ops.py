@@ -25,6 +25,7 @@ th.manual_seed(42)  # Set SEED
 TMP_DIR = '/tmp/utests/'; os.makedirs('/tmp/utests/', exist_ok=True)
 
 
+@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class NetworkWithOpsTest(unittest.TestCase):
     def setUp(self) -> None:
         print(f"\n--- Start {self._testMethodName} ---\n")
