@@ -1,6 +1,7 @@
 import time
 import types
 import logging
+import threading
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.components.global_monitoring import weightslab_rlock
@@ -21,10 +22,16 @@ class ExperimentService:
     and handles general experiment-related commands.
     """
 
+    # Limit concurrent GetLatestLoggerData calls to 3 to avoid piling up under slow I/O
+    _logger_data_semaphore = threading.Semaphore(3)
+
     def __init__(self, ctx):
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
+        # Per-instance in-flight counter for GetLatestLoggerData
+        self._logger_data_in_flight = 0
+        self._logger_data_counter_lock = threading.Lock()
 
     # -------------------------------------------------------------------------
     # Logger queue sync for WeightsStudio
@@ -36,10 +43,52 @@ class ExperimentService:
         - If request_full_history is False: returns only new data from the queue since last request
         - If break_by_slices is True: returns per-sample data filtered by tags
         """
+        _t0 = time.monotonic()
+
+        with self._logger_data_counter_lock:
+            self._logger_data_in_flight += 1
+            _in_flight = self._logger_data_in_flight
+
+        logger.debug("GetLatestLoggerData: start (in_flight=%d, full_history=%s)",
+                     _in_flight, request.request_full_history)
+
+        # Concurrency cap: if already 3 calls in-flight, reject immediately
+        acquired = self._logger_data_semaphore.acquire(blocking=False)
+        if not acquired:
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            logger.warning("GetLatestLoggerData: concurrency cap hit (in_flight=%d), dropping after %.1fms",
+                           _in_flight, elapsed_ms)
+            with self._logger_data_counter_lock:
+                self._logger_data_in_flight -= 1
+            return pb2.GetLatestLoggerDataResponse(points=[])
+
+        try:
+            return self._get_latest_logger_data_impl(request, context)
+        except Exception:
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            logger.exception("GetLatestLoggerData: handler exception after %.1fms (in_flight=%d)",
+                             elapsed_ms, _in_flight)
+            raise
+        finally:
+            self._logger_data_semaphore.release()
+            with self._logger_data_counter_lock:
+                self._logger_data_in_flight -= 1
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            _active = context.is_active() if context else True
+            _level = logger.warning if elapsed_ms > 2000 else logger.debug
+            _level("GetLatestLoggerData: done elapsed=%.1fms in_flight_peak=%d client_active=%s",
+                   elapsed_ms, _in_flight, _active)
+
+    def _get_latest_logger_data_impl(self, request, context):
         self._ctx.ensure_components()
         components = self._ctx.components
         signal_logger = components.get("signal_logger")
         if signal_logger ==  None:
+            return pb2.GetLatestLoggerDataResponse(points=[])
+
+        # Drop the request early if the client already disconnected
+        if context and not context.is_active():
+            logger.debug("GetLatestLoggerData: client cancelled before processing")
             return pb2.GetLatestLoggerDataResponse(points=[])
 
         points = []
@@ -102,7 +151,17 @@ class ExperimentService:
         if request.request_full_history:
             # Return full history
             max_points = request.max_points or 10000
+            # Cancellation guard before the potentially heavy history fetch
+            if context and not context.is_active():
+                logger.debug("GetLatestLoggerData: client cancelled before get_signal_history")
+                return pb2.GetLatestLoggerDataResponse(points=[])
+            _th = time.monotonic()
             history = signal_logger.get_signal_history()
+            _th_ms = (time.monotonic() - _th) * 1000
+            if _th_ms > 500:
+                logger.warning("get_signal_history() took %.1fms (slow — possible lock contention)", _th_ms)
+            else:
+                logger.debug("get_signal_history() took %.1fms", _th_ms)
 
             # Normalize history to grouped list format:
             # - Legacy: List[signal_entry]
@@ -157,7 +216,14 @@ class ExperimentService:
                     )
         else:
             # Return only queue (new data since last poll)
+            if context and not context.is_active():
+                logger.debug("GetLatestLoggerData: client cancelled before get_and_clear_queue")
+                return pb2.GetLatestLoggerDataResponse(points=[])
+            _tq = time.monotonic()
             queue_data = signal_logger.get_and_clear_queue()
+            _tq_ms = (time.monotonic() - _tq) * 1000
+            if _tq_ms > 200:
+                logger.warning("get_and_clear_queue() took %.1fms (slow — possible lock contention)", _tq_ms)
             for s in queue_data:
                 points.append(
                     pb2.LoggerDataPoint(
@@ -261,6 +327,42 @@ class ExperimentService:
                 message=f"Error: {str(e)}"
             )
 
+    def _get_live_hyper_parameter_descs(self, components):
+        hyper_parameter_descs = list(get_hyper_parameters_pb(self._ctx.hyper_parameters))
+
+        trainer = components.get("trainer") if components else None
+        if trainer is None or not hasattr(trainer, "is_paused"):
+            return hyper_parameter_descs
+
+        is_training = not trainer.is_paused()
+
+        hp_name = self._ctx.exp_name or resolve_hp_name()
+        if hp_name:
+            try:
+                hp = get_hyperparams(hp_name)
+                current_is_training = bool(hp.get("is_training", False)) if hasattr(hp, "get") else None
+                if current_is_training is not None and current_is_training != is_training:
+                    set_hyperparam(name=hp_name, key_path="is_training", value=is_training)
+            except Exception:
+                logger.debug("Failed to resync ledger is_training for %s", hp_name, exc_info=True)
+
+        for desc in hyper_parameter_descs:
+            if desc.name == "is_training" or desc.label in {"is_training", "Is Training"}:
+                desc.type = "number"
+                desc.numerical_value = 1.0 if is_training else 0.0
+                desc.ClearField("string_value")
+                return hyper_parameter_descs
+
+        hyper_parameter_descs.append(
+            pb2.HyperParameterDesc(
+                label="Is Training",
+                name="is_training",
+                type="number",
+                numerical_value=1.0 if is_training else 0.0,
+            )
+        )
+        return hyper_parameter_descs
+
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
     def ExperimentCommand(self, request, context):
@@ -290,7 +392,6 @@ class ExperimentService:
                         key_path="training_steps_to_do",
                         value=hyper_parameters.training_steps_to_do
                     )
-
                 if hyper_parameters.HasField("learning_rate"):
                     set_hyperparam(
                         name=hp_name,
@@ -303,14 +404,12 @@ class ExperimentService:
                         key_path="data.train_loader.batch_size",
                         value=hyper_parameters.batch_size
                     )
-
                 if hyper_parameters.HasField("full_eval_frequency"):
                     set_hyperparam(
                         name=hp_name,
                         key_path="eval_full_to_train_steps_ratio",
                         value=hyper_parameters.full_eval_frequency
                     )
-
                 if hyper_parameters.HasField("checkpont_frequency"):
                     set_hyperparam(
                         name=hp_name,
@@ -419,7 +518,7 @@ class ExperimentService:
         response = pb2.CommandResponse(success=True, message="")
         if request.get_hyper_parameters:
             response.hyper_parameters_descs.extend(
-                get_hyper_parameters_pb(self._ctx.hyper_parameters)
+                self._get_live_hyper_parameter_descs(components)
             )
 
         if request.get_interactive_layers:

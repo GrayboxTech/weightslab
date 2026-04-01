@@ -6,12 +6,48 @@ on:
     tags: [ 'v*' ]
   pull_request:
     branches: [ main, dev ]
-    types: [ opened, reopened, ready_for_review ]
+    types: [opened, reopened, ready_for_review, synchronize]
   workflow_dispatch:
 
 jobs:
+  skip-push-when-pr-open:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+    steps:
+      - name: Decide whether to run CI
+        id: decide
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'push') {
+              core.setOutput('should_run', 'true');
+              core.info('Non-push event, CI will run.');
+              return;
+            }
+
+            const branch = context.ref.replace('refs/heads/', '');
+            const head = `${context.repo.owner}:${branch}`;
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head,
+              per_page: 1
+            });
+
+            const hasOpenPr = pulls.length > 0;
+            core.setOutput('should_run', hasOpenPr ? 'false' : 'true');
+
+            if (hasOpenPr) {
+              core.notice(`Skipping push CI for branch ${branch} because an open PR exists.`);
+            } else {
+              core.info(`No open PR for branch ${branch}, CI will run.`);
+            }
+
   code-quality:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+    needs: skip-push-when-pr-open
+    if: needs.skip-push-when-pr-open.outputs.should_run == 'true' && (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -24,7 +60,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+
+      - name: Ensure cache directories exist
+        run: |
+          mkdir -p ~/.cache/pip
+          mkdir -p ~/.cache/ruff
 
       - name: Ensure cache directories exist
         run: |
@@ -105,7 +145,7 @@ jobs:
             echo "$FILES" | xargs vulture --min-confidence 70 . || true
           fi
 
-  install:
+  install-and-test:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     needs: code-quality
@@ -125,8 +165,19 @@ jobs:
       - name: Ensure pip cache directory exists
         run: mkdir -p ~/.cache/pip
 
-      - name: Cache pip
+      - name: Cache pip (save + restore, Python 3.10 only)
+        if: matrix.python-version == '3.10'
         uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}
+            ${{ runner.os }}-pip
+
+      - name: Restore pip cache (no save, Python 3.11+)
+        if: matrix.python-version != '3.10'
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ matrix.python-version }}
@@ -143,93 +194,140 @@ jobs:
         run: |
           python -c "import sys, weightslab; print(f'weightslab imported successfully on Python {sys.version.split()[0]}')"
 
-  test:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
-    needs: install
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ${{ github.event_name == 'pull_request' && fromJson('["3.10","3.11","3.12","3.13","3.14"]') || fromJson('["3.10"]') }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Ensure pip cache directory exists
-        run: mkdir -p ~/.cache/pip
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
-          restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}
-            ${{ runner.os }}-pip
-
-      - name: Install project dependencies
+      - name: Run unit tests (dynamic by test directories)
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install .
-
-      - name: Run unit tests - General
-        run: |
+          set -euo pipefail
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
 
-      - name: Run unit tests - Model
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/model -v
+          TEST_ROOT="./weightslab/tests"
 
-      - name: Run unit tests - Data
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/data -v
+          # Run each first-level subdirectory as its own suite so each group is
+          # reported separately. The previous root-level recursive discover was
+          # removed because it re-ran the same subdirectory tests and doubled CI time.
+          while IFS= read -r dir; do
+            echo "::group::Running tests in ${dir}"
+            python -m unittest discover -s "${dir}" -p "test_*.py" -t . -v
+            echo "::endgroup::"
+          done < <(find "${TEST_ROOT}" -mindepth 1 -maxdepth 1 -type d -not -name '__pycache__' | sort)
 
-      - name: Run unit tests - Integrations
-        run: |
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m unittest discover -s ./weightslab/tests/integrations -v
-
-      - name: Trigger WeightsStudio CI
-        if: ${{ matrix.python-version == '3.10' && ((github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev'))) }}
-        env:
-          WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-        run: |
-          if [ -z "${WS_TOKEN}" ]; then
-            echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
-            exit 0
+          # Run any test files directly under tests/ (not inside a subdir).
+          mapfile -t root_tests < <(find "${TEST_ROOT}" -maxdepth 1 -name "test_*.py" | sort)
+          if [ "${#root_tests[@]}" -gt 0 ]; then
+            echo "::group::Running root-level tests in ${TEST_ROOT}"
+            modules=()
+            for f in "${root_tests[@]}"; do
+              # Convert ./weightslab/tests/test_foo.py -> weightslab.tests.test_foo
+              m="${f#./}"; m="${m%.py}"; m="${m//\//.}"
+              modules+=("$m")
+            done
+            python -m unittest "${modules[@]}" -v
+            echo "::endgroup::"
           fi
 
-          TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
-
-          # Trigger the ws-ci workflow in the weights_studio repository on the matching target branch.
-          curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
-            -H "Authorization: Bearer ${WS_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d "{\"ref\":\"${TARGET_BRANCH}\"}"
-
-          echo "WeightsStudio workflow dispatch requested successfully on ${TARGET_BRANCH}."
-
-  weightsstudio-ci:
+  trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
-    name: WeightsStudio CI
-    needs: test
-    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
-    with:
-      weightslab_branch: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+    name: Trigger WeightsStudio CI (workflow_dispatch)
+    needs: install-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve target branch
+        id: resolve-target
+        run: |
+          TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
+          echo "branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch ws-ci workflow in weights_studio
+        uses: actions/github-script@v7
+        env:
+          TARGET_BRANCH: ${{ steps.resolve-target.outputs.branch }}
+        with:
+          github-token: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
+          script: |
+            const owner = 'GrayboxTech';
+            const repo = 'weights_studio';
+            const workflow_id = 'ws-ci.yml';
+            const branch = process.env.TARGET_BRANCH;
+
+            if (!branch) {
+              core.setFailed('Missing TARGET_BRANCH');
+              return;
+            }
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const dispatchTs = new Date().toISOString();
+
+            core.info(`Dispatching ${workflow_id} on ${owner}/${repo}@${branch}`);
+
+            await github.request('POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', {
+              owner,
+              repo,
+              workflow_id,
+              ref: branch,
+            });
+
+            let runId = null;
+
+            for (let attempt = 1; attempt <= 60; attempt++) {
+              const runsResp = await github.request('GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs', {
+                owner,
+                repo,
+                workflow_id,
+                event: 'workflow_dispatch',
+                branch,
+                per_page: 20,
+              });
+
+              const runs = runsResp.data.workflow_runs || [];
+              const candidates = runs
+                .filter((run) => run.created_at >= dispatchTs)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              if (candidates.length > 0) {
+                runId = candidates[0].id;
+                core.info(`Detected ws-ci run id: ${runId}`);
+                break;
+              }
+
+              core.info(`Waiting for ws-ci run to appear (attempt ${attempt}/60)...`);
+              await sleep(5000);
+            }
+
+            if (!runId) {
+              core.setFailed('Could not detect ws-ci run in weights_studio after dispatch.');
+              return;
+            }
+
+            for (let attempt = 1; attempt <= 120; attempt++) {
+              const runResp = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', {
+                owner,
+                repo,
+                run_id: runId,
+              });
+
+              const status = runResp.data.status || '';
+              const conclusion = runResp.data.conclusion || '';
+
+              core.info(`ws-ci status: ${status}, conclusion: ${conclusion}`);
+
+              if (status === 'completed') {
+                if (conclusion === 'success') {
+                  core.info('WeightsStudio ws-ci completed successfully.');
+                  return;
+                }
+                core.setFailed(`WeightsStudio ws-ci failed with conclusion: ${conclusion}`);
+                return;
+              }
+
+              await sleep(10000);
+            }
+
+            core.setFailed('Timed out waiting for WeightsStudio ws-ci completion.');
 
   build-and-publish-dev:
     if: ${{ github.event_name == 'pull_request' }}
     name: Build & Publish Dev (TestPyPI)
-    needs: weightsstudio-ci
+    needs: trigger-weightsstudio-dispatch
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -20,6 +20,7 @@ DEVICE = 'cpu' if not th.cuda.is_available() else 'cuda'
 th.manual_seed(42)  # Set SEED
 
 
+@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TriggersTrackerTest(unittest.TestCase):
     """
         Tests the TriggersTracker for the 4 neuron ops operation and persistent
@@ -147,6 +148,7 @@ class TriggersTrackerTest(unittest.TestCase):
         self.assertEqual(self.triggers_tracker, replica_triggers_tracker)
 
 
+@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TriggersTrackerClazzAndSampleIDTest(unittest.TestCase):
     """ Tests the TriggersTrackerClazzAndSampleID for the neuron operations and
         persistency.

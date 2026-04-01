@@ -10,6 +10,7 @@ update" workflow described by the user.
 
 from __future__ import annotations
 
+import traceback
 import threading
 import weakref
 import logging
@@ -26,6 +27,16 @@ logger = logging.getLogger(__name__)
 # Default registry name for single-experiment workflows.
 # TODO: For parallel experiments (future), implement dynamic naming or experiment_id param.
 DEFAULT_NAME = "main"
+
+
+def _rebuild_proxy(obj: Any) -> "Proxy":
+    proxy = Proxy()
+    proxy._obj = obj
+    return proxy
+
+
+def _rebuild_value_proxy(parent: "Proxy", key: Any, default: Any = None) -> "Proxy._ValueProxy":
+    return Proxy._ValueProxy(parent, key, default)
 
 
 class Proxy:
@@ -64,8 +75,260 @@ class Proxy:
             except Exception:
                 pass
 
-    def get(self, ref=None, default=None) -> Any:
+    def __reduce_ex__(self, protocol):
+        return (_rebuild_proxy, (self._obj,))
+
+    class _ValueProxy:
+        """Live proxy over a key inside a proxied mapping.
+
+        The proxy always resolves the current parent mapping and key on access,
+        so if parent values are updated in-place or replaced, reads stay fresh.
+        """
+
+        def __init__(self, parent: "Proxy", key: Any, default: Any = None):
+            self._parent = parent
+            self._key = key
+            self._default = default
+
+        @property
+        def __class__(self):
+            """Report the wrapped value class so isinstance() checks track the live value."""
+            value = self._resolve()
+            if value is not None:
+                return type(value)
+            return type(self)
+
+        def _resolve(self, default: Any = None) -> Any:
+            parent_obj = self._parent.get()
+            if parent_obj is None:
+                return self._default if default is None else default
+            if hasattr(parent_obj, 'get'):
+                return parent_obj.get(self._key, self._default if default is None else default)
+            try:
+                return parent_obj[self._key]
+            except Exception:
+                return self._default if default is None else default
+
+        def get(self, *args, **kwargs) -> Any:
+            """Retrieve the current value of this proxy.
+            If arguments are provided, it assumes the value is a dict-like and delegates the get() call.
+            """
+            v = self._resolve()
+            if not args and not kwargs:
+                return v
+            if hasattr(v, 'get'):
+                return v.get(*args, **kwargs)
+            # Fallback for the proxy's own resolve-with-default logic
+            if len(args) == 1 and not kwargs:
+                return self._resolve(default=args[0])
+            raise AttributeError(f"'{type(v).__name__}' object has no attribute 'get'")
+
+        def set(self, value: Any) -> None:
+            parent_obj = self._parent.get()
+            if parent_obj is None:
+                raise TypeError("Proxy target not set")
+            parent_obj[self._key] = value
+
+        def __call__(self) -> Any:
+            return self._resolve()
+
+        def __reduce_ex__(self, protocol):
+            return (_rebuild_value_proxy, (self._parent, self._key, self._default))
+
+        def __repr__(self) -> str:
+            return f"ValueProxy(key={self._key!r}, value={self._resolve()!r})"
+
+        def __str__(self) -> str:
+            v = self._resolve()
+            return "" if v is None else str(v)
+
+        def __fspath__(self) -> str:
+            v = self._resolve()
+            if v is None:
+                raise TypeError("ValueProxy resolved to None")
+            return os.fspath(v)
+
+        def __bool__(self) -> bool:
+            return bool(self._resolve())
+
+        @staticmethod
+        def _unwrap(other: Any) -> Any:
+            return other._resolve() if isinstance(other, Proxy._ValueProxy) else other
+
+        def __eq__(self, other: Any) -> bool:
+            other_val = self._unwrap(other)
+            return self._resolve() == other_val
+
+        def __ne__(self, other: Any) -> bool:
+            return not self.__eq__(other)
+
+        def __lt__(self, other: Any) -> bool:
+            other_val = self._unwrap(other)
+            return self._resolve() < other_val
+
+        def __le__(self, other: Any) -> bool:
+            other_val = self._unwrap(other)
+            return self._resolve() <= other_val
+
+        def __gt__(self, other: Any) -> bool:
+            other_val = self._unwrap(other)
+            return self._resolve() > other_val
+
+        def __ge__(self, other: Any) -> bool:
+            other_val = self._unwrap(other)
+            return self._resolve() >= other_val
+
+        def __hash__(self) -> int:
+            return hash(self._resolve())
+
+        def __int__(self) -> int:
+            return int(self._resolve())
+
+        def __float__(self) -> float:
+            return float(self._resolve())
+
+        def __index__(self) -> int:
+            v = self._resolve()
+            if isinstance(v, (int, bool)):
+                return int(v)
+            # Raising TypeError instead of ValueError is critical:
+            # - ValueError in __index__ causes os.path.exists() to return False silently for string paths.
+            # - TypeError causes a crash, forcing explicit cast str(proxy) which is the correct fix for paths.
+            raise TypeError(f"'{type(v).__name__}' object (ValueProxy wrapping {v!r}) cannot be interpreted as an integer")
+
+        def __add__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() + other_val
+
+        def __radd__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val + self._resolve()
+
+        def __mul__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() * other_val
+
+        def __rmul__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val * self._resolve()
+
+        def __sub__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() - other_val
+
+        def __rsub__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val - self._resolve()
+
+        def __truediv__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() / other_val
+
+        def __rtruediv__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val / self._resolve()
+
+        def __floordiv__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() // other_val
+
+        def __rfloordiv__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val // self._resolve()
+
+        def __mod__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() % other_val
+
+        def __rmod__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val % self._resolve()
+
+        def __pow__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() ** other_val
+
+        def __rpow__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val ** self._resolve()
+
+        def __divmod__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return divmod(self._resolve(), other_val)
+
+        def __rdivmod__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return divmod(other_val, self._resolve())
+
+        def __and__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() & other_val
+
+        def __rand__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val & self._resolve()
+
+        def __or__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() | other_val
+
+        def __ror__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val | self._resolve()
+
+        def __xor__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() ^ other_val
+
+        def __rxor__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val ^ self._resolve()
+
+        def __lshift__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() << other_val
+
+        def __rlshift__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val << self._resolve()
+
+        def __rshift__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return self._resolve() >> other_val
+
+        def __rrshift__(self, other: Any) -> Any:
+            other_val = self._unwrap(other)
+            return other_val >> self._resolve()
+
+        def __neg__(self) -> Any:
+            return -self._resolve()
+
+        def __pos__(self) -> Any:
+            return +self._resolve()
+
+        def __abs__(self) -> Any:
+            return abs(self._resolve())
+
+        def __invert__(self) -> Any:
+            return ~self._resolve()
+
+        def __getattr__(self, item: str) -> Any:
+            v = self._resolve()
+            if v is None:
+                raise AttributeError("ValueProxy target not set")
+            return getattr(v, item)
+
+    def get(self, ref=None, default=None, proxy: bool = True) -> Any:
+        """Get wrapped object or a key from the wrapped mapping.
+
+        Args:
+            ref: Mapping key when provided.
+            default: Fallback value when key/target is missing.
+            proxy: When True and ref is provided, return a live key proxy.
+        """
         if ref is not None:
+            if proxy:
+                return Proxy._ValueProxy(self, ref, default)
             return self._obj.get(ref, default)
         return self._obj if self._obj is not None else default
 
@@ -173,7 +436,7 @@ class Proxy:
         """Enable equality comparison with the wrapped object.
 
         This allows `proxy is None` to return True when the wrapped object is None.
-        
+
         IMPORTANT: Use `proxy is None` or `proxy is not None` for None checks.
         Python's `is` operator cannot be overridden and `proxy is None` will always be False.
         """
@@ -185,7 +448,7 @@ class Proxy:
 
     def __ne__(self, other):
         """Enable inequality comparison with the wrapped object.
-        
+
         This allows `proxy is not None` to return False when the wrapped object is None.
         """
         return not self.__eq__(other)
@@ -202,7 +465,7 @@ class Proxy:
 
     def __hash__(self):
         """Make Proxy hashable by hashing the wrapped object's identity.
-        
+
         This allows Proxy objects to be used in sets and as dictionary keys.
         Uses id() for consistent hashing regardless of object's __hash__ implementation.
         """
@@ -220,11 +483,13 @@ class Proxy:
         try:
             return next(self._obj)
         except Exception:
+            traceback.print_exc()
             # clear cached iterator so future next(proxy) restarts
             try:
-                delattr(self, '_iterator')
+                if hasattr(self, '_iterator'):
+                    delattr(self, '_iterator')
             except Exception:
-                pass
+                traceback.print_exc()
         raise StopIteration
 
     # Context manager support so `with proxy as x:` works when the proxy
@@ -369,14 +634,29 @@ class Ledger:
         existing entry. If a Proxy placeholder exists for this name it is
         updated in-place (so external references continue to work).
         """
+        obj_to_register = params
         with self._lock:
-            proxy = self._proxies_hyperparams.get(name)
-            if proxy is not None:
-                proxy.set(params)
-                self._hyperparams[name] = proxy
-            else:
-                self._hyperparams[name] = params
-        return self._register(self._hyperparams, self._hyperparams_weak, self._proxies_hyperparams, name, params, weak=weak)
+            existing = self._hyperparams.get(name)
+            if isinstance(existing, Proxy):
+                wrapped = existing.get()
+                if isinstance(wrapped, dict) and isinstance(params, dict):
+                    # Keep wrapped dict identity stable for true in-place updates.
+                    wrapped.clear()
+                    wrapped.update(params)
+                    obj_to_register = wrapped
+            elif isinstance(existing, dict) and isinstance(params, dict):
+                # Keep previously registered dict object identity stable.
+                existing.clear()
+                existing.update(params)
+                obj_to_register = existing
+        return self._register(
+            self._hyperparams,
+            self._hyperparams_weak,
+            self._proxies_hyperparams,
+            name,
+            obj_to_register,
+            weak=weak,
+        )
 
     def get_hyperparams(self, name: str = DEFAULT_NAME) -> Any:
         """Get hyperparams by name. Creates a placeholder Proxy(None) if not yet registered."""
@@ -395,7 +675,7 @@ class Ledger:
 
     def set_hyperparam(self, key_path: str, value: Any, name: str = DEFAULT_NAME) -> None:
         """Set a nested hyperparameter using dot-separated `key_path`.
-        Example: set_hyperparam('exp', 'data.train.batch_size', 128)
+        Example: set_hyperparam(name='exp', key_path='data.train.batch_size', value=128)
         """
         with self._lock:
             if name is None:
@@ -450,7 +730,7 @@ class Ledger:
                                     # ignore invalid top-level content
                                     last_mtime = mtime
                                 else:
-                                    self.register_hyperparams(name, data)
+                                    self.register_hyperparams(params=data, name=name)
                                     last_mtime = mtime
                         # sleep with small increments to be responsive to stop_event
                         for _ in range(int(max(1, poll_interval * 10))):

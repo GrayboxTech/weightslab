@@ -17,6 +17,45 @@ _TMP_DIR_PATH = None
 _FILE_HANDLER = None
 
 
+def _env_flag(name: str, default: str = 'false') -> bool:
+    return os.getenv(name, default).lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _configure_dependency_log_levels() -> None:
+    """Silence noisy dependency loggers that flood DEBUG output."""
+    suppressed_logger_groups = {
+        'WEIGHTSLAB_ENABLE_ONNX_DEBUG_LOGS': (
+            'onnx',
+            'onnxscript',
+            'onnxscript._internal',
+            'onnxscript._internal.values',
+            'torch.onnx',
+            'torch.onnx._internal',
+        ),
+        'WEIGHTSLAB_ENABLE_MATPLOTLIB_DEBUG_LOGS': (
+            'matplotlib',
+            'matplotlib.pyplot',
+            'matplotlib.font_manager',
+        ),
+        'WEIGHTSLAB_ENABLE_GRPC_DEBUG_LOGS': (
+            'grpc',
+            'grpc._channel',
+            'grpc._server',
+        ),
+        'WEIGHTSLAB_ENABLE_PIL_DEBUG_LOGS': (
+            'PIL',
+            'PIL.Image',
+            'PIL.PngImagePlugin',
+        ),
+    }
+
+    for env_var, logger_names in suppressed_logger_groups.items():
+        if _env_flag(env_var):
+            continue
+        for logger_name in logger_names:
+            logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
 def _print_log_location():
     """Print log file location when Python exits."""
     if _LOG_FILE_PATH and os.path.exists(_LOG_FILE_PATH):
@@ -58,6 +97,7 @@ def setup_logging(level, log_to_file=True):
     root_logger = logging.getLogger()
     root_logger.setLevel(level.upper())
     root_logger.addHandler(console_handler)
+    _configure_dependency_log_levels()
 
     # File handler - write to temp directory
     if log_to_file:

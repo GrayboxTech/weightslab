@@ -16,7 +16,11 @@ import unittest
 import tempfile
 import warnings
 import shutil
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
+
+# Per-test timeout (seconds). Heavy tests download MNIST + init model.
+_TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "120"))
 
 from weightslab.data.sample_stats import SampleStatsEx
 warnings.filterwarnings("ignore")
@@ -70,7 +74,23 @@ class SimpleCNN(nn.Module):
         return x
 
 
-class TestGRPCTagOperations(unittest.TestCase):
+class _TimeoutMixin:
+    """Wraps every test with a hard timeout so stuck threads cannot block CI."""
+
+    def run(self, result=None):
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(super().run, result)
+        try:
+            fut.result(timeout=_TEST_TIMEOUT)
+        except FuturesTimeoutError:
+            if result is not None:
+                result.addError(self, (TimeoutError, TimeoutError(
+                    f"Test timed out after {_TEST_TIMEOUT}s"), None))
+        finally:
+            pool.shutdown(wait=False)
+
+
+class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
     """Test suite for tag and discarded operations via gRPC"""
 
     @classmethod
@@ -78,10 +98,10 @@ class TestGRPCTagOperations(unittest.TestCase):
         """Set up test environment - runs once before all tests"""
         cls.temp_dir = tempfile.mkdtemp(prefix="wl_grpc_test_")
         cls.exp_name = "mnist_grpc_tag_test"
-        
+
         print(f"\n========== Setting up test environment ==========")
         print(f"Temp dir: {cls.temp_dir}")
-        
+
         # Create hyperparameters
         cls.config = {
             'model': {
@@ -98,7 +118,7 @@ class TestGRPCTagOperations(unittest.TestCase):
                 'lr': 0.001
             }
         }
-        
+
         # ==================
         # Initialize dataset (100 samples from MNIST test set)
         # ==================
@@ -106,23 +126,23 @@ class TestGRPCTagOperations(unittest.TestCase):
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,))
         ])
-        
+
         # Download to a standard location
         mnist_data_path = Path.home() / '.mnist_data'
         mnist_data_path.mkdir(exist_ok=True)
-        
+
         full_dataset = datasets.MNIST(
             root=str(mnist_data_path),
             train=False,
             download=True,
             transform=transform
         )
-        
+
         # Create subset with 100 samples
         cls.dataset = Subset(full_dataset, list(range(100)))
-        
+
         print(f"Dataset size: {len(cls.dataset)} samples")
-        
+
         # =================
         # Register components
         # =================
@@ -132,7 +152,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             defaults=cls.config,
             poll_interval=1.0
         )
-        
+
         # Initialize model
         cls.model = SimpleCNN(conv1_out=8, conv2_out=16)
         cls.model = wl.watch_or_edit(
@@ -141,7 +161,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             device=DEVICE,
             skip_previous_auto_load=True
         )
-        
+
         # Register dataloader
         cls.dataloader = wl.watch_or_edit(
             cls.dataset,
@@ -151,20 +171,20 @@ class TestGRPCTagOperations(unittest.TestCase):
             batch_size=cls.config.get('data', {}).get('train_loader', {}).get('batch_size', 32),
             shuffle=cls.config.get('data', {}).get('train_loader', {}).get('shuffle', False)
         )
-        
+
         # Register optimizer
         cls.optimizer = wl.watch_or_edit(
             th.optim.Adam(cls.model.parameters(), lr=cls.config['optimizer']['lr']),
             flag="optimizer"
         )
-        
+
         # Create ExperimentContext for DataService
         cls.ctx = ExperimentContext(cls.exp_name)
-        
+
         # Initialize DataService
         cls.data_service = DataService(cls.ctx)
         cls.mock_context = MockContext()
-        
+
         print(f"========== Setup complete ==========\n")
 
     @classmethod
@@ -176,7 +196,7 @@ class TestGRPCTagOperations(unittest.TestCase):
             wl.finish()
         except:
             pass
-        
+
         # Clean up temp directory
         if os.path.exists(cls.temp_dir):
             shutil.rmtree(cls.temp_dir)
@@ -185,7 +205,7 @@ class TestGRPCTagOperations(unittest.TestCase):
     def test_01_add_tags_accumulate(self):
         """Test adding tags to samples using EDIT_ACCUMULATE"""
         print("\n[TEST 1] Testing tag addition (EDIT_ACCUMULATE)")
-        
+
         # Create request to add tag "test_tag" to first 10 samples
         request = pb2.DataEditsRequest(
             stat_name="tags",
@@ -193,40 +213,40 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="test_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(10)),
+            samples_ids=[str(i) for i in range(10)],
             sample_origins=["test"] * 10
         )
-        
+
         response = self.data_service.EditDataSample(request, self.mock_context)
-        
+
         self.assertTrue(response.success, f"Failed to add tags: {response.message}")
         print(f"✓ Successfully added tag 'test_tag' to 10 samples")
-        
+
         # Verify tags were added by checking the dataframe
         df = self.data_service._all_datasets_df
         if df is not None:
             tag_col = "tag:test_tag"
             self.assertIn(tag_col, df.columns, f"Tag column {tag_col} not found in dataframe")
-            
+
             # Check first 10 samples have the tag
             for sample_id in range(10):
                 if isinstance(df.index, pd.MultiIndex):
-                    value = df.loc[("test", sample_id), tag_col]
+                    value = df.loc[("test", str(sample_id)), tag_col]
                 else:
-                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                     if mask.any():
                         value = df.loc[mask, tag_col].iloc[0]
                     else:
                         value = False
-                
+
                 self.assertTrue(value, f"Sample {sample_id} should have tag 'test_tag'")
-            
+
             print(f"✓ Verified tag column exists and has correct values")
 
     def test_02_add_multiple_tags(self):
         """Test adding multiple different tags"""
         print("\n[TEST 2] Testing multiple tag addition")
-        
+
         # Add "difficult" tag to samples 0-4
         request1 = pb2.DataEditsRequest(
             stat_name="tags",
@@ -234,14 +254,14 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="difficult",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(5)),
+            samples_ids=[str(i) for i in range(5)],
             sample_origins=["test"] * 5
         )
-        
+
         response1 = self.data_service.EditDataSample(request1, self.mock_context)
         self.assertTrue(response1.success)
         print(f"✓ Added tag 'difficult' to samples 0-4")
-        
+
         # Add "outlier" tag to samples 5-9
         request2 = pb2.DataEditsRequest(
             stat_name="tags",
@@ -249,14 +269,14 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="outlier",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(5, 10)),
+            samples_ids=[str(i) for i in range(5, 10)],
             sample_origins=["test"] * 5
         )
-        
+
         response2 = self.data_service.EditDataSample(request2, self.mock_context)
         self.assertTrue(response2.success)
         print(f"✓ Added tag 'outlier' to samples 5-9")
-        
+
         # Verify both tags exist
         df = self.data_service._all_datasets_df
         self.assertIn("tag:difficult", df.columns)
@@ -266,7 +286,7 @@ class TestGRPCTagOperations(unittest.TestCase):
     def test_03_remove_tag_from_samples(self):
         """Test removing a tag from specific samples using EDIT_REMOVE"""
         print("\n[TEST 3] Testing tag removal from samples")
-        
+
         # Remove "test_tag" from samples 0-4
         request = pb2.DataEditsRequest(
             stat_name="tags",
@@ -274,49 +294,49 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="test_tag",
             bool_value=False,
             type=SampleEditType.EDIT_REMOVE,
-            samples_ids=list(range(5)),
+            samples_ids=[str(i) for i in range(5)],
             sample_origins=["test"] * 5
         )
-        
+
         response = self.data_service.EditDataSample(request, self.mock_context)
         self.assertTrue(response.success, f"Failed to remove tag: {response.message}")
         print(f"✓ Removed tag 'test_tag' from samples 0-4")
-        
+
         # Verify tag was removed from those samples
         df = self.data_service._all_datasets_df
         tag_col = "tag:test_tag"
-        
+
         for sample_id in range(5):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), tag_col]
+                value = df.loc[("test", str(sample_id)), tag_col]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                 else:
                     value = False
-            
+
             self.assertFalse(value, f"Sample {sample_id} should NOT have tag 'test_tag'")
-        
+
         # But samples 5-9 should still have it
         for sample_id in range(5, 10):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), tag_col]
+                value = df.loc[("test", str(sample_id)), tag_col]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                 else:
                     value = False
-            
+
             self.assertTrue(value, f"Sample {sample_id} should still have tag 'test_tag'")
-        
+
         print(f"✓ Verified tag removal worked correctly")
 
     def test_04_delete_entire_tag_column(self):
         """Test deleting an entire tag column using EDIT_REMOVE with value=-1"""
         print("\n[TEST 4] Testing entire tag column deletion")
-        
+
         # Delete the "difficult" tag column completely
         request = pb2.DataEditsRequest(
             stat_name="tag:difficult",
@@ -324,14 +344,14 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="",
             bool_value=False,
             type=SampleEditType.EDIT_REMOVE,
-            samples_ids=[0],  # Just need one sample as reference
+            samples_ids=["0"],  # Just need one sample as reference
             sample_origins=["test"]
         )
-        
+
         response = self.data_service.EditDataSample(request, self.mock_context)
         self.assertTrue(response.success, f"Failed to delete tag column: {response.message}")
         print(f"✓ Deleted entire 'difficult' tag column")
-        
+
         # Verify column no longer exists
         df = self.data_service._all_datasets_df
         self.assertNotIn("tag:difficult", df.columns, "Tag column should be deleted")
@@ -340,7 +360,7 @@ class TestGRPCTagOperations(unittest.TestCase):
     def test_05_deny_listed_operations(self):
         """Test discarded (discard/restore) operations"""
         print("\n[TEST 5] Testing discarded operations")
-        
+
         # Mark samples 10-14 as discarded (discarded)
         request_discard = pb2.DataEditsRequest(
             stat_name=SampleStatsEx.DISCARDED.value,
@@ -348,30 +368,30 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="",
             bool_value=True,  # True = discarded
             type=SampleEditType.EDIT_OVERRIDE,
-            samples_ids=list(range(10, 15)),
+            samples_ids=[str(i) for i in range(10, 15)],
             sample_origins=["test"] * 5
         )
-        
+
         response = self.data_service.EditDataSample(request_discard, self.mock_context)
         self.assertTrue(response.success, f"Failed to discard samples: {response.message}")
         print(f"✓ Marked samples 10-14 as discarded")
-        
+
         # Verify samples are marked as discarded
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 15):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
                     value = False
-            
+
             self.assertTrue(value, f"Sample {sample_id} should be discarded")
-        
+
         print(f"✓ Verified samples are discarded")
-        
+
         # Now restore samples 10-12
         request_restore = pb2.DataEditsRequest(
             stat_name=SampleStatsEx.DISCARDED.value,
@@ -379,47 +399,47 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="",
             bool_value=False,  # False = restored
             type=SampleEditType.EDIT_OVERRIDE,
-            samples_ids=list(range(10, 13)),
+            samples_ids=[str(i) for i in range(10, 13)],
             sample_origins=["test"] * 3
         )
-        
+
         response = self.data_service.EditDataSample(request_restore, self.mock_context)
         self.assertTrue(response.success, f"Failed to restore samples: {response.message}")
         print(f"✓ Restored samples 10-12")
-        
+
         # Verify restoration
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 13):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
                     value = False
-            
+
             self.assertFalse(value, f"Sample {sample_id} should be restored")
-        
+
         # But 13-14 should still be discarded
         for sample_id in range(13, 15):
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
                     value = False
-            
+
             self.assertTrue(value, f"Sample {sample_id} should still be discarded")
-        
+
         print(f"✓ Verified restoration worked correctly")
 
     def test_06_batch_tag_operations(self):
         """Test batch operations on many samples at once"""
         print("\n[TEST 6] Testing batch tag operations")
-        
+
         # Add "batch_tag" to 50 samples at once
         request = pb2.DataEditsRequest(
             stat_name=f"{SampleStatsEx.TAG.value}:batch_tag",
@@ -427,50 +447,50 @@ class TestGRPCTagOperations(unittest.TestCase):
             string_value="batch_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=list(range(50)),
+            samples_ids=[str(i) for i in range(50)],
             sample_origins=["test"] * 50
         )
-        
+
         response = self.data_service.EditDataSample(request, self.mock_context)
         self.assertTrue(response.success, f"Failed to add batch tag: {response.message}")
         print(f"✓ Added 'batch_tag' to 50 samples in one operation")
-        
+
         # Verify all 50 samples have the tag
         df = self.data_service._all_datasets_df
         tag_col = f"{SampleStatsEx.TAG.value}:batch_tag"
         self.assertIn(tag_col, df.columns)
-        
+
         success_count = 0
         for sample_id in range(50):
             if isinstance(df.index, pd.MultiIndex):
                 try:
-                    value = df.loc[("test", sample_id), tag_col]
+                    value = df.loc[("test", str(sample_id)), tag_col]
                     if value:
                         success_count += 1
                 except KeyError:
                     pass
             else:
-                mask = (df.index == sample_id) & (df["origin"] == "test")
+                mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                     if value:
                         success_count += 1
-        
+
         self.assertGreaterEqual(success_count, 45, f"Expected at least 45 samples to have batch_tag, got {success_count}")
         print(f"✓ Verified {success_count}/50 samples have the batch tag")
 
     def test_07_tag_persistence(self):
         """Test that tags persist and can be queried"""
         print("\n[TEST 7] Testing tag persistence")
-        
+
         df = self.data_service._all_datasets_df
-        
+
         # Count tag columns
         tag_columns = [col for col in df.columns if col.startswith(f"{SampleStatsEx.TAG.value}:")]
         print(f"✓ Found {len(tag_columns)} tag columns: {tag_columns}")
-        
+
         self.assertGreater(len(tag_columns), 0, "Should have at least one tag column")
-        
+
         # Verify we can query tagged samples
         for tag_col in tag_columns:
             tagged_samples = df[df[tag_col] == True]
@@ -487,12 +507,12 @@ if __name__ == '__main__':
     print("\n" + "="*80)
     print("Running gRPC Tag and Deny_Listed Operations Tests")
     print("="*80)
-    
+
     # Run tests
     suite = unittest.TestLoader().loadTestsFromTestCase(TestGRPCTagOperations)
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
-    
+
     # Print summary
     print("\n" + "="*80)
     print("Test Summary")
@@ -502,7 +522,7 @@ if __name__ == '__main__':
     print(f"Failures: {len(result.failures)}")
     print(f"Errors: {len(result.errors)}")
     print("="*80 + "\n")
-    
+
     if result.wasSuccessful():
         print("✅ ALL TESTS PASSED!")
     else:
@@ -515,7 +535,3 @@ if __name__ == '__main__':
             print("\nErrors:")
             for test, traceback in result.errors:
                 print(f"  - {test}: {traceback}")
-
-
-
-

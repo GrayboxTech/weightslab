@@ -22,13 +22,13 @@ static_resources:
                   prefix: "/"
                 route:
                   cluster: grpc_service
-                  timeout: 300s
+                  timeout: 15s
                   retry_policy:
-                    retry_on: "unavailable,resource-exhausted"
-                    num_retries: 3
-                    per_try_timeout: 60s
+                    retry_on: connect-failure,refused-stream,reset
+                    num_retries: 1
+                    per_try_timeout: 3s
                   max_stream_duration:
-                    grpc_timeout_header_max: 300s
+                    grpc_timeout_header_max: 15s
               cors:
                 allow_origin_string_match:
                 - prefix: "*"
@@ -56,8 +56,11 @@ static_resources:
     http2_protocol_options: {}          # enable HTTP/2 (required for gRPC)
     circuit_breakers:
       thresholds:
-      - max_requests: 64
-        max_pending_requests: 64
+      - priority: DEFAULT
+        max_connections: 100
+        max_pending_requests: 100
+        max_requests: 200
+        max_retries: 3
     load_assignment:
       cluster_name: grpc_service
       endpoints:
@@ -65,7 +68,7 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: host.docker.internal  # container -> host (make sure extra_hosts is set)
+                address: host.docker.internal
                 port_value: 50051
 
 admin:

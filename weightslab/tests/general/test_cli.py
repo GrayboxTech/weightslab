@@ -261,12 +261,6 @@ class TestCLICommands(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertIn('usage', result['error'])
 
-    def test_operate_insufficient_args(self):
-        """Test operate command with insufficient arguments."""
-        result = _handle_command('operate 1 2')
-        self.assertFalse(result['ok'])
-        self.assertIn('usage', result['error'])
-
 
 class TestCLIServer(unittest.TestCase):
     """Test CLI server functionality."""
@@ -302,9 +296,9 @@ class TestCLIServer(unittest.TestCase):
 
     def test_cli_serve_starts(self):
         """Test that CLI server starts successfully."""
-        result = cli_serve(cli_host='127.0.0.4', cli_port=2, spawn_client=False)
+        result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
         self.assertTrue(result['ok'])
-            
+
         self.assertIn('host', result)
         self.assertIn('port', result)
         self.assertGreater(result['port'], 0)
@@ -324,7 +318,7 @@ class TestCLIServer(unittest.TestCase):
         """Test server binds to specified port."""
         # Use port 0 to let OS assign
         result = cli_serve(cli_host='127.0.0.1', cli_port=0, spawn_client=False)
-        
+
         self.assertTrue(result['ok'])
         self.assertGreater(result['port'], 0)
 

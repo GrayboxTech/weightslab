@@ -35,6 +35,7 @@ class ModelInterface(NetworkWithOps):
             device: str = None,
             print_graph: bool = False,
             print_graph_filename: str = None,
+            opset_version: int = 17,
             name: str = None,
             register: bool = True,
             use_onnx: bool = False,
@@ -67,6 +68,7 @@ class ModelInterface(NetworkWithOps):
                 registered in the global ledger. Defaults to True.
             use_onnx (bool, optional): If True, ONNX export will be used for
                 dependency extraction instead of torch.fx tracing. Defaults to False.
+            opset_version (int, optional): The ONNX opset version to use if `use_onnx` is True. Defaults to 17.
             compute_dependencies (bool, optional): If True, computes the
                 computational graph dependencies for the wrapped model (using
                 torch.fx or ONNX according to `use_onnx`) so that layer and
@@ -112,9 +114,8 @@ class ModelInterface(NetworkWithOps):
         # Ensure device is a string
         if device and not isinstance(device, str):
             device = str(device)
-
-        self.device = device
-        self.model = model.to(device) if hasattr(model, 'to') else model
+        self.device = 'cuda' if device == 'auto' and th.cuda.is_available() else (device or 'cpu')
+        self.model = model.to(self.device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
 
         # Generate dummy input if not provided and sanity check
@@ -128,9 +129,9 @@ class ModelInterface(NetworkWithOps):
 
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
-                self.dummy_input = dummy_input.to(device)
+                self.dummy_input = dummy_input.to(self.device)
             else:
-                self.dummy_input = th.randn(model.input_shape).to(device)
+                self.dummy_input = th.randn(model.input_shape).to(self.device)
 
         if compute_dependencies and not use_onnx:
             self.print_graph = print_graph
@@ -157,7 +158,7 @@ class ModelInterface(NetworkWithOps):
                 self.generate_graph_vizu()
 
             # Generate the graph dependencies
-            self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input)
+            self.define_deps(use_onnx=use_onnx, dummy_input=self.dummy_input, opset_version=opset_version)
 
         # Clean - Optionally register wrapper in global ledger
         if register:
@@ -205,7 +206,7 @@ class ModelInterface(NetworkWithOps):
                         hp = None
                 if isinstance(hp, dict):
                     _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
-                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 0
+                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 100
                     if not _skip_checkpoint_load:
                         _skip_checkpoint_load = hp.get('skip_checkpoint_load', False)
         except Exception:
@@ -412,7 +413,20 @@ class ModelInterface(NetworkWithOps):
         for opt_name in get_optimizers():
             # Overwrite the optimizer with the same class and lr, updated
             opt = get_optimizer(opt_name)
-            lr = opt.get_lr()[0]
+
+            # Robust LR extraction: handle both OptimizerInterface and raw torch optimizers
+            if hasattr(opt, 'get_lr'):
+                lr = opt.get_lr()[0]
+            elif hasattr(opt, 'param_groups'):
+                lr = opt.param_groups[0]['lr']
+            else:
+                lr = 1e-3 # Fallback
+
+            # If we don't have a valid optimizer or can't extract LR, skip updating
+            if opt == None:
+                return
+
+            # Create a new optimizer instance with the same class, but updated parameters and lr
             optimizer_class = type(opt.optimizer)
             _optimizer = optimizer_class(
                 model.parameters(),
@@ -421,23 +435,46 @@ class ModelInterface(NetworkWithOps):
 
             wl.watch_or_edit(_optimizer, flag='optimizer')
 
+    def _sync_dynamic_hyperparams(self):
+        """Sync dynamic hyperparameters from the ledger."""
+        hp_name = ledgers.resolve_hp_name()
+        hp = ledgers.get_hyperparams(hp_name)
+
+        # Audit mode
+        is_audit = False
+        try:
+            # Check for Audit Mode override to completely prevent checkpointing
+            if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
+                is_audit = True
+        except Exception:
+            pass
+
+        # Sync checkpoint auto-dump steps ratio if specified
+        if hp and not is_audit:
+            # Resolve the value from the proxy if it is one
+            new_ratio = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio')
+            val = new_ratio._resolve() if hasattr(new_ratio, '_resolve') else new_ratio
+
+            if val is not None:
+                try:
+                    self._checkpoint_auto_every_steps = int(val)
+                    logger.info(f"Updated checkpoint auto-dump steps ratio to {self._checkpoint_auto_every_steps} based on hyperparameters")
+                except Exception as e:
+                    logger.warning(f"Failed to update checkpoint auto-dump steps ratio from hyperparameters: {e}")
+
+        return is_audit
+
     def _maybe_auto_dump(self):
         # Called from base class hook after step update.
         # Auto-dump: save model weights only (and architecture if changed).
         existing_manager = ledgers.get_checkpoint_manager()
         try:
             # Check for Audit Mode override to completely prevent checkpointing
-            is_audit = False
-            try:
-                hp_name = ledgers.resolve_hp_name()
-                hp = ledgers.get_hyperparams(hp_name)
-                if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
-                    is_audit = True
-            except Exception:
-                pass
-
+            is_audit = self._sync_dynamic_hyperparams()
             if is_audit or not self.is_training() or existing_manager == None or self._checkpoint_auto_every_steps <= 0:
                 return
+
+            # Only auto-dump if we have a checkpoint manager and we're in training mode with a positive auto-dump ratio
             batched_age = int(self.get_age())
             if batched_age > 0 and (batched_age % self._checkpoint_auto_every_steps) == 0:
                 try:
@@ -464,6 +501,7 @@ class ModelInterface(NetworkWithOps):
             pass
 
     def update_optimizer(self):
+        """Public method to update the optimizer, can be called after architecture changes."""
         try:
             self._update_optimizer()
         except Exception as e:
@@ -583,7 +621,7 @@ class ModelInterface(NetworkWithOps):
                 filename=self.print_graph_filename
             )
 
-    def define_deps(self, use_onnx: bool = False, dummy_input: th.Tensor = None):
+    def define_deps(self, use_onnx: bool = False, dummy_input: th.Tensor = None, opset_version: int = 17):
         """Generates and registers the computational graph dependencies for the model.
 
         This method first calls `generate_graph_dependencies` to determine the
@@ -615,7 +653,8 @@ class ModelInterface(NetworkWithOps):
         else:
             self.dependencies_with_ops = generate_layer_dependencies_from_onnx(
                 self.model,
-                dummy_input=dummy_input
+                dummy_input=dummy_input,
+                opset_version=opset_version
             )
 
         # Map dependencies between layers and their operations
@@ -626,7 +665,7 @@ class ModelInterface(NetworkWithOps):
         # Register the dependencies
         self.register_dependencies(self.mapped_dependencies_with_ops)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, *args, **kwargs) -> th.Tensor:
         """
         Performs a forward pass through the wrapped model, optionally updating its age.
 
@@ -642,12 +681,9 @@ class ModelInterface(NetworkWithOps):
             th.Tensor: The output tensor from the model's forward pass.
         """
 
-        # Check device
-        if x.device != self.device:
-            x = x.to(self.device)
-
-        self.maybe_update_age(x)
-        out = self.model(x)
+        # Forward pass through the model with age update if applicable
+        out = self.model(*args, **kwargs)
+        self.maybe_update_age()
 
         return out
 

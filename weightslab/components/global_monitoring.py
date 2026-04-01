@@ -1,5 +1,5 @@
 import os
-from typing import Any
+from typing import Any, Optional
 from enum import Enum
 import contextvars
 
@@ -32,6 +32,11 @@ _current_context: contextvars.ContextVar[Context] = contextvars.ContextVar(
     'weightslab_context', default=Context.UNKNOWN
 )
 
+# NEW: Track active dataset origin (e.g. 'train_loader')
+_active_origin: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    'weightslab_origin', default=None
+)
+
 
 def get_current_context() -> Context:
     """Get the current WeightsLab execution context (training or testing)."""
@@ -41,6 +46,16 @@ def get_current_context() -> Context:
 def set_current_context(context: Context) -> contextvars.Token[Context]:
     """Set the current WeightsLab execution context and return a token for restoration."""
     return _current_context.set(context)
+
+
+def get_active_origin() -> Optional[str]:
+    """Get the current active dataset origin name."""
+    return _active_origin.get()
+
+
+def set_active_origin(origin: Optional[str]) -> contextvars.Token[Optional[str]]:
+    """Set the current active dataset origin name."""
+    return _active_origin.set(origin)
 
 
 class PauseController:
@@ -59,7 +74,10 @@ class PauseController:
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
-        self._event.wait()   # releases GIL while waiting
+        # Use timeout to allow signal handlers (Ctrl+C, SIGTERM) to be processed
+        while not self._event.wait(timeout=1):
+            # Timeout occurred, loop back to check pause state and allow signals to be handled
+            pass
 
     def pause(self):
         self._event.clear()

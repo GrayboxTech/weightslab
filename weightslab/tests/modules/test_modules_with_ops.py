@@ -525,28 +525,28 @@ def _create_test_method(
 for layer_key in LAYER_KEYS:
     for op in OPERATIONS:
         # 1. CPU Test
-        test_method_cpu = _create_test_method(
+        generated_method_cpu = _create_test_method(
             op,
             layer_key,
             th.device('cpu')
         )
         setattr(
             LayerWiseOperationsTest,
-            test_method_cpu.__name__,
-            test_method_cpu
+            generated_method_cpu.__name__,
+            generated_method_cpu
         )
 
         # 2. CUDA Test
         if th.cuda.is_available():
-            test_method_cuda = _create_test_method(
+            generated_method_cuda = _create_test_method(
                 op,
                 layer_key,
                 th.device('cuda')
             )
             setattr(
                 LayerWiseOperationsTest,
-                test_method_cuda.__name__,
-                test_method_cuda
+                generated_method_cuda.__name__,
+                generated_method_cuda
             )
 
 

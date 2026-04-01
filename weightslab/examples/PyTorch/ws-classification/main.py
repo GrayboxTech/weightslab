@@ -7,13 +7,15 @@ import tempfile
 import yaml
 import tqdm
 import torch
+import random
 import torch.nn as nn
 import torch.optim as optim
 
+from torch.utils.data import Dataset
+from torchvision import datasets, transforms
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
-from torchvision import datasets, transforms
-from torch.utils.data import Dataset
+from torchvision.transforms import InterpolationMode, functional as TF
 
 import weightslab as wl
 from weightslab.backend import ledgers
@@ -28,9 +30,8 @@ from weightslab.components.global_monitoring import (
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
-
 # =============================================================================
-# Custom MNIST Dataset with Filepath Metadata
+# Custom MNIST Dataset with Filepath Metadata and getitem return structure
 # =============================================================================
 class MNISTCustomDataset(Dataset):
     """
@@ -40,7 +41,16 @@ class MNISTCustomDataset(Dataset):
     as metadata that can be tracked by WeightsLab.
     """
 
-    def __init__(self, root, train=True, download=False, transform=None, max_samples=None):
+    def __init__(
+        self,
+        root,
+        train=True,
+        download=False,
+        transform=None,
+        max_samples=None,
+        augmentation_config=None,
+        live_augmentation_config=None,
+    ):
         """
         Args:
             root (str): Root directory where MNIST data is stored
@@ -48,78 +58,155 @@ class MNISTCustomDataset(Dataset):
             download (bool): If True, download the data if not present
             transform (callable, optional): Optional transform to be applied on images
         """
-
         # Load the standard MNIST dataset
-        try:
-            self.mnist = datasets.MNIST(
-                root=root,
-                train=train,
-                download=download,
-                transform=None  # We'll apply transform manually to track filepath
-            )
-        except RuntimeError as e:
-            logger.error(f"Error loading MNIST dataset: {e}")
-            self.mnist = datasets.MNIST(
-                root=root,
-                train=train,
-                download=True,
-                transform=None  # We'll apply transform manually to track filepath
-            )
+        self.mnist = datasets.MNIST(
+            root=root,
+            train=train,
+            download=download,
+            transform=None  # We'll apply transform manually to track filepath
+        )
         self.transform = transform
         self.train = train
         self.root = root
-        self.max_samples = max_samples
+        self.max_samples = max_samples if max_samples is not None else len(self.mnist)
+        self.mnist.data = self.mnist.data[:self.max_samples]
+        self.mnist.targets = self.mnist.targets[:self.max_samples]
+        self.augmentation_config = augmentation_config or {}
+        self.live_augmentation_config = live_augmentation_config or {}
+        # Pre-compute live augmentation settings for fast access in __getitem__
+        self._live_aug_enabled = self.live_augmentation_config.get('enabled', False)
+        self._live_aug_max_rotation = float(self.live_augmentation_config.get('max_rotation_degrees', 20.0))
+        self._live_aug_max_translation = int(self.live_augmentation_config.get('max_translation_pixels', 3))
+        self.samples = []
 
-        # Build filepath mapping for each sample
-        self._build_filepath_mapping()
+        self._build_samples()
 
-    def _build_filepath_mapping(self):
-        """Build a mapping of sample index to filepath."""
+    def _build_samples(self):
+        """Build sample descriptors, optionally adding deterministic augmented copies."""
+        split = 'train' if self.train else 'test'
+        self.samples = []
 
-        self.filepaths = {}
-
-        # For each index, construct a meaningful filepath
-        # MNIST doesn't have original individual files, so we create virtual paths
-        for idx in range(len(self.mnist)):
-            if self.max_samples is not None and idx >= self.max_samples:
-                break
-            label = self.mnist.targets[idx].item() if hasattr(self.mnist.targets[idx], 'item') else self.mnist.targets[idx]
-            split = 'train' if self.train else 'test'
-
-            # Create a virtual filepath that identifies the image
-            virtual_path = os.path.join(
+        for source_idx in range(len(self.mnist)):
+            label = self.mnist.targets[source_idx].item() if hasattr(self.mnist.targets[source_idx], 'item') else self.mnist.targets[source_idx]
+            filepath = os.path.join(
                 'MNIST',
                 'processed',
                 split,
                 f'class_{label}',
-                f'sample_{idx:05d}.pt'
+                f'sample_{source_idx:05d}.pt'
             )
-            self.filepaths[idx] = virtual_path
+            self.samples.append(
+                {
+                    'source_idx': source_idx,
+                    'label': label,
+                    'filepath': filepath,
+                    'metadata': {
+                        'filepath': filepath,
+                    },
+                }
+            )
+
+        if not self.augmentation_config.get('enabled', False):
+            return
+
+        copies_per_sample = int(self.augmentation_config.get('copies_per_sample', 1))
+        if copies_per_sample <= 0:
+            return
+
+        max_rotation_degrees = float(self.augmentation_config.get('max_rotation_degrees', 20.0))
+        max_translation_pixels = int(self.augmentation_config.get('max_translation_pixels', 3))
+        seed = int(self.augmentation_config.get('seed', 1337))
+        rng = random.Random(seed + (0 if self.train else 10_000))
+
+        base_sample_count = len(self.samples)
+        for source_idx in range(base_sample_count):
+            base_sample = self.samples[source_idx]
+            for augmentation_index in range(copies_per_sample):
+                rotation_degrees = rng.uniform(-max_rotation_degrees, max_rotation_degrees)
+                translate_x = rng.randint(-max_translation_pixels, max_translation_pixels)
+                translate_y = rng.randint(-max_translation_pixels, max_translation_pixels)
+                filepath = os.path.join(
+                    'MNIST',
+                    'processed',
+                    split,
+                    f'class_{base_sample["label"]}',
+                    f'sample_{source_idx:05d}_aug_{augmentation_index:02d}.pt'
+                )
+                self.samples.append(
+                    {
+                        'source_idx': source_idx,
+                        'label': base_sample['label'],
+                        'filepath': filepath,
+                        'rotation_degrees': rotation_degrees,
+                        'translation': (translate_x, translate_y),
+                        'metadata': {
+                            'filepath': filepath,
+                            'tags': {
+                                'augmented': True,
+                            },
+                            'augmentation': {
+                                'type': 'affine',
+                                'rotation_degrees': round(rotation_degrees, 4),
+                                'translate_x': translate_x,
+                                'translate_y': translate_y,
+                                'source_index': source_idx,
+                            },
+                        },
+                    }
+                )
 
     def __len__(self):
-        if self.max_samples is not None:
-            return min(len(self.mnist), self.max_samples)
-        return len(self.mnist)
+        return len(self.samples)
 
     def __getitem__(self, idx):
         """
         Returns:
-            tuple: (image, idx, label)
+            tuple: (image, label, filepath)
         """
+        sample = self.samples[idx]
+        image, label = self.mnist[sample['source_idx']]
 
-        image, label = self.mnist[idx]
+        if 'rotation_degrees' in sample:
+            # Static augmentation: deterministic transform baked in at init time
+            image = TF.affine(
+                image,
+                angle=sample['rotation_degrees'],
+                translate=list(sample['translation']),
+                scale=1.0,
+                shear=[0.0, 0.0],
+                interpolation=InterpolationMode.BILINEAR,
+                fill=0,
+            )
+            metadata = sample['metadata']
+        elif self._live_aug_enabled:
+            # Live augmentation: random transform applied on-the-fly each epoch
+            rotation_degrees = random.uniform(-self._live_aug_max_rotation, self._live_aug_max_rotation)
+            translate_x = random.randint(-self._live_aug_max_translation, self._live_aug_max_translation)
+            translate_y = random.randint(-self._live_aug_max_translation, self._live_aug_max_translation)
+            image = TF.affine(
+                image,
+                angle=rotation_degrees,
+                translate=[translate_x, translate_y],
+                scale=1.0,
+                shear=[0.0, 0.0],
+                interpolation=InterpolationMode.BILINEAR,
+                fill=0,
+            )
+            metadata = {**sample['metadata'], 'live_augmented': True, 'live_rotation_degrees': round(rotation_degrees, 4), 'live_translate_x': translate_x, 'live_translate_y': translate_y}
+        else:
+            metadata = sample['metadata']
 
         # Apply transform if provided
         if self.transform:
             image = self.transform(image)
 
-        return image, idx, label
+        return image, idx, label, metadata
 
 
 # -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_mlt, device):
+def train(loader, model, optimizer, criterion_mlt, device, epoch=0):
     """Single training step using the tracked dataloader + watched loss."""
 
     with guard_training_context:
@@ -142,9 +229,16 @@ def train(loader, model, optimizer, criterion_mlt, device):
             preds_raw.float(),
             labels.long(),
             batch_ids=ids,
-            preds=preds
+            preds=preds,
         )
         total_loss = loss_batch_mlt.mean()  # Final scalar loss
+
+        # Log seen_count signal separately
+        wl.save_signals(
+            signals={"seen_count": torch.full((inputs.size(0),), epoch + 1, dtype=torch.float)},
+            batch_ids=ids,
+            log=False
+        )
 
         # Model
         total_loss.backward()
@@ -259,7 +353,12 @@ if __name__ == "__main__":
 
     # Model
     _model = CNN().to(device)
-    model = wl.watch_or_edit(_model, flag="model", device=device)
+    model = wl.watch_or_edit(
+        _model,
+        flag="model",
+        device=device,
+        skip_previous_auto_load=parameters.get("skip_checkpoint_load", False)
+    )
 
     # Optimizer
     lr = parameters.get("optimizer", {}).get("lr", 0.01)
@@ -286,31 +385,37 @@ if __name__ == "__main__":
     # Read data config for all loaders
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
+    train_augmentation_cfg = train_cfg.get("augmentation", {})
+    train_live_augmentation_cfg = train_cfg.get("live_augmentation", {})
 
+    # Create custom datasets with filepath metadata and optional augmentations
     _train_dataset = MNISTCustomDataset(
         root=data_root,
         train=True,
         download=should_download,
+        max_samples=parameters.get("data", {}).get("train_loader", {}).get("max_samples", None),
+        augmentation_config=train_augmentation_cfg,
+        live_augmentation_config=train_live_augmentation_cfg,
         transform=transforms.Compose(
             [
                 transforms.ToTensor(),
             ]
         ),
-        max_samples=train_cfg.get("max_samples", None)
     )
     _test_dataset = MNISTCustomDataset(
         root=data_root,
         train=False,
         download=should_download,
+        max_samples=parameters.get("data", {}).get("test_loader", {}).get("max_samples", None),
         transform=transforms.Compose(
             [
                 transforms.ToTensor(),
             ]
         ),
-        max_samples=test_cfg.get("max_samples", None)
     )
 
     # Create tracked loaders for train, test, and test
+    skip_auto_load = parameters.get("skip_checkpoint_load", False)
     train_loader = wl.watch_or_edit(
         _train_dataset,
         flag="data",
@@ -321,7 +426,8 @@ if __name__ == "__main__":
         compute_hash=False,
         preload_labels=True,
         preload_metadata=False,
-        enable_h5_persistence=enable_h5_persistence
+        enable_h5_persistence=enable_h5_persistence,
+        skip_previous_auto_load=skip_auto_load
     )
     test_loader = wl.watch_or_edit(
         _test_dataset,
@@ -333,7 +439,8 @@ if __name__ == "__main__":
         compute_hash=False,
         preload_labels=True,
         preload_metadata=False,
-        enable_h5_persistence=enable_h5_persistence
+        enable_h5_persistence=enable_h5_persistence,
+        skip_previous_auto_load=skip_auto_load
     )
 
     # Losses & metrics (watched objects – they log themselves)
@@ -378,11 +485,17 @@ if __name__ == "__main__":
 
     train_loss = None
     test_loss, test_metric = None, None
+    steps_per_epoch = len(train_loader)
+
     for train_step in train_range:
-        age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
+        # Get model age in steps (total steps seen by model)
+        age = model.get_age() if hasattr(model, "get_age") else train_step
+
+        # Calculate current epoch
+        epoch = train_step // steps_per_epoch
 
         # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion, device)
+        train_loss = train(train_loader, model, optimizer, train_criterion, device, epoch=epoch)
 
         # Periodic test evaluation
         if age > 0 and age % eval_every == 0:
@@ -408,6 +521,10 @@ if __name__ == "__main__":
             sys.stdout.write(f"\r{msg:<100}")
             sys.stdout.flush()
         elif tqdm_display:
+            # Update description with epoch
+            epoch = train_step // steps_per_epoch
+            train_range.set_description(f"Epoch {epoch}")
+
             # Build compact postfix string
             postfix_parts = [f"train_loss={train_loss:.4f}"]
             if test_loss is not None:

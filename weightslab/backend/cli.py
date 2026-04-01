@@ -115,7 +115,6 @@ def _handle_command(cmd: str) -> Any:
                     'list_loaders': 'List registered dataloader names in the ledger',
                     'list_uids': 'List data sample UIDs. Syntax: list_uids [loader_name] [--discarded] [--limit N]',
                     'dump': 'Return a sanitized dump of the ledger contents',
-                    'operate': 'Edit model architecture. Syntax: operate [<model_name>] <op_type:int> <layer_id:int> <nb|[list]>',
                     'plot_model': 'Show ASCII tree of model architecture. Syntax: plot_model [<model_name>]',
                     'discard': 'Discard data samples. Syntax: discard <uid> [uid2 ...] [--loader loader_name]',
                     'undiscard': 'Un-discard data samples. Syntax: undiscard <uid> [uid2 ...] [--loader loader_name]',
@@ -141,12 +140,12 @@ def _handle_command(cmd: str) -> Any:
         name = resolve_hp_name()
         if verb == 'pause' or verb == 'p':
             pause_controller.pause()
-            set_hyperparam(name, 'is_training', False)
+            set_hyperparam(name=name, value=False, key_path='is_training')
             return {'ok': True, 'action': 'paused'}
 
         if verb == 'resume' or verb == 'r':
             pause_controller.resume()
-            set_hyperparam(name, 'is_training', True)
+            set_hyperparam(name=name, value=True, key_path='is_training')
             return {'ok': True, 'action': 'resumed'}
 
         if verb == 'status':
@@ -404,67 +403,6 @@ def _handle_command(cmd: str) -> Any:
                 out['hyperparams'] = {}
             return {'ok': True, 'ledger': out}
 
-        if verb == 'operate':
-            # syntax:
-            #  - operate <op_type:int> <layer_id:int> <nb>
-            #  - operate <model_name> <op_type:int> <layer_id:int> <nb>
-            if len(parts) < 4:
-                return {'ok': False, 'error': 'usage: operate [<model_name>] <op_type> <layer_id> <nb|[list]>'}
-
-            # detect whether second token is model name or op_type
-            with weightslab_rlock:
-                try:
-                    op_type = int(parts[1])
-                    layer_id = int(parts[2])
-                    raw = ' '.join(parts[3:])
-                    try:
-                        nb = eval(raw, {}, {})
-                    except Exception:
-                        try:
-                            nb = int(parts[3])
-                        except Exception:
-                            nb = raw
-                    try:
-                        m = GLOBAL_LEDGER.get_model()
-                    except Exception:
-                        return {'ok': False, 'error': 'no_model_registered'}
-
-                    # Operate
-                    with m as mm:
-                        mm.operate(layer_id, nb, op_type)
-                    print(f'[cli] operated on model via context manager')
-                    print(f'[cli] new model info: {m}')
-
-                    return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': None}
-                except ValueError:
-                    # parts[1] is not an int => treat as model name
-                    model_name = parts[1]
-                    if len(parts) < 5:
-                        return {'ok': False, 'error': 'usage: operate <model_name> <op_type> <layer_id> <nb|[list]>'}
-                    try:
-                        op_type = int(parts[2])
-                        layer_id = int(parts[3])
-                    except Exception:
-                        return {'ok': False, 'error': 'op_type and layer_id must be ints'}
-                    raw = ' '.join(parts[4:])
-                    try:
-                        nb = eval(raw, {}, {})
-                    except Exception:
-                        try:
-                            nb = int(parts[4])
-                        except Exception:
-                            nb = raw
-                    try:
-                        m = GLOBAL_LEDGER.get_model(model_name)
-                    except Exception:
-                        return {'ok': False, 'error': f'model_not_found: {model_name}'}
-
-                    # Operate
-                    with m as mm:
-                        mm.operate(layer_id, nb, op_type)
-
-                    return {'ok': True, 'operated': True, 'op': (op_type, layer_id, nb), 'model': model_name}
-
         if verb in ('discard', 'undiscard'):
             # Syntax: discard <uid> [uid2 ...] [--loader loader_name]
             # Syntax: undiscard <uid> [uid2 ...] [--loader loader_name]
@@ -594,7 +532,7 @@ def _handle_command(cmd: str) -> Any:
                     try:
                         # Try different methods to add tags - with new tag system, use set() method
                         sample_id = str(uid) if uid.isdigit() else uid
-                        
+
                         if hasattr(dataset, 'set') and callable(dataset.set):
                             # New tag system: use set() to create tags_<tagname> column
                             dataset.set(sample_id=sample_id, stat_name="tags", value=tag)
@@ -686,7 +624,7 @@ def _handle_command(cmd: str) -> Any:
 
                 # apply change
                 try:
-                    set_hyperparam(hp_name, key, value)
+                    set_hyperparam(name=hp_name, value=value, key_path=key)
                     return {'ok': True, 'hp_name': hp_name, 'key': key, 'value': value}
                 except Exception as e:
                     return {'ok': False, 'error': str(e)}
@@ -695,7 +633,7 @@ def _handle_command(cmd: str) -> Any:
 
         # Editing hyperparameters via CLI is intentionally disabled.
         return {'ok': False, 'error': f'unknown_command: {verb}'}
-    
+
     except Exception as e:
         return {'ok': False, 'error': str(e)}
 
@@ -779,7 +717,7 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
     srv = None
     last_error = None
     max_attempts = 10
-    
+
     for attempt in range(max_attempts):
         try_port = cli_port + attempt
         try:
@@ -812,7 +750,7 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
                 # All attempts failed
                 logger.exception("cli_bind_failed_all_attempts")
                 return {'ok': False, 'error': f'bind_failed after {max_attempts} attempts. Last error: {e}. Port {cli_port} may be in use or require admin privileges.'}
-    
+
     if srv is None:
         return {'ok': False, 'error': f'bind_failed: {last_error}'}
 

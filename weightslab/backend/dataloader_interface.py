@@ -15,6 +15,7 @@ It also supports:
   hyperparameters
 - checkpoint-based data loading and reproducible iterator restoration
 """
+import os
 import torch
 import logging
 from typing import Any, Iterator, Optional
@@ -37,6 +38,42 @@ from weightslab.data.sample_stats import SampleStatsEx
 
 # Get Global Logger
 logger = logging.getLogger(__name__)
+
+
+_DENY_LIST_REFRESH_INTERVAL = 32
+
+
+def _resolve_safe_num_workers(dataset: Any, num_workers: int, loader_name: Optional[str] = None) -> int:
+    """Clamp worker count for datasets that cannot be pickled by Windows spawn."""
+    try:
+        requested_num_workers = int(num_workers)
+    except Exception:
+        requested_num_workers = 0
+
+    if requested_num_workers <= 0 or os.name != "nt":
+        return max(0, requested_num_workers)
+
+    wrapped_dataset = dataset
+    while hasattr(wrapped_dataset, "wrapped_dataset"):
+        next_dataset = getattr(wrapped_dataset, "wrapped_dataset", None)
+        if next_dataset is None or next_dataset is wrapped_dataset:
+            break
+        wrapped_dataset = next_dataset
+
+    dataset_cls = type(wrapped_dataset)
+    dataset_module = getattr(dataset_cls, "__module__", "")
+    if dataset_module in {"__main__", "__mp_main__"}:
+        dataset_name = getattr(dataset_cls, "__name__", repr(dataset_cls))
+        loader_label = loader_name or "unnamed"
+        logger.warning(
+            "Forcing num_workers=0 for loader '%s' because dataset %s is defined in %s and cannot be pickled by Windows multiprocessing. Move the dataset class into its own importable module file and import it from your main script if you want num_workers > 0.",
+            loader_label,
+            dataset_name,
+            dataset_module,
+        )
+        return 0
+
+    return requested_num_workers
 
 
 class WeightsLabDataSampler(Sampler):
@@ -92,6 +129,8 @@ class WeightsLabDataSampler(Sampler):
         self.offset = max(0, offset)
         self.batch_size = batch_size
         self.drop_last = drop_last
+        self._deny_listed_uids_cache: set[str] = set()
+        self._deny_list_revision: Optional[tuple[str, int]] = None
 
     def _get_deny_listed_uids(self) -> set:
         """Get set of deny-listed UIDs from tracked dataset."""
@@ -100,10 +139,61 @@ class WeightsLabDataSampler(Sampler):
             try:
                 df_view = self.tracked_dataset._get_df_view()
                 if not df_view.empty and SampleStatsEx.DISCARDED.value in df_view.columns:
-                    deny_listed_uids = set(df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index)
+                    deny_listed_uids = {
+                        str(uid)
+                        for uid in df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index
+                    }
             except Exception:
                 pass
         return deny_listed_uids
+
+    def _get_deny_list_revision(self) -> Optional[tuple[str, int]]:
+        """Return a cheap revision token for discard-state refreshes."""
+        try:
+            origin = getattr(self.tracked_dataset, "_dataset_split", None)
+            df_manager = get_dataframe()
+            if origin and df_manager is not None and hasattr(df_manager, "get_origin_revision"):
+                return ("origin", int(df_manager.get_origin_revision(origin)))
+        except Exception:
+            pass
+
+        try:
+            denied_count = getattr(self.tracked_dataset, "denied_sample_cnt", None)
+            if denied_count is not None:
+                return ("count", int(denied_count))
+        except Exception:
+            pass
+
+        return None
+
+    def _refresh_deny_list_cache(self, force: bool = False) -> set[str]:
+        """Refresh deny-list cache only when the shared ledger changed."""
+        revision = self._get_deny_list_revision()
+        if not force and revision is not None and revision == self._deny_list_revision:
+            return self._deny_listed_uids_cache
+
+        self._deny_listed_uids_cache = self._get_deny_listed_uids()
+        self._deny_list_revision = revision
+        return self._deny_listed_uids_cache
+
+    def _is_deny_listed(self, idx: int) -> bool:
+        """Check whether an index is currently deny-listed."""
+        if self.tracked_dataset is None or not hasattr(self.tracked_dataset, "unique_ids"):
+            return False
+
+        try:
+            # Prefer physical_uids when available: after introducing grouped/physical
+            # indexing, __len__ returns len(physical_uids), so idx is a physical index
+            # and unique_ids (the expanded per-member list) would point at the wrong UID.
+            physical_uids = getattr(self.tracked_dataset, "physical_uids", None)
+            if physical_uids is not None:
+                uid = str(physical_uids[idx])
+            else:
+                uid = str(self.tracked_dataset.unique_ids[idx])
+        except Exception:
+            return False
+
+        return uid in self._refresh_deny_list_cache()
 
     def _generate_indices(self):
         """Generate base indices (shuffled or sequential)."""
@@ -114,44 +204,55 @@ class WeightsLabDataSampler(Sampler):
             indices = list(range(n))
         return indices
 
-    def _filter_indices(self, indices):
-        """Filter out deny-listed and offset indices."""
-        deny_listed_uids = self._get_deny_listed_uids()
-
-        # Filter and apply offset
-        filtered = []
+    def _iter_filtered_indices(self, indices):
+        """Yield indices lazily so new discards are respected mid-epoch."""
         skipped = 0
+        unique_ids = getattr(self.tracked_dataset, "unique_ids", None)
+        # Prefer physical_uids: after grouped indexing __len__ returns
+        # len(physical_uids) so idx is a physical index; unique_ids is the
+        # expanded per-member list and would resolve the wrong UID.
+        physical_uids = getattr(self.tracked_dataset, "physical_uids", None)
+        uid_source = physical_uids if physical_uids is not None else unique_ids
+        deny_listed_uids = self._refresh_deny_list_cache()
+        deny_list_revision = self._deny_list_revision
+        polled_since_refresh = 0
 
         for idx in indices:
-            # Check if deny-listed
-            if self.tracked_dataset is not None and hasattr(self.tracked_dataset, "unique_ids"):
+            if uid_source is not None:
+                should_refresh = False
+                current_revision = self._get_deny_list_revision()
+
+                if current_revision is not None:
+                    should_refresh = current_revision != deny_list_revision
+                else:
+                    polled_since_refresh += 1
+                    should_refresh = polled_since_refresh >= _DENY_LIST_REFRESH_INTERVAL
+
+                if should_refresh:
+                    deny_listed_uids = self._refresh_deny_list_cache(force=current_revision is None)
+                    deny_list_revision = self._deny_list_revision
+                    polled_since_refresh = 0
+
                 try:
-                    uid = int(self.tracked_dataset.unique_ids[idx])
-                    if uid in deny_listed_uids:
+                    if str(uid_source[idx]) in deny_listed_uids:
                         continue
                 except Exception:
                     pass
 
-            # Apply offset
             if skipped < self.offset:
                 skipped += 1
                 continue
 
-            filtered.append(idx)
-
-        return filtered
+            yield idx
 
     def __iter__(self):
         """Iterate over indices or batches of indices."""
-        # Generate and filter indices
         indices = self._generate_indices()
-        filtered_indices = self._filter_indices(indices)
+        filtered_indices = self._iter_filtered_indices(indices)
 
-        # If no batching, yield individual indices
         if self.batch_size is None:
             yield from filtered_indices
         else:
-            # Yield batches
             batch = []
             for idx in filtered_indices:
                 batch.append(idx)
@@ -159,7 +260,6 @@ class WeightsLabDataSampler(Sampler):
                     yield list(batch)
                     batch = []
 
-            # Yield remaining batch if not dropping last
             if batch and not self.drop_last:
                 yield list(batch)
 
@@ -169,7 +269,7 @@ class WeightsLabDataSampler(Sampler):
         total = len(self.data_source)
 
         # Subtract deny-listed samples
-        deny_listed_uids = self._get_deny_listed_uids()
+        deny_listed_uids = self._refresh_deny_list_cache()
         total -= len(deny_listed_uids)
 
         # Subtract offset
@@ -317,6 +417,7 @@ class DataLoaderInterface:
                 batch_size=batch_size,
                 drop_last=drop_last,
             )
+            num_workers = _resolve_safe_num_workers(self.tracked_dataset, num_workers, loader_name)
 
             # Finally, construct dataloader using our batch_sampler
             self.dataloader = DataLoader(
@@ -848,6 +949,11 @@ class DataLoaderInterface:
                 )
                 self._mutable_batch_sampler = sampler
                 self._sample_offset = 0
+                num_workers = _resolve_safe_num_workers(
+                    self.tracked_dataset,
+                    num_workers,
+                    getattr(self, "_ledger_name", None),
+                )
 
                 # Rebuild dataloader with offset sampler
                 self.dataloader = DataLoader(
@@ -916,6 +1022,11 @@ class DataLoaderInterface:
                 drop_last = kwargs.pop("drop_last", False)
                 pin_memory = kwargs.pop("pin_memory", False)
                 collate_fn = kwargs.pop("collate_fn", None)
+                num_workers = _resolve_safe_num_workers(
+                    self.tracked_dataset,
+                    num_workers,
+                    getattr(self, "_ledger_name", None),
+                )
 
                 # Rebuild sampler & dataloader if we had one
                 if getattr(self, "_mutable_batch_sampler", None) is not None:

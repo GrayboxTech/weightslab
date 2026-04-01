@@ -22,6 +22,107 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+
+
+
+def _to_uint8_image(img_float: np.ndarray) -> np.ndarray:
+    """
+    Convert float image to uint8 for visualization.
+    Supports:
+      - HxW (grayscale)
+      - HxWx1
+      - HxWx3
+    Assumes img_float is either in [0,1] or any range (will be min-max normalized).
+    """
+    img = np.asarray(img_float)
+
+    if img.ndim == 2:
+        img = img[..., None]  # HxWx1
+
+    if img.shape[-1] == 1:
+        img = np.repeat(img, 3, axis=-1)  # grayscale -> RGB
+
+    if img.shape[-1] != 3:
+        raise ValueError(f"Expected image with 1 or 3 channels, got shape {img.shape}")
+
+    img = img.astype(np.float32)
+
+    # If already looks like [0,1], keep it; otherwise min-max normalize.
+    mn, mx = float(img.min()), float(img.max())
+    if mn >= 0.0 and mx <= 1.0:
+        img01 = img
+    else:
+        if mx - mn < 1e-12:
+            img01 = np.zeros_like(img, dtype=np.float32)
+        else:
+            img01 = (img - mn) / (mx - mn)
+
+    return (img01 * 255.0 + 0.5).astype(np.uint8)
+
+
+def overlay_gt_pred(
+    image_float: np.ndarray,
+    gt_mask: np.ndarray,
+    pred_mask: np.ndarray,
+    *,
+    gt_value=None,
+    pred_value=None,
+    alpha_gt=0.45,
+    alpha_pred=0.45,
+    color_gt=(0, 255, 0),      # green
+    color_pred=(255, 0, 0),    # red
+    show_overlap_as_yellow=True
+) -> np.ndarray:
+    """
+    Returns uint8 RGB image with GT and Pred overlays.
+
+    gt_mask / pred_mask: HxW integer arrays (int8 ok).
+    gt_value / pred_value: value treated as "foreground" (use >0 if you prefer).
+    """
+    base = _to_uint8_image(image_float)
+    h, w, _ = base.shape
+
+    gt = np.asarray(gt_mask)
+    pr = np.asarray(pred_mask)
+    if gt.shape != (h, w) or pr.shape != (h, w):
+        raise ValueError(
+            f"Mask shapes must match image HxW={(h,w)}; got gt={gt.shape}, pred={pr.shape}"
+        )
+
+    # Foreground booleans
+    gt_fg = (gt == gt_value) if gt_value is not None else (gt > 0)
+    pr_fg = (pr == pred_value) if pred_value is not None else (pr > 0)
+
+    overlap = gt_fg & pr_fg
+    gt_only = gt_fg & ~pr_fg
+    pr_only = pr_fg & ~gt_fg
+
+    out = base.astype(np.float32)
+
+    def blend(where: np.ndarray, color, alpha: float):
+        if alpha <= 0:
+            return
+        col = np.array(color, dtype=np.float32).reshape(1, 1, 3)
+        m = where[..., None].astype(np.float32)
+        # out = (1-a)*out + a*color where mask==1
+        out[:] = out * (1.0 - alpha * m) + col * (alpha * m)
+
+    # Blend GT-only and Pred-only
+    blend(gt_only, color_gt, alpha_gt)
+    blend(pr_only, color_pred, alpha_pred)
+
+    # Blend overlap separately (optional)
+    if show_overlap_as_yellow:
+        # yellow = red + green
+        blend(overlap, (255, 255, 0), max(alpha_gt, alpha_pred))
+    else:
+        # Or just apply both (will darken/compound)
+        blend(overlap, color_gt, alpha_gt)
+        blend(overlap, color_pred, alpha_pred)
+
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 # Pre-compile regex patterns for stats matching
 _PATTERN_CACHE = {}
 
@@ -211,7 +312,7 @@ def load_label(dataset, sample_id):
     Arguments:
         dataset: The dataset object to load from.
         sample_id: The sample ID to load the label for.
-    
+
     Expected dataset patterns:
     - dataset[index] -> (data, label)
     - dataset[index] -> (data, uids, label)
@@ -271,7 +372,7 @@ def load_metadata(dataset, sample_id):
     Arguments:
         dataset: The dataset object to load from.
         sample_id: The sample ID to load the label for.
-    
+
     Expected dataset patterns:
     - dataset[index] -> (data, label)
     - dataset[index] -> (data, uids, label)
@@ -320,18 +421,18 @@ def _detect_channel_first_3d(shape_tuple) -> bool:
 
 def _extract_slice_from_4d(np_img: np.ndarray, slice_idx: int = None) -> np.ndarray:
     """Extract a 2D/3D slice from 4D volumetric data.
-    
+
     Expects input in (Z, H, W, C) or (Z, H, W) format.
     Handles channel-first formats:
     - (C, Z, H, W) → transposes to (Z, H, W, C)
     - (T, C, H, W) → transposes to (T, H, W, C) - PyTorch sequence format
-    
+
     If slice_idx is None, extracts middle slice.
     Returns 2D array suitable for PIL Image conversion.
     """
     if np_img.ndim != 4:
         return np_img
-    
+
     # Detect and transpose channel-first formats
     if np_img.shape[0] in [1, 3, 4] and np_img.shape[0] < min(np_img.shape[1:]):
         # Format: (C, Z, H, W) → (Z, H, W, C)
@@ -339,19 +440,19 @@ def _extract_slice_from_4d(np_img: np.ndarray, slice_idx: int = None) -> np.ndar
     elif np_img.shape[1] in [1, 3, 4] and np_img.shape[1] < min(np_img.shape[2], np_img.shape[3]):
         # Format: (T, C, H, W) → (T, H, W, C) - PyTorch sequence format
         np_img = np.transpose(np_img, (0, 2, 3, 1))
-    
+
     # Now we should have (Z, H, W) or (Z, H, W, C)
     z_dim = np_img.shape[0]
     if slice_idx is None:
         slice_idx = z_dim // 2  # Middle slice
-    
+
     slice_idx = max(0, min(slice_idx, z_dim - 1))
     return np_img[slice_idx]  # Returns (H, W) or (H, W, C)
 
 
-def _get_image_array_and_metadata(wrapped, index) -> tuple:
+def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
     """Load image array from dataset and return (array, is_volumetric, original_shape).
-    
+
     Returns:
         (np_img, is_volumetric, original_shape) where:
         - np_img: 2D or 3D array (H×W or H×W×C) or 4D array (Z×H×W×C)
@@ -359,13 +460,31 @@ def _get_image_array_and_metadata(wrapped, index) -> tuple:
         - original_shape: tuple of original shape AFTER any channel-first transposition
     """
     np_img = wrapped[index]
-    if isinstance(np_img, (list, tuple)):
-        np_img = np_img[0]
+    if isinstance(np_img, (list, tuple)) and len(np_img) > 0:
+        pixels = np_img[0]
+        if isinstance(pixels, (list, tuple)):
+            # Case A: WeightsLab RAW container OR custom raw group list.
+            # We must pluck from the first element.
+            if len(pixels) > rank:
+                np_img = pixels[rank]
+            else:
+                np_img = pixels[0]
+        elif len(np_img) >= 2 and isinstance(np_img[1], str):
+            # Case B: WeightsLab PLUCKED container (pixels, id, target, ...)
+            # The first element is already the correctly plucked member.
+            np_img = pixels
+        else:
+            # Case C: Standard raw group list / tuple where elements are NOT nested lists.
+            # (e.g. torchvision's (Img, Target))
+            if len(np_img) > rank:
+                np_img = np_img[rank]
+            else:
+                np_img = np_img[0]
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
-    
+
     is_volumetric = np_img.ndim == 4
-    
+
     # For 4D volumetric data, detect and transpose channel-first formats:
     # 1. (C, Z, H, W) → (Z, H, W, C) - channels first in all dimensions
     # 2. (T, C, H, W) → (T, H, W, C) - sequence with channels first (PyTorch format)
@@ -380,9 +499,9 @@ def _get_image_array_and_metadata(wrapped, index) -> tuple:
             logger.info(f"[4D Transpose] Detected (T,C,H,W) format: {original_4d_shape} -> transposing to (T,H,W,C)")
             np_img = np.transpose(np_img, (0, 2, 3, 1))
         logger.info(f"[4D Shape] After transpose: {np_img.shape}")
-    
+
     original_shape = tuple(np_img.shape)
-    
+
     return np_img, is_volumetric, original_shape
 
 
@@ -409,17 +528,18 @@ def to_uint8(np_img: np.ndarray) -> np.ndarray:
     return np_img.astype(np.uint8)
 
 
-def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
+def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Image.Image:
     """Load raw image from dataset at given index.
-    
+
     For 4D volumetric data (Z, H, W, C) or (Z, H, W), extracts a single slice.
     If slice_idx is None, extracts middle slice.
-    
+
     Args:
         dataset: Dataset object
         index: Sample index
         slice_idx: Specific Z-slice to extract (None = middle slice)
-    
+        rank: Member rank for grouped data
+
     Returns:
         PIL Image of the 2D slice
     """
@@ -435,12 +555,12 @@ def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
         img = Image.open(img_path)
         return img.convert("RGB")
     elif hasattr(wrapped, '__getitem__') or hasattr(wrapped, "data") or hasattr(wrapped, "dataset"):
-        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index)
-        
+        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
+
         # Handle 4D volumetric data
         if is_volumetric:
             np_img = _extract_slice_from_4d(np_img, slice_idx=slice_idx)
-        
+
         if np_img.ndim == 2:
             # Grayscale 2D
             np_img = to_uint8(np_img)
@@ -450,7 +570,7 @@ def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
             if _detect_channel_first_3d(np_img.shape):
                 # (C, H, W) -> (H, W, C)
                 np_img = np.transpose(np_img, (1, 2, 0))
-            
+
             np_img = to_uint8(np_img)
             # Now must be (H, W, C)
             channels = np_img.shape[-1]
@@ -475,26 +595,26 @@ def load_raw_image(dataset, index, slice_idx: int = None) -> Image.Image:
         raise ValueError("Dataset type not supported for raw image extraction.")
 
 
-def load_raw_image_array(dataset, index) -> tuple:
+def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
     """Load raw image array from dataset and return (array, is_volumetric, original_shape).
-    
+
     Returns the full array (including 4D if present) for serialization to WS.
     For 4D volumetric data, also extracts middle slice for thumbnail.
-    
+
     Returns:
         (full_array, is_volumetric, original_shape, middle_slice_image)
     """
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
-    
+
     if hasattr(wrapped, '__getitem__'):
-        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index)
-        
+        np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
+
         # Extract middle slice for thumbnail
         if is_volumetric:
             middle_slice = _extract_slice_from_4d(np_img, slice_idx=None)
         else:
             middle_slice = np_img
-        
+
         # Convert middle slice to PIL Image for thumbnail
         if middle_slice.ndim == 2:
             middle_slice_uint8 = to_uint8(middle_slice)
@@ -512,9 +632,9 @@ def load_raw_image_array(dataset, index) -> tuple:
                 middle_pil = Image.fromarray(middle_slice_uint8, mode="RGBA")
             else:
                 middle_pil = Image.fromarray(middle_slice_uint8[..., 0], mode="L")  # Fallback
-        
+
         return np_img, is_volumetric, original_shape, middle_pil
-    
+
     return None, False, None, None
 
 
@@ -524,7 +644,7 @@ def load_uid(dataset, sample_id):
     Arguments:
         dataset: The dataset object to load from.
         sample_id: The sample ID to load the label for.
-    
+
     Expected dataset patterns:
     - dataset[index] -> (data, label)
     - dataset[index] -> (data, uids, label)
@@ -551,5 +671,5 @@ def load_uid(dataset, sample_id):
             if len(data) == 1:
                 return None  # Only data, no metadata
             elif len(data) >= 2:  # if len==2, only data and uid, no extra info
-                return data[1]  # Second element is typically the uid 
+                return data[1]  # Second element is typically the uid
     return None

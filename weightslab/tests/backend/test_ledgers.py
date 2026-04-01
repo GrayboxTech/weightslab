@@ -1,4 +1,5 @@
 import gc
+import pickle
 import unittest
 
 from weightslab.backend.ledgers import GLOBAL_LEDGER, DEFAULT_NAME, Ledger, Proxy
@@ -178,6 +179,175 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(hp_handle.get(), params)
         self.assertEqual(hp_handle['learning_rate'], 0.01)
         self.assertEqual(GLOBAL_LEDGER.list_hyperparams(), [DEFAULT_NAME])
+
+    def test_proxy_get_key_default_mode_returns_live_proxy(self):
+        """Default key get returns a live ValueProxy for dict-backed targets."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1"})
+
+        data_root = hp_handle.get("data_root")
+        self.assertEqual(data_root, "C:/data/v1")
+        self.assertTrue(hasattr(data_root, "set"))
+
+        # Updating the underlying mapping is reflected through the live proxy.
+        hp_handle["data_root"] = "C:/data/v2"
+        self.assertEqual(data_root.get(), "C:/data/v2")
+
+    def test_proxy_pickles_and_restores(self):
+        proxy = Proxy({"flag": True, "count": 3})
+
+        payload = pickle.dumps(proxy)
+        restored = pickle.loads(payload)
+
+        self.assertIsInstance(restored, Proxy)
+        self.assertEqual(restored.get(), {"flag": True, "count": 3})
+        self.assertTrue(isinstance(restored, dict))
+
+    def test_value_proxy_pickles_and_preserves_live_behavior(self):
+        proxy = Proxy({"flag": True})
+        value_proxy = proxy.get("flag")
+
+        payload = pickle.dumps(value_proxy)
+        restored = pickle.loads(payload)
+
+        self.assertTrue(isinstance(restored, bool))
+        self.assertTrue(restored.get())
+        restored.set(False)
+        self.assertFalse(restored.get())
+        self.assertTrue(proxy.get("flag"))
+
+    def test_proxy_get_key_explicit_plain_value_mode(self):
+        """proxy=False returns a plain snapshot value."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1"})
+
+        data_root = hp_handle.get("data_root", proxy=False)
+        self.assertEqual(data_root, "C:/data/v1")
+
+        hp_handle["data_root"] = "C:/data/v2"
+        self.assertEqual(data_root, "C:/data/v1")
+
+    def test_value_proxy_numeric_comparisons(self):
+        """ValueProxy supports all standard numeric and string comparison operators."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"lr": 0.01, "batch_size": 32, "tag": "v1"})
+
+        lr = hp_handle.get("lr")
+        bs = hp_handle.get("batch_size")
+        tag = hp_handle.get("tag")
+
+        # Equality
+        self.assertTrue(lr == 0.01)
+        self.assertTrue(0.01 == lr)
+        self.assertFalse(lr != 0.01)
+
+        # Ordering — ValueProxy on left
+        self.assertTrue(lr < 1.0)
+        self.assertTrue(lr <= 0.01)
+        self.assertTrue(lr > 0.001)
+        self.assertTrue(lr >= 0.01)
+
+        # Ordering — plain value on left (uses __gt__/__ge__ via reflected ops)
+        self.assertTrue(1.0 > lr)
+        self.assertTrue(0.01 >= lr)
+        self.assertTrue(0.001 < lr)
+
+        # Integer / index coercion
+        self.assertEqual(int(bs), 32)
+        self.assertEqual(float(lr), 0.01)
+
+        # Arithmetic
+        self.assertAlmostEqual(lr + 0.09, 0.1)
+        self.assertAlmostEqual(0.09 + lr, 0.1)
+        self.assertEqual(bs * 2, 64)
+        self.assertEqual(2 * bs, 64)
+        self.assertEqual(bs - 2, 30)
+        self.assertEqual(40 - bs, 8)
+        self.assertEqual(bs // 3, 10)
+        self.assertEqual(100 // bs, 3)
+        self.assertEqual(bs % 5, 2)
+        self.assertEqual(101 % bs, 5)
+        self.assertAlmostEqual(bs / 2, 16.0)
+        self.assertAlmostEqual(64 / bs, 2.0)
+
+        # String comparison
+        self.assertTrue(tag == "v1")
+        self.assertTrue(tag < "v2")
+        self.assertTrue("v0" < tag)
+
+        # Hashability (usable in sets/dicts)
+        s = {lr, 0.01}
+        self.assertEqual(len(s), 1)
+
+    def test_proxy_get_key_proxy_mode_live_read_and_write(self):
+        """proxy=True returns a live key proxy that tracks and updates parent mapping."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1"})
+
+        data_root_proxy = hp_handle.get("data_root", proxy=True)
+        self.assertEqual(data_root_proxy.get(), "C:/data/v1")
+
+        # External mapping update is visible from the key proxy.
+        hp_handle["data_root"] = "C:/data/v2"
+        self.assertEqual(data_root_proxy.get(), "C:/data/v2")
+
+        # Key proxy update writes back into parent mapping.
+        data_root_proxy.set("C:/data/v3")
+        self.assertEqual(hp_handle.get("data_root"), "C:/data/v3")
+
+    def test_proxy_get_key_proxy_mode_survives_parent_replacement(self):
+        """Live key proxy resolves against current parent object after re-registration."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1"})
+
+        data_root_proxy = hp_handle.get("data_root", proxy=True)
+        self.assertEqual(data_root_proxy.get(), "C:/data/v1")
+
+        # Re-register hyperparams under same name; existing parent proxy is updated.
+        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v4", "lr": 0.01})
+        self.assertEqual(data_root_proxy.get(), "C:/data/v4")
+
+        # Updates through key proxy should target the latest registered mapping.
+        data_root_proxy.set("C:/data/v5")
+        self.assertEqual(hp_handle.get("data_root"), "C:/data/v5")
+
+    def test_proxy_get_key_proxy_mode_default_and_late_set(self):
+        """Missing-key live proxy returns default and can later populate the key."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={})
+
+        data_root_proxy = hp_handle.get("data_root", default="C:/fallback", proxy=True)
+        self.assertEqual(data_root_proxy.get(), "C:/fallback")
+
+        data_root_proxy.set("C:/data/live")
+        self.assertEqual(hp_handle.get("data_root"), "C:/data/live")
+
+    def test_watch_or_edit_hyperparams_rebinds_caller_variable(self):
+        """wl.watch_or_edit(parameters, flag='hyperparameters') rebinds the caller's
+        local variable to the Proxy even without capturing the return value."""
+        import weightslab as wl
+        from weightslab.backend.ledgers import Proxy
+
+        params = {"lr": 0.001, "batch_size": 32}
+        wl.watch_or_edit(params, flag="hyperparameters", defaults=params)
+        # After the call without assignment, `params` should now be a Proxy.
+        self.assertIsInstance(params, Proxy)
+        self.assertEqual(params["lr"], 0.001)
+
+    def test_register_hyperparams_updates_existing_dict_in_place(self):
+        """Re-registering hyperparams preserves dict identity for in-place workflows."""
+        params = {"learning_rate": 0.001, "batch_size": 32}
+        GLOBAL_LEDGER.register_hyperparams(params=params)
+
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        initial_id = id(hp_handle)
+
+        GLOBAL_LEDGER.register_hyperparams(params={"learning_rate": 0.01, "momentum": 0.9})
+
+        self.assertEqual(id(hp_handle), initial_id)
+        self.assertEqual(hp_handle["learning_rate"], 0.01)
+        self.assertEqual(hp_handle["momentum"], 0.9)
+        self.assertNotIn("batch_size", hp_handle)
 
     def test_dataloader_default_name_proxy_pattern(self):
         """Test dataloader registration with default name and Proxy(None) pattern."""
