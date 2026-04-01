@@ -1,5 +1,9 @@
 name: Code CI
 
+permissions:
+  contents: read
+  pull-requests: read
+
 on:
   push:
     branches: [ main, dev ]
@@ -23,6 +27,12 @@ jobs:
             if (context.eventName !== 'push') {
               core.setOutput('should_run', 'true');
               core.info('Non-push event, CI will run.');
+              return;
+            }
+
+            if (!context.ref.startsWith('refs/heads/')) {
+              core.setOutput('should_run', 'true');
+              core.info(`Push ref ${context.ref} is not a branch ref; skipping open-PR lookup.`);
               return;
             }
 
