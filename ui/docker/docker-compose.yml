@@ -18,7 +18,7 @@ services:
 
   # Weights Studio frontend (production static server)
   weights_studio:
-    image: guillaumep2705/weightslab:latest
+    image: graybx/weightslab:latest
     container_name: weights_studio_frontend
     ports:
       - "${VITE_PORT:-5173}:80"
