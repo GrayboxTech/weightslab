@@ -4,7 +4,7 @@ import grpc
 import logging
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from concurrent import futures
 
 from weightslab.trainer.trainer_tools import *
@@ -27,6 +27,7 @@ class RpcWatchdogState:
         self._next_id = 0
         self._in_flight = {}
         self._stuck_threshold_s = stuck_threshold_s
+        self._unhealthy_count = 0  # Track consecutive unhealthy detections
 
     def begin(self, method_name: str) -> int:
         now = time.monotonic()
@@ -59,6 +60,18 @@ class RpcWatchdogState:
                 "unhealthy": unhealthy,
             }
 
+    def record_unhealthy(self):
+        """Increment unhealthy counter, reset on healthy."""
+        with self._lock:
+            self._unhealthy_count += 1
+            return self._unhealthy_count
+
+    def record_healthy(self):
+        """Reset unhealthy counter on healthy state."""
+        with self._lock:
+            self._unhealthy_count = 0
+            return self._unhealthy_count
+
 
 class RpcTimingAndWatchdogInterceptor(grpc.ServerInterceptor):
     """Logs per-RPC timings and keeps watchdog state for long-running calls."""
@@ -89,6 +102,40 @@ class RpcTimingAndWatchdogInterceptor(grpc.ServerInterceptor):
             request_deserializer=handler.request_deserializer,
             response_serializer=handler.response_serializer,
         )
+
+
+class GrpcServerManager:
+    """Manages the gRPC server lifecycle, allowing restart from watchdog."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._server = None
+        self._restart_requested = Event()
+
+    def set_server(self, server):
+        """Store reference to server."""
+        with self._lock:
+            self._server = server
+
+    def stop(self, grace: float = 5.0):
+        """Gracefully stop the server."""
+        with self._lock:
+            if self._server:
+                logger.info(f"[gRPC] Requesting graceful shutdown with {grace}s grace period")
+                self._server.stop(grace=grace)
+                self._server = None
+
+    def request_restart(self):
+        """Signal that server should restart."""
+        self._restart_requested.set()
+
+    def should_restart(self) -> bool:
+        """Check if restart was requested."""
+        return self._restart_requested.is_set()
+
+    def clear_restart_request(self):
+        """Clear the restart flag."""
+        self._restart_requested.clear()
 
 
 class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
@@ -186,7 +233,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port
     """Configure trainer services such as gRPC server.
     Args:
         n_workers_grpc (int): Number of threads for the gRPC server.
-        port_grpc (int): Port number for the gRPC server.
+        grpc_port (int): Port number for the gRPC server.
     """
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
@@ -196,20 +243,31 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port
     watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "60"))
     watchdog_interval_s = float(os.getenv("GRPC_WATCHDOG_INTERVAL_SECONDS", "5"))
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks
+
     watchdog_state = RpcWatchdogState(stuck_threshold_s=watchdog_threshold_s)
+    server_manager = GrpcServerManager()
 
     def watchdog_thread_callback():
         while True:
             snap = watchdog_state.snapshot()
             if snap["unhealthy"]:
+                unhealthy_count = watchdog_state.record_unhealthy()
                 logger.error(
-                    "[gRPC-Watchdog] unhealthy: in_flight=%d oldest_age=%.1fs oldest_method=%s threshold=%.1fs",
-                    snap["in_flight"], snap["oldest_age_s"], snap["oldest_method"], watchdog_threshold_s,
+                    "[gRPC-Watchdog] unhealthy: in_flight=%d oldest_age=%.1fs oldest_method=%s threshold=%.1fs (unhealthy_count=%d)",
+                    snap["in_flight"], snap["oldest_age_s"], snap["oldest_method"], watchdog_threshold_s, unhealthy_count,
                 )
                 if watchdog_exit_on_stuck:
                     logger.critical("[gRPC-Watchdog] exiting process due to stuck RPC (GRPC_WATCHDOG_EXIT_ON_STUCK enabled)")
                     os._exit(1)
+                elif unhealthy_count >= watchdog_restart_threshold:
+                    logger.warning(
+                        "[gRPC-Watchdog] Too many consecutive unhealthy checks (%d >= %d). Requesting server restart.",
+                        unhealthy_count, watchdog_restart_threshold
+                    )
+                    server_manager.request_restart()
             else:
+                watchdog_state.record_healthy()
                 logger.debug(
                     "[gRPC-Watchdog] healthy: in_flight=%d oldest_age=%.1fs",
                     snap["in_flight"], snap["oldest_age_s"],
@@ -219,41 +277,55 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port
     def serving_thread_callback():
         logger.info("[gRPC] Thread callback started")
         try:
-            _effective_workers = n_workers_grpc or min(32, (os.cpu_count() or 1) + 4)
-            logger.info("[gRPC] Creating ThreadPoolExecutor with %d worker threads (n_workers_grpc=%s)",
-                        _effective_workers, n_workers_grpc)
-            # Allow large payloads for batches of HD images + segmentation masks.
-            # Default 4 MB is too small for 720p image grids with mask arrays.
-            _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024))  # 256 MB
-            server = grpc.server(
-                futures.ThreadPoolExecutor(
-                    thread_name_prefix="WL-gRPC-Worker",
-                    max_workers=_effective_workers
-                ),
-                interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)],
-                options=[
-                    ("grpc.max_send_message_length", _max_msg),
-                    ("grpc.max_receive_message_length", _max_msg),
-                ],
-            )
-            logger.info("[gRPC] Server object created")
-            servicer = trainer.ExperimentServiceServicer()
-            pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-            logger.info("[gRPC] Servicer added")
+            while True:  # Loop to allow restarts
+                logger.info("[gRPC] Creating ThreadPoolExecutor")
+                _effective_workers = n_workers_grpc or min(32, (os.cpu_count() or 1) + 4)
+                logger.info("[gRPC] Creating ThreadPoolExecutor with %d worker threads (n_workers_grpc=%s)",
+                            _effective_workers, n_workers_grpc)
+                # Allow large payloads for batches of HD images + segmentation masks.
+                # Default 4 MB is too small for 720p image grids with mask arrays.
+                _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024))  # 256 MB
+                server = grpc.server(
+                    futures.ThreadPoolExecutor(
+                        thread_name_prefix="WL-gRPC-Worker",
+                        max_workers=_effective_workers
+                    ),
+                    interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)],
+                    options=[
+                        ("grpc.max_send_message_length", _max_msg),
+                        ("grpc.max_receive_message_length", _max_msg),
+                    ],
+                )
+                logger.info("[gRPC] Server object created")
+                server_manager.set_server(server)
+                servicer = trainer.ExperimentServiceServicer()
+                pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
+                logger.info("[gRPC] Servicer added")
 
-            # Bind to host:port
-            bind_addr = f'{grpc_host}:{grpc_port}'
-            logger.info(f"[gRPC] Attempting to bind to {bind_addr}")
-            bound_port = server.add_insecure_port(bind_addr)
+                # Bind to host:port
+                bind_addr = f'{grpc_host}:{grpc_port}'
+                logger.info(f"[gRPC] Attempting to bind to {bind_addr}")
+                bound_port = server.add_insecure_port(bind_addr)
 
-            if bound_port == 0:
-                logger.error(f"[gRPC] Failed to bind to {bind_addr}. Port might be in use.")
-                return
+                if bound_port == 0:
+                    logger.error(f"[gRPC] Failed to bind to {bind_addr}. Port might be in use.")
+                    return
 
-            logger.info(f"[gRPC] Port {bound_port} bound successfully.")
-            server.start()
-            logger.info(f"[gRPC] Server started and listening on {bind_addr}")
-            server.wait_for_termination()
+                logger.info(f"[gRPC] Port {bound_port} bound successfully.")
+                server.start()
+                logger.info(f"[gRPC] Server started and listening on {bind_addr}")
+
+                # Wait for termination or restart signal
+                while not server_manager.should_restart():
+                    time.sleep(0.5)
+
+                # Restart requested
+                logger.warning("[gRPC] Restart requested by watchdog. Gracefully shutting down server (5s grace)...")
+                server.stop(grace=5)
+                server_manager.clear_restart_request()
+                logger.info("[gRPC] Server stopped. Restarting...")
+                time.sleep(2)  # Brief delay before restart
+
         except Exception as e:
             logger.exception(f"[gRPC] Critical error in gRPC thread: {e}")
         except KeyboardInterrupt:
@@ -282,6 +354,7 @@ def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port
         "watchdog_threshold_s": watchdog_threshold_s,
         "watchdog_interval_s": watchdog_interval_s,
         "watchdog_exit_on_stuck": watchdog_exit_on_stuck,
+        "watchdog_restart_threshold": watchdog_restart_threshold,
     })
 
 

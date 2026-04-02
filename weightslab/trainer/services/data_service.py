@@ -2593,9 +2593,19 @@ class DataService:
         """
 
         try:
+            if context is not None and not context.is_active():
+                return pb2.DataSplitsResponse(success=False, split_names=[])
+
+            # IMPORTANT: keep lock ordering consistent (_update_lock -> _lock).
+            # Calling _slowUpdateInternals() while holding _lock can deadlock
+            # with concurrent readers/writers under high UI refresh pressure.
+            self._slowUpdateInternals()
+
+            if context is not None and not context.is_active():
+                return pb2.DataSplitsResponse(success=False, split_names=[])
+
             split_names = []
             with self._lock:
-                self._slowUpdateInternals()
                 if self._all_datasets_df is not None and not self._all_datasets_df.empty:
                     if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
                         raw_splits = self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist()
