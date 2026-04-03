@@ -86,11 +86,11 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
              patch("weightslab.trainer.trainer_services.pb2_grpc.add_ExperimentServiceServicer_to_server") as add_servicer, \
              patch("weightslab.trainer.trainer_services.Thread", _InstantThread), \
              patch("weightslab.trainer.trainer_services.ExperimentServiceServicer") as servicer_cls:
-            trainer_services.grpc_serve(n_workers_grpc=2, grpc_host="127.0.0.1", grpc_port=50052)
+            trainer_services.grpc_serve(n_workers_grpc=2, grpc_host="127.0.0.1", grpc_port=50099, force_parameters=True)
 
         servicer_cls.assert_called_once()
         add_servicer.assert_called_once()
-        fake_server.add_insecure_port.assert_called_once_with("127.0.0.1:50052")
+        fake_server.add_insecure_port.assert_called_once_with("127.0.0.1:50099")
         fake_server.start.assert_called_once()
         fake_server.wait_for_termination.assert_called_once()
 

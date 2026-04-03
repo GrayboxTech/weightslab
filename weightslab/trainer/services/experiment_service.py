@@ -3,8 +3,9 @@ import types
 import logging
 import threading
 
+import grpc
 import weightslab.proto.experiment_service_pb2 as pb2
-from weightslab.components.global_monitoring import weightslab_rlock
+from weightslab.components.global_monitoring import weightslab_rlock, try_acquire_rlock, _GRPC_LOCK_TIMEOUT_S
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
 from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name, get_hyperparams
 from weightslab.backend import ledgers
@@ -298,10 +299,11 @@ class ExperimentService:
                     load_weights=True,
                     load_config=True,
                     load_data=True,
+                    load_logger=False,  # Don't load logger for weights-only restore to avoid overwriting signals,
                     target_step=target_step,
                 )
             else:
-                success = checkpoint_manager.load_state(experiment_hash)
+                success = checkpoint_manager.load_state(experiment_hash, load_logger=False)  # Don't load logger for full restore to avoid overwriting signals already in memory
 
             # Reply
             if success:
@@ -461,18 +463,21 @@ class ExperimentService:
                                     key_path="pause_at_step",
                                     value=m_age+hyper_parameters.nb_steps
                                 )
-                        # Set training state and pause/resume accordingly
-                        set_hyperparam(
-                            name=hp_name,
-                            key_path="is_training",
-                            value=hyper_parameters.is_training
-                        )
+
+                        # If is_training flag is set, pause or resume accordingly
                         if hyper_parameters.is_training:
                             logger.info("\n[WeightsLab] UI Command: RESUME")
                             trainer.resume()
                         else:
                             logger.info("\n[WeightsLab] UI Command: PAUSE")
                             trainer.pause()
+
+                        # Set training state and pause/resume accordingly
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="is_training",
+                            value=hyper_parameters.is_training
+                        )
 
             except Exception as e:
                 return pb2.CommandResponse(
@@ -481,7 +486,11 @@ class ExperimentService:
                 )
 
             if request.HasField("load_checkpoint_operation"):
-                with weightslab_rlock:
+                if not try_acquire_rlock():
+                    logger.error("[ExperimentCommand] weightslab_rlock timed out after %.0fs", _GRPC_LOCK_TIMEOUT_S)
+                    context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
+                    return pb2.CommandResponse(success=False, message="Lock timeout")
+                try:
                     # Pause training if it's currently running
                     trainer = components.get("trainer")
                     hp = components.get("hyperparams")
@@ -492,6 +501,8 @@ class ExperimentService:
                         hp['is_training'] = False
                     else:
                         hp["is_training"] = False
+                finally:
+                    weightslab_rlock.release()
 
                 checkpoint_id = request.load_checkpoint_operation.checkpoint_id
                 model = components.get("model")

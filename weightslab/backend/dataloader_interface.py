@@ -562,7 +562,7 @@ class DataLoaderInterface:
                         self._pending_iteration_state = iter_state
                     elif isinstance(iter_state, dict):
                         # Multi-loader format; pick one for this loader
-                        state_for_loader = iter_state.get(self._ledger_name) or iter_state.get('default') or next(iter(iter_state.values()), None)
+                        state_for_loader = (iter_state.get(self._ledger_name) if hasattr(self, '_ledger_name') else None) or iter_state.get('default') or next(iter(iter_state.values()), None)
                         if state_for_loader:
                             self._pending_iteration_state = state_for_loader
                     else:

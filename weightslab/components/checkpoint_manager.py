@@ -703,6 +703,11 @@ class CheckpointManager:
         """
         return self._has_pending_changes, self._pending_components.copy()
 
+    def get_logger_length(self) -> int:
+        """Get the number of log records in the logger."""
+        logger = ledgers.get_logger()
+        return len(logger)
+
     # ================
     # SAVING FUNCTIONS
     # ================
@@ -1763,6 +1768,7 @@ class CheckpointManager:
         load_weights: bool = True,
         load_config: bool = True,
         load_data: bool = True,
+        load_logger: bool = True,
         target_step: Optional[int] = None,
     ) -> bool:
         """Load and apply a complete checkpoint state by experiment hash.
@@ -1816,7 +1822,12 @@ class CheckpointManager:
                 if checkpoint_data.get('weights') is not None:
                     loaded_step = checkpoint_data['weights'].get('step', None)
                 if loaded_step is not None:
-                    self._model_init_step = int(loaded_step)
+                    loaded_step = int(loaded_step)
+                    self._model_init_step = loaded_step
+                    try:
+                        setattr(model, 'current_step', loaded_step)
+                    except Exception:
+                        pass
                 logger.info(f"[OK] Applied model architecture and weights (step {loaded_step})")
 
             except Exception as e:
@@ -1830,10 +1841,14 @@ class CheckpointManager:
                 weights = checkpoint_data['weights']
                 if model and weights and 'model_state_dict' in weights:
                     model.load_state_dict(weights['model_state_dict'])
-                    step = weights.get('step', 0)
+                    step = int(weights.get('step', 0))
+                    try:
+                        setattr(model, 'current_step', step)
+                    except Exception:
+                        pass
                     model.update_optimizer() # Update optimizer with new model parameters if needed
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
-                    self._model_init_step = int(step)
+                    self._model_init_step = step
 
                 # Set Model Training Guard
                 guard_training_context.model = model  # Train
@@ -1862,10 +1877,14 @@ class CheckpointManager:
                     weights = checkpoint_data['weights']
                     if model and weights and 'model_state_dict' in weights:
                         model.load_state_dict(weights['model_state_dict'])
-                        step = weights.get('step', 0)
+                        step = int(weights.get('step', 0))
+                        try:
+                            setattr(model, 'current_step', step)
+                        except Exception:
+                            pass
                         model.update_optimizer()  # Update optimizer with new model parameters if needed
                         logger.info(f"[OK] Applied weights to reloaded model (step {step})")
-                        self._model_init_step = int(step)
+                        self._model_init_step = step
                         logger.info("Successfully recovered by reloading full checkpoint with architecture and weights")
 
                     # Set Model Training Guard
@@ -1971,10 +1990,12 @@ class CheckpointManager:
                 success = False
 
         # Restore logger snapshot for this experiment if available
-        try:
-            self.load_logger_snapshot()
-        except Exception as e:
-            logger.warning(f"Failed to restore logger snapshot for {exp_hash}: {e}")
+        logger_len = self.get_logger_length()
+        if load_logger and logger_len == 0:  # Load logger if requested and logger is currently empty (e.g. on fresh start)
+            try:
+                self.load_logger_snapshot()
+            except Exception as e:
+                logger.warning(f"Failed to restore logger snapshot for {exp_hash}: {e}")
 
         # Update current experiment hash
         if success:

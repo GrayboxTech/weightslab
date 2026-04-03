@@ -113,6 +113,27 @@ Quickstart examples:
 - [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch_Lightning/ws-classification)
 
 
+## Configuration
+
+WeightsLab and Weights Studio are configured through environment variables.
+A fully-commented `.env` template is included at the repository root — copy it and adjust for your setup:
+
+```bash
+cp .env .env.local   # or edit .env directly
+```
+
+| Category | Key variables |
+|---|---|
+| **Logging** | `WEIGHTSLAB_LOG_LEVEL`, `WEIGHTSLAB_LOG_TO_FILE`, `WEIGHTSLAB_ROOT_LOG_DIR` |
+| **gRPC server** | `GRPC_BACKEND_HOST`, `GRPC_BACKEND_PORT`, `GRPC_MAX_MESSAGE_BYTES` |
+| **Watchdog** | `GRPC_WATCHDOG_STUCK_SECONDS`, `GRPC_WATCHDOG_INTERVAL_SECONDS`, `GRPC_WATCHDOG_RESTART_THRESHOLD`, `GRPC_WATCHDOG_EXIT_ON_STUCK` |
+| **Data / cache** | `WL_MAX_PREVIEW_CACHE_SIZE`, `WL_DEFAULT_THUMBNAIL_SIZE`, `WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5` |
+| **AI keys** | `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` |
+| **Weights Studio** | `VITE_SERVER_HOST`, `VITE_SERVER_PORT`, `ENVOY_HOST`, `ENVOY_PORT` |
+
+> Full documentation with all variables and their descriptions: [docs/configuration.rst](docs/configuration.rst)
+
+
 ## Documentation (API + SDK)
 
 * <div>

@@ -57,9 +57,9 @@ class SampleStats:
     DEFAULTS: Dict[str, Any] = {
         Ex.SAMPLE_ID.value: -1,
 
-        Ex.PREDICTION.value: [],
-        Ex.PREDICTION_RAW.value: [],
-        Ex.TARGET.value: [],
+        Ex.PREDICTION.value: None, #[],
+        Ex.PREDICTION_RAW.value: None, #[],
+        Ex.TARGET.value: None, #[],
 
         Ex.DISCARDED.value: False,
 

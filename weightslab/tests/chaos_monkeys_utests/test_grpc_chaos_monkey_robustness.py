@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import grpc
 
-from weightslab.trainer.trainer_services import (
-    ExperimentServiceServicer,
+from weightslab.trainer.trainer_services import ExperimentServiceServicer
+from weightslab.watchdog import (
     GrpcServerManager,
     RpcTimingAndWatchdogInterceptor,
     RpcWatchdogState,

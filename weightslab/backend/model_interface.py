@@ -114,7 +114,7 @@ class ModelInterface(NetworkWithOps):
         # Ensure device is a string
         if device and not isinstance(device, str):
             device = str(device)
-        self.device = 'cuda' if device == 'auto' and th.cuda.is_available() else (device or 'cpu')
+        self.device = 'cuda' if (device == 'auto' and th.cuda.is_available()) or device == 'cuda' else 'cpu'
         self.model = model.to(self.device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
 
@@ -440,7 +440,7 @@ class ModelInterface(NetworkWithOps):
         hp_name = ledgers.resolve_hp_name()
         hp = ledgers.get_hyperparams(hp_name)
 
-        # Audit mode
+        # Sync audit mode flag
         is_audit = False
         try:
             # Check for Audit Mode override to completely prevent checkpointing
@@ -457,8 +457,10 @@ class ModelInterface(NetworkWithOps):
 
             if val is not None:
                 try:
+                    _log = self._checkpoint_auto_every_steps != int(val)
                     self._checkpoint_auto_every_steps = int(val)
-                    logger.info(f"Updated checkpoint auto-dump steps ratio to {self._checkpoint_auto_every_steps} based on hyperparameters")
+                    if _log:
+                        logger.debug(f"Updated checkpoint auto-dump steps ratio to {self._checkpoint_auto_every_steps} based on hyperparameters")
                 except Exception as e:
                     logger.warning(f"Failed to update checkpoint auto-dump steps ratio from hyperparameters: {e}")
 

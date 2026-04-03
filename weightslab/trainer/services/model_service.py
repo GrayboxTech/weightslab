@@ -2,13 +2,14 @@ import types
 import logging
 import traceback
 
+import grpc
 import torch
 import numpy as np
 
 import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.trainer.trainer_tools import process_sample, _get_input_tensor_for_sample
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
-from weightslab.components.global_monitoring import weightslab_rlock
+from weightslab.components.global_monitoring import weightslab_rlock, try_acquire_rlock, _GRPC_LOCK_TIMEOUT_S
 
 
 logger = logging.getLogger(__name__)
@@ -26,8 +27,6 @@ class ModelService:
     # Sample retrieval (images / segmentation / recon)
     # -------------------------------------------------------------------------
     def GetSamples(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetSamples({request})")
-
         import concurrent.futures
 
         self._ctx.ensure_components()
@@ -134,8 +133,6 @@ class ModelService:
     # Weights inspection
     # -------------------------------------------------------------------------
     def GetWeights(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetWeights({request})")
-
         self._ctx.ensure_components()
 
         components = self._ctx.components
@@ -184,8 +181,6 @@ class ModelService:
     # Activations
     # -------------------------------------------------------------------------
     def GetActivations(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetActivations({request})")
-
         self._ctx.ensure_components()
 
         components = self._ctx.components
@@ -316,8 +311,6 @@ class ModelService:
     # Weight manipulation (architecture operations)
     # -------------------------------------------------------------------------
     def ManipulateWeights(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.ManipulateWeights({request})")
-
         self._ctx.ensure_components()
 
         components = self._ctx.components
@@ -348,24 +341,36 @@ class ModelService:
             layer_id = weight_operations.layer_id
             neuron_id = []
 
-            with weightslab_rlock:
+            if not try_acquire_rlock():
+                logger.error("[ManipulateWeights] weightslab_rlock timed out after %.0fs", _GRPC_LOCK_TIMEOUT_S)
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
+                return pb2.WeightsOperationResponse(success=False, message="Lock timeout")
+            try:
                 model.apply_architecture_op(
                     op_type=op_type,
                     layer_id=layer_id,
                     neuron_indices=neuron_id,
                 )
+            finally:
+                weightslab_rlock.release()
 
         else:
             for neuron_details in weight_operations.neuron_ids:
                 layer_id = neuron_details.layer_id
                 neuron_id = neuron_details.neuron_id
 
-                with weightslab_rlock:
+                if not try_acquire_rlock():
+                    logger.error("[ManipulateWeights] weightslab_rlock timed out after %.0fs", _GRPC_LOCK_TIMEOUT_S)
+                    context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s")
+                    return pb2.WeightsOperationResponse(success=False, message="Lock timeout")
+                try:
                     model.apply_architecture_op(
                         op_type=op_type,
                         layer_id=layer_id,
                         neuron_indices=neuron_id,
                     )
+                finally:
+                    weightslab_rlock.release()
 
         answer = pb2.WeightsOperationResponse(
             success=True,

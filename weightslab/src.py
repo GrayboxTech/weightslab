@@ -776,7 +776,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                 checkpoint_hp_loaded = False
                 try:
                     chkpt_manager = get_checkpoint_manager()
-                    if chkpt_manager != None and not isinstance(chkpt_manager, ledgers.Proxy):
+                    if chkpt_manager != None and isinstance(chkpt_manager, ledgers.Proxy):
                         # Try to get latest hash and load hyperparameters from checkpoint
                         latest_hash = None
                         if hasattr(chkpt_manager, 'current_exp_hash') and chkpt_manager.current_exp_hash:
