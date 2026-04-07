@@ -159,6 +159,12 @@ Data and Cache
      - ``0``
      - Number of samples per internal processing chunk.
        ``0`` means use the full batch at once.
+   * - ``WL_PREVIEW_CACHE_WARMUP_WAIT_MS``
+     - ``100``
+     - Bounded wait (milliseconds) before generating missing preview entries
+       on-demand when the preview cache is still warming up.
+       Goal: reduce duplicate image decode/resize work during startup.
+       Clamped to ``0..1000`` (set ``0`` to disable wait).
    * - ``WL_ENABLE_HP_SYNC``
      - ``1``
      - Synchronise hyperparameters with the UI on every training step.
@@ -282,6 +288,10 @@ These variables are injected into the browser bundle at build / dev time.
      - *(device-adaptive)*
      - Number of image batches to prefetch in the grid view.
        Leave unset to use the automatic 1–3 value derived from device capabilities.
+   * - ``VITE_HISTOGRAM_MAX_BINS``
+     - ``512``
+     - Maximum number of metadata histogram bars shown above the sample slider.
+       Values above ``512`` are clamped to ``512`` to keep rendering responsive.
    * - ``VITE_WS_MAX_IMAGE_CACHE_SIZE``
      - *(prefetch + 4)*
      - Maximum number of images held in the WebSocket image cache.
@@ -291,3 +301,5 @@ These variables are injected into the browser bundle at build / dev time.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
+
+

@@ -790,7 +790,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
                                 exp_hash=latest_hash,
                                 load_model=False,
                                 load_weights=False,
-                                load_config=True,
+                                load_config=obj.get('checkpoint_manager', {}).get('load_config', True),
                                 force=True,
                                 load_data=False
                             )

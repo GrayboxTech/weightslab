@@ -146,7 +146,7 @@ class DataService:
         # Check hyperparameters for compute_natural_sort flag (default: False)
         # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
-        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})
+        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})  # is it already a proxy ?
         self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
 
         # In-memory dataframe view of all datasets combined (streamed to UI)
@@ -239,11 +239,41 @@ class DataService:
             PREVIEW_SIZE = 64  # fixed low-res dimension
             built = 0
 
-            for row_idx, (_, row) in enumerate(df.iterrows()):
+            index_names = list(getattr(df.index, "names", []) or [])
+            origin_index_pos = index_names.index(SampleStatsEx.ORIGIN.value) if SampleStatsEx.ORIGIN.value in index_names else None
+            sample_id_index_pos = index_names.index(SampleStatsEx.SAMPLE_ID.value) if SampleStatsEx.SAMPLE_ID.value in index_names else None
+
+            for row_idx, (row_index, row) in enumerate(tqdm(df.iterrows(), total=total, desc="[PreviewCache]", unit="sample")):
                 if row_idx >= total:
                     break
-                sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
-                origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
+
+                sample_id = row.get(SampleStatsEx.SAMPLE_ID.value)
+                origin = row.get(SampleStatsEx.ORIGIN.value)
+
+                # In the internal dataframe view, origin/sample_id are often in the index
+                # (MultiIndex: origin, sample_id), not in dataframe columns.
+                if isinstance(row_index, tuple):
+                    if origin is None and origin_index_pos is not None and origin_index_pos < len(row_index):
+                        origin = row_index[origin_index_pos]
+                    if sample_id is None and sample_id_index_pos is not None and sample_id_index_pos < len(row_index):
+                        sample_id = row_index[sample_id_index_pos]
+                    # Fallback for unnamed tuple index that still follows (origin, sample_id)
+                    if origin is None and len(row_index) >= 1:
+                        origin = row_index[0]
+                    if sample_id is None and len(row_index) >= 2:
+                        sample_id = row_index[1]
+                else:
+                    if sample_id is None and (sample_id_index_pos is not None or df.index.name == SampleStatsEx.SAMPLE_ID.value):
+                        sample_id = row_index
+
+                origin = str(origin) if origin is not None else 'unknown'
+
+                try:
+                    sample_id_int = int(sample_id)
+                except (TypeError, ValueError):
+                    logger.debug("[PreviewCache] Skipped row %s: invalid sample_id=%r", row_idx, sample_id)
+                    continue
+
                 dataset = self._get_dataset(origin)
                 if dataset is None:
                     continue
@@ -253,9 +283,9 @@ class DataService:
                     ds = getattr(dataset, "wrapped_dataset", dataset)
                     # --- Thumbnail image ---
                     if hasattr(dataset, "get_physical_location"):
-                        ds_idx, member_rank = dataset.get_physical_location(sample_id)
+                        ds_idx, member_rank = dataset.get_physical_location(sample_id_int)
                     else:
-                        ds_idx = dataset.get_index_from_sample_id(sample_id)
+                        ds_idx = dataset.get_index_from_sample_id(sample_id_int)
                         member_rank = 0
 
                     _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
@@ -283,7 +313,7 @@ class DataService:
                         del pil_thumb, pil_save, pil_img
 
                     # --- GT mask ---
-                    label = load_label(dataset, sample_id)
+                    label = load_label(dataset, sample_id_int)
                     if label is not None:
                         label_arr = to_numpy_safe(label)
                         if label_arr is None:
@@ -318,11 +348,12 @@ class DataService:
                     if nc_val:
                         stats.append(create_data_stat('num_classes', 'scalar', shape=[1], value=[float(nc_val)]))
 
-                    record = pb2.DataRecord(sample_id=str(sample_id), data_stats=stats)
-                    self._preview_cache[int(sample_id)] = record
+                    record = pb2.DataRecord(sample_id=str(sample_id_int), data_stats=stats)
+                    self._preview_cache[sample_id_int] = record
                     built += 1
                 except Exception as exc:
-                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id, exc)
+                    traceback.print_exc()
+                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id_int, exc)
                     continue
 
             elapsed = time.time() - t0
@@ -1926,7 +1957,12 @@ class DataService:
             return False
 
     def _build_metadata_only_response(self, df_slice: pd.DataFrame, request):
-        """Build DataSamplesResponse from dataframe columns only (no dataset/image traversal)."""
+        """Build DataSamplesResponse from dataframe columns only (no dataset/image traversal).
+
+        This is a single-job vectorized path: the entire df_slice is processed
+        at once using pandas operations rather than dispatching per-sample_id
+        work to the thread pool.
+        """
         if df_slice is None or df_slice.empty:
             return pb2.DataSamplesResponse(
                 success=False,
@@ -1938,8 +1974,8 @@ class DataService:
         excluded_cols = {
             SampleStatsEx.SAMPLE_ID.value,
             SampleStatsEx.ORIGIN.value,
-            SampleStatsEx.TARGET.value,
-            SampleStatsEx.PREDICTION.value,
+            # SampleStatsEx.TARGET.value,
+            # SampleStatsEx.PREDICTION.value,
             SampleStatsEx.TASK_TYPE.value,
         }
 
@@ -1955,54 +1991,65 @@ class DataService:
                 data_records=[],
             )
 
-        # Build a compact dataframe view first, then iterate with tuple access
-        # (faster than iterrows for large metadata volumes).
         sample_id_col = SampleStatsEx.SAMPLE_ID.value
-        df_view = df_slice[metadata_cols + [sample_id_col]]
-
         tag_prefix = f"{SampleStatsEx.TAG.value}:"
-        column_processors = []
-        for stat_name in metadata_cols:
-            values = df_view[stat_name].tolist()
-            if stat_name.startswith(tag_prefix):
-                column_processors.append(("tag", stat_name, values))
+
+        # -- Vectorized pre-processing: build string matrices via pandas ------
+        # Separate tag columns from regular metadata columns for different
+        # handling.  All heavy conversion is done once on the full column
+        # vectors, not per-row.
+        tag_cols = [c for c in metadata_cols if c.startswith(tag_prefix)]
+        meta_cols = [c for c in metadata_cols if not c.startswith(tag_prefix)]
+
+        sample_ids = df_slice[sample_id_col].tolist()
+        n_rows = len(sample_ids)
+
+        # Pre-allocate per-row stat bins – avoids repeated list creation
+        row_stats: list[list] = [[] for _ in range(n_rows)]
+
+        # -- Column-wise DataStat construction --------------------------------
+        # Build all DataStat objects for one column at a time using list
+        # comprehensions (CPython fast-path) and inline pb2.DataStat() to
+        # eliminate the create_data_stat wrapper overhead.  Then scatter
+        # them into the per-row bins.  At 1M rows × 10 cols this avoids
+        # a 10M-iteration nested Python loop.
+        _DataStat = pb2.DataStat  # local ref – avoids repeated attr lookup
+
+        for col in meta_cols:
+            series = df_slice[col]
+            if series.dtype.kind == 'f':
+                str_vals = series.round(7).astype(str).str[:512].tolist()
             else:
-                normalized_values = []
-                for value in values:
-                    if isinstance(value, np.generic):
-                        value = value.item()
-                    if isinstance(value, float) and np.isnan(value):
-                        normalized_values.append(None)
-                    else:
-                        normalized_values.append(str(value)[:512])
-                column_processors.append(("meta", stat_name, normalized_values))
-
-        sample_ids = df_view[sample_id_col].tolist()
-        data_records: list = []
-        for row_idx, sample_id in enumerate(sample_ids):
-            data_stats: list = []
-
-            for kind, stat_name, values in column_processors:
-                value = values[row_idx]
-                if kind == "tag":
-                    if not bool(value):
-                        continue
-                    data_stats.append(
-                        create_data_stat(stat_name, "string", shape=[1], value_string="1", thumbnail=b"")
-                    )
-                else:
-                    if value is None:
-                        continue
-                    data_stats.append(
-                        create_data_stat(stat_name, "string", shape=[1], value_string=value, thumbnail=b"")
+                str_vals = series.astype(str).str[:512].tolist()
+            # NaN → None
+            nan_mask = series.isna()
+            if nan_mask.any():
+                for pos in nan_mask.values.nonzero()[0]:
+                    str_vals[pos] = None
+            # Scatter non-None stats into per-row bins
+            for i, v in enumerate(str_vals):
+                if v is not None:
+                    row_stats[i].append(
+                        _DataStat(name=col, type="string", shape=[1], value_string=v)
                     )
 
-            data_records.append(
-                pb2.DataRecord(
-                    sample_id=str(sample_id),
-                    data_stats=data_stats,
-                )
-            )
+        for col in tag_cols:
+            bools = df_slice[col].astype(bool).tolist()
+            # Pre-build a single shared DataStat for this tag column –
+            # protobuf messages are mutable so we need one per row, but
+            # the tag "1" stat is tiny so construction is cheap.
+            for i, b in enumerate(bools):
+                if b:
+                    row_stats[i].append(
+                        _DataStat(name=col, type="string", shape=[1], value_string="1")
+                    )
+
+        # -- Build DataRecord list in one comprehension -----------------------
+        _DataRecord = pb2.DataRecord
+        data_records = [
+            _DataRecord(sample_id=str(sid), data_stats=stats)
+            for sid, stats in zip(sample_ids, row_stats)
+        ]
 
         return pb2.DataSamplesResponse(
             success=True,
@@ -2086,34 +2133,107 @@ class DataService:
             if self._is_metadata_only_request(request):
                 return self._build_metadata_only_response(df_slice, request)
 
-            # ---- Preview-cache fast path ----------------------------------
-            # If the caller is asking for preview-tier resolution (e.g. the
-            # low-res pass), try to serve every record from the in-memory
-            # cache.  A single cache miss aborts the fast path so we fall
-            # through to the standard pipeline.
+            # ---- Preview-cache tolerant path -------------------------------
+            # For preview-tier requests, serve what is available from cache
+            # and compute only cache misses at fixed 64px preview size.
+            # This avoids whole-page fallback to full-size processing when
+            # the cache is still warming up.
             is_preview_request = (
-                self._preview_cache
-                and abs(request.resize_width) <= _PREVIEW_CACHE_THRESHOLD
-                and abs(request.resize_height) <= _PREVIEW_CACHE_THRESHOLD
+                bool(getattr(request, "include_raw_data", False))
+                and abs(getattr(request, "resize_width", 0)) <= _PREVIEW_CACHE_THRESHOLD
+                and abs(getattr(request, "resize_height", 0)) <= _PREVIEW_CACHE_THRESHOLD
             )
             if is_preview_request:
-                cached_records: list = []
-                all_hit = True
-                for _, row in df_slice.iterrows():
-                    sid = int(row.get(SampleStatsEx.SAMPLE_ID.value, -1))
+                ordered_preview_records: list[pb2.DataRecord | None] = [None] * len(df_slice)
+                missing_rows: list[tuple[int, pd.Series]] = []
+
+                for row_pos, (_, row) in enumerate(df_slice.iterrows()):
+                    sid_raw = row.get(SampleStatsEx.SAMPLE_ID.value, -1)
+                    try:
+                        sid = int(sid_raw)
+                    except (TypeError, ValueError):
+                        sid = -1
+
                     rec = self._get_preview_record(sid)
                     if rec is None:
-                        all_hit = False
-                        break
-                    cached_records.append(rec)
-                if all_hit and cached_records:
+                        missing_rows.append((row_pos, row))
+                    else:
+                        ordered_preview_records[row_pos] = rec
+
+                if missing_rows:
+                    wait_ms_raw = os.environ.get("WL_PREVIEW_CACHE_WARMUP_WAIT_MS", "100")
+                    try:
+                        wait_ms = max(0, min(1000, int(wait_ms_raw)))
+                    except (TypeError, ValueError):
+                        wait_ms = 100
+
+                    if wait_ms > 0 and not self._preview_cache_ready.is_set():
+                        self._preview_cache_ready.wait(wait_ms / 1000.0)
+
+                        still_missing_rows: list[tuple[int, pd.Series]] = []
+                        for row_pos, row in missing_rows:
+                            sid_raw = row.get(SampleStatsEx.SAMPLE_ID.value, -1)
+                            try:
+                                sid = int(sid_raw)
+                            except (TypeError, ValueError):
+                                sid = -1
+
+                            rec = self._get_preview_record(sid)
+                            if rec is None:
+                                still_missing_rows.append((row_pos, row))
+                            else:
+                                ordered_preview_records[row_pos] = rec
+
+                        missing_rows = still_missing_rows
+
+                    preview_request = pb2.DataSamplesRequest(
+                        start_index=request.start_index,
+                        records_cnt=request.records_cnt,
+                        include_raw_data=True,
+                        include_transformed_data=False,
+                        stats_to_retrieve=list(getattr(request, "stats_to_retrieve", []) or []),
+                        resize_width=64,
+                        resize_height=64,
+                    )
+
+                    missing_count = len(missing_rows)
+                    missing_chunk = _BATCH_CHUNK_SIZE if _BATCH_CHUNK_SIZE > 0 else missing_count
+                    for chunk_start in range(0, missing_count, missing_chunk):
+                        chunk_end = min(chunk_start + missing_chunk, missing_count)
+                        missing_slice = missing_rows[chunk_start:chunk_end]
+                        chunk_tasks = [(row, preview_request, df_slice.columns) for _, row in missing_slice]
+                        chunk_results = list(self._data_executor.map(self._process_sample_row, chunk_tasks, timeout=120))
+
+                        for (row_pos, _), rec in zip(missing_slice, chunk_results):
+                            if rec is None:
+                                continue
+                            ordered_preview_records[row_pos] = rec
+                            try:
+                                self._preview_cache[int(rec.sample_id)] = rec
+                            except (TypeError, ValueError):
+                                pass
+
+                if all(rec is not None for rec in ordered_preview_records):
                     elapsed = time.time() - start_time
-                    logger.debug("[PreviewCache] Served %d records in %.1fms", len(cached_records), elapsed * 1000)
+                    ready_count = len(ordered_preview_records)
+                    warmed_count = len(missing_rows)
+                    logger.debug(
+                        "[PreviewCache] Served %d preview records in %.1fms (%d cache miss(es) warmed on-demand)",
+                        ready_count,
+                        elapsed * 1000,
+                        warmed_count,
+                    )
                     return pb2.DataSamplesResponse(
                         success=True,
-                        message=f"Served {len(cached_records)} preview-cached records",
-                        data_records=cached_records,
+                        message=f"Served {ready_count} preview records ({warmed_count} warmed on-demand)",
+                        data_records=[rec for rec in ordered_preview_records if rec is not None],
                     )
+
+                logger.debug(
+                    "[PreviewCache] Partial preview assembly failed (%d/%d ready), falling back to standard pipeline",
+                    sum(1 for rec in ordered_preview_records if rec is not None),
+                    len(ordered_preview_records),
+                )
 
             # ---- Parallel batch processing ---------------------------------
             # Submit ALL rows to the thread pool at once so all 8 workers

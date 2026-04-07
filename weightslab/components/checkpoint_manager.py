@@ -1523,7 +1523,6 @@ class CheckpointManager:
                         exp_hash: str,
                         load_model: bool = True,
                         load_weights: bool = True,
-                        load_optimizer: bool = True,
                         load_config: bool = True,
                         load_data: bool = True,
                         target_step: Optional[int] = None,
@@ -1538,7 +1537,7 @@ class CheckpointManager:
             exp_hash: The 24-byte experiment hash to load (HP_MODEL_DATA)
             load_model: Whether to load model architecture if different
             load_weights: Whether to load model weights
-            load_optimizer: Whether to load optimizer state
+            : Whether to load optimizer state
             load_config: Whether to load hyperparameters if different
             load_data: Whether to load data state if different
             force: If True, force reload of all components regardless of hash comparison
@@ -1856,7 +1855,7 @@ class CheckpointManager:
 
             except Exception:
                 if 'model' not in checkpoint_data['loaded_components']:
-                    logger.info("Attempting to reload full checkpoint to recover...")
+                    logger.info("Attempting to force reload full checkpoint to recover...")
 
                     # Load checkpoint data
                     model_data = self.load_checkpoint(
@@ -1871,6 +1870,7 @@ class CheckpointManager:
                     if not model_data['loaded_components']:
                         logger.warning("No components were loaded")
                         return False
+
                 try:
                     model = model_data['model']
                     ledgers.register_model(model)

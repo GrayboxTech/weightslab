@@ -126,9 +126,9 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 # -----------------------------------------------------------------------------
 def grpc_serve(
     n_workers_grpc: int = None,
-    grpc_host: str = "0.0.0.0",
-    grpc_port: int = 50051,
-    force_parameters: bool = True,
+    grpc_host: str = None,
+    grpc_port: int = None,
+    force_parameters: bool = False,
     max_concurrent_rpcs: int = None,
     **_,
 ):
@@ -140,8 +140,8 @@ def grpc_serve(
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
 
-    grpc_host = os.getenv("GRPC_BACKEND_HOST", grpc_host) if not force_parameters else grpc_host
-    grpc_port = int(os.getenv("GRPC_BACKEND_PORT", grpc_port)) if not force_parameters else grpc_port
+    grpc_host = os.getenv("GRPC_BACKEND_HOST", "0.0.0.0") if not force_parameters or grpc_host is None else grpc_host
+    grpc_port = int(os.getenv("GRPC_BACKEND_PORT", 50051)) if not force_parameters or grpc_port is None else grpc_port
     watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "60"))
     watchdog_interval_s = float(os.getenv("GRPC_WATCHDOG_INTERVAL_SECONDS", "5"))
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -164,6 +164,11 @@ def grpc_serve(
     watchdog.register_lock("weightslab_rlock", weightslab_rlock)
     watchdog_state = watchdog.rpc_state       # shared with RpcTimingAndWatchdogInterceptor
     server_manager = watchdog.server_manager  # shared with serving_thread_callback
+    logger.debug(
+        f"grpc_serve called with parameters: n_workers_grpc={n_workers_grpc}, grpc_host={grpc_host}, grpc_port={grpc_port}, "
+        f"watchdog_threshold_s={watchdog_threshold_s}, watchdog_interval_s={watchdog_interval_s}, watchdog_exit_on_stuck={watchdog_exit_on_stuck}, watchdog_restart_threshold={watchdog_restart_threshold}, "
+        f"watchdog_details_limit={watchdog_details_limit}, max_concurrent_rpcs={max_concurrent_rpcs}"
+    )
 
     def serving_thread_callback():
         logger.info("[gRPC] Thread callback started")

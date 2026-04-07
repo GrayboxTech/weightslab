@@ -18,7 +18,7 @@ from weightslab.utils.computational_graph import \
     generate_layer_dependencies_from_onnx, \
     generate_index_maps
 from weightslab.components.global_monitoring import guard_training_context, guard_testing_context
-from weightslab.backend.ledgers import get_optimizer, get_optimizers, register_model
+from weightslab.backend.ledgers import get_hyperparams, get_optimizer, get_optimizers, register_model
 from weightslab.backend import ledgers
 from weightslab.utils.tools import restore_rng_state
 
@@ -182,33 +182,19 @@ class ModelInterface(NetworkWithOps):
         self.guard_training_context.model = self
         self.guard_testing_context.model = self
 
+        # Set global self.hp
+        self.hp = get_hyperparams()
+
         # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
         _checkpoint_auto_every_steps = 0
         _root_log_dir = None
         _skip_checkpoint_load = self.skip_previous_auto_load
         try:
-            from weightslab.backend.ledgers import list_hyperparams, get_hyperparams
-            names = list_hyperparams()
-            chosen = None
-            if 'main' in names:
-                chosen = 'main'
-            elif 'experiment' in names:
-                chosen = 'experiment'
-            elif len(names) > 1:
-                chosen = names[-1]
-
-            if chosen:
-                hp = get_hyperparams(chosen)
-                if hasattr(hp, 'get') and not isinstance(hp, dict):
-                    try:
-                        hp = hp.get()
-                    except Exception:
-                        hp = None
-                if isinstance(hp, dict):
-                    _root_log_dir = hp.get('root_log_dir') or hp.get('root-log-dir') or hp.get('root')
-                    _checkpoint_auto_every_steps = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio') or 100
-                    if not _skip_checkpoint_load:
-                        _skip_checkpoint_load = hp.get('skip_checkpoint_load', False)
+            if isinstance(self.hp, dict):
+                _root_log_dir = self.hp.get('root_log_dir') or self.hp.get('root-log-dir') or self.hp.get('root')
+                _checkpoint_auto_every_steps = self.hp.get('experiment_dump_to_train_steps_ratio') or self.hp.get('experiment-dump-to-train-steps-ratio') or 100
+                if not _skip_checkpoint_load:
+                    _skip_checkpoint_load = self.hp.get('skip_checkpoint_load', False)
         except Exception:
             _root_log_dir = None
             _checkpoint_auto_every_steps = 0
@@ -241,7 +227,7 @@ class ModelInterface(NetworkWithOps):
                         checkpoint_data = existing_manager.load_checkpoint(
                             exp_hash=latest_hash,
                             load_model=False,
-                            load_weights=True,
+                            load_weights=self.hp.get('checkpoint_manager', {}).get('load_weights', True),
                             load_config=False,
                             load_data=False,
                             force=True
@@ -437,22 +423,19 @@ class ModelInterface(NetworkWithOps):
 
     def _sync_dynamic_hyperparams(self):
         """Sync dynamic hyperparameters from the ledger."""
-        hp_name = ledgers.resolve_hp_name()
-        hp = ledgers.get_hyperparams(hp_name)
-
         # Sync audit mode flag
         is_audit = False
         try:
             # Check for Audit Mode override to completely prevent checkpointing
-            if hp and (bool(hp.get('auditorMode')) or bool(hp.get('auditor_mode'))):
+            if self.hp and (bool(self.hp.get('auditorMode')) or bool(self.hp.get('auditor_mode'))):
                 is_audit = True
         except Exception:
             pass
 
         # Sync checkpoint auto-dump steps ratio if specified
-        if hp and not is_audit:
+        if self.hp and not is_audit:
             # Resolve the value from the proxy if it is one
-            new_ratio = hp.get('experiment_dump_to_train_steps_ratio') or hp.get('experiment-dump-to-train-steps-ratio')
+            new_ratio = self.hp.get('experiment_dump_to_train_steps_ratio') or self.hp.get('experiment-dump-to-train-steps-ratio')
             val = new_ratio._resolve() if hasattr(new_ratio, '_resolve') else new_ratio
 
             if val is not None:

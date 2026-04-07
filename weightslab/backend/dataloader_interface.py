@@ -521,7 +521,7 @@ class DataLoaderInterface:
                 load_model=False,
                 load_weights=False,
                 load_config=False,
-                load_data=True,
+                load_data=self.hp.get('checkpoint_manager', {}).get('load_data', True),
                 force=True
             )
 
