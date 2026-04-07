@@ -68,7 +68,7 @@ class LedgeredDataFrameManager:
 
     def set_store(self, store: H5DataFrameStore):
         with self._lock:
-            if self._store is None and self._enable_h5_persistence:
+            if self._store is None:
                 self._store = store
                 # Auto-create array store in SAME directory (shared, both in parent)
                 if self._array_store is None:
@@ -167,8 +167,6 @@ class LedgeredDataFrameManager:
         self._ensure_flush_thread()
 
     def _load_existing_data(self, origin: str = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
-        if not self._enable_h5_persistence:
-            return
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
 
         if not loaded_df.empty:
