@@ -318,6 +318,12 @@ class Proxy:
                 raise AttributeError("ValueProxy target not set")
             return getattr(v, item)
 
+        def __len__(self) -> int:
+            v = self._resolve()
+            if v is None:
+                return 0
+            return len(v)
+
     def get(self, ref=None, default=None, proxy: bool = True) -> Any:
         """Get wrapped object or a key from the wrapped mapping.
 
