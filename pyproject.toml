@@ -35,6 +35,7 @@ dependencies = [
   "dill>=0.3.8,<0.5",
   "zstandard>=0.22,<1",
   "h5py>=3.10,<4",
+  "tables>=3.9,<4",
   "xxhash>=3.4,<4.1",
 
   # PyTorch stack
