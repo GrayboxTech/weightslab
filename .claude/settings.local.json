@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m pytest weightslab/tests/watchdog/ weightslab/tests/chaos_monkeys_utests/ weightslab/tests/backend/test_data_loader_interface.py::TestDataLoaderInterface::test_multiple_workers_parallelize_preprocessing -x -v)"
+      "Bash(python -m pytest weightslab/tests/watchdog/ weightslab/tests/chaos_monkeys_utests/ weightslab/tests/backend/test_data_loader_interface.py::TestDataLoaderInterface::test_multiple_workers_parallelize_preprocessing -x -v)",
+      "Bash(git add:*)",
+      "Bash(git rebase:*)",
+      "Bash(GIT_EDITOR=true git rebase:*)"
     ]
   }
 }
