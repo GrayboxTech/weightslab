@@ -1,4 +1,3 @@
-import graphviz
 import logging
 import torch as th
 import torch.nn as nn
@@ -48,6 +47,12 @@ def plot_fx_graph_with_details(
     on nodes and dependency types (INCOMING/SAME) on edges.
     Includes DOT syntax fixes.
     """
+    try:
+        import graphviz
+    except ImportError:
+        logger.warning("graphviz is not installed — skipping graph plot. Install with: pip install graphviz")
+        return
+
     comment = traced_model.name if hasattr(traced_model, 'name') else 'Model'
     graph_attr = {
         'rankdir': 'TB',
