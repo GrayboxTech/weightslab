@@ -3,7 +3,7 @@ Configuration
 
 WeightsLab and Weights Studio are configured entirely through environment variables.
 Copy the ``.env`` file in the repository root and adjust the values for your setup.
-All variables are optional — the default shown in each table is used when unset.
+All variables are optional ? the default shown in each table is used when unset.
 
 .. code-block:: bash
 
@@ -107,6 +107,15 @@ subclass) that unwinds the stack and releases the lock via ``finally`` /
    * - Variable
      - Default
      - Description
+   * - ``WEIGHTSLAB_DISABLE_WATCHDOGS``
+     - ``0``
+     - If set to ``1`` / ``true`` / ``yes`` / ``on``, disables watchdog threads
+       (lock interrupt and stuck-RPC restart watchdog). Useful while debugging
+       with breakpoints that intentionally pause longer than watchdog thresholds.
+
+       Example (PowerShell):
+       ``$env:WEIGHTSLAB_DISABLE_WATCHDOGS = "1"``
+
    * - ``GRPC_WATCHDOG_STUCK_SECONDS``
      - ``60``
      - Seconds a lock or in-flight RPC must be held before being flagged as
@@ -186,13 +195,13 @@ These keys are required only when using the agentic data-query features.
      - Description
    * - ``OPENAI_API_KEY``
      - *(empty)*
-     - OpenAI API key — required for GPT-based natural-language data queries.
+     - OpenAI API key ? required for GPT-based natural-language data queries.
    * - ``GOOGLE_API_KEY``
      - *(empty)*
-     - Google API key — required for Gemini-based data queries.
+     - Google API key ? required for Gemini-based data queries.
    * - ``OPENROUTER_API_KEY``
      - *(empty)*
-     - OpenRouter API key — alternative multi-model routing endpoint.
+     - OpenRouter API key ? alternative multi-model routing endpoint.
 
 
 Testing
@@ -282,12 +291,12 @@ These variables are injected into the browser bundle at build / dev time.
      - Protocol (``http`` or ``https``) for browser-to-backend requests.
    * - ``VITE_IS_A_SANDBOX``
      - ``0``
-     - Enables sandbox / demo mode — disables all write operations in the UI.
+     - Enables sandbox / demo mode ? disables all write operations in the UI.
        Set to ``1`` for public demo deployments.
    * - ``VITE_MAX_PREFETCH_BATCHES``
      - *(device-adaptive)*
      - Number of image batches to prefetch in the grid view.
-       Leave unset to use the automatic 1–3 value derived from device capabilities.
+       Leave unset to use the automatic 1?3 value derived from device capabilities.
    * - ``VITE_HISTOGRAM_MAX_BINS``
      - ``512``
      - Maximum number of metadata histogram bars shown above the sample slider.
@@ -301,5 +310,6 @@ These variables are injected into the browser bundle at build / dev time.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
+
 
 

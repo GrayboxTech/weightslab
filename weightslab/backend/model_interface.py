@@ -203,6 +203,11 @@ class ModelInterface(NetworkWithOps):
         # Initialize CheckpointManager if we have a root dir (fallback to default root)
         root_log_dir = _root_log_dir or os.path.join('.', 'root_log_dir')
 
+        # Ensure the wrapper is registered in the ledger to load the checkpoint manager if it exists, or to register a new one if not. This is needed for the auto-load logic to work correctly.
+        self._registration(
+            weak=weak
+        )
+
         # Check if a checkpoint manager is already registered in ledger
         existing_manager = ledgers.get_checkpoint_manager()
         if existing_manager != None and isinstance(existing_manager, ledgers.Proxy):
@@ -250,11 +255,6 @@ class ModelInterface(NetworkWithOps):
                                     logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
                                 except Exception as e:
                                     logger.warning(f"Failed to load weights state dict: {e}")
-
-                        # Ensure the wrapper is registered in the ledger
-                        self._registration(
-                            weak=weak
-                        )
                         return
 
                 except Exception as e:

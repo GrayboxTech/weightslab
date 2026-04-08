@@ -139,8 +139,11 @@ class TestRaiseInThread(unittest.TestCase):
             tid_box[0] = threading.current_thread().ident
             thread_started.set()
             try:
-                # Simulate a stuck computation
-                time.sleep(10)
+                # Short-sleep loop so async exceptions are delivered promptly
+                # on Windows (PyThreadState_SetAsyncExc only fires at bytecode
+                # boundaries, not inside a long blocking C-level sleep).
+                for _ in range(1000):
+                    time.sleep(0.02)
             except _WatchdogInterrupt:
                 pass
             finally:
@@ -175,7 +178,8 @@ class TestRaiseInThread(unittest.TestCase):
                 tid_box[0] = threading.current_thread().ident
                 thread_started.set()
                 try:
-                    time.sleep(10)
+                    for _ in range(1000):
+                        time.sleep(0.02)
                 except _WatchdogInterrupt:
                     pass
             released.set()
@@ -203,7 +207,8 @@ class TestRaiseInThread(unittest.TestCase):
             tid_box[0] = threading.current_thread().ident
             thread_started.set()
             try:
-                time.sleep(10)
+                for _ in range(1000):
+                    time.sleep(0.02)
             except _WatchdogInterrupt:
                 pass
             finally:

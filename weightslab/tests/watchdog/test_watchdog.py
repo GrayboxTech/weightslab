@@ -67,7 +67,10 @@ class TestWeighlabsWatchdogLockMonitoring(unittest.TestCase):
             lock.acquire()
             thread_started.set()
             try:
-                time.sleep(30)          # simulate stuck
+                # Short-sleep loop so async exceptions fire promptly on Windows
+                # (PyThreadState_SetAsyncExc only fires at bytecode boundaries).
+                for _ in range(1500):
+                    time.sleep(0.02)
             except _WatchdogInterrupt:
                 pass
             finally:
