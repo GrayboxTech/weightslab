@@ -12,7 +12,7 @@ from weightslab.trainer.trainer_tools import *
 from weightslab.trainer.experiment_context import ExperimentContext
 from weightslab.trainer.services.experiment_service import ExperimentService
 
-# Watchdog module — also registers WATCHDOG log level and logger.watchdog()
+# Watchdog module ? also registers WATCHDOG log level and logger.watchdog()
 from weightslab.watchdog import (
     WeighlabsWatchdog,
     RpcWatchdogState,
@@ -147,23 +147,31 @@ def grpc_serve(
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
     watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks
     watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
+    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "0")).strip().lower() in {"1", "true", "yes", "on"}
     max_concurrent_rpcs_env = os.getenv("GRPC_MAX_CONCURRENT_RPCS")
     if max_concurrent_rpcs_env is not None:
         max_concurrent_rpcs = int(max_concurrent_rpcs_env)
     elif max_concurrent_rpcs is None and n_workers_grpc is not None:
         max_concurrent_rpcs = int(n_workers_grpc)
 
-    # Build unified watchdog (manages locks + gRPC threads)
-    watchdog = WeighlabsWatchdog(
-        stuck_threshold_s=watchdog_threshold_s,
-        poll_interval_s=watchdog_interval_s,
-        restart_threshold=watchdog_restart_threshold,
-        exit_on_stuck=watchdog_exit_on_stuck,
-        details_limit=watchdog_details_limit,
-    )
-    watchdog.register_lock("weightslab_rlock", weightslab_rlock)
-    watchdog_state = watchdog.rpc_state       # shared with RpcTimingAndWatchdogInterceptor
-    server_manager = watchdog.server_manager  # shared with serving_thread_callback
+    # Build watchdog components. In debug sessions, watchdogs can be disabled
+    # to avoid lock/RPC timeout interruptions while paused on breakpoints.
+    if watchdog_disabled:
+        watchdog = None
+        watchdog_state = RpcWatchdogState(stuck_threshold_s=watchdog_threshold_s)
+        server_manager = GrpcServerManager()
+        logger.info("[gRPC] Watchdogs disabled via WEIGHTSLAB_DISABLE_WATCHDOGS.")
+    else:
+        watchdog = WeighlabsWatchdog(
+            stuck_threshold_s=watchdog_threshold_s,
+            poll_interval_s=watchdog_interval_s,
+            restart_threshold=watchdog_restart_threshold,
+            exit_on_stuck=watchdog_exit_on_stuck,
+            details_limit=watchdog_details_limit,
+        )
+        watchdog.register_lock("weightslab_rlock", weightslab_rlock)
+        watchdog_state = watchdog.rpc_state       # shared with RpcTimingAndWatchdogInterceptor
+        server_manager = watchdog.server_manager  # shared with serving_thread_callback
     logger.debug(
         f"grpc_serve called with parameters: n_workers_grpc={n_workers_grpc}, grpc_host={grpc_host}, grpc_port={grpc_port}, "
         f"watchdog_threshold_s={watchdog_threshold_s}, watchdog_interval_s={watchdog_interval_s}, watchdog_exit_on_stuck={watchdog_exit_on_stuck}, watchdog_restart_threshold={watchdog_restart_threshold}, "
@@ -238,15 +246,25 @@ def grpc_serve(
         name="WL-gRPC_Server",
     )
     serving_thread.start()
-    watchdog.start()
+    if watchdog is not None:
+        watchdog.start()
 
-    logger.info(
-        "[gRPC] Server and watchdog started (host=%s port=%d workers=%s threshold=%.1fs interval=%.1fs restart_after=%d exit_on_stuck=%s)",
-        grpc_host, grpc_port, n_workers_grpc,
-        watchdog_threshold_s, watchdog_interval_s,
-        watchdog_restart_threshold, watchdog_exit_on_stuck,
-    )
-
+        logger.info(
+            "[gRPC] Server and watchdog started (host=%s port=%d workers=%s threshold=%.1fs interval=%.1fs restart_after=%d exit_on_stuck=%s)",
+            grpc_host, grpc_port, n_workers_grpc,
+            watchdog_threshold_s, watchdog_interval_s,
+            watchdog_restart_threshold, watchdog_exit_on_stuck,
+        )
+    else:
+        logger.info(
+            "[gRPC] Server started with watchdogs disabled (host=%s port=%d workers=%s)",
+            grpc_host, grpc_port, n_workers_grpc,
+        )
 
 if __name__ == "__main__":
     grpc_serve()
+
+
+
+
+

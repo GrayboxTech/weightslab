@@ -58,7 +58,7 @@ The granular statistics and interactive paradigm enable powerful workflows:
 
 <ul class="tabbed">
   <li>
-      <a href="https://sandbox.graybx.com/vla">
+      <a href="https://sandbox.graybx.com/mnist">
       <p style="text-indent:20px;">MNIST</p>
     </a>
   </li>
@@ -73,8 +73,6 @@ The granular statistics and interactive paradigm enable powerful workflows:
     </a>
   </li>
 </ul>
-
-## Getting Started
 
 
 ## Getting Started
@@ -107,10 +105,10 @@ docker compose up -d
 Check out our materials, which include examples ranging from toys to more complex models and experiments.
 
 Quickstart examples:
-- [WeightsLab - Classification toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-classification)
-- [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-segmentation)
-- [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-detection)
-- [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch_Lightning/ws-classification)
+- [WeightsLab - Classification toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-classification)
+- [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-segmentation)
+- [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-detection)
+- [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch_Lightning/ws-classification)
 
 
 ## Configuration
@@ -161,4 +159,3 @@ If you publish work that uses Graybx, please cite Graybx as follows:
 }
 ```
 -->
-
