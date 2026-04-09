@@ -365,8 +365,8 @@ class DataManipulationAgent:
                 break
 
         config_paths = [
-            os.environ.get("AGENT_CONFIG_PATH", repo_root) / ".agent_config.yaml",
-            os.environ.get("AGENT_CONFIG_PATH", repo_root) / "agent_config.yaml",
+            Path(os.environ.get("AGENT_CONFIG_PATH", repo_root)) / ".agent_config.yaml",
+            Path(os.environ.get("AGENT_CONFIG_PATH", repo_root)) / "agent_config.yaml",
             inner_pkg / "agent_config.yaml",
             Path.cwd() / "agent_config.yaml"
         ]
