@@ -274,7 +274,6 @@ class DataService:
                 except (TypeError, ValueError):
                     logger.debug("[PreviewCache] Skipped row %s: invalid sample_id=%r", row_idx, sample_id)
                     continue
-
                 dataset = self._get_dataset(origin)
                 if dataset is None:
                     continue
