@@ -438,6 +438,7 @@ class DataManipulationAgent:
 
         # OPEN AI
         if "openai" in active_providers and self.openai_api_key:
+            _LOGGER.info(f"Setting up OpenAI with model {self.openai_model}")
             try:
                 llm = ChatOpenAI(model=self.openai_model, temperature=0, api_key=self.openai_api_key, max_retries=1)
                 self.chain_openai = llm.with_structured_output(Intent)
@@ -446,6 +447,7 @@ class DataManipulationAgent:
 
         # GOOGLE
         if "google" in active_providers and self.google_api_key:
+            _LOGGER.info(f"Setting up Google with model {self.google_model}")
             try:
                 llm = ChatOpenAI(
                     model=self.google_model,
@@ -460,6 +462,7 @@ class DataManipulationAgent:
 
         # OPEN ROUTER
         if "openrouter" in active_providers and self.openrouter_api_key:
+            _LOGGER.info(f"Setting up OpenRouter with model {self.openrouter_model}")
             try:
                 explicit_openrouter_port = os.environ.get("OPENROUTER_PORT", "").strip()
                 openrouter_base_url = self._normalize_openrouter_base_url(self.openrouter_base_url, explicit_openrouter_port)
@@ -480,6 +483,7 @@ class DataManipulationAgent:
         # LOCAL
         if "ollama" in active_providers:
             try:
+                _LOGGER.info(f"Setting up Ollama with model {self.ollama_model}")
                 host = self.ollama_host.split(':')[0]
                 port = self.ollama_port
                 llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
