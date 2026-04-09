@@ -219,10 +219,11 @@ class DataService:
     def _build_preview_cache(self) -> None:
         """Pre-generate 64×64 or less or less thumbnail + RLE mask for every row in the DF.
 
-        Each entry is a lightweight ``DataRecord`` containing only:
-          • raw_data (bytes) — 64×64 or less or less WebP thumbnail
-          • target   (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
-          • origin, task_type, num_classes, class_names (metadata)
+                Each entry is a lightweight ``DataRecord`` containing only:
+                    • raw_data  (bytes) — 64×64 or less or less WebP thumbnail
+                    • target    (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
+                    • pred_mask (rle_mask) — RLE-encoded prediction mask resized to 64×64 or less or less
+                    • origin, task_type, num_classes, class_names (metadata)
         Respects ``_preview_cache_max`` to cap memory usage.
         """
         try:
@@ -273,7 +274,6 @@ class DataService:
                 except (TypeError, ValueError):
                     logger.debug("[PreviewCache] Skipped row %s: invalid sample_id=%r", row_idx, sample_id)
                     continue
-
                 dataset = self._get_dataset(origin)
                 if dataset is None:
                     continue
@@ -332,6 +332,24 @@ class DataService:
                             stats.append(create_data_stat('target', 'rle_mask', shape=list(mask_u8.shape), thumbnail=rle))
                             del mask_pil, mask_u8
 
+                    # --- Prediction mask ---
+                    pred = row.get(SampleStatsEx.PREDICTION.value)
+                    if pred is not None:
+                        pred_arr = to_numpy_safe(pred)
+                        if pred_arr is None:
+                            try:
+                                pred_arr = np.asarray(pred)
+                            except Exception:
+                                pred_arr = None
+                        if pred_arr is not None and pred_arr.ndim >= 2:
+                            from PIL import Image as _PILImage
+                            pred_pil = _PILImage.fromarray(pred_arr.astype(np.uint8) if pred_arr.ndim == 2 else pred_arr.astype(np.uint8)[:, :, 0])
+                            pred_pil = pred_pil.resize((tw if 'tw' in dir() else PREVIEW_SIZE, th if 'th' in dir() else PREVIEW_SIZE), _PILImage.Resampling.NEAREST)
+                            pred_u8 = np.asarray(pred_pil, dtype=np.uint8)
+                            pred_rle = rle_encode_mask(pred_u8.ravel())
+                            stats.append(create_data_stat('pred_mask', 'rle_mask', shape=list(pred_u8.shape), thumbnail=pred_rle))
+                            del pred_pil, pred_u8
+
                     # --- Metadata ---
                     # Detect task type
                     db_task = row.get(SampleStatsEx.TASK_TYPE.value)
@@ -343,8 +361,18 @@ class DataService:
                     stats.append(create_data_stat('origin', 'string', shape=[1], value_string=origin))
                     stats.append(create_data_stat('task_type', 'string', shape=[1], value_string=task_type))
 
-                    # num_classes
+                    # num_classes — always include for segmentation so the frontend can build the
+                    # colour palette on first preview render (before hi-res records arrive).
                     nc_val = row.get('num_classes') or getattr(ds, "num_classes", None)
+                    if not nc_val and label is not None:
+                        try:
+                            _nc_arr = to_numpy_safe(label)
+                            if _nc_arr is None:
+                                _nc_arr = np.asarray(label)
+                            if _nc_arr is not None and _nc_arr.size > 0:
+                                nc_val = int(_nc_arr.max()) + 1
+                        except Exception:
+                            pass
                     if nc_val:
                         stats.append(create_data_stat('num_classes', 'scalar', shape=[1], value=[float(nc_val)]))
 
@@ -352,7 +380,7 @@ class DataService:
                     self._preview_cache[sample_id_int] = record
                     built += 1
                 except Exception as exc:
-                    traceback.print_exc()
+                    # traceback.print_exc()
                     logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id_int, exc)
                     continue
 
@@ -367,6 +395,66 @@ class DataService:
     def _get_preview_record(self, sample_id: int) -> "pb2.DataRecord | None":
         """Return a cached 64×64 or less preview record, or None if not available."""
         return self._preview_cache.get(sample_id)
+
+    def _refresh_preview_masks_from_row(self, preview_rec: "pb2.DataRecord", row: pd.Series) -> "pb2.DataRecord":
+        """Return a copy of preview_rec with GT/PRED masks refreshed from the live dataframe row.
+
+        This keeps `raw_data` served from the fast in-memory preview cache while ensuring
+        segmentation masks reflect the latest row values (e.g. updated predictions during training).
+        """
+        rec = pb2.DataRecord(sample_id=preview_rec.sample_id)
+        rec.data_stats.extend(preview_rec.data_stats)
+
+        # Infer preview dimensions from cached raw_data shape; fallback to 64x64.
+        target_h, target_w = 64, 64
+        for st in rec.data_stats:
+            if st.name == "raw_data" and len(st.shape) >= 2:
+                try:
+                    target_h = int(st.shape[0]) if int(st.shape[0]) > 0 else 64
+                    target_w = int(st.shape[1]) if int(st.shape[1]) > 0 else 64
+                except Exception:
+                    target_h, target_w = 64, 64
+                break
+
+        def _encode_row_mask(mask_like) -> tuple[bytes | None, list[int] | None]:
+            if mask_like is None:
+                return None, None
+            arr = to_numpy_safe(mask_like)
+            if arr is None:
+                try:
+                    arr = np.asarray(mask_like)
+                except Exception:
+                    return None, None
+            if arr is None or arr.ndim < 2:
+                return None, None
+
+            try:
+                arr_u8 = arr.astype(np.uint8) if arr.ndim == 2 else arr.astype(np.uint8)[:, :, 0]
+                mask_pil = Image.fromarray(arr_u8)
+                if target_w > 0 and target_h > 0 and (mask_pil.size[0] != target_w or mask_pil.size[1] != target_h):
+                    mask_pil = mask_pil.resize((target_w, target_h), Image.Resampling.NEAREST)
+                mask_u8 = np.asarray(mask_pil, dtype=np.uint8)
+                return rle_encode_mask(mask_u8.ravel()), list(mask_u8.shape)
+            except Exception:
+                return None, None
+
+        def _upsert_mask_stat(stat_name: str, rle_bytes: bytes | None, shape: list[int] | None) -> None:
+            if not rle_bytes or not shape:
+                return
+            new_stat = create_data_stat(stat_name, 'rle_mask', shape=shape, thumbnail=rle_bytes)
+            for i, st in enumerate(rec.data_stats):
+                if st.name == stat_name:
+                    rec.data_stats[i].CopyFrom(new_stat)
+                    return
+            rec.data_stats.append(new_stat)
+
+        gt_rle, gt_shape = _encode_row_mask(row.get(SampleStatsEx.TARGET.value))
+        _upsert_mask_stat('target', gt_rle, gt_shape)
+
+        pred_rle, pred_shape = _encode_row_mask(row.get(SampleStatsEx.PREDICTION.value))
+        _upsert_mask_stat('pred_mask', pred_rle, pred_shape)
+
+        return rec
 
     def _deduce_and_set_aspect_ratios(self):
         """Automatically deduce and set aspect_ratio for all registered datasets.
@@ -2158,7 +2246,7 @@ class DataService:
                     if rec is None:
                         missing_rows.append((row_pos, row))
                     else:
-                        ordered_preview_records[row_pos] = rec
+                        ordered_preview_records[row_pos] = self._refresh_preview_masks_from_row(rec, row)
 
                 if missing_rows:
                     wait_ms_raw = os.environ.get("WL_PREVIEW_CACHE_WARMUP_WAIT_MS", "100")
@@ -2182,7 +2270,7 @@ class DataService:
                             if rec is None:
                                 still_missing_rows.append((row_pos, row))
                             else:
-                                ordered_preview_records[row_pos] = rec
+                                ordered_preview_records[row_pos] = self._refresh_preview_masks_from_row(rec, row)
 
                         missing_rows = still_missing_rows
 
@@ -2243,7 +2331,6 @@ class DataService:
             rows_list = list(df_slice.iterrows())
             n_rows = len(rows_list)
             tasks = [(row, request, df_slice.columns) for _, row in rows_list]
-
             effective_chunk = _BATCH_CHUNK_SIZE if _BATCH_CHUNK_SIZE > 0 else n_rows
 
             for chunk_start in range(0, n_rows, effective_chunk):

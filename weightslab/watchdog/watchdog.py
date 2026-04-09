@@ -45,7 +45,7 @@ class WeighlabsWatchdog:
         details_limit: int = 10,
     ) -> None:
         self._stuck_threshold_s = stuck_threshold_s
-        self._poll_interval_s = max(1.0, poll_interval_s)
+        self._poll_interval_s = poll_interval_s
         self._restart_threshold = restart_threshold
         self._exit_on_stuck = exit_on_stuck
         self._details_limit = details_limit
