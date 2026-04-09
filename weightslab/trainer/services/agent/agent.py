@@ -377,16 +377,26 @@ class DataManipulationAgent:
                     cfg = yaml.safe_load(f)
                 if not cfg or "agent" not in cfg: continue
                 a_cfg = cfg["agent"]
+
+                # Agents settings
                 self.preferred_provider = a_cfg.get("provider", self.preferred_provider).lower()
-                self.google_model = a_cfg.get("google_model", self.google_model)
-                self.openai_model = a_cfg.get("openai_model", self.openai_model)
+                self.fallback_to_local = a_cfg.get("fallback_to_local", self.fallback_to_local)
+                # OPENROUTER
                 self.openrouter_model = a_cfg.get("openrouter_model", self.openrouter_model)
                 self.openrouter_base_url = a_cfg.get("openrouter_base_url", self.openrouter_base_url)
+                self.openrouter_api_key = a_cfg.get("openrouter_api_key", os.environ.get("OPENROUTER_API_KEY"))
                 self.openrouter_request_timeout = float(a_cfg.get("openrouter_request_timeout", self.openrouter_request_timeout))
-                self.fallback_to_local = a_cfg.get("fallback_to_local", self.fallback_to_local)
+                # OPENAI
+                self.openai_model = a_cfg.get("openai_model", self.openai_model)
+                self.openai_api_key = a_cfg.get("openai_api_key", os.environ.get("OPENAI_API_KEY"))
+                # GOOGLE
+                self.google_model = a_cfg.get("google_model", self.google_model)
+                self.google_api_key = a_cfg.get("google_api_key", os.environ.get("GOOGLE_API_KEY"))
+                # OLLAMA
                 self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
                 self.ollama_port = a_cfg.get("ollama_port", self.ollama_port)
                 self.ollama_model = a_cfg.get("ollama_model", self.ollama_model)
+
                 _LOGGER.info(f"Applied agent configuration from {path}")
                 break
             except Exception as e:
@@ -426,20 +436,20 @@ class DataManipulationAgent:
             active_providers.add("ollama")
 
         # OPEN AI
-        if "openai" in active_providers and os.environ.get("OPENAI_API_KEY"):
+        if "openai" in active_providers and self.openai_api_key:
             try:
-                llm = ChatOpenAI(model=self.openai_model, temperature=0)
+                llm = ChatOpenAI(model=self.openai_model, temperature=0, api_key=self.openai_api_key, max_retries=1)
                 self.chain_openai = llm.with_structured_output(Intent)
                 _LOGGER.info(f"[Agent] OpenAI enabled: {self.openai_model}")
             except Exception as e: _LOGGER.error(f"OpenAI error: {e}")
 
         # GOOGLE
-        if "google" in active_providers and os.environ.get("GOOGLE_API_KEY"):
+        if "google" in active_providers and self.google_api_key:
             try:
                 llm = ChatOpenAI(
                     model=self.google_model,
                     temperature=0,
-                    api_key=os.environ.get("GOOGLE_API_KEY"),
+                    api_key=self.google_api_key,
                     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                     max_retries=1
                 )
@@ -448,7 +458,7 @@ class DataManipulationAgent:
             except Exception as e: _LOGGER.error(f"Google error: {e}")
 
         # OPEN ROUTER
-        if "openrouter" in active_providers and os.environ.get("OPENROUTER_API_KEY"):
+        if "openrouter" in active_providers and self.openrouter_api_key:
             try:
                 explicit_openrouter_port = os.environ.get("OPENROUTER_PORT", "").strip()
                 openrouter_base_url = self._normalize_openrouter_base_url(self.openrouter_base_url, explicit_openrouter_port)
@@ -456,7 +466,7 @@ class DataManipulationAgent:
                 effective_port = self._effective_http_port(parsed, explicit_openrouter_port)
                 llm = ChatOpenAI(
                     model=self.openrouter_model, temperature=0,
-                    api_key=os.environ.get("OPENROUTER_API_KEY"),
+                    api_key=self.openrouter_api_key,
                     base_url=openrouter_base_url,
                     streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
                 )
