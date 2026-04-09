@@ -209,6 +209,7 @@ jobs:
         run: |
           set -euo pipefail
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          export WL_PRELOAD_IMAGE_OVERVIEW="0"  # disable image overview generation during tests to save time and avoid potential issues with headless environments
 
           TEST_ROOT="./weightslab/tests"
 
