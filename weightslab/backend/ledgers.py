@@ -185,7 +185,11 @@ class Proxy:
             return int(self._resolve())
 
         def __float__(self) -> float:
-            return float(self._resolve())
+            v = self._resolve()
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
 
         def __index__(self) -> int:
             v = self._resolve()

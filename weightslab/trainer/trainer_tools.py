@@ -79,13 +79,18 @@ def get_hyper_parameters_pb(
         else:
             # For numerical values, ensure we pass a float to gRPC to avoid "must be real number" errors
             try:
+                if hasattr(value, "get"):
+                    value = value.get()  # unwrap if it's a wrapper object
                 if value is None or value == None:
                     num_val = 'null'
+                    type_ = 'string'
+                elif callable(value):
+                    num_val = str(value)
                     type_ = 'string'
                 elif isinstance(value, bool):
                     num_val = int(value)
                 else:
-                    num_val = value  # Try parsing string if necessary
+                    num_val = float(value)
             except (ValueError, TypeError):
                 num_val = 0
             if type_ == "numerical" or type_ == "number":
