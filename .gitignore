@@ -12,6 +12,9 @@ venv
 # Ignore hidden directories
 .history
 .lh
+.claude
+.chat
+.ai
 .pytest_cache
 .ruff_cache
 .venv

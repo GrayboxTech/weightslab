@@ -13,6 +13,7 @@ import torch.nn as nn
 
 try:
     import pytorch_lightning as pl
+    from torchmetrics.classification import Accuracy
     PYTORCH_LIGHTNING_AVAILABLE = True
 except ImportError:
     PYTORCH_LIGHTNING_AVAILABLE = False
@@ -20,7 +21,6 @@ except ImportError:
 import weightslab as wl
 
 from torch.utils.data import TensorDataset
-from torchmetrics.classification import Accuracy
 
 from weightslab.backend.ledgers import GLOBAL_LEDGER, Proxy
 from weightslab.components.global_monitoring import (

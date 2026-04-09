@@ -38,7 +38,7 @@ class ExperimentContext:
     def ensure_components(self, force: bool = False):
         """Ensure ledger-backed components are resolved and available on
         `self` (model, train/test dataloaders, optimizer, hyperparams,
-        logger). 
+        logger).
         """
         # Simple caching to avoid thrashing the ledger on every RPC call
         now = time.time()
@@ -179,6 +179,27 @@ class ExperimentContext:
 
             return _g
 
+        def _get_last_hash():
+            # Try to get last checkpoint hash from checkpoint manager, otherwise return placeholder
+            last_hash = "000000000000000000000000"
+            try:
+                chkpt_m = self._components.get("checkpoint_manager")
+                if chkpt_m and hasattr(chkpt_m, "get_last_checkpoint_hash"):
+                    last_hash = chkpt_m.get_current_experiment_hash()
+            except Exception:
+                pass
+            return "..." + last_hash[6:8] + "..." + last_hash[14:16] + "..." + last_hash[-2:]
+
+        def _get_model_age():
+            # Get model age from model if available (e.g. via get_age() or current_step), otherwise return -1
+            model = self._components.get("model")
+            if model:
+                if hasattr(model, 'get_age'):
+                    return int(model.get_age())
+                elif hasattr(model, 'current_step'):
+                    return int(model.current_step)
+            return -1
+
         def _get_total_steps():
             # Try to infer Total = Current (Elapsed) + Remaining
             try:
@@ -206,6 +227,8 @@ class ExperimentContext:
         # TODO (GP): expand hyper-parameters exposed here
         self.hyper_parameters = {
             ("Experiment Name", "experiment_name", "text", lambda: _hp_getter("experiment_name", "Anonymous")()),
+            ("Last hash", "last_hash", "text", lambda: _get_last_hash()),
+            ("Model Age", "model_age", "number", _get_model_age),
             ("Total Training Steps", "total_training_steps", "number", _get_total_steps),
             ("Left Training Steps", "training_left", "number", _hp_getter("training_steps_to_do", 999)),
             ("Eval Frequency", "eval_frequency", "number", _hp_getter("eval_full_to_train_steps_ratio", 100)),

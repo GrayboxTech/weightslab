@@ -3,20 +3,39 @@ from typing import Any, Optional
 from enum import Enum
 import contextvars
 
-from threading import Event, RLock, Lock
+from threading import Event, Lock
 import threading
 import time
 import logging
 
 from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager
 from weightslab.components.tracking import TrackingMode
+from weightslab.watchdog.lock_monitor import MonitoredRLock
 
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
 # Global locks
-weightslab_rlock = RLock()
+# weightslab_rlock is a MonitoredRLock so the watchdog can detect when it is
+# held too long and raise _WatchdogInterrupt in the holder thread, causing
+# any finally/with block to release it cleanly.
+weightslab_rlock = MonitoredRLock()
 weightslab_lock = Lock()
+
+# Timeout for acquiring weightslab_rlock in gRPC handlers.
+# Mirrors GRPC_WATCHDOG_STUCK_SECONDS so an RPC that cannot grab the lock fails
+# cleanly before the watchdog would flag it as an infinite hang.
+_GRPC_LOCK_TIMEOUT_S: float = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "60"))
+
+
+def try_acquire_rlock(timeout_s: float = _GRPC_LOCK_TIMEOUT_S) -> bool:
+    """Try to acquire weightslab_rlock with a watchdog-aligned timeout.
+
+    Returns True if the lock was acquired (caller must release it).
+    Returns False if timed out — caller should abort the RPC instead of hanging.
+    """
+    return weightslab_rlock.acquire(timeout=timeout_s)
 
 
 # Context management for training vs testing
@@ -63,6 +82,7 @@ class PauseController:
         Shared between model (reader: wait) and control thread (writer: pause/resume).
     """
     def __init__(self):
+        # Event is used for efficient waiting in the main thread during pause, and for signaling resume.
         self._event = Event()
         self._event.clear()
 
@@ -98,8 +118,7 @@ class PauseController:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager != None:
             self.checkpoint_manager.update_experiment_hash(firsttime=True)
-            self.checkpoint_manager.save_pending_changes()
-            self.checkpoint_manager.save_pending_changes()
+            self.checkpoint_manager.save_pending_changes()  # Write pending change to disk
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:
             logger.warning('Cannot access checkpoint manager on resume.')
@@ -130,6 +149,7 @@ class PauseController:
         fl = self.checkpoint_manager.get_hp_hash() != "00000000" and self.checkpoint_manager.get_model_hash() != "00000000" and self.checkpoint_manager.get_data_hash() != "00000000"
 
         return fl
+
 
 # Global pause controller instance
 pause_controller = PauseController()
@@ -299,13 +319,13 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
                 controller_paused = pause_controller.is_paused()
                 controller_running = not controller_paused
 
-                # Drive controller from ledger when ledger explicitly sets the flag
-                if isinstance(hp_is_training, bool):
-                    if controller_paused and hp_is_training:
-                        resumed = pause_controller.resume()
-                        firstresume = False if resumed else True
-                    elif controller_running and not hp_is_training:
-                        pause_controller.pause()
+                # # Drive controller from ledger when ledger explicitly sets the flag
+                # if isinstance(hp_is_training, bool):
+                #     if controller_paused and hp_is_training:
+                #         resumed = pause_controller.resume()
+                #         firstresume = False if resumed else True
+                #     elif controller_running and not hp_is_training:
+                #         pause_controller.pause()
 
                 # Re-evaluate controller state after potential changes
                 controller_paused = pause_controller.is_paused()

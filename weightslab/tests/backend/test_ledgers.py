@@ -522,6 +522,40 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(snapshot['checkpoint_managers'], [DEFAULT_NAME])
         self.assertIn('checkpoint_managers', snapshot)
 
+    def test_proxy_delattr_missing_is_noop(self):
+        """Deleting a missing attribute on Proxy should not raise."""
+        proxy = Proxy(Dummy("x"))
+
+        # Regression: cleanup paths may call delattr after hasattr false-positives.
+        delattr(proxy, "_iterator")
+        delattr(proxy, "not_existing_anywhere")
+
+        # Still usable after no-op deletions.
+        self.assertEqual(proxy.name, "x")
+
+    def test_proxy_delattr_local_attribute(self):
+        """Deleting a local proxy attribute removes it from proxy state."""
+        proxy = Proxy([1, 2, 3])
+        proxy._iterator = iter([9])
+
+        self.assertIn("_iterator", proxy.__dict__)
+        delattr(proxy, "_iterator")
+        self.assertNotIn("_iterator", proxy.__dict__)
+
+    def test_proxy_delattr_forwards_to_wrapped_object(self):
+        """Deleting non-local attrs should forward to wrapped object when present."""
+
+        class _HasFlag:
+            def __init__(self):
+                self.flag = True
+
+        wrapped = _HasFlag()
+        proxy = Proxy(wrapped)
+
+        self.assertTrue(hasattr(wrapped, "flag"))
+        delattr(proxy, "flag")
+        self.assertFalse(hasattr(wrapped, "flag"))
+
 
 
 if __name__ == "__main__":

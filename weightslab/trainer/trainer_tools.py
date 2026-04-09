@@ -1,6 +1,7 @@
 import io
 import sys
 import io
+import time
 import torch
 import logging
 import subprocess
@@ -32,14 +33,15 @@ def generate_overview(df, n=3):
         logger.error(f"Error generating overview: {e}", exc_info=True)
         return "Error generating overview."
 
+
 def execute_df_operation(df, operation_str):
     """
     Execute a pandas operation from a string and return the result.
-    
+
     Args:
         df: The pandas DataFrame
         operation_str: String like "df.sort_index(inplace=True)"
-    
+
     Returns:
         DataFrame or None (if inplace=True)
     """
@@ -49,7 +51,7 @@ def execute_df_operation(df, operation_str):
 
         # Execute the operation
         exec(operation_str, {"df": df, "pd": pd})
-        
+
         # If result is None, the operation was inplace, return the modified df
         success_message = f"Operation '{operation_str}' executed successfully."
         return df, success_message
@@ -77,22 +79,35 @@ def get_hyper_parameters_pb(
         else:
             # For numerical values, ensure we pass a float to gRPC to avoid "must be real number" errors
             try:
-                if value is None:
-                    num_val = 0.0
-                elif isinstance(value, (int, float, bool)):
-                    num_val = float(value)
+                if hasattr(value, "get"):
+                    value = value.get()  # unwrap if it's a wrapper object
+                if value is None or value == None:
+                    num_val = 'null'
+                    type_ = 'string'
+                elif callable(value):
+                    num_val = str(value)
+                    type_ = 'string'
+                elif isinstance(value, bool):
+                    num_val = int(value)
                 else:
-                    # Try parsing string if necessary
-                    num_val = float(str(value))
+                    num_val = float(value)
             except (ValueError, TypeError):
-                num_val = 0.0
+                num_val = 0
+            if type_ == "numerical" or type_ == "number":
+                hyper_parameter_pb2 = pb2.HyperParameterDesc(
+                    label=label,
+                    name=name,
+                    type=type_,
+                    numerical_value=num_val
+                )
+            elif type_ == "string":
+                hyper_parameter_pb2 = pb2.HyperParameterDesc(
+                    label=label,
+                    name=name,
+                    type=type_,
+                    string_value=str(num_val)
+                )
 
-            hyper_parameter_pb2 = pb2.HyperParameterDesc(
-                label=label,
-                name=name,
-                type=type_,
-                numerical_value=num_val
-            )
         hyper_parameters_pb2.append(hyper_parameter_pb2)
 
     return hyper_parameters_pb2
@@ -104,7 +119,7 @@ def get_neuron_representations(layer) -> Iterable[pb2.NeuronStatistics]:
     neuron_representations = []
     if not layer:
         return None
-    
+
     for neuron_idx in range(layer.out_neurons):
         # SAFEGUARD: Ensure trackers are available
         if layer.train_dataset_tracker is None:
@@ -179,6 +194,7 @@ def get_layer_representations(model):
         layer_representations.append(layer_representation)
     return layer_representations
 
+
 def mask_to_png_bytes(mask, num_classes=21):
     if isinstance(mask, torch.Tensor):
         mask = mask.detach().cpu().numpy()
@@ -201,6 +217,7 @@ def mask_to_png_bytes(mask, num_classes=21):
     im.save(buf, format="PNG")
     return buf.getvalue()
 
+
 def _class_ids(x, num_classes=None, ignore_index=255):
     if x is None:
         return []
@@ -217,6 +234,7 @@ def _class_ids(x, num_classes=None, ignore_index=255):
         u = u[(u >= 0) & (u < int(num_classes))]
     return [int(v) for v in u.tolist()]
 
+
 def _labels_from_mask_path_histogram(path, num_classes=None, ignore_index=255):
     with Image.open(path) as im:
         if im.mode not in ("P", "L"):
@@ -228,6 +246,7 @@ def _labels_from_mask_path_histogram(path, num_classes=None, ignore_index=255):
         ig = int(ignore_index)
         ids = [i for i in ids if i != ig]
     return ids
+
 
 def get_data_set_representation(dataset, experiment) -> pb2.SampleStatistics:
     sample_stats = pb2.SampleStatistics()
@@ -364,6 +383,7 @@ def load_raw_image(dataset, index):
     else:
         raise ValueError("Dataset type not supported for raw image extraction.")
 
+
 def _get_input_tensor_for_sample(dataset, sample_id, device):
     if hasattr(dataset, "_getitem_raw"):
         tensor, _, _ = dataset._getitem_raw(id=sample_id)
@@ -380,6 +400,7 @@ def _get_input_tensor_for_sample(dataset, sample_id, device):
 
     tensor = tensor.to(device)
     return tensor
+
 
 def process_sample(sid, dataset, do_resize, resize_dims, experiment):
     try:
@@ -453,6 +474,7 @@ def process_sample(sid, dataset, do_resize, resize_dims, experiment):
         logger.error(f"GetSamples({sid}) failed: {e}")
         return (sid, None, None, -1, b"", b"")
 
+
 def force_kill_all_python_processes():
     """
     Tente de tuer TOUS les processus python en cours d'exécution sur la machine.
@@ -484,3 +506,86 @@ def force_kill_all_python_processes():
 
     else:
         logger.error(f"Operating system '{sys.platform}' not supported for forced shutdown.")
+
+
+def encode_image_to_raw_bytes(
+    np_img,
+    middle_pil,
+    original_shape: list,
+    is_volumetric: bool,
+    is_full_resolution: bool,
+    target_width: int,
+    target_height: int,
+) -> Tuple[bytes, list, float]:
+    """Encode a raw image into bytes for gRPC transfer.
+
+    Two encoding paths:
+    - Volumetric + full resolution: numpy array serialised as raw float32 bytes.
+    - All other cases (thumbnails, 2D): PIL image compressed to WebP (JPEG fallback).
+
+    Args:
+        np_img:            Numpy array of the image (required for the volumetric path).
+        middle_pil:        PIL Image (required for the 2D / thumbnail path).
+        original_shape:    Original tensor shape, used to derive [Z, H, W, C] for volumetric.
+        is_volumetric:     True when the image has a depth (Z) dimension.
+        is_full_resolution: True when sending the full modal view, False for grid thumbnails.
+        target_width:      Width of the (possibly resized) output image.
+        target_height:     Height of the (possibly resized) output image.
+
+    Returns:
+        raw_data_bytes: Encoded bytes ready for gRPC transfer.
+        raw_shape:      [Z, H, W, C] or [H, W, C] shape of the encoded data.
+        encode_time_s:  Seconds spent encoding (0.0 for the raw float32 path).
+    """
+    raw_data_bytes: bytes = b""
+    raw_shape: list = []
+    encode_time_s: float = 0.0
+
+    if is_volumetric and np_img is not None and is_full_resolution:
+        # Full-resolution modal: send the full 4-D array as raw float32 bytes.
+        np_img_f32 = np.asarray(np_img, dtype=np.float32)
+        if not np_img_f32.flags['C_CONTIGUOUS']:
+            np_img_f32 = np.ascontiguousarray(np_img_f32)
+        raw_data_bytes = np_img_f32.tobytes()
+        del np_img_f32  # release float32 copy immediately
+
+        # Normalise shape to [Z, H, W, C] from the original 4-D tensor.
+        if len(original_shape) == 4:
+            if original_shape[1] > original_shape[-1]:
+                raw_shape = list(original_shape)                                               # already [Z, H, W, C]
+            elif original_shape[1] < original_shape[-1]:
+                raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]]  # [Z, C, H, W] -> [Z, H, W, C]
+            else:
+                raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]      # ambiguous: assume single channel
+        logger.info(
+            "[Volumetric] Sending full res: np_img.shape=%s, original_shape=%s, raw_shape=%s, bytes=%d",
+            np_img.shape, original_shape, raw_shape, len(raw_data_bytes),
+        )
+    else:
+        # Thumbnail (grid) or non-volumetric: compress with WebP, fall back to JPEG.
+        # WebP is ~40-50 % smaller than JPEG at equivalent visual quality.
+        _quality = 80 if is_full_resolution else 65
+        _webp_method = 4 if is_full_resolution else 2  # 0 = fastest … 6 = smallest
+        raw_buf = io.BytesIO()
+        t0_enc = time.time()
+        try:
+            _save_img = middle_pil
+            if _save_img.mode == 'P':
+                _save_img = _save_img.convert('RGBA')
+            _save_img.save(raw_buf, format='WEBP', quality=_quality, method=_webp_method)
+        except Exception:
+            # libwebp not available — fall back to JPEG.
+            raw_buf = io.BytesIO()
+            _save_img = middle_pil
+            if _save_img.mode in ('RGBA', 'LA', 'P'):
+                _save_img = _save_img.convert('RGB')
+            _save_img.save(raw_buf, format='JPEG', quality=_quality, optimize=True)
+        raw_data_bytes = raw_buf.getvalue()
+        raw_buf.close()
+        encode_time_s = time.time() - t0_enc
+
+        # Shape: [H, W, C] for RGB / RGBA, [H, W, 1] for grayscale.
+        num_channels = len(middle_pil.getbands())
+        raw_shape = [target_height, target_width, 1 if num_channels == 1 else num_channels]
+
+    return raw_data_bytes, raw_shape, encode_time_s

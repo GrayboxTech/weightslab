@@ -27,7 +27,7 @@ from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals, Proxy
 from weightslab.data.data_utils import load_label, load_raw_image, to_numpy_safe
-from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview
+from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
 from weightslab.data.data_utils import load_raw_image_array
 
 # Image encoding / mask compression / proto helpers (extracted)
@@ -146,7 +146,7 @@ class DataService:
         # Check hyperparameters for compute_natural_sort flag (default: False)
         # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
-        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})
+        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})  # is it already a proxy ?
         self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
 
         # In-memory dataframe view of all datasets combined (streamed to UI)
@@ -175,7 +175,7 @@ class DataService:
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         # =====================================================================
-        # Preview cache: pre-generate 64×64 WebP thumbnails + RLE masks for
+        # Preview cache: pre-generate 64×64 or less WebP thumbnails + RLE masks for
         # every sample in the dataset.
         # Enabled by default (auto-builds on background thread).
         # Disable with env var WL_PRELOAD_IMAGE_OVERVIEW=0.
@@ -199,16 +199,31 @@ class DataService:
 
         logger.info("DataService initialized.")
 
+    @staticmethod
+    def _clamp_to_downscale_only(target_width: int, target_height: int, original_width: int, original_height: int):
+        """Clamp target size so thumbnail paths never upscale beyond original size."""
+        tw = max(1, int(target_width))
+        th = max(1, int(target_height))
+        ow = max(1, int(original_width))
+        oh = max(1, int(original_height))
+
+        scale = min(1.0, ow / float(tw), oh / float(th))
+        if scale < 1.0:
+            tw = max(1, int(tw * scale))
+            th = max(1, int(th * scale))
+        return tw, th
+
     # -----------------------------------------------------------------
     # Preview cache builder (runs on background thread)
     # -----------------------------------------------------------------
     def _build_preview_cache(self) -> None:
-        """Pre-generate 64×64 thumbnail + RLE mask for every row in the DF.
+        """Pre-generate 64×64 or less or less thumbnail + RLE mask for every row in the DF.
 
-        Each entry is a lightweight ``DataRecord`` containing only:
-          • raw_data (bytes) — 64×64 WebP thumbnail
-          • target   (rle_mask) — RLE-encoded GT mask resized to 64×64
-          • origin, task_type, num_classes, class_names (metadata)
+                Each entry is a lightweight ``DataRecord`` containing only:
+                    • raw_data  (bytes) — 64×64 or less or less WebP thumbnail
+                    • target    (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
+                    • pred_mask (rle_mask) — RLE-encoded prediction mask resized to 64×64 or less or less
+                    • origin, task_type, num_classes, class_names (metadata)
         Respects ``_preview_cache_max`` to cap memory usage.
         """
         try:
@@ -219,17 +234,46 @@ class DataService:
                 return
 
             total = min(len(df), self._preview_cache_max)
-            logger.info("[PreviewCache] Building 64×64 preview cache for %d samples …", total)
+            logger.info("[PreviewCache] Building 64×64 or less or less preview cache for %d samples …", total)
             t0 = time.time()
 
             PREVIEW_SIZE = 64  # fixed low-res dimension
             built = 0
 
-            for row_idx, (_, row) in enumerate(df.iterrows()):
+            index_names = list(getattr(df.index, "names", []) or [])
+            origin_index_pos = index_names.index(SampleStatsEx.ORIGIN.value) if SampleStatsEx.ORIGIN.value in index_names else None
+            sample_id_index_pos = index_names.index(SampleStatsEx.SAMPLE_ID.value) if SampleStatsEx.SAMPLE_ID.value in index_names else None
+
+            for row_idx, (row_index, row) in enumerate(tqdm(df.iterrows(), total=total, desc="[PreviewCache]", unit="sample")):
                 if row_idx >= total:
                     break
-                sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
-                origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
+
+                sample_id = row.get(SampleStatsEx.SAMPLE_ID.value)
+                origin = row.get(SampleStatsEx.ORIGIN.value)
+
+                # In the internal dataframe view, origin/sample_id are often in the index
+                # (MultiIndex: origin, sample_id), not in dataframe columns.
+                if isinstance(row_index, tuple):
+                    if origin is None and origin_index_pos is not None and origin_index_pos < len(row_index):
+                        origin = row_index[origin_index_pos]
+                    if sample_id is None and sample_id_index_pos is not None and sample_id_index_pos < len(row_index):
+                        sample_id = row_index[sample_id_index_pos]
+                    # Fallback for unnamed tuple index that still follows (origin, sample_id)
+                    if origin is None and len(row_index) >= 1:
+                        origin = row_index[0]
+                    if sample_id is None and len(row_index) >= 2:
+                        sample_id = row_index[1]
+                else:
+                    if sample_id is None and (sample_id_index_pos is not None or df.index.name == SampleStatsEx.SAMPLE_ID.value):
+                        sample_id = row_index
+
+                origin = str(origin) if origin is not None else 'unknown'
+
+                try:
+                    sample_id_int = int(sample_id)
+                except (TypeError, ValueError):
+                    logger.debug("[PreviewCache] Skipped row %s: invalid sample_id=%r", row_idx, sample_id)
+                    continue
                 dataset = self._get_dataset(origin)
                 if dataset is None:
                     continue
@@ -239,17 +283,26 @@ class DataService:
                     ds = getattr(dataset, "wrapped_dataset", dataset)
                     # --- Thumbnail image ---
                     if hasattr(dataset, "get_physical_location"):
-                        ds_idx, member_rank = dataset.get_physical_location(sample_id)
+                        ds_idx, member_rank = dataset.get_physical_location(sample_id_int)
                     else:
-                        ds_idx = dataset.get_index_from_sample_id(sample_id)
+                        ds_idx = dataset.get_index_from_sample_id(sample_id_int)
                         member_rank = 0
 
                     _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
                     if pil_img is not None:
                         ar = pil_img.size[0] / max(pil_img.size[1], 1)
-                        tw = max(1, int(PREVIEW_SIZE * ar)) if ar >= 1 else PREVIEW_SIZE
-                        th = PREVIEW_SIZE if ar >= 1 else max(1, int(PREVIEW_SIZE / ar))
-                        pil_thumb = pil_img.resize((tw, th), Image.Resampling.BILINEAR)
+                        if PREVIEW_SIZE >= max(pil_img.size):
+                            # No resize if image size are smaller
+                            tw, th = pil_img.size
+                            pil_thumb = pil_img
+                        else:
+                            # Otherwise resize
+                            tw = max(1, int(PREVIEW_SIZE * ar)) if ar >= 1 else PREVIEW_SIZE
+                            th = PREVIEW_SIZE if ar >= 1 else max(1, int(PREVIEW_SIZE / ar))
+                            tw, th = self._clamp_to_downscale_only(tw, th, pil_img.size[0], pil_img.size[1])
+                            pil_thumb = pil_img.resize((tw, th), Image.Resampling.BILINEAR)
+
+                        # Buffer thumbnail as WebP bytes (smaller than JPEG and supports lossless compression for very small images)
                         buf = io.BytesIO()
                         pil_save = pil_thumb.convert('RGB') if pil_thumb.mode not in ('RGB', 'RGBA') else pil_thumb
                         pil_save.save(buf, format='WEBP', quality=50, method=0)
@@ -260,7 +313,7 @@ class DataService:
                         del pil_thumb, pil_save, pil_img
 
                     # --- GT mask ---
-                    label = load_label(dataset, sample_id)
+                    label = load_label(dataset, sample_id_int)
                     if label is not None:
                         label_arr = to_numpy_safe(label)
                         if label_arr is None:
@@ -269,7 +322,7 @@ class DataService:
                             except Exception:
                                 label_arr = None
                         if label_arr is not None and label_arr.ndim >= 2:
-                            # Resize mask to 64×64 using nearest-neighbour (class IDs must stay exact)
+                            # Resize mask to 64×64 or less using nearest-neighbour (class IDs must stay exact)
                             from PIL import Image as _PILImage
                             h, w = label_arr.shape[:2]
                             mask_pil = _PILImage.fromarray(label_arr.astype(np.uint8) if label_arr.ndim == 2 else label_arr.astype(np.uint8)[:, :, 0])
@@ -278,6 +331,24 @@ class DataService:
                             rle = rle_encode_mask(mask_u8.ravel())
                             stats.append(create_data_stat('target', 'rle_mask', shape=list(mask_u8.shape), thumbnail=rle))
                             del mask_pil, mask_u8
+
+                    # --- Prediction mask ---
+                    pred = row.get(SampleStatsEx.PREDICTION.value)
+                    if pred is not None:
+                        pred_arr = to_numpy_safe(pred)
+                        if pred_arr is None:
+                            try:
+                                pred_arr = np.asarray(pred)
+                            except Exception:
+                                pred_arr = None
+                        if pred_arr is not None and pred_arr.ndim >= 2:
+                            from PIL import Image as _PILImage
+                            pred_pil = _PILImage.fromarray(pred_arr.astype(np.uint8) if pred_arr.ndim == 2 else pred_arr.astype(np.uint8)[:, :, 0])
+                            pred_pil = pred_pil.resize((tw if 'tw' in dir() else PREVIEW_SIZE, th if 'th' in dir() else PREVIEW_SIZE), _PILImage.Resampling.NEAREST)
+                            pred_u8 = np.asarray(pred_pil, dtype=np.uint8)
+                            pred_rle = rle_encode_mask(pred_u8.ravel())
+                            stats.append(create_data_stat('pred_mask', 'rle_mask', shape=list(pred_u8.shape), thumbnail=pred_rle))
+                            del pred_pil, pred_u8
 
                     # --- Metadata ---
                     # Detect task type
@@ -290,16 +361,27 @@ class DataService:
                     stats.append(create_data_stat('origin', 'string', shape=[1], value_string=origin))
                     stats.append(create_data_stat('task_type', 'string', shape=[1], value_string=task_type))
 
-                    # num_classes
+                    # num_classes — always include for segmentation so the frontend can build the
+                    # colour palette on first preview render (before hi-res records arrive).
                     nc_val = row.get('num_classes') or getattr(ds, "num_classes", None)
+                    if not nc_val and label is not None:
+                        try:
+                            _nc_arr = to_numpy_safe(label)
+                            if _nc_arr is None:
+                                _nc_arr = np.asarray(label)
+                            if _nc_arr is not None and _nc_arr.size > 0:
+                                nc_val = int(_nc_arr.max()) + 1
+                        except Exception:
+                            pass
                     if nc_val:
                         stats.append(create_data_stat('num_classes', 'scalar', shape=[1], value=[float(nc_val)]))
 
-                    record = pb2.DataRecord(sample_id=str(sample_id), data_stats=stats)
-                    self._preview_cache[int(sample_id)] = record
+                    record = pb2.DataRecord(sample_id=str(sample_id_int), data_stats=stats)
+                    self._preview_cache[sample_id_int] = record
                     built += 1
                 except Exception as exc:
-                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id, exc)
+                    # traceback.print_exc()
+                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id_int, exc)
                     continue
 
             elapsed = time.time() - t0
@@ -311,8 +393,68 @@ class DataService:
             self._preview_cache_ready.set()
 
     def _get_preview_record(self, sample_id: int) -> "pb2.DataRecord | None":
-        """Return a cached 64×64 preview record, or None if not available."""
+        """Return a cached 64×64 or less preview record, or None if not available."""
         return self._preview_cache.get(sample_id)
+
+    def _refresh_preview_masks_from_row(self, preview_rec: "pb2.DataRecord", row: pd.Series) -> "pb2.DataRecord":
+        """Return a copy of preview_rec with GT/PRED masks refreshed from the live dataframe row.
+
+        This keeps `raw_data` served from the fast in-memory preview cache while ensuring
+        segmentation masks reflect the latest row values (e.g. updated predictions during training).
+        """
+        rec = pb2.DataRecord(sample_id=preview_rec.sample_id)
+        rec.data_stats.extend(preview_rec.data_stats)
+
+        # Infer preview dimensions from cached raw_data shape; fallback to 64x64.
+        target_h, target_w = 64, 64
+        for st in rec.data_stats:
+            if st.name == "raw_data" and len(st.shape) >= 2:
+                try:
+                    target_h = int(st.shape[0]) if int(st.shape[0]) > 0 else 64
+                    target_w = int(st.shape[1]) if int(st.shape[1]) > 0 else 64
+                except Exception:
+                    target_h, target_w = 64, 64
+                break
+
+        def _encode_row_mask(mask_like) -> tuple[bytes | None, list[int] | None]:
+            if mask_like is None:
+                return None, None
+            arr = to_numpy_safe(mask_like)
+            if arr is None:
+                try:
+                    arr = np.asarray(mask_like)
+                except Exception:
+                    return None, None
+            if arr is None or arr.ndim < 2:
+                return None, None
+
+            try:
+                arr_u8 = arr.astype(np.uint8) if arr.ndim == 2 else arr.astype(np.uint8)[:, :, 0]
+                mask_pil = Image.fromarray(arr_u8)
+                if target_w > 0 and target_h > 0 and (mask_pil.size[0] != target_w or mask_pil.size[1] != target_h):
+                    mask_pil = mask_pil.resize((target_w, target_h), Image.Resampling.NEAREST)
+                mask_u8 = np.asarray(mask_pil, dtype=np.uint8)
+                return rle_encode_mask(mask_u8.ravel()), list(mask_u8.shape)
+            except Exception:
+                return None, None
+
+        def _upsert_mask_stat(stat_name: str, rle_bytes: bytes | None, shape: list[int] | None) -> None:
+            if not rle_bytes or not shape:
+                return
+            new_stat = create_data_stat(stat_name, 'rle_mask', shape=shape, thumbnail=rle_bytes)
+            for i, st in enumerate(rec.data_stats):
+                if st.name == stat_name:
+                    rec.data_stats[i].CopyFrom(new_stat)
+                    return
+            rec.data_stats.append(new_stat)
+
+        gt_rle, gt_shape = _encode_row_mask(row.get(SampleStatsEx.TARGET.value))
+        _upsert_mask_stat('target', gt_rle, gt_shape)
+
+        pred_rle, pred_shape = _encode_row_mask(row.get(SampleStatsEx.PREDICTION.value))
+        _upsert_mask_stat('pred_mask', pred_rle, pred_shape)
+
+        return rec
 
     def _deduce_and_set_aspect_ratios(self):
         """Automatically deduce and set aspect_ratio for all registered datasets.
@@ -805,7 +947,8 @@ class DataService:
         try:
             origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
             sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
-            logger.debug(f"Processing sample_id={sample_id} from origin={origin} with request: {request}")
+            # logger.debug(f"Processing sample_id={sample_id} from origin={origin} with request: {request}")
+
             # ===== Timing accumulators =====
             t_image_load = 0.0
             t_image_encode = 0.0
@@ -817,11 +960,7 @@ class DataService:
             raw_data_bytes = b""
 
             # ====== Step 1: Request mode ======
-            metadata_only_request = (
-                (not bool(request.include_raw_data))
-                and (not bool(getattr(request, 'include_transformed_data', False)))
-                and bool(list(getattr(request, 'stats_to_retrieve', [])))
-            )
+            metadata_only_request = self._is_metadata_only_request(request)
 
             skip_label_for_request = metadata_only_request
             skip_prediction_for_request = metadata_only_request
@@ -944,6 +1083,11 @@ class DataService:
                 )
             )
 
+            target_mask_stat_index = None
+            pred_mask_stat_index = None
+            target_mask_u8 = None
+            pred_mask_u8 = None
+
             # ====== Step 7: Process labels ======
             t_label_convert = 0.0
             if not skip_label_for_request and task_type != "classification":
@@ -974,6 +1118,8 @@ class DataService:
                         thumbnail=rle_bytes
                     )
                 )
+                target_mask_stat_index = len(data_stats) - 1
+                target_mask_u8 = label_u8
 
                 # Prefer row attribute if available, fallback to dataset, then model
                 num_classes = (
@@ -1098,6 +1244,8 @@ class DataService:
                             thumbnail=rle_bytes
                         )
                     )
+                    pred_mask_stat_index = len(data_stats) - 1
+                    pred_mask_u8 = pred_arr
                 except Exception:
                     pass
             else:
@@ -1136,7 +1284,6 @@ class DataService:
 
             # ====== Step 9: Generate raw data bytes and thumbnail ======
             if request.include_raw_data and dataset is not None:
-                logger.debug(f"Loading raw data for sample_id={sample_id} from dataset for origin={origin}")
                 try:
                     # New grouped-aware location resolution
                     if hasattr(dataset, "get_physical_location"):
@@ -1210,6 +1357,16 @@ class DataService:
                     target_width = max(1, target_width)
                     target_height = max(1, target_height)
 
+                    # For thumbnails, avoid backend upsampling. The browser can upscale
+                    # to the grid cell size client-side with lower gRPC payload cost.
+                    if not is_full_resolution:
+                        target_width, target_height = self._clamp_to_downscale_only(
+                            target_width,
+                            target_height,
+                            original_size[0],
+                            original_size[1],
+                        )
+
                     # Resize middle slice for thumbnail if requested (maintain aspect ratio)
                     if target_width != original_size[0] or target_height != original_size[1]:
                         # BILINEAR is ~2x faster than LANCZOS and sufficient for small thumbnails;
@@ -1217,56 +1374,30 @@ class DataService:
                         _resample = Image.Resampling.LANCZOS if is_full_resolution else Image.Resampling.BILINEAR
                         middle_pil = middle_pil.resize((target_width, target_height), _resample)
 
-                    raw_data_bytes = b""
-                    raw_shape = []
+                    # Keep masks in sync with thumbnail size, but only for thumbnail paths.
+                    # Full-resolution modal requests keep original mask resolution.
+                    if not is_full_resolution:
+                        if target_mask_stat_index is not None and target_mask_u8 is not None and target_mask_u8.size > 0:
+                            resized_target = resize_mask_nearest(target_mask_u8, target_width, target_height)
+                            target_stat = data_stats[target_mask_stat_index]
+                            target_stat.shape[:] = list(resized_target.shape)
+                            target_stat.thumbnail = rle_encode_mask(resized_target.ravel())
 
-                    if is_volumetric and np_img is not None and is_full_resolution:
-                        # Full resolution modal view: Send full 4D array as raw bytes (C-contiguous, float32)
-                        np_img_f32 = np.asarray(np_img, dtype=np.float32)
-                        if not np_img_f32.flags['C_CONTIGUOUS']:
-                            np_img_f32 = np.ascontiguousarray(np_img_f32)
-                        raw_data_bytes = np_img_f32.tobytes()
-                        del np_img_f32  # Release float32 copy immediately
-                        # Shape: [Z, H, W, C] using ORIGINAL 4D dimensions, not thumbnail dimensions
-                        if len(original_shape) == 4:
-                            if original_shape[1] > original_shape[-1]:
-                                raw_shape = list(original_shape)  # [Z, H, W, C]
-                            elif original_shape[1] < original_shape[-1]:
-                                raw_shape = [original_shape[0], original_shape[2], original_shape[3], original_shape[1]]
-                            else:
-                                raw_shape = [original_shape[0], original_shape[1], original_shape[2], 1]
-                            logger.info(f"[Volumetric] Sending full res: np_img.shape={np_img.shape}, original_shape={original_shape}, raw_shape={raw_shape}, bytes={len(raw_data_bytes)}")
-                    else:
-                        # Thumbnail for grid OR non-volumetric: Send as compressed image bytes.
-                        # WebP is ~40-50% smaller than JPEG at equivalent visual quality and
-                        # all modern browsers support it. Use lower quality for small grid
-                        # thumbnails (fast decode, minimal bandwidth) and higher for modal.
-                        _quality = 80 if is_full_resolution else 65
-                        _webp_method = 4 if is_full_resolution else 2  # 0=fast … 6=slow+small
-                        raw_buf = io.BytesIO()
-                        t0_enc = time.time()
-                        try:
-                            # Ensure mode is WebP-compatible
-                            _save_img = middle_pil
-                            if _save_img.mode == 'P':
-                                _save_img = _save_img.convert('RGBA')
-                            _save_img.save(raw_buf, format='WEBP', quality=_quality, method=_webp_method)
-                        except Exception:
-                            # Fallback to JPEG if WebP is unavailable (missing libwebp)
-                            raw_buf = io.BytesIO()
-                            _save_img = middle_pil
-                            if _save_img.mode in ('RGBA', 'LA', 'P'):
-                                _save_img = _save_img.convert('RGB')
-                            _save_img.save(raw_buf, format='JPEG', quality=_quality, optimize=True)
-                        raw_data_bytes = raw_buf.getvalue()
-                        raw_buf.close()  # Release underlying buffer
-                        t_image_encode = time.time() - t0_enc
-                        # Shape: [H, W, C] for 3D RGB or [H, W] for 2D grayscale
-                        num_channels = len(middle_pil.getbands())
-                        if num_channels == 1:
-                            raw_shape = [target_height, target_width, 1]
-                        else:
-                            raw_shape = [target_height, target_width, num_channels]
+                        if pred_mask_stat_index is not None and pred_mask_u8 is not None and pred_mask_u8.size > 0:
+                            resized_pred = resize_mask_nearest(pred_mask_u8, target_width, target_height)
+                            pred_stat = data_stats[pred_mask_stat_index]
+                            pred_stat.shape[:] = list(resized_pred.shape)
+                            pred_stat.thumbnail = rle_encode_mask(resized_pred.ravel())
+
+                    raw_data_bytes, raw_shape, t_image_encode = encode_image_to_raw_bytes(
+                        np_img=np_img,
+                        middle_pil=middle_pil,
+                        original_shape=original_shape,
+                        is_volumetric=is_volumetric,
+                        is_full_resolution=is_full_resolution,
+                        target_width=target_width,
+                        target_height=target_height,
+                    )
 
                     data_stats.append(
                         create_data_stat(
@@ -1903,12 +2034,123 @@ class DataService:
             self._all_datasets_df = updated_df
             self._last_internals_update_time = current_time
 
+    def _is_metadata_only_request(self, request) -> bool:
+        """True when caller requests metadata columns only, without image payloads."""
+        try:
+            stats_to_retrieve = list(getattr(request, 'stats_to_retrieve', []) or [])
+            include_raw = bool(getattr(request, 'include_raw_data', False))
+            include_transformed = bool(getattr(request, 'include_transformed_data', False))
+            return (not include_raw) and (not include_transformed) and bool(stats_to_retrieve)
+        except Exception:
+            return False
+
+    def _build_metadata_only_response(self, df_slice: pd.DataFrame, request):
+        """Build DataSamplesResponse from dataframe columns only (no dataset/image traversal).
+
+        This is a single-job vectorized path: the entire df_slice is processed
+        at once using pandas operations rather than dispatching per-sample_id
+        work to the thread pool.
+        """
+        if df_slice is None or df_slice.empty:
+            return pb2.DataSamplesResponse(
+                success=False,
+                message="No metadata rows available",
+                data_records=[],
+            )
+
+        requested_cols = list(getattr(request, 'stats_to_retrieve', []) or [])
+        excluded_cols = {
+            SampleStatsEx.SAMPLE_ID.value,
+            SampleStatsEx.ORIGIN.value,
+            # SampleStatsEx.TARGET.value,
+            # SampleStatsEx.PREDICTION.value,
+            SampleStatsEx.TASK_TYPE.value,
+        }
+
+        metadata_cols = [
+            col for col in requested_cols
+            if col in df_slice.columns and col not in excluded_cols
+        ]
+
+        if not metadata_cols:
+            return pb2.DataSamplesResponse(
+                success=False,
+                message="Requested metadata columns are not available in dataframe view",
+                data_records=[],
+            )
+
+        sample_id_col = SampleStatsEx.SAMPLE_ID.value
+        tag_prefix = f"{SampleStatsEx.TAG.value}:"
+
+        # -- Vectorized pre-processing: build string matrices via pandas ------
+        # Separate tag columns from regular metadata columns for different
+        # handling.  All heavy conversion is done once on the full column
+        # vectors, not per-row.
+        tag_cols = [c for c in metadata_cols if c.startswith(tag_prefix)]
+        meta_cols = [c for c in metadata_cols if not c.startswith(tag_prefix)]
+
+        sample_ids = df_slice[sample_id_col].tolist()
+        n_rows = len(sample_ids)
+
+        # Pre-allocate per-row stat bins – avoids repeated list creation
+        row_stats: list[list] = [[] for _ in range(n_rows)]
+
+        # -- Column-wise DataStat construction --------------------------------
+        # Build all DataStat objects for one column at a time using list
+        # comprehensions (CPython fast-path) and inline pb2.DataStat() to
+        # eliminate the create_data_stat wrapper overhead.  Then scatter
+        # them into the per-row bins.  At 1M rows × 10 cols this avoids
+        # a 10M-iteration nested Python loop.
+        _DataStat = pb2.DataStat  # local ref – avoids repeated attr lookup
+
+        for col in meta_cols:
+            series = df_slice[col]
+            if series.dtype.kind == 'f':
+                str_vals = series.round(7).astype(str).str[:512].tolist()
+            else:
+                str_vals = series.astype(str).str[:512].tolist()
+            # NaN → None
+            nan_mask = series.isna()
+            if nan_mask.any():
+                for pos in nan_mask.values.nonzero()[0]:
+                    str_vals[pos] = None
+            # Scatter non-None stats into per-row bins
+            for i, v in enumerate(str_vals):
+                if v is not None:
+                    row_stats[i].append(
+                        _DataStat(name=col, type="string", shape=[1], value_string=v)
+                    )
+
+        for col in tag_cols:
+            bools = df_slice[col].astype(bool).tolist()
+            # Pre-build a single shared DataStat for this tag column –
+            # protobuf messages are mutable so we need one per row, but
+            # the tag "1" stat is tiny so construction is cheap.
+            for i, b in enumerate(bools):
+                if b:
+                    row_stats[i].append(
+                        _DataStat(name=col, type="string", shape=[1], value_string="1")
+                    )
+
+        # -- Build DataRecord list in one comprehension -----------------------
+        _DataRecord = pb2.DataRecord
+        data_records = [
+            _DataRecord(sample_id=str(sid), data_stats=stats)
+            for sid, stats in zip(sample_ids, row_stats)
+        ]
+
+        return pb2.DataSamplesResponse(
+            success=True,
+            message=f"Retrieved {len(data_records)} metadata records (columns: {', '.join(metadata_cols)})",
+            data_records=data_records,
+        )
+
     def _process_get_data_samples(self, request, context):
         """
         Actual implementation of GetDataSamples.
 
         Two optimisations:
-        1. **Preview-cache fast path** – If the preview cache has a 64×64
+        1. **Preview-cache fast path** – If the preview cache has a 64×64 or less
            thumbnail for the requested sample *and* the request is for a tiny
            resolution (both dims ≤ ``_PREVIEW_CACHE_THRESHOLD``), serve from
            the cache instantly without touching the file system.
@@ -1976,34 +2218,110 @@ class DataService:
             logger.debug(
                 "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)
 
-            # ---- Preview-cache fast path ----------------------------------
-            # If the caller is asking for preview-tier resolution (e.g. the
-            # low-res pass), try to serve every record from the in-memory
-            # cache.  A single cache miss aborts the fast path so we fall
-            # through to the standard pipeline.
+            if self._is_metadata_only_request(request):
+                return self._build_metadata_only_response(df_slice, request)
+
+            # ---- Preview-cache tolerant path -------------------------------
+            # For preview-tier requests, serve what is available from cache
+            # and compute only cache misses at fixed 64px preview size.
+            # This avoids whole-page fallback to full-size processing when
+            # the cache is still warming up.
             is_preview_request = (
-                self._preview_cache
-                and abs(request.resize_width) <= _PREVIEW_CACHE_THRESHOLD
-                and abs(request.resize_height) <= _PREVIEW_CACHE_THRESHOLD
+                bool(getattr(request, "include_raw_data", False))
+                and abs(getattr(request, "resize_width", 0)) <= _PREVIEW_CACHE_THRESHOLD
+                and abs(getattr(request, "resize_height", 0)) <= _PREVIEW_CACHE_THRESHOLD
             )
             if is_preview_request:
-                cached_records: list = []
-                all_hit = True
-                for _, row in df_slice.iterrows():
-                    sid = int(row.get(SampleStatsEx.SAMPLE_ID.value, -1))
+                ordered_preview_records: list[pb2.DataRecord | None] = [None] * len(df_slice)
+                missing_rows: list[tuple[int, pd.Series]] = []
+
+                for row_pos, (_, row) in enumerate(df_slice.iterrows()):
+                    sid_raw = row.get(SampleStatsEx.SAMPLE_ID.value, -1)
+                    try:
+                        sid = int(sid_raw)
+                    except (TypeError, ValueError):
+                        sid = -1
+
                     rec = self._get_preview_record(sid)
                     if rec is None:
-                        all_hit = False
-                        break
-                    cached_records.append(rec)
-                if all_hit and cached_records:
+                        missing_rows.append((row_pos, row))
+                    else:
+                        ordered_preview_records[row_pos] = self._refresh_preview_masks_from_row(rec, row)
+
+                if missing_rows:
+                    wait_ms_raw = os.environ.get("WL_PREVIEW_CACHE_WARMUP_WAIT_MS", "100")
+                    try:
+                        wait_ms = max(0, min(1000, int(wait_ms_raw)))
+                    except (TypeError, ValueError):
+                        wait_ms = 100
+
+                    if wait_ms > 0 and not self._preview_cache_ready.is_set():
+                        self._preview_cache_ready.wait(wait_ms / 1000.0)
+
+                        still_missing_rows: list[tuple[int, pd.Series]] = []
+                        for row_pos, row in missing_rows:
+                            sid_raw = row.get(SampleStatsEx.SAMPLE_ID.value, -1)
+                            try:
+                                sid = int(sid_raw)
+                            except (TypeError, ValueError):
+                                sid = -1
+
+                            rec = self._get_preview_record(sid)
+                            if rec is None:
+                                still_missing_rows.append((row_pos, row))
+                            else:
+                                ordered_preview_records[row_pos] = self._refresh_preview_masks_from_row(rec, row)
+
+                        missing_rows = still_missing_rows
+
+                    preview_request = pb2.DataSamplesRequest(
+                        start_index=request.start_index,
+                        records_cnt=request.records_cnt,
+                        include_raw_data=True,
+                        include_transformed_data=False,
+                        stats_to_retrieve=list(getattr(request, "stats_to_retrieve", []) or []),
+                        resize_width=64,
+                        resize_height=64,
+                    )
+
+                    missing_count = len(missing_rows)
+                    missing_chunk = _BATCH_CHUNK_SIZE if _BATCH_CHUNK_SIZE > 0 else missing_count
+                    for chunk_start in range(0, missing_count, missing_chunk):
+                        chunk_end = min(chunk_start + missing_chunk, missing_count)
+                        missing_slice = missing_rows[chunk_start:chunk_end]
+                        chunk_tasks = [(row, preview_request, df_slice.columns) for _, row in missing_slice]
+                        chunk_results = list(self._data_executor.map(self._process_sample_row, chunk_tasks, timeout=120))
+
+                        for (row_pos, _), rec in zip(missing_slice, chunk_results):
+                            if rec is None:
+                                continue
+                            ordered_preview_records[row_pos] = rec
+                            try:
+                                self._preview_cache[int(rec.sample_id)] = rec
+                            except (TypeError, ValueError):
+                                pass
+
+                if all(rec is not None for rec in ordered_preview_records):
                     elapsed = time.time() - start_time
-                    logger.debug("[PreviewCache] Served %d records in %.1fms", len(cached_records), elapsed * 1000)
+                    ready_count = len(ordered_preview_records)
+                    warmed_count = len(missing_rows)
+                    logger.debug(
+                        "[PreviewCache] Served %d preview records in %.1fms (%d cache miss(es) warmed on-demand)",
+                        ready_count,
+                        elapsed * 1000,
+                        warmed_count,
+                    )
                     return pb2.DataSamplesResponse(
                         success=True,
-                        message=f"Served {len(cached_records)} preview-cached records",
-                        data_records=cached_records,
+                        message=f"Served {ready_count} preview records ({warmed_count} warmed on-demand)",
+                        data_records=[rec for rec in ordered_preview_records if rec is not None],
                     )
+
+                logger.debug(
+                    "[PreviewCache] Partial preview assembly failed (%d/%d ready), falling back to standard pipeline",
+                    sum(1 for rec in ordered_preview_records if rec is not None),
+                    len(ordered_preview_records),
+                )
 
             # ---- Parallel batch processing ---------------------------------
             # Submit ALL rows to the thread pool at once so all 8 workers
@@ -2013,7 +2331,6 @@ class DataService:
             rows_list = list(df_slice.iterrows())
             n_rows = len(rows_list)
             tasks = [(row, request, df_slice.columns) for _, row in rows_list]
-
             effective_chunk = _BATCH_CHUNK_SIZE if _BATCH_CHUNK_SIZE > 0 else n_rows
 
             for chunk_start in range(0, n_rows, effective_chunk):
@@ -2341,6 +2658,82 @@ class DataService:
                 data_records=[]
             )
 
+    def _set_h5_persistence_enabled(self, enabled: bool) -> bool:
+        """Toggle dataframe manager H5 persistence flag when available."""
+        if self._df_manager is None:
+            return False
+        if not hasattr(self._df_manager, "_enable_h5_persistence"):
+            return False
+        try:
+            setattr(self._df_manager, "_enable_h5_persistence", bool(enabled))
+            return True
+        except Exception:
+            return False
+
+    def _manual_save_data_state(self, force_enable_h5: bool = False):
+        """Persist current dataframe state to H5 and checkpoint JSON snapshot."""
+        self._ctx.ensure_components()
+        components = self._ctx.components
+
+        if self._df_manager is None:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="Dataframe manager is not available; cannot save data state.",
+            )
+
+        h5_enabled = bool(getattr(self._df_manager, "_enable_h5_persistence", False))
+        if force_enable_h5:
+            toggled = self._set_h5_persistence_enabled(True)
+            h5_enabled = bool(getattr(self._df_manager, "_enable_h5_persistence", False))
+            if not toggled or not h5_enabled:
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Failed to force-enable H5 persistence before manual save.",
+                )
+
+        if not h5_enabled:
+            return pb2.DataEditsResponse(
+                success=False,
+                message="H5 writing is disabled. Enable it first (right-click Manual Save -> Force H5 writing).",
+            )
+
+        try:
+            if hasattr(self._df_manager, "flush"):
+                self._df_manager.flush()
+            else:
+                self._df_manager.flush_if_needed_nonblocking(force=True)
+        except Exception as flush_error:
+            logger.error(f"[EditDataSample] Manual save flush failed: {flush_error}", exc_info=True)
+            return pb2.DataEditsResponse(
+                success=False,
+                message=f"Failed to flush dataframe to H5: {flush_error}",
+            )
+
+        snapshot_saved = False
+        checkpoint_manager = components.get("checkpoint_manager")
+        if checkpoint_manager is not None and hasattr(checkpoint_manager, "save_data_snapshot"):
+            try:
+                if not getattr(checkpoint_manager, "current_exp_hash", None):
+                    if hasattr(checkpoint_manager, "update_experiment_hash"):
+                        checkpoint_manager.update_experiment_hash()
+                snapshot_path = checkpoint_manager.save_data_snapshot()
+                snapshot_saved = snapshot_path is not None
+            except Exception as snapshot_error:
+                logger.warning(f"[EditDataSample] Manual save snapshot failed: {snapshot_error}")
+
+        self._slowUpdateInternals(force=True)
+
+        if snapshot_saved:
+            return pb2.DataEditsResponse(
+                success=True,
+                message="Data state saved to H5 and checkpoint JSON snapshot.",
+            )
+
+        return pb2.DataEditsResponse(
+            success=True,
+            message="Data state saved to H5 (JSON snapshot not available).",
+        )
+
     def EditDataSample(self, request, context):
         """
         Edit sample metadata (tags and discarded).
@@ -2366,6 +2759,12 @@ class DataService:
                 hp['is_training'] = False
             else:
                 hp["is_training"] = False
+
+        if request.stat_name == "__save_data_state__":
+            return self._manual_save_data_state(force_enable_h5=False)
+
+        if request.stat_name == "__force_h5_write_and_save__":
+            return self._manual_save_data_state(force_enable_h5=True)
 
         if request.stat_name == "__copy_metadata__":
             source_column = str(request.string_value or "").strip()
@@ -2499,7 +2898,7 @@ class DataService:
         if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
-                message="Only 'tags', 'discarded', '__copy_metadata__', and '__delete_metadata__' edits are supported.",
+                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', and '__force_h5_write_and_save__' edits are supported.",
             )
 
         # =====================================================================
@@ -2593,9 +2992,19 @@ class DataService:
         """
 
         try:
+            if context is not None and not context.is_active():
+                return pb2.DataSplitsResponse(success=False, split_names=[])
+
+            # IMPORTANT: keep lock ordering consistent (_update_lock -> _lock).
+            # Calling _slowUpdateInternals() while holding _lock can deadlock
+            # with concurrent readers/writers under high UI refresh pressure.
+            self._slowUpdateInternals()
+
+            if context is not None and not context.is_active():
+                return pb2.DataSplitsResponse(success=False, split_names=[])
+
             split_names = []
             with self._lock:
-                self._slowUpdateInternals()
                 if self._all_datasets_df is not None and not self._all_datasets_df.empty:
                     if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
                         raw_splits = self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist()

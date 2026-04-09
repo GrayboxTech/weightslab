@@ -295,9 +295,16 @@ class DataSampleTrackingWrapper(Dataset):
         expanded_uids = []
         physical_uids = []
 
+        # User information
         logger.info(
-            f"Preloading sample statistics for PHYSICAL indices in split '{split}' with preload_labels={preload_labels}, preload_metadata={preload_metadata}..."
+            f"Preloading sample statistics for PHYSICAL indices in split '{split}' with:" +
+            (f" preload_labels={preload_labels}," if preload_labels else "") +
+            (f" preload_metadata={preload_metadata}..." if preload_metadata else "")
         )
+        if not preload_labels:
+            logger.info(f"Labels will be loaded on demand from the wrapped dataset for split '{split}' when accessed, which may increase latency on first access but reduces initialization time.")
+        if not preload_metadata:
+            logger.info(f"Metadata will be loaded on demand from the wrapped dataset for split '{split}' when accessed, which may increase latency on first access but reduces initialization time.")
 
         n_physical = len(wrapped_dataset)
         for p_idx in tqdm(range(n_physical), desc=f"Initializing ledger for split '{split}'"):

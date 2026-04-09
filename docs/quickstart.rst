@@ -82,6 +82,7 @@ Use Weightslab Studio (UI)
 
 For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the Weights Studio web app via Docker Compose. This will start both the UI and Envoy proxy, which routes data to your training script's gRPC server.:
 Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
+If you keep agent settings outside the repository, set ``AGENT_CONFIG_PATH`` so the backend can resolve ``agent_config.yaml`` from that directory.
 
 .. code-block:: bash
 

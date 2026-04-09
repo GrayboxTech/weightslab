@@ -24,7 +24,7 @@ ledger_flush_interval: 60.0
 
 # Data
 num_classes: 6
-image_size: 128
+image_size: 360
 data_root: ./BDD_subset
 data:
   train_loader:
