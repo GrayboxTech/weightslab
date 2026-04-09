@@ -398,6 +398,7 @@ class DataManipulationAgent:
                 self.ollama_model = a_cfg.get("ollama_model", self.ollama_model)
 
                 _LOGGER.info(f"Applied agent configuration from {path}")
+                _LOGGER.debug(f"Agent Config: {cfg}")
                 break
             except Exception as e:
                 _LOGGER.warning(f"Error loading config from {path}: {e}")
