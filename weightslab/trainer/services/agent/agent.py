@@ -5,6 +5,7 @@ import yaml
 import logging
 import threading
 import pandas as pd
+from urllib.parse import urlparse, urlunparse
 
 from abc import ABC, abstractmethod
 from typing import Optional, List, Union, Literal, Callable, Dict, Any
@@ -346,6 +347,8 @@ class DataManipulationAgent:
         self.google_model = "gemini-1.5-flash-latest"
         self.openai_model = "gpt-4o-mini"
         self.openrouter_model = "mistralai/mistral-7b-instruct:free"
+        self.openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
         self.fallback_to_local = True
         self.ollama_host = "localhost"
         self.ollama_port = "11435"
@@ -361,7 +364,12 @@ class DataManipulationAgent:
                 _LOGGER.info(f"Loaded credentials from {ep}")
                 break
 
-        config_paths = [repo_root / "agent_config.yaml", inner_pkg / "agent_config.yaml", Path.cwd() / "agent_config.yaml"]
+        config_paths = [
+            os.environ.get("AGENT_CONFIG_PATH", repo_root) / ".agent_config.yaml",
+            os.environ.get("AGENT_CONFIG_PATH", repo_root) / "agent_config.yaml",
+            inner_pkg / "agent_config.yaml",
+            Path.cwd() / "agent_config.yaml"
+        ]
         for path in config_paths:
             if not path.exists(): continue
             try:
@@ -373,6 +381,8 @@ class DataManipulationAgent:
                 self.google_model = a_cfg.get("google_model", self.google_model)
                 self.openai_model = a_cfg.get("openai_model", self.openai_model)
                 self.openrouter_model = a_cfg.get("openrouter_model", self.openrouter_model)
+                self.openrouter_base_url = a_cfg.get("openrouter_base_url", self.openrouter_base_url)
+                self.openrouter_request_timeout = float(a_cfg.get("openrouter_request_timeout", self.openrouter_request_timeout))
                 self.fallback_to_local = a_cfg.get("fallback_to_local", self.fallback_to_local)
                 self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
                 self.ollama_port = a_cfg.get("ollama_port", self.ollama_port)
@@ -381,6 +391,28 @@ class DataManipulationAgent:
                 break
             except Exception as e:
                 _LOGGER.warning(f"Error loading config from {path}: {e}")
+
+    @staticmethod
+    def _effective_http_port(parsed_url, explicit_port: Optional[str]) -> int:
+        if explicit_port and explicit_port.isdigit():
+            return int(explicit_port)
+        if parsed_url.port is not None:
+            return parsed_url.port
+        return 443 if parsed_url.scheme == "https" else 80
+
+    @staticmethod
+    def _normalize_openrouter_base_url(raw_url: str, explicit_port: Optional[str]) -> str:
+        url = (raw_url or "https://openrouter.ai/api/v1").strip()
+        parsed = urlparse(url)
+        if not parsed.scheme:
+            parsed = urlparse(f"https://{url}")
+
+        host = parsed.hostname or "openrouter.ai"
+        port = DataManipulationAgent._effective_http_port(parsed, explicit_port)
+        netloc = host if ((parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)) else f"{host}:{port}"
+        path = parsed.path if parsed.path else "/api/v1"
+
+        return urlunparse((parsed.scheme, netloc, path, "", "", ""))
 
     def _setup_providers(self):
         self.chain_openai = None
@@ -418,14 +450,20 @@ class DataManipulationAgent:
         # OPEN ROUTER
         if "openrouter" in active_providers and os.environ.get("OPENROUTER_API_KEY"):
             try:
+                explicit_openrouter_port = os.environ.get("OPENROUTER_PORT", "").strip()
+                openrouter_base_url = self._normalize_openrouter_base_url(self.openrouter_base_url, explicit_openrouter_port)
+                parsed = urlparse(openrouter_base_url)
+                effective_port = self._effective_http_port(parsed, explicit_openrouter_port)
                 llm = ChatOpenAI(
                     model=self.openrouter_model, temperature=0,
                     api_key=os.environ.get("OPENROUTER_API_KEY"),
-                    base_url="https://openrouter.ai/api/v1",
-                    streaming=False, max_retries=1, request_timeout=15.0,
+                    base_url=openrouter_base_url,
+                    streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
                 )
                 self.chain_openrouter = llm
-                _LOGGER.info(f"[Agent] OpenRouter enabled: {self.openrouter_model}")
+                _LOGGER.info(
+                    f"[Agent] OpenRouter enabled: {self.openrouter_model} via {parsed.hostname}:{effective_port}"
+                )
             except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
 
         # LOCAL

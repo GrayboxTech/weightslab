@@ -204,6 +204,42 @@ These keys are required only when using the agentic data-query features.
      - OpenRouter API key ? alternative multi-model routing endpoint.
 
 
+Agent Configuration
+~~~~~~~~~~~~~~~~~~~
+
+These variables control how the data-query agent finds its YAML configuration.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``AGENT_CONFIG_PATH``
+     - *(empty)*
+     - Optional directory override for ``agent_config.yaml``.
+       When set, WeightsLab first checks
+       ``<AGENT_CONFIG_PATH>/agent_config.yaml`` before built-in fallback paths.
+
+Agent config lookup order
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+1. ``<AGENT_CONFIG_PATH>/agent_config.yaml`` (if ``AGENT_CONFIG_PATH`` is set)
+2. Repository-level ``agent_config.yaml``
+3. Package-level ``agent_config.yaml``
+4. Current working directory ``agent_config.yaml``
+
+Example
+^^^^^^^
+
+.. code-block:: bash
+
+   export AGENT_CONFIG_PATH=/opt/weightslab/config
+   # WeightsLab will look for:
+   # /opt/weightslab/config/agent_config.yaml
+
+
 Testing
 ~~~~~~~
 
