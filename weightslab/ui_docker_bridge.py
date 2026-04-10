@@ -100,6 +100,8 @@ def main():
     ui_sub.add_parser("stop", help="Stop the UI containers (keeps images)")
     ui_sub.add_parser("drop", help="Stop containers and remove images")
 
+    sub.add_parser("help", help="Show this help message")
+
     args = parser.parse_args()
 
     actions = {
@@ -108,11 +110,14 @@ def main():
         "drop": ui_drop,
     }
 
-    if args.command == "ui" and args.action in actions:
+    if args.command == "help" or args.command is None:
+        parser.print_help()
+    elif args.command == "ui" and args.action in actions:
         actions[args.action](args)
+    elif args.command == "ui":
+        ui_parser.print_help()
     else:
         parser.print_help()
-        sys.exit(1)
 
 
 if __name__ == "__main__":
