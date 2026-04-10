@@ -8,10 +8,18 @@ services:
       - "${ENVOY_PORT:-8080}:${ENVOY_PORT:-8080}"
       - "${ENVOY_ADMIN_PORT:-9901}:${ENVOY_ADMIN_PORT:-9901}"
     volumes:
-      - ../envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: [ "/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml" ]
+    environment:
+      - GRPC_BACKEND_PORT=${GRPC_BACKEND_PORT:-50051}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        GRPC_BACKEND_PORT="${GRPC_BACKEND_PORT:-50051}";
+        sed "s/__GRPC_BACKEND_PORT__/${GRPC_BACKEND_PORT}/g" /etc/envoy/envoy.yaml > /tmp/envoy.generated.yaml;
+        exec /usr/local/bin/envoy -c /tmp/envoy.generated.yaml
     networks:
       - weights_studio_network
     restart: unless-stopped

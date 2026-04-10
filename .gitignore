@@ -20,7 +20,7 @@ venv
 .venv
 .vscode
 .vscode
-.venv
+.venv*
 
 # Ignore hidden files
 .env
