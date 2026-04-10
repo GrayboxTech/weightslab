@@ -365,6 +365,9 @@ class DataLoaderInterface:
         self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
         self.skip_previous_auto_load = kwargs.pop("skip_previous_auto_load", False)
 
+        # Init ledgered HP
+        self.hp = get_hyperparams()
+
         if isinstance(data_loader_or_dataset, DataLoader):
             logger.warning(
                 "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !! "
@@ -474,7 +477,6 @@ class DataLoaderInterface:
 
         # Get model and hp Proxy for future supervision
         self.model = get_model()
-        self.hp = get_hyperparams()
 
     def _load_checkpoint_data(self) -> None:
         """Load data checkpoint, RNG state, and dataloader iteration state early.
