@@ -968,7 +968,7 @@ class CheckpointManager:
                 self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name, self._step_counter)
 
             # If model architecture doesn't exist in this hash directory, save a reference to where it is
-            self._save_architecture_reference_if_needed()
+            # self._save_architecture_reference_if_needed()
 
             # Persist logger queues alongside weight checkpoints
             try:
