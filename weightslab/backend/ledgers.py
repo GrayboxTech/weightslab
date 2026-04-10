@@ -69,9 +69,9 @@ class Proxy:
             obj = obj.get()
         self._obj = obj
         # invalidate any cached iterator when target changes
-        if hasattr(self, '_iterator'):
+        if '_iterator' in self.__dict__:
             try:
-                del self._iterator
+                object.__delattr__(self, '_iterator')
             except Exception:
                 pass
 
@@ -185,7 +185,11 @@ class Proxy:
             return int(self._resolve())
 
         def __float__(self) -> float:
-            return float(self._resolve())
+            v = self._resolve()
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
 
         def __index__(self) -> int:
             v = self._resolve()
@@ -318,6 +322,12 @@ class Proxy:
                 raise AttributeError("ValueProxy target not set")
             return getattr(v, item)
 
+        def __len__(self) -> int:
+            v = self._resolve()
+            if v is None:
+                return 0
+            return len(v)
+
     def get(self, ref=None, default=None, proxy: bool = True) -> Any:
         """Get wrapped object or a key from the wrapped mapping.
 
@@ -345,6 +355,26 @@ class Proxy:
             return getattr(obj, item)
         except AttributeError:
             return None
+
+    def __delattr__(self, name: str) -> None:
+        """Delete an attribute from the proxy or wrapped object safely.
+
+        Behavior:
+        - If the attribute exists on the proxy instance, delete it locally.
+        - Else, if the wrapped object has that attribute, delete it there.
+        - Else, treat as no-op to keep cleanup paths resilient.
+        """
+        if name in self.__dict__:
+            object.__delattr__(self, name)
+            return
+
+        obj = object.__getattribute__(self, '_obj')
+        if obj is not None and hasattr(obj, name):
+            delattr(obj, name)
+            return
+
+        # Missing attributes are ignored intentionally for robust cleanup.
+        return
 
     # Special method forwarding for common container/iterable operations.
     # CPython looks up special methods on the type, so we must implement
@@ -486,8 +516,8 @@ class Proxy:
             traceback.print_exc()
             # clear cached iterator so future next(proxy) restarts
             try:
-                if hasattr(self, '_iterator'):
-                    delattr(self, '_iterator')
+                if '_iterator' in self.__dict__:
+                    object.__delattr__(self, '_iterator')
             except Exception:
                 traceback.print_exc()
         raise StopIteration

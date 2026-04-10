@@ -58,7 +58,7 @@ The granular statistics and interactive paradigm enable powerful workflows:
 
 <ul class="tabbed">
   <li>
-      <a href="https://sandbox.graybx.com/vla">
+      <a href="https://sandbox.graybx.com/mnist">
       <p style="text-indent:20px;">MNIST</p>
     </a>
   </li>
@@ -73,8 +73,6 @@ The granular statistics and interactive paradigm enable powerful workflows:
     </a>
   </li>
 </ul>
-
-## Getting Started
 
 
 ## Getting Started
@@ -107,10 +105,35 @@ docker compose up -d
 Check out our materials, which include examples ranging from toys to more complex models and experiments.
 
 Quickstart examples:
-- [WeightsLab - Classification toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-classification)
-- [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-segmentation)
-- [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch/ws-detection)
-- [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/dev/weightslab/examples/PyTorch_Lightning/ws-classification)
+- [WeightsLab - Classification toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-classification)
+- [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-segmentation)
+- [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-detection)
+- [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch_Lightning/ws-classification)
+
+
+## Configuration
+
+WeightsLab and Weights Studio are configured through environment variables.
+A fully-commented `.env` template is included at the repository root — copy it and adjust for your setup:
+
+```bash
+cp .env .env.local   # or edit .env directly
+```
+
+| Category | Key variables |
+|---|---|
+| **Logging** | `WEIGHTSLAB_LOG_LEVEL`, `WEIGHTSLAB_LOG_TO_FILE`, `WEIGHTSLAB_ROOT_LOG_DIR` |
+| **gRPC server** | `GRPC_BACKEND_HOST`, `GRPC_BACKEND_PORT`, `GRPC_MAX_MESSAGE_BYTES` |
+| **Watchdog** | `GRPC_WATCHDOG_STUCK_SECONDS`, `GRPC_WATCHDOG_INTERVAL_SECONDS`, `GRPC_WATCHDOG_RESTART_THRESHOLD`, `GRPC_WATCHDOG_EXIT_ON_STUCK` |
+| **Data / cache** | `WL_MAX_PREVIEW_CACHE_SIZE`, `WL_PREVIEW_CACHE_WARMUP_WAIT_MS`, `WL_DEFAULT_THUMBNAIL_SIZE`, `WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5` |
+| **AI keys** | `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` |
+| **Agent config** | `AGENT_CONFIG_PATH` |
+| **Weights Studio** | `VITE_SERVER_HOST`, `VITE_SERVER_PORT`, `VITE_HISTOGRAM_MAX_BINS`, `ENVOY_HOST`, `ENVOY_PORT` |
+
+`AGENT_CONFIG_PATH` lets you point the data agent to a custom directory that contains `agent_config.yaml`.
+If set, WeightsLab looks for `<AGENT_CONFIG_PATH>/agent_config.yaml` before fallback locations.
+
+> Full documentation with all variables and their descriptions: [docs/configuration.rst](docs/configuration.rst)
 
 
 ## Documentation (API + SDK)

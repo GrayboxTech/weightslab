@@ -1,7 +1,27 @@
 import torch as th
+from array import array as _array
 from copy import deepcopy
 
 from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoint_manager
+
+
+def _make_per_sample_buf():
+    """Compact storage for per-sample signals: three typed C arrays.
+
+    Uses array.array instead of a list of dicts to reduce memory by ~20-40x:
+    - list of dicts:  ~400-600 bytes/entry (Python dict overhead + 6 string keys)
+    - compact arrays: 12 bytes/entry (int32 + int32 + float32)
+
+    Fields:
+        sample_ids: signed int32 – dataset sample index
+        steps:      signed int32 – global training step
+        values:     float32       – signal value at that step for that sample
+    """
+    return {
+        "sample_ids": _array('i'),  # int32, 4 bytes each
+        "steps":      _array('i'),  # int32, 4 bytes each
+        "values":     _array('f'),  # float32, 4 bytes each
+    }
 
 
 class LoggerQueue:
@@ -24,6 +44,15 @@ class LoggerQueue:
 
         # Init checkpoint manager for experiment hash retrieval (if available)
         self.chkpt_manager = get_checkpoint_manager()
+
+    def __len__(self):
+        """Return logger length."""
+        len_history = 0
+        for k in self._signal_history:
+            for exp_hash in self._signal_history[k]:
+                l = len(self._signal_history[k][exp_hash])
+                len_history = max(len_history, l)
+        return len_history
 
     # Clear history method (can be called by WeightsLabCallback at the start of a new experiment to reset state,
     # while preserving graph names which are derived from signals and may be needed for future signals after clearing history)
@@ -62,7 +91,6 @@ class LoggerQueue:
     def _flush_current_step_buffer(self, add_to_queue: bool):
         if self._buffered_step is None or not self._current_step_buffer:
             return
-
         for (_, graph_name, exp_hash), payload in self._current_step_buffer.items():
             count = payload.get("count", 0)
             if count <= 0:
@@ -99,25 +127,19 @@ class LoggerQueue:
         if not aggregate_by_step and self._current_step_buffer:
             self._flush_current_step_buffer(add_to_queue=True)
 
-        # Update per-sample signal history immediately
-        if graph_name not in self._signal_history_per_sample:
-            self._signal_history_per_sample[graph_name] = {}
-        if exp_hash not in self._signal_history_per_sample[graph_name]:
-            self._signal_history_per_sample[graph_name][exp_hash] = []
-
-        # Save per-sample signals if provided (expected to be a dict of {sample_id: value})
+        # Update per-sample signal history with compact array storage
         if signal_per_sample and isinstance(signal_per_sample, dict):
+            if graph_name not in self._signal_history_per_sample:
+                self._signal_history_per_sample[graph_name] = {}
+            if exp_hash not in self._signal_history_per_sample[graph_name]:
+                self._signal_history_per_sample[graph_name][exp_hash] = _make_per_sample_buf()
+
+            buf = self._signal_history_per_sample[graph_name][exp_hash]
+            step_i = int(global_step)
             for sid, value in signal_per_sample.items():
-                self._signal_history_per_sample[graph_name][exp_hash].append(
-                    {
-                        "experiment_name": graph_name,
-                        "sample_id": sid,
-                        "model_age": global_step,
-                        "metric_name": graph_name,
-                        "metric_value": self._to_float(value),
-                        "experiment_hash": exp_hash
-                    }
-                )
+                buf["sample_ids"].append(int(sid))
+                buf["steps"].append(step_i)
+                buf["values"].append(self._to_float(value))
 
         metric_values = []
         if aggregate_by_step and signal_per_sample and isinstance(signal_per_sample, dict):
@@ -153,8 +175,7 @@ class LoggerQueue:
         if signal_entry is not None:
             self._pending_queue.append(signal_entry)
 
-    # Print methods for debugging/inspection of logger state (also return the printed data for potential programmatic use) -
-    # these can be removed or replaced with proper accessors as needed
+    # Print methods for debugging/inspection of logger state
     def print_history(self):
         """Print all items in history."""
         for metric_name, experiments in self._signal_history.items():
@@ -169,12 +190,12 @@ class LoggerQueue:
 
     def print_history_per_sample(self):
         """Print all items in per-sample history."""
-        for metric_name, samples in self._signal_history_per_sample.items():
+        for metric_name, exps in self._signal_history_per_sample.items():
             print(f"Metric: {metric_name}")
-            for exp_hash, signals in samples.items():
+            for exp_hash, buf in exps.items():
                 print(f"  Experiment Hash: {exp_hash}")
-                for signal in signals:
-                    print(f"    Sample ID: {signal['sample_id']}, Signal: {signal}")
+                for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
+                    print(f"    Sample ID: {sid}, Step: {step}, Value: {val}")
         return self._signal_history_per_sample
 
     def print_buffer(self):
@@ -194,20 +215,81 @@ class LoggerQueue:
 
     def get_signal_history(self):
         """Retrieve all accumulated signals from memory."""
-        self._flush_current_step_buffer(add_to_queue=False)
+        # self._flush_current_step_buffer(add_to_queue=False)  # History should already be up to date since we flush on step change and on add_scalars when not aggregating by step, but we can flush here as well to be safe before retrieving history for checkpoint saving
         return deepcopy(self._signal_history)
 
     def get_signal_history_per_sample(self):
-        """Retrieve all accumulated per-sample signals from memory."""
-        return deepcopy(self._signal_history_per_sample)
+        """Reconstruct per-sample history as list-of-dicts from compact array storage."""
+        result = {}
+        for graph_name, exps in self._signal_history_per_sample.items():
+            result[graph_name] = {}
+            for exp_hash, buf in exps.items():
+                entries = []
+                for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
+                    entries.append({
+                        "experiment_name": graph_name,
+                        "sample_id": sid,
+                        "model_age": step,
+                        "metric_name": graph_name,
+                        "metric_value": float(val),
+                        "experiment_hash": exp_hash,
+                    })
+                result[graph_name][exp_hash] = entries
+        return result
+
+    def query_per_sample(self, graph_name: str, sample_ids=None, exp_hash=None):
+        """Efficiently query per-sample history for specific sample IDs.
+
+        Returns a list of (sample_id, step, value) tuples, filtered by sample_ids
+        and optionally by experiment hash. Much faster than get_signal_history_per_sample()
+        for targeted queries (e.g., "show me only samples with label 8").
+
+        Args:
+            graph_name: Signal name (e.g., "loss", "accuracy").
+            sample_ids: Collection of sample IDs to filter by. If None, returns all.
+            exp_hash: Specific experiment hash to query. If None, queries all hashes.
+
+        Returns:
+            List of (sample_id, step, value) tuples.
+        """
+        if graph_name not in self._signal_history_per_sample:
+            return []
+
+        exps = self._signal_history_per_sample[graph_name]
+        hashes = [exp_hash] if exp_hash is not None else list(exps.keys())
+        sid_set = set(int(s) for s in sample_ids) if sample_ids is not None else None
+
+        results = []
+        for h in hashes:
+            buf = exps.get(h)
+            if buf is None:
+                continue
+            for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
+                if sid_set is None or sid in sid_set:
+                    results.append((sid, step, float(val)))
+
+        return results
 
     def save_snapshot(self) -> dict:
         """Build a serializable snapshot of the logger state."""
         self._flush_current_step_buffer(add_to_queue=False)
+
+        # Compact serialization: store 3 parallel lists instead of list-of-dicts
+        per_sample_compact = {}
+        for graph_name, exps in self._signal_history_per_sample.items():
+            per_sample_compact[graph_name] = {}
+            for exp_hash, buf in exps.items():
+                per_sample_compact[graph_name][exp_hash] = {
+                    "_compact": True,
+                    "sample_ids": list(buf["sample_ids"]),
+                    "steps":      list(buf["steps"]),
+                    "values":     list(buf["values"]),
+                }
+
         return {
             "graph_names": sorted(self.graph_names),
             "signal_history": self.get_signal_history(),
-            "signal_history_per_sample": self.get_signal_history_per_sample(),
+            "signal_history_per_sample": per_sample_compact,
         }
 
     def get_and_clear_queue(self):
@@ -277,7 +359,13 @@ class LoggerQueue:
                 _append_signal_entry(metric_name, exp_hash, step, signal_entry)
 
     def load_signal_history_per_sample(self, signals_per_sample):
-        """Load per-sample history (supports legacy and nested formats)."""
+        """Load per-sample history into compact array storage.
+
+        Handles three formats:
+          - New compact:  {graph_name: {exp_hash: {"_compact": True, "sample_ids": [...], "steps": [...], "values": [...]}}}
+          - Legacy list:  {graph_name: {exp_hash: [{sample_id, model_age, metric_value, ...}, ...]}}
+          - Legacy dict:  {graph_name: {sample_id_as_key: {model_age, metric_value, ...}}}  → stored under None key
+        """
         if not signals_per_sample:
             return
 
@@ -290,26 +378,50 @@ class LoggerQueue:
                 continue
 
             for exp_hash, entries in samples_by_exp.items():
-                if isinstance(entries, list):
+                # --- New compact format ---
+                if isinstance(entries, dict) and entries.get("_compact"):
                     if exp_hash not in self._signal_history_per_sample[metric_name]:
-                        self._signal_history_per_sample[metric_name][exp_hash] = []
+                        self._signal_history_per_sample[metric_name][exp_hash] = _make_per_sample_buf()
+                    buf = self._signal_history_per_sample[metric_name][exp_hash]
+                    ids   = entries.get("sample_ids", [])
+                    steps = entries.get("steps", [])
+                    vals  = entries.get("values", [])
+                    for s, t, v in zip(ids, steps, vals):
+                        try:
+                            buf["sample_ids"].append(int(s))
+                            buf["steps"].append(int(t))
+                            buf["values"].append(float(v))
+                        except (TypeError, ValueError):
+                            pass
+
+                # --- Legacy list-of-dicts format ---
+                elif isinstance(entries, list):
+                    if exp_hash not in self._signal_history_per_sample[metric_name]:
+                        self._signal_history_per_sample[metric_name][exp_hash] = _make_per_sample_buf()
+                    buf = self._signal_history_per_sample[metric_name][exp_hash]
                     for entry in entries:
                         if not isinstance(entry, dict):
                             continue
-                        normalized = dict(entry)
-                        normalized.setdefault("metric_name", metric_name)
-                        normalized.setdefault("experiment_name", metric_name)
-                        normalized.setdefault("experiment_hash", exp_hash)
-                        self._signal_history_per_sample[metric_name][exp_hash].append(normalized)
+                        try:
+                            buf["sample_ids"].append(int(entry.get("sample_id", -1)))
+                            buf["steps"].append(int(entry.get("model_age", 0)))
+                            buf["values"].append(float(entry.get("metric_value", 0.0)))
+                        except (TypeError, ValueError):
+                            pass
+
+                # --- Legacy single-dict format (exp_hash key was actually the sample_id) ---
                 elif isinstance(entries, dict):
-                    if None not in self._signal_history_per_sample[metric_name]:
-                        self._signal_history_per_sample[metric_name][None] = []
-                    normalized = dict(entries)
-                    normalized.setdefault("metric_name", metric_name)
-                    normalized.setdefault("experiment_name", metric_name)
-                    normalized.setdefault("sample_id", exp_hash)
-                    normalized.setdefault("experiment_hash", None)
-                    self._signal_history_per_sample[metric_name][None].append(normalized)
+                    null_key = None
+                    if null_key not in self._signal_history_per_sample[metric_name]:
+                        self._signal_history_per_sample[metric_name][null_key] = _make_per_sample_buf()
+                    buf = self._signal_history_per_sample[metric_name][null_key]
+                    try:
+                        sid = int(exp_hash) if isinstance(exp_hash, (int, float)) else -1
+                        buf["sample_ids"].append(sid)
+                        buf["steps"].append(int(entries.get("model_age", 0)))
+                        buf["values"].append(float(entries.get("metric_value", 0.0)))
+                    except (TypeError, ValueError):
+                        pass
 
     def load_snapshot(self, snapshot: dict):
         """Restore logger state from a snapshot dict."""

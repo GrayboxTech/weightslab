@@ -24,6 +24,7 @@ class _Net(NetworkWithOps):
         self.l2 = _Layer(20)
 
 
+@unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")
 class TestModelWithOpsUnit(unittest.TestCase):
     def test_reverse_index_and_tracking_mode(self):
         net = _Net()

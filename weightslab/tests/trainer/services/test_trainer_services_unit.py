@@ -232,6 +232,14 @@ class TestDataServiceHelpersUnit(unittest.TestCase):
         self.assertIsInstance(thumb, bytes)
         self.assertGreater(len(thumb), 0)
 
+    def test_clamp_to_downscale_only_keeps_original_for_upsize_requests(self):
+        width, height = DataService._clamp_to_downscale_only(1024, 640, 320, 200)
+        self.assertEqual((width, height), (320, 200))
+
+    def test_clamp_to_downscale_only_preserves_downscale_target(self):
+        width, height = DataService._clamp_to_downscale_only(160, 100, 320, 200)
+        self.assertEqual((width, height), (160, 100))
+
     def test_data_service_origin_filter_and_df_filter(self):
         service = DataService.__new__(DataService)
 
@@ -334,6 +342,56 @@ class TestDataServiceHelpersUnit(unittest.TestCase):
         result = service._apply_agent_operation(df, "df.analyze", {"code": "import os"})
 
         self.assertEqual(result, "Safety Violation")
+
+    def test_metadata_only_response_uses_dataframe_columns(self):
+        service = DataService.__new__(DataService)
+        df_slice = pd.DataFrame(
+            {
+                SampleStatsEx.SAMPLE_ID.value: ["1", "2"],
+                "quality": [0.1, 0.9],
+            }
+        )
+        request = type(
+            "Req",
+            (),
+            {
+                "stats_to_retrieve": ["quality"],
+            },
+        )()
+
+        response = service._build_metadata_only_response(df_slice, request)
+
+        self.assertTrue(response.success)
+        self.assertEqual(len(response.data_records), 2)
+        self.assertEqual(response.data_records[0].sample_id, "1")
+        self.assertEqual(response.data_records[1].data_stats[0].name, "quality")
+
+    def test_manual_save_data_state_fails_when_h5_disabled(self):
+        service = DataService.__new__(DataService)
+        service._ctx = _DummyCtx(components={})
+        service._df_manager = MagicMock()
+        service._df_manager._enable_h5_persistence = False
+
+        response = service._manual_save_data_state(force_enable_h5=False)
+
+        self.assertFalse(response.success)
+        self.assertIn("H5 writing is disabled", response.message)
+
+    def test_manual_save_data_state_force_enables_h5_and_flushes(self):
+        service = DataService.__new__(DataService)
+        checkpoint_manager = MagicMock()
+        checkpoint_manager.current_exp_hash = "abcd1234abcd1234abcd1234"
+        checkpoint_manager.save_data_snapshot.return_value = "snapshot.json"
+        service._ctx = _DummyCtx(components={"checkpoint_manager": checkpoint_manager})
+        service._df_manager = MagicMock()
+        service._df_manager._enable_h5_persistence = False
+        service._slowUpdateInternals = MagicMock()
+
+        response = service._manual_save_data_state(force_enable_h5=True)
+
+        self.assertTrue(response.success)
+        self.assertTrue(service._df_manager.flush.called)
+        self.assertTrue(checkpoint_manager.save_data_snapshot.called)
 
 
 if __name__ == "__main__":

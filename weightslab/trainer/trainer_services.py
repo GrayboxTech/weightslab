@@ -4,7 +4,7 @@ import grpc
 import logging
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
-from threading import Thread, Lock
+from threading import Thread
 from concurrent import futures
 
 from weightslab.trainer.trainer_tools import *
@@ -12,83 +12,25 @@ from weightslab.trainer.trainer_tools import *
 from weightslab.trainer.experiment_context import ExperimentContext
 from weightslab.trainer.services.experiment_service import ExperimentService
 
-from weightslab.trainer.experiment_context import ExperimentContext
-from weightslab.trainer.services.experiment_service import ExperimentService
+# Watchdog module ? also registers WATCHDOG log level and logger.watchdog()
+from weightslab.watchdog import (
+    WeighlabsWatchdog,
+    RpcWatchdogState,
+    RpcTimingAndWatchdogInterceptor,
+    GrpcServerManager,
+)
+from weightslab.components.global_monitoring import weightslab_rlock
 
 # Global logger
 logger = logging.getLogger(__name__)
 
 
-class RpcWatchdogState:
-    """Tracks in-flight RPCs so prolonged stalls are detectable."""
-
-    def __init__(self, stuck_threshold_s: float = 60.0):
-        self._lock = Lock()
-        self._next_id = 0
-        self._in_flight = {}
-        self._stuck_threshold_s = stuck_threshold_s
-
-    def begin(self, method_name: str) -> int:
-        now = time.monotonic()
-        with self._lock:
-            self._next_id += 1
-            rpc_id = self._next_id
-            self._in_flight[rpc_id] = (method_name, now)
-            return rpc_id
-
-    def end(self, rpc_id: int) -> None:
-        with self._lock:
-            self._in_flight.pop(rpc_id, None)
-
-    def snapshot(self):
-        now = time.monotonic()
-        with self._lock:
-            count = len(self._in_flight)
-            oldest_age_s = 0.0
-            oldest_method = None
-            if self._in_flight:
-                oldest_id, (method, started_at) = min(self._in_flight.items(), key=lambda kv: kv[1][1])
-                _ = oldest_id
-                oldest_age_s = max(0.0, now - started_at)
-                oldest_method = method
-            unhealthy = oldest_age_s >= self._stuck_threshold_s
-            return {
-                "in_flight": count,
-                "oldest_age_s": oldest_age_s,
-                "oldest_method": oldest_method,
-                "unhealthy": unhealthy,
-            }
-
-
-class RpcTimingAndWatchdogInterceptor(grpc.ServerInterceptor):
-    """Logs per-RPC timings and keeps watchdog state for long-running calls."""
-
-    def __init__(self, watchdog_state: RpcWatchdogState):
-        self._watchdog_state = watchdog_state
-
-    def intercept_service(self, continuation, handler_call_details):
-        handler = continuation(handler_call_details)
-        if handler is None or handler.unary_unary is None:
-            return handler
-
-        method_name = handler_call_details.method
-
-        def unary_unary_wrapper(request, context):
-            rpc_id = self._watchdog_state.begin(method_name)
-            t0 = time.monotonic()
-            try:
-                return handler.unary_unary(request, context)
-            finally:
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                self._watchdog_state.end(rpc_id)
-                level = logger.warning if elapsed_ms > 2000 else logger.debug
-                level("[gRPC] %s completed in %.1fms", method_name, elapsed_ms)
-
-        return grpc.unary_unary_rpc_method_handler(
-            unary_unary_wrapper,
-            request_deserializer=handler.request_deserializer,
-            response_serializer=handler.response_serializer,
-        )
+# ---------------------------------------------------------------------------
+# Backward-compat note: RpcWatchdogState, RpcTimingAndWatchdogInterceptor and
+# GrpcServerManager are now defined in weightslab.watchdog.grpc_watchdog and
+# re-exported above.  External code that imported them from trainer_services
+# continues to work unchanged.
+# ---------------------------------------------------------------------------
 
 
 class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
@@ -110,44 +52,44 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # Sample retrieval (images / segmentation / recon)
     # -------------------------------------------------------------------------
     def GetSamples(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetSamples({request})")
+        logger.debug(f"\nExperimentServiceServicer.GetSamples({request})")
         return self._exp_service.model_service.GetSamples(request, context)
 
     # -------------------------------------------------------------------------
     # Weights inspection
     # -------------------------------------------------------------------------
     def GetWeights(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetWeights({request})")
+        logger.debug(f"\nExperimentServiceServicer.GetWeights({request})")
         return self._exp_service.model_service.GetWeights(request, context)
 
     # -------------------------------------------------------------------------
     # Activations
     # -------------------------------------------------------------------------
     def GetActivations(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetActivations({request})")
+        logger.debug(f"\nExperimentServiceServicer.GetActivations({request})")
         return self._exp_service.model_service.GetActivations(request, context)
 
     # -------------------------------------------------------------------------
     # Data service helpers + RPCs (for weights_studio UI)
     # -------------------------------------------------------------------------
     def ApplyDataQuery(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.ApplyDataQuery({request})")
+        logger.debug(f"\nExperimentServiceServicer.ApplyDataQuery({request})")
         return self._exp_service.data_service.ApplyDataQuery(request, context)
 
     def GetDataSamples(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetDataSamples({request})")
+        logger.debug(f"\nExperimentServiceServicer.GetDataSamples({request})")
         return self._exp_service.data_service.GetDataSamples(request, context)
 
     def EditDataSample(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.EditDataSample({request})")
+        logger.debug(f"\nExperimentServiceServicer.EditDataSample({request})")
         return self._exp_service.data_service.EditDataSample(request, context)
 
     def GetDataSplits(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.GetDataSplits({request})")
+        logger.debug(f"\nExperimentServiceServicer.GetDataSplits({request})")
         return self._exp_service.data_service.GetDataSplits(request, context)
 
     def CheckAgentHealth(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.CheckAgentHealth({request})")
+        logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
         return self._exp_service.data_service.CheckAgentHealth(request, context)
 
     # -------------------------------------------------------------------------
@@ -161,122 +103,168 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
     def ExperimentCommand(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.ExperimentCommand({request})")
+        logger.debug(f"\nExperimentServiceServicer.ExperimentCommand({request})")
         return self._exp_service.ExperimentCommand(request, context)
 
     # -------------------------------------------------------------------------
     # Weight manipulation (architecture operations)
     # -------------------------------------------------------------------------
     def ManipulateWeights(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.ManipulateWeights({request})")
+        logger.debug(f"\nExperimentServiceServicer.ManipulateWeights({request})")
         return self._exp_service.model_service.ManipulateWeights(request, context)
 
     # -------------------------------------------------------------------------
     # Checkpoint restore
     # -------------------------------------------------------------------------
     def RestoreCheckpoint(self, request, context):
-        logger.debug(f"ExperimentServiceServicer.RestoreCheckpoint({request})")
+        logger.debug(f"\nExperimentServiceServicer.RestoreCheckpoint({request})")
         return self._exp_service.RestoreCheckpoint(request, context)
 
 
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
 # -----------------------------------------------------------------------------
-def grpc_serve(n_workers_grpc: int = None, grpc_host: str = "0.0.0.0", grpc_port: int = 50051, **_):
+def grpc_serve(
+    n_workers_grpc: int = None,
+    grpc_host: str = None,
+    grpc_port: int = None,
+    force_parameters: bool = False,
+    max_concurrent_rpcs: int = None,
+    **_,
+):
     """Configure trainer services such as gRPC server.
     Args:
         n_workers_grpc (int): Number of threads for the gRPC server.
-        port_grpc (int): Port number for the gRPC server.
+        grpc_port (int): Port number for the gRPC server.
     """
     import weightslab.trainer.trainer_services as trainer
     from weightslab.trainer.trainer_tools import force_kill_all_python_processes
 
-    grpc_host = os.getenv("GRPC_BACKEND_HOST", grpc_host)
-    grpc_port = int(os.getenv("GRPC_BACKEND_PORT", grpc_port))
+    grpc_host = os.getenv("GRPC_BACKEND_HOST", "0.0.0.0") if not force_parameters or grpc_host is None else grpc_host
+    grpc_port = int(os.getenv("GRPC_BACKEND_PORT", 50051)) if not force_parameters or grpc_port is None else grpc_port
     watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "60"))
     watchdog_interval_s = float(os.getenv("GRPC_WATCHDOG_INTERVAL_SECONDS", "5"))
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
-    watchdog_state = RpcWatchdogState(stuck_threshold_s=watchdog_threshold_s)
+    watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks
+    watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
+    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    max_concurrent_rpcs_env = os.getenv("GRPC_MAX_CONCURRENT_RPCS")
+    if max_concurrent_rpcs_env is not None:
+        max_concurrent_rpcs = int(max_concurrent_rpcs_env)
+    elif max_concurrent_rpcs is None and n_workers_grpc is not None:
+        max_concurrent_rpcs = int(n_workers_grpc)
 
-    def watchdog_thread_callback():
-        while True:
-            snap = watchdog_state.snapshot()
-            if snap["unhealthy"]:
-                logger.error(
-                    "[gRPC-Watchdog] unhealthy: in_flight=%d oldest_age=%.1fs oldest_method=%s threshold=%.1fs",
-                    snap["in_flight"], snap["oldest_age_s"], snap["oldest_method"], watchdog_threshold_s,
-                )
-                if watchdog_exit_on_stuck:
-                    logger.critical("[gRPC-Watchdog] exiting process due to stuck RPC (GRPC_WATCHDOG_EXIT_ON_STUCK enabled)")
-                    os._exit(1)
-            else:
-                logger.debug(
-                    "[gRPC-Watchdog] healthy: in_flight=%d oldest_age=%.1fs",
-                    snap["in_flight"], snap["oldest_age_s"],
-                )
-            time.sleep(max(1.0, watchdog_interval_s))
+    # Build watchdog components. In debug sessions, watchdogs can be disabled
+    # to avoid lock/RPC timeout interruptions while paused on breakpoints.
+    if watchdog_disabled:
+        watchdog = None
+        watchdog_state = RpcWatchdogState(stuck_threshold_s=watchdog_threshold_s)
+        server_manager = GrpcServerManager()
+        logger.info("[gRPC] Watchdogs disabled via WEIGHTSLAB_DISABLE_WATCHDOGS.")
+    else:
+        watchdog = WeighlabsWatchdog(
+            stuck_threshold_s=watchdog_threshold_s,
+            poll_interval_s=watchdog_interval_s,
+            restart_threshold=watchdog_restart_threshold,
+            exit_on_stuck=watchdog_exit_on_stuck,
+            details_limit=watchdog_details_limit,
+        )
+        watchdog.register_lock("weightslab_rlock", weightslab_rlock)
+        watchdog_state = watchdog.rpc_state       # shared with RpcTimingAndWatchdogInterceptor
+        server_manager = watchdog.server_manager  # shared with serving_thread_callback
+    logger.debug(
+        f"grpc_serve called with parameters: n_workers_grpc={n_workers_grpc}, grpc_host={grpc_host}, grpc_port={grpc_port}, "
+        f"watchdog_threshold_s={watchdog_threshold_s}, watchdog_interval_s={watchdog_interval_s}, watchdog_exit_on_stuck={watchdog_exit_on_stuck}, watchdog_restart_threshold={watchdog_restart_threshold}, "
+        f"watchdog_details_limit={watchdog_details_limit}, max_concurrent_rpcs={max_concurrent_rpcs}"
+    )
 
     def serving_thread_callback():
         logger.info("[gRPC] Thread callback started")
         try:
-            _effective_workers = n_workers_grpc or min(32, (os.cpu_count() or 1) + 4)
-            logger.info("[gRPC] Creating ThreadPoolExecutor with %d worker threads (n_workers_grpc=%s)",
-                        _effective_workers, n_workers_grpc)
-            server = grpc.server(
-                futures.ThreadPoolExecutor(
-                    thread_name_prefix="WL-gRPC-Worker",
-                    max_workers=_effective_workers
-                ),
-                interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)]
-            )
-            logger.info("[gRPC] Server object created")
-            servicer = trainer.ExperimentServiceServicer()
-            pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
-            logger.info("[gRPC] Servicer added")
+            while True:  # Loop to allow restarts
+                _effective_workers = n_workers_grpc or min(32, (os.cpu_count() or 1) + 4)
+                logger.info(
+                    "[gRPC] Creating ThreadPoolExecutor with %d worker threads (n_workers_grpc=%s, max_concurrent_rpcs=%s)",
+                    _effective_workers, n_workers_grpc, max_concurrent_rpcs,
+                )
+                _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024))  # 256 MB
+                server = grpc.server(
+                    futures.ThreadPoolExecutor(
+                        thread_name_prefix="WL-gRPC-Worker",
+                        max_workers=_effective_workers,
+                    ),
+                    interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)],
+                    options=[
+                        ("grpc.max_send_message_length", _max_msg),
+                        ("grpc.max_receive_message_length", _max_msg),
+                    ],
+                    maximum_concurrent_rpcs=max_concurrent_rpcs,
+                )
+                logger.info("[gRPC] Server object created")
+                server_manager.set_server(server)
+                servicer = trainer.ExperimentServiceServicer()
+                pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
+                logger.info("[gRPC] Servicer added")
 
-            # Bind to host:port
-            bind_addr = f'{grpc_host}:{grpc_port}'
-            logger.info(f"[gRPC] Attempting to bind to {bind_addr}")
-            bound_port = server.add_insecure_port(bind_addr)
+                bind_addr = f"{grpc_host}:{grpc_port}"
+                logger.info("[gRPC] Attempting to bind to %s", bind_addr)
+                bound_port = server.add_insecure_port(bind_addr)
+                if bound_port == 0:
+                    logger.error("[gRPC] Failed to bind to %s. Port might be in use.", bind_addr)
+                    return
 
-            if bound_port == 0:
-                logger.error(f"[gRPC] Failed to bind to {bind_addr}. Port might be in use.")
-                return
+                logger.info("[gRPC] Port %d bound successfully.", bound_port)
+                server.start()
+                logger.info("[gRPC] Server started and listening on %s", bind_addr)
 
-            logger.info(f"[gRPC] Port {bound_port} bound successfully.")
-            server.start()
-            logger.info(f"[gRPC] Server started and listening on {bind_addr}")
-            server.wait_for_termination()
+                # Wait for restart signal from watchdog
+                while not server_manager.should_restart():
+                    time.sleep(0.5)
+
+                logger.watchdog("[gRPC] Restart requested. Gracefully shutting down (5s grace)...")  # type: ignore[attr-defined]
+                stop_event = server.stop(grace=5)
+                stopped = stop_event.wait(timeout=6.0)
+                if not stopped:
+                    logger.watchdog("[gRPC] Graceful stop timed out; forcing immediate stop.")  # type: ignore[attr-defined]
+                    server.stop(grace=0).wait(timeout=1.0)
+
+                cleared = watchdog_state.clear_for_restart()
+                if cleared:
+                    logger.watchdog("[gRPC] Cleared %d stale in-flight RPC records after restart.", cleared)  # type: ignore[attr-defined]
+                server_manager.clear_restart_request()
+                logger.info("[gRPC] Server stopped. Restarting in 2s...")
+                time.sleep(2)
+
         except Exception as e:
-            logger.exception(f"[gRPC] Critical error in gRPC thread: {e}")
+            logger.exception("[gRPC] Critical error in gRPC thread: %s", e)
         except KeyboardInterrupt:
             force_kill_all_python_processes()
 
-    training_thread = Thread(
+    serving_thread = Thread(
         target=serving_thread_callback,
         daemon=True,
         name="WL-gRPC_Server",
     )
-    training_thread.start()
+    serving_thread.start()
+    if watchdog is not None:
+        watchdog.start()
 
-    watchdog_thread = Thread(
-        target=watchdog_thread_callback,
-        daemon=True,
-        name="WL-gRPC_Watchdog",
-    )
-    watchdog_thread.start()
-
-    logger.info("grpc_thread_started", extra={
-        "thread_name": training_thread.name,
-        "thread_id": training_thread.ident,
-        "grpc_host": grpc_host,
-        "grpc_port": grpc_port,
-        "n_workers_grpc": n_workers_grpc,
-        "watchdog_threshold_s": watchdog_threshold_s,
-        "watchdog_interval_s": watchdog_interval_s,
-        "watchdog_exit_on_stuck": watchdog_exit_on_stuck,
-    })
-
+        logger.info(
+            "[gRPC] Server and watchdog started (host=%s port=%d workers=%s threshold=%.1fs interval=%.1fs restart_after=%d exit_on_stuck=%s)",
+            grpc_host, grpc_port, n_workers_grpc,
+            watchdog_threshold_s, watchdog_interval_s,
+            watchdog_restart_threshold, watchdog_exit_on_stuck,
+        )
+    else:
+        logger.info(
+            "[gRPC] Server started with watchdogs disabled (host=%s port=%d workers=%s)",
+            grpc_host, grpc_port, n_workers_grpc,
+        )
 
 if __name__ == "__main__":
     grpc_serve()
+
+
+
+
+

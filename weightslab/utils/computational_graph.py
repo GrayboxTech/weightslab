@@ -808,6 +808,7 @@ def generate_graph_dependencies_from_torchfx(
 def generate_layer_dependencies_from_onnx(
     model: nn.Module,
     dummy_input: Optional[th.Tensor] = None,
+    opset_version: int = 17
 ) -> List[Tuple[nn.Module, nn.Module, DepType]]:
     """
     Generate a simplified list of layer dependencies from an ONNX graph.
@@ -846,7 +847,7 @@ def generate_layer_dependencies_from_onnx(
     """
 
     # First generate the onnx file from the model temporarily
-    onnx_file_path = _export_model_to_onnx_temp(model, dummy_input=th.randn(model.input_shape) if dummy_input is None else dummy_input)
+    onnx_file_path = _export_model_to_onnx_temp(model, dummy_input=th.randn(model.input_shape) if dummy_input is None else dummy_input, opset_version=opset_version)
 
     # Load ONNX model and get shape information
     try:

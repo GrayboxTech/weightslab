@@ -19,10 +19,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify tag commit is on main
+      - name: Verify tag commit is on main (alternative method)
         run: |
-          git fetch origin main --depth=1
-          if ! git branch -r --contains "$GITHUB_SHA" | grep -q "origin/main"; then
+          TAG_COMMIT="$(git rev-list -n 1 "${GITHUB_REF}")"
+          echo "Tag ref: ${GITHUB_REF}"
+          echo "Tag commit: ${TAG_COMMIT}"
+          echo "Main head: $(git rev-parse refs/remotes/origin/main)"
+
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" refs/remotes/origin/main; then
             echo "Tag ${GITHUB_REF} does not point to a commit on main"
             exit 1
           fi
@@ -135,7 +139,7 @@ jobs:
 
       - name: Create GitHub Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
@@ -144,7 +148,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: "dist/*"
         env:

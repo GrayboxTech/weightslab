@@ -58,6 +58,7 @@ From ``../weights_studio/docker/docker-compose.yml`` and ``../weights_studio/env
 Default values in ``../weights_studio/docker/.env``:
 
 - ``VITE_PORT=5173``
+- ``VITE_HISTOGRAM_MAX_BINS=512``
 - ``WS_SERVER_HOST=localhost``
 - ``WS_SERVER_PORT=8080``
 - ``WS_SERVER_PROTOCOL=http``
@@ -167,6 +168,7 @@ consistently with your deployed endpoints:
    WS_SERVER_PROTOCOL=https
    WS_SERVER_HOST=studio.your-domain.com
    WS_SERVER_PORT=443
+   VITE_HISTOGRAM_MAX_BINS=512
 
    # envoy / backend internal wiring
    ENVOY_PORT=8080
@@ -223,6 +225,7 @@ Use this pattern for a simple single-VM production-like deployment.
     WS_SERVER_PROTOCOL=https
     WS_SERVER_HOST=studio.your-domain.com
     WS_SERVER_PORT=443
+   VITE_HISTOGRAM_MAX_BINS=512
 
     ENVOY_PORT=8080
     ENVOY_ADMIN_PORT=9901
@@ -479,3 +482,4 @@ Troubleshooting
   verify ``WS_SERVER_HOST/PORT/PROTOCOL`` in docker environment.
 - No plot updates:
   verify plot auto-refresh setting and backend logger data availability.
+

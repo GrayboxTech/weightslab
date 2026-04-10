@@ -164,17 +164,15 @@ class BDD100kSegDataset(Dataset):
         self.image_transform = transforms.Compose(
             [
                 transforms.Resize(
-                    (
-                        image_size,
-                        image_size
-                    ),
+                    size=image_size,
                     interpolation=Image.BILINEAR
                 ),
                 transforms.ToTensor(),
             ]
         )
         self.mask_resize = transforms.Resize(
-            (image_size, image_size), interpolation=Image.NEAREST
+            size=image_size,
+            interpolation=Image.NEAREST
         )
 
     def __len__(self):

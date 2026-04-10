@@ -17,11 +17,27 @@ def _get_envoy_config():
 
 
 def _check_docker():
-    """Verify that docker is available."""
+    """Verify that docker is installed and the daemon is running."""
     if shutil.which("docker") is None:
         print(
-            "Error: Docker is required but not found.\n"
+            "Error: Docker is required but not found on your PATH.\n"
             "Install it from: https://docs.docker.com/get-docker/",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        subprocess.run(
+            ["docker", "info"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        print(
+            "Error: Docker is installed but the daemon is not running.\n"
+            "Start it with:  sudo systemctl start docker\n"
+            "                or open Docker Desktop.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -84,6 +100,8 @@ def main():
     ui_sub.add_parser("stop", help="Stop the UI containers (keeps images)")
     ui_sub.add_parser("drop", help="Stop containers and remove images")
 
+    sub.add_parser("help", help="Show this help message")
+
     args = parser.parse_args()
 
     actions = {
@@ -92,11 +110,14 @@ def main():
         "drop": ui_drop,
     }
 
-    if args.command == "ui" and args.action in actions:
+    if args.command == "help" or args.command is None:
+        parser.print_help()
+    elif args.command == "ui" and args.action in actions:
         actions[args.action](args)
+    elif args.command == "ui":
+        ui_parser.print_help()
     else:
         parser.print_help()
-        sys.exit(1)
 
 
 if __name__ == "__main__":

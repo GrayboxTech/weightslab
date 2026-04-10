@@ -77,7 +77,7 @@ class TestTrainerTools(unittest.TestCase):
 
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0].string_value, "abc")
-        self.assertEqual(result[1].numerical_value, 0.0)
+        self.assertEqual(result[1], None)
 
     def test_mask_to_png_bytes_and_class_ids(self):
         mask = np.array([[0, 1], [2, 3]], dtype=np.int64)
