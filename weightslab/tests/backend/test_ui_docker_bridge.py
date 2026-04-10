@@ -1,7 +1,7 @@
 import argparse
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from weightslab.ui_docker_bridge import (
     _check_docker,
@@ -56,7 +56,7 @@ class TestUiLaunch(unittest.TestCase):
     @patch("weightslab.ui_docker_bridge._check_docker")
     @patch("weightslab.ui_docker_bridge._get_envoy_config", return_value="/fake/envoy.yaml")
     @patch("weightslab.ui_docker_bridge._get_compose_file", return_value="/fake/docker-compose.yml")
-    def test_launch_prints_url_default_port(self, _gc, _ge, mock_check, mock_compose, capsys=None):
+    def test_launch_prints_url_default_port(self, _gc, _ge, mock_check, mock_compose):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("VITE_PORT", None)
             from io import StringIO
