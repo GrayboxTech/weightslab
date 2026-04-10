@@ -8,7 +8,7 @@ services:
       - "${ENVOY_PORT:-8080}:${ENVOY_PORT:-8080}"
       - "${ENVOY_ADMIN_PORT:-9901}:${ENVOY_ADMIN_PORT:-9901}"
     volumes:
-      - ../envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
