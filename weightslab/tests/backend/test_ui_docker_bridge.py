@@ -1,7 +1,7 @@
 import argparse
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from weightslab.ui_docker_bridge import (
     _check_docker,
