@@ -306,112 +306,6 @@ def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
     return raw
 
 
-def load_label(dataset, sample_id):
-    """Load label/target from dataset at given index.
-
-    Arguments:
-        dataset: The dataset object to load from.
-        sample_id: The sample ID to load the label for.
-
-    Expected dataset patterns:
-    - dataset[index] -> (data, label)
-    - dataset[index] -> (data, uids, label)
-    - dataset[index] -> (data, uids, label, metadata) with metadata containing
-
-
-    Returns the label in its native format (int, array, etc.).
-    """
-    # Get index from sample_id
-    try:
-        index = dataset.get_index_from_sample_id(sample_id)
-    except (KeyError, ValueError, IndexError):
-        logger.debug(f"Sample ID {sample_id} not found in current dataset. Likely a ghost record from a previous run.")
-        return None
-
-    # Get dataset wrapper if exists
-    wrapped = getattr(dataset, "wrapped_dataset", dataset)
-
-    # Try common dataset patterns first
-    if hasattr(wrapped, '__getitem__'):
-        data = wrapped[index]
-
-        if isinstance(data, (list, tuple)):
-            if len(data) == 1:
-                return None  # Only data, no label
-            elif len(data) == 2:  # Commonly (data, label) in standard PyTorch datasets
-                label = to_numpy_safe(data[1])
-                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
-            elif len(data) == 3:  # if len==3, data, uids, label, no extra info
-                label = to_numpy_safe(data[2])  # Third element is typically the label
-                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
-            elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
-                if len(data) == 4:
-                    label = to_numpy_safe(data[2])  # Third element is typically the label
-                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
-                    metadata = data[3]
-                    classes = to_numpy_safe(metadata['classes']) if isinstance(metadata, dict) and 'classes' in metadata else None
-                    if classes is not None:
-                        label = to_numpy_safe(data[2])  # Second element is typically the label
-                        # Concat label with classes if available (bbox detection, i.e., (4,) -> (5,) with class id)
-                        label = np.concatenate([label, classes[..., None]], axis=1)
-                    else:
-                        label = to_numpy_safe(data[2])  # Second element is typically the label
-                else:
-                    label = to_numpy_safe(data[2])  # Third element is typically the label
-                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
-                    metadata = data[3:]
-            if label is not None:
-                return label[0] if label.ndim == 1 and label.shape[0] == 1 else label
-            return None
-    return None
-
-
-def load_metadata(dataset, sample_id):
-    """Load metadata from dataset at given index.
-
-    Arguments:
-        dataset: The dataset object to load from.
-        sample_id: The sample ID to load the label for.
-
-    Expected dataset patterns:
-    - dataset[index] -> (data, label)
-    - dataset[index] -> (data, uids, label)
-    - dataset[index] -> (data, uids, label, metadata) with metadata containing
-
-
-    Returns the metadata in its native format (dict, etc.).
-    """
-    # Get index from sample_id
-    try:
-        index = dataset.get_index_from_sample_id(sample_id)
-    except (KeyError, ValueError, IndexError):
-        logger.debug(f"Sample ID {sample_id} not found in current dataset. Likely a ghost record from a previous run.")
-        return None
-
-    # Get dataset wrapper if exists
-    wrapped = getattr(dataset, "wrapped_dataset", dataset)
-
-    # Try common dataset patterns first
-    if hasattr(wrapped, '__getitem__'):
-        data = wrapped[index]
-
-        if isinstance(data, (list, tuple)):
-            if len(data) == 1:
-                return None  # Only data, no metadata
-            elif len(data) == 2:  # if len==2, only data and uid, no extra info
-                return None  # No metadata, only data and uid
-            elif len(data) == 3:  # if len==3, data, uids, label, no extra info
-                return None  # No metadata, only data, uid, and label
-            elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
-                metadata = {}
-                for item in data[3:]:
-                    if isinstance(item, dict):
-                        metadata.update(item)
-                return metadata if metadata else None
-            return None
-    return None
-
-
 def _detect_channel_first_3d(shape_tuple) -> bool:
     """Detect if a 3D array is C×H×W (True) or H×W×C (False).
     Returns True if first dimension is likely channels (1, 3, 4).
@@ -459,7 +353,7 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
         - is_volumetric: bool indicating if original was 4D
         - original_shape: tuple of original shape AFTER any channel-first transposition
     """
-    np_img = wrapped[index]
+    np_img = wrapped.get_items(index, include_metadata=False, include_labels=False, include_images=True) if hasattr(wrapped, 'get_items') else wrapped[index]
     if isinstance(np_img, (list, tuple)) and len(np_img) > 0:
         pixels = np_img[0]
         if isinstance(pixels, (list, tuple)):
@@ -526,6 +420,112 @@ def to_uint8(np_img: np.ndarray) -> np.ndarray:
     # Clip to valid byte range then cast
     np_img = np.clip(np_img, 0, 255)
     return np_img.astype(np.uint8)
+
+
+def load_label(dataset, sample_id):
+    """Load label/target from dataset at given index.
+
+    Arguments:
+        dataset: The dataset object to load from.
+        sample_id: The sample ID to load the label for.
+
+    Expected dataset patterns:
+    - dataset[index] -> (data, label)
+    - dataset[index] -> (data, uids, label)
+    - dataset[index] -> (data, uids, label, metadata) with metadata containing
+
+
+    Returns the label in its native format (int, array, etc.).
+    """
+    # Get index from sample_id
+    try:
+        index = dataset.get_index_from_sample_id(sample_id)
+    except (KeyError, ValueError, IndexError):
+        logger.debug(f"Sample ID {sample_id} not found in current dataset. Likely a ghost record from a previous run.")
+        return None
+
+    # Get dataset wrapper if exists
+    wrapped = getattr(dataset, "wrapped_dataset", dataset)
+
+    # Try common dataset patterns first
+    if hasattr(wrapped, '__getitem__'):
+        data = wrapped.get_items(index, include_metadata=False, include_labels=True, include_images=False) if hasattr(wrapped, 'get_items') else wrapped[index]
+
+        if isinstance(data, (list, tuple)):
+            if len(data) == 1:
+                return None  # Only data, no label
+            elif len(data) == 2:  # Commonly (data, label) in standard PyTorch datasets
+                label = to_numpy_safe(data[1])
+                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+            elif len(data) == 3:  # if len==3, data, uids, label, no extra info
+                label = to_numpy_safe(data[2])  # Third element is typically the label
+                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+            elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
+                if len(data) == 4:
+                    label = to_numpy_safe(data[2])  # Third element is typically the label
+                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+                    metadata = data[3]
+                    classes = to_numpy_safe(metadata['classes']) if isinstance(metadata, dict) and 'classes' in metadata else None
+                    if classes is not None:
+                        label = to_numpy_safe(data[2])  # Second element is typically the label
+                        # Concat label with classes if available (bbox detection, i.e., (4,) -> (5,) with class id)
+                        label = np.concatenate([label, classes[..., None]], axis=1)
+                    else:
+                        label = to_numpy_safe(data[2])  # Second element is typically the label
+                else:
+                    label = to_numpy_safe(data[2])  # Third element is typically the label
+                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
+                    metadata = data[3:]
+            if label is not None:
+                return label[0] if label.ndim == 1 and label.shape[0] == 1 else label
+            return None
+    return None
+
+
+def load_metadata(dataset, sample_id):
+    """Load metadata from dataset at given index.
+
+    Arguments:
+        dataset: The dataset object to load from.
+        sample_id: The sample ID to load the label for.
+
+    Expected dataset patterns:
+    - dataset[index] -> (data, label)
+    - dataset[index] -> (data, uids, label)
+    - dataset[index] -> (data, uids, label, metadata) with metadata containing
+
+
+    Returns the metadata in its native format (dict, etc.).
+    """
+    # Get index from sample_id
+    try:
+        index = dataset.get_index_from_sample_id(sample_id)
+    except (KeyError, ValueError, IndexError):
+        logger.debug(f"Sample ID {sample_id} not found in current dataset. Likely a ghost record from a previous run.")
+        return None
+
+    # Get dataset wrapper if exists
+    wrapped = getattr(dataset, "wrapped_dataset", dataset)
+
+    # Try common dataset patterns first
+    if hasattr(wrapped, '__getitem__'):
+        data = wrapped.get_items(index, include_metadata=True, include_labels=False, include_images=False) if hasattr(wrapped, 'get_items') else wrapped[index]
+
+        if isinstance(data, (list, tuple)):
+            if len(data) == 1:
+                return None  # Only data, no metadata
+            elif len(data) == 2:  # if len==2, only data and uid, no extra info
+                return None  # No metadata, only data and uid
+            elif len(data) == 3:  # if len==3, data, uids, label, no extra info
+                return None  # No metadata, only data, uid, and label
+            elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
+                metadata = {}
+                for item in data[3:]:
+                    if isinstance(item, dict):
+                        metadata.update(item)
+                return metadata if metadata else None
+            return None
+    return None
 
 
 def load_raw_image(dataset, index, slice_idx: int = None, rank: int = 0) -> Image.Image:

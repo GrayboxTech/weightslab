@@ -20,6 +20,12 @@ from pathlib import Path
 from datetime import datetime
 from concurrent import futures
 
+try:
+    from omegaconf import DictConfig
+except ImportError:
+    DictConfig = dict # type: ignore
+    logger.warning("OmegaConf not found, DictConfig will be treated as dict. Install OmegaConf for full functionality.")
+
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.proto.experiment_service_pb2 import SampleEditType
@@ -224,7 +230,7 @@ class DataService:
                     • target    (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
                     • pred_mask (rle_mask) — RLE-encoded prediction mask resized to 64×64 or less or less
                     • origin, task_type, num_classes, class_names (metadata)
-        Respects ``_preview_cache_max`` to cap memory usage.
+            Respects ``_preview_cache_max`` to cap memory usage.
         """
         try:
             df = self._all_datasets_df
@@ -269,11 +275,6 @@ class DataService:
 
                 origin = str(origin) if origin is not None else 'unknown'
 
-                try:
-                    sample_id_int = int(sample_id)
-                except (TypeError, ValueError):
-                    logger.debug("[PreviewCache] Skipped row %s: invalid sample_id=%r", row_idx, sample_id)
-                    continue
                 dataset = self._get_dataset(origin)
                 if dataset is None:
                     continue
@@ -283,9 +284,9 @@ class DataService:
                     ds = getattr(dataset, "wrapped_dataset", dataset)
                     # --- Thumbnail image ---
                     if hasattr(dataset, "get_physical_location"):
-                        ds_idx, member_rank = dataset.get_physical_location(sample_id_int)
+                        ds_idx, member_rank = dataset.get_physical_location(sample_id)
                     else:
-                        ds_idx = dataset.get_index_from_sample_id(sample_id_int)
+                        ds_idx = dataset.get_index_from_sample_id(sample_id)
                         member_rank = 0
 
                     _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
@@ -313,7 +314,7 @@ class DataService:
                         del pil_thumb, pil_save, pil_img
 
                     # --- GT mask ---
-                    label = load_label(dataset, sample_id_int)
+                    label = load_label(dataset, sample_id)
                     if label is not None:
                         label_arr = to_numpy_safe(label)
                         if label_arr is None:
@@ -376,12 +377,12 @@ class DataService:
                     if nc_val:
                         stats.append(create_data_stat('num_classes', 'scalar', shape=[1], value=[float(nc_val)]))
 
-                    record = pb2.DataRecord(sample_id=str(sample_id_int), data_stats=stats)
-                    self._preview_cache[sample_id_int] = record
+                    record = pb2.DataRecord(sample_id=str(sample_id), data_stats=stats)
+                    self._preview_cache[sample_id] = record
                     built += 1
                 except Exception as exc:
                     # traceback.print_exc()
-                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id_int, exc)
+                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id, exc)
                     continue
 
             elapsed = time.time() - t0
@@ -970,12 +971,13 @@ class DataService:
             dataset = self._get_dataset(origin) if needs_dataset else None
 
             # ====== Step 3: Determine task type ======
-
             label = row.get(SampleStatsEx.TARGET.value)
             is_label_empty = False
             if label is None:
                 is_label_empty = True
             elif isinstance(label, list) and not label:
+                is_label_empty = True
+            elif isinstance(label, str) and isinstance(label, str) and '.' in label and not label.endswith('.') and label.rsplit('.', 1)[-1] != '':
                 is_label_empty = True
             elif isinstance(label, float):
                 import math
@@ -1158,15 +1160,16 @@ class DataService:
                     try:
                         if isinstance(class_names, (list, tuple)):
                             val_str = json.dumps(list(class_names))
-                        elif isinstance(class_names, dict):
+                        elif isinstance(class_names, (dict, DictConfig)):
                             # Convert int keys to string for JSON if all keys are ints
                             if all(isinstance(k, int) for k in class_names.keys()):
                                 class_names = {str(k): v for k, v in class_names.items()}
                             val_str = json.dumps(class_names)
                         else:
+                            logger.warning(f"Unsupported class_names type: {type(class_names)}. Expected list, tuple, or dict.")
                             val_str = str(class_names)
                     except Exception:
-                        val_str = str(class_names)
+                        logger.error(f"Error serializing class_names: {class_names}")
 
                     data_stats.append(
                         create_data_stat(
