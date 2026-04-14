@@ -34,6 +34,12 @@ class LoggerQueue:
         self._pending_queue = []  # Queue for new signals waiting to be sent to WeightsStudio
         self._buffered_step = None
 
+        # Evaluation mode state
+        self._eval_mode_active: bool = False
+        self._eval_mode_hash: str = ""
+        self._eval_mode_split: str = ""
+        self._eval_accum: dict = {}  # {graph_name: [sum, count]}
+
         lg = None
         if register:
             try:
@@ -108,6 +114,104 @@ class LoggerQueue:
         self._current_step_buffer.clear()
         self._buffered_step = None
 
+    # ------------------------------------------------------------------
+    # Evaluation mode helpers
+    # ------------------------------------------------------------------
+
+    def get_next_evaluation_count(self, base_hash: str) -> int:
+        """Return the next unused evaluation index for *base_hash*.
+
+        Scans the current signal history for keys of the form
+        ``<base_hash>_<integer>`` and returns max(found) + 1 (or 1 if none).
+        """
+        prefix = base_hash + "_"
+        max_count = 0
+        for gname in self._signal_history:
+            for hash_key in self._signal_history[gname]:
+                if isinstance(hash_key, str) and hash_key.startswith(prefix):
+                    suffix = hash_key[len(prefix):]
+                    try:
+                        count = int(suffix)
+                        if count > max_count:
+                            max_count = count
+                    except ValueError:
+                        pass
+        return max_count + 1
+
+    def start_evaluation_mode(self, split_name: str, eval_hash: str) -> None:
+        """Redirect subsequent add_scalars() calls into the evaluation buffer.
+
+        While evaluation mode is active, signals are NOT added to the normal
+        curve history.  Instead they accumulate in an internal buffer.
+        ``stop_evaluation_mode()`` finalises the buffer into a single marker.
+
+        Per-sample history *is* still updated (for Break-By-Slice on eval
+        results), using *eval_hash* as the experiment key.
+
+        Args:
+            split_name: Human-readable split name (e.g. ``"train_loader"``).
+            eval_hash:  Modified experiment hash (e.g. ``"abc123_1"``).
+        """
+        self._flush_current_step_buffer(add_to_queue=True)
+        self._eval_mode_active = True
+        self._eval_mode_hash = eval_hash
+        self._eval_mode_split = split_name
+        self._eval_accum = {}
+
+    def stop_evaluation_mode(self, model_age: int) -> dict:
+        """Finalise evaluation mode and emit averaged markers.
+
+        Computes the mean value for every graph name that was accumulated
+        since ``start_evaluation_mode()``, writes each one into the signal
+        history under *eval_hash* and into the pending queue, then resets
+        evaluation-mode state.
+
+        Args:
+            model_age: Current model age (training step) at time of evaluation.
+
+        Returns:
+            Dict mapping graph_name → averaged value for all signals seen.
+        """
+        if not self._eval_mode_active:
+            return {}
+
+        self._eval_mode_active = False
+        eval_hash = self._eval_mode_hash
+        split_name = self._eval_mode_split
+        results = {}
+
+        for graph_name, (total, count) in self._eval_accum.items():
+            if count <= 0:
+                continue
+            avg = total / count
+            results[graph_name] = avg
+            self.graph_names.add(graph_name)
+
+            # Store in signal history under eval_hash
+            if graph_name not in self._signal_history:
+                self._signal_history[graph_name] = {}
+            if eval_hash not in self._signal_history[graph_name]:
+                self._signal_history[graph_name][eval_hash] = {}
+            if model_age not in self._signal_history[graph_name][eval_hash]:
+                self._signal_history[graph_name][eval_hash][model_age] = []
+
+            entry = {
+                "experiment_name": graph_name,
+                "model_age": model_age,
+                "metric_name": graph_name,
+                "metric_value": avg,
+                "experiment_hash": eval_hash,
+                "is_evaluation_marker": True,
+                "split_name": split_name,
+            }
+            self._signal_history[graph_name][eval_hash][model_age].append(entry)
+            self._pending_queue.append(entry)
+
+        self._eval_accum = {}
+        self._eval_mode_hash = ""
+        self._eval_mode_split = ""
+        return results
+
     # Main method for adding signals to the logger - this is called by the WeightsLabCallback and is responsible for updating
     # history and queueing signals for WeightsStudio
     def add_scalars(self, graph_name, signal, global_step, signal_per_sample, aggregate_by_step: bool = True):
@@ -116,9 +220,46 @@ class LoggerQueue:
         - Training/immediate mode (`aggregate_by_step=False`): append entry directly and queue immediately.
         - Test/per-sample mode (`aggregate_by_step=True`): aggregate values within the step,
           append one averaged entry when step changes, and queue only on step change.
+        - Evaluation mode active: accumulate into internal buffer; per-sample history
+          still gets written under the eval hash for Break-By-Slice support.
         """
         self.graph_names.add(graph_name)
         self._last_step = global_step
+
+        # ----------------------------------------------------------------
+        # Evaluation-mode interception
+        # ----------------------------------------------------------------
+        if self._eval_mode_active:
+            # Collect scalar values to accumulate
+            values: list = []
+            if aggregate_by_step and signal_per_sample and isinstance(signal_per_sample, dict):
+                values = [self._to_float(v) for v in signal_per_sample.values()]
+            elif signal and isinstance(signal, dict):
+                values = [self._to_float(v) for _, v in signal.items()]
+
+            if values:
+                if graph_name not in self._eval_accum:
+                    self._eval_accum[graph_name] = [0.0, 0]
+                self._eval_accum[graph_name][0] += sum(values)
+                self._eval_accum[graph_name][1] += len(values)
+
+            # Still store per-sample signals under eval_hash (for Break-By-Slice)
+            if signal_per_sample and isinstance(signal_per_sample, dict):
+                eval_hash = self._eval_mode_hash
+                if graph_name not in self._signal_history_per_sample:
+                    self._signal_history_per_sample[graph_name] = {}
+                if eval_hash not in self._signal_history_per_sample[graph_name]:
+                    self._signal_history_per_sample[graph_name][eval_hash] = _make_per_sample_buf()
+                buf = self._signal_history_per_sample[graph_name][eval_hash]
+                step_i = int(global_step)
+                for sid, value in signal_per_sample.items():
+                    buf["sample_ids"].append(int(sid))
+                    buf["steps"].append(step_i)
+                    buf["values"].append(self._to_float(value))
+
+            return  # Do NOT add to normal history during evaluation mode
+        # ----------------------------------------------------------------
+
         exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None
 
         if self._buffered_step is not None and global_step != self._buffered_step:
@@ -291,6 +432,24 @@ class LoggerQueue:
             "signal_history": self.get_signal_history(),
             "signal_history_per_sample": per_sample_compact,
         }
+
+    # ------------------------------------------------------------------
+    # Convenience: list all evaluation-marker hashes in history
+    # ------------------------------------------------------------------
+    def get_evaluation_marker_hashes(self) -> list:
+        """Return all experiment hashes that correspond to evaluation markers."""
+        hashes = set()
+        for gname in self._signal_history:
+            for hash_key in self._signal_history[gname]:
+                if isinstance(hash_key, str) and "_" in hash_key:
+                    # Check that the suffix is a pure integer
+                    suffix = hash_key.rsplit("_", 1)[-1]
+                    try:
+                        int(suffix)
+                        hashes.add(hash_key)
+                    except ValueError:
+                        pass
+        return sorted(hashes)
 
     def get_and_clear_queue(self):
         """Get pending queue and clear it (for incremental updates to WeightsStudio)."""

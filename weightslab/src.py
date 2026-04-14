@@ -1700,6 +1700,266 @@ def clear_all():
 
 
 # ##############################################################################################################
+# EVALUATION MODE PUBLIC API
+# ##############################################################################################################
+
+def run_pending_evaluation(
+    loaders: dict,
+    model,
+    eval_fn,
+    device=None,
+) -> bool:
+    """Check for a pending evaluation request and execute it if one is present.
+
+    Place this call at the **top** of every training-loop iteration, *before*
+    calling ``train()``.  When an evaluation request arrives from the UI the
+    training thread will reach this function on its next iteration (or will be
+    woken from ``wait_if_paused()`` early), run the evaluation pass, then
+    continue / re-pause as appropriate.
+
+    Args:
+        loaders:  Mapping of *loader_name* → ``DataLoaderInterface`` (or any
+                  iterable dataloader).  The key must match the
+                  ``split_name`` sent by the UI (e.g. ``"train_loader"``).
+        model:    The tracked model instance (used to read ``get_age()``).
+        eval_fn:  Callable with signature ``eval_fn(loader) -> None`` that
+                  runs a full inference pass over *loader*.  Inside this
+                  function the user should call their watched criteria /
+                  metrics exactly as in their normal ``test()`` function.
+                  The logger's evaluation-mode buffer intercepts all
+                  ``add_scalars`` calls and accumulates averages.
+        device:   Unused; kept for API symmetry.
+
+    Returns:
+        ``True`` if an evaluation was executed (caller should ``continue``
+        the training loop), ``False`` otherwise.
+    """
+    from weightslab.components.evaluation_controller import eval_controller
+    from weightslab.components.global_monitoring import pause_controller
+    from weightslab.backend.ledgers import get_logger, get_checkpoint_manager
+
+    req = eval_controller.consume_request()
+    if req is None:
+        return False
+
+    split_name: str = req.get("split_name", "")
+    tags: list = req.get("tags", [])
+    use_full_set: bool = req.get("use_full_set", True)
+    was_paused: bool = req.get("was_paused", False)
+
+    logger_obj = logging.getLogger(__name__)
+    logger_obj.info(
+        "[wl.run_pending_evaluation] split=%s tags=%s full_set=%s was_paused=%s",
+        split_name, tags, use_full_set, was_paused,
+    )
+
+    # Get the target DataLoaderInterface
+    loader_if = loaders.get(split_name)
+    if loader_if is None:
+        eval_controller.mark_error(
+            f"Loader '{split_name}' not found. Available: {list(loaders.keys())}"
+        )
+        if was_paused:
+            pause_controller.pause()
+        return False
+
+    # ------------------------------------------------------------------
+    # 1. Save shuffle state and force shuffle=False
+    # ------------------------------------------------------------------
+    sampler = getattr(loader_if, "_mutable_batch_sampler", None)
+    prev_shuffle = True
+    if sampler is not None:
+        prev_shuffle = bool(getattr(sampler, "shuffle", True))
+        sampler.shuffle = False
+
+
+    # 2. Apply tag filter via eval allow-list (similar to discard logic)
+    prev_eval_allow_list = None
+    filtered_count = None
+    if sampler is not None:
+        prev_eval_allow_list = sampler._eval_allow_list  # None normally
+        if not use_full_set and tags:
+            allow_list = _build_eval_allow_list(loader_if, tags, split_name)
+            sampler._eval_allow_list = allow_list
+        else:
+            sampler._eval_allow_list = None
+        # After setting allow-list, check if any samples remain
+        try:
+            filtered_count = len(loader_if)
+        except Exception:
+            filtered_count = None
+        if filtered_count == 0:
+            eval_controller.mark_error(f"Evaluation set is empty after filtering (tags={tags}, split={split_name})")
+            logger_obj.error(f"[wl.run_pending_evaluation] Evaluation set is empty after filtering (tags={tags}, split={split_name})")
+            # Restore sampler state
+            _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list)
+            if was_paused:
+                pause_controller.pause()
+            return False
+
+    # Reset dataloader iterator so we start from index 0
+    if hasattr(loader_if, "_iterator"):
+        loader_if._iterator = None
+
+    # ------------------------------------------------------------------
+    # 3. Compute eval hash and start logger evaluation mode
+    # ------------------------------------------------------------------
+    chkpt_mgr = get_checkpoint_manager()
+    base_hash = chkpt_mgr.get_current_experiment_hash() if chkpt_mgr else "unknown"
+    signal_logger = get_logger()
+
+    eval_count = 1
+    eval_hash = f"{base_hash}_{eval_count}"
+    if signal_logger is not None:
+        eval_count = signal_logger.get_next_evaluation_count(base_hash)
+        eval_hash = f"{base_hash}_{eval_count}"
+        signal_logger.start_evaluation_mode(split_name, eval_hash)
+
+    # ------------------------------------------------------------------
+    # 4. Compute total samples for progress reporting
+    # ------------------------------------------------------------------
+    try:
+        total_batches = len(loader_if)
+    except Exception:
+        total_batches = 0
+    eval_controller.report_progress(0, total_batches, f"Evaluating '{split_name}'…")
+
+    # ------------------------------------------------------------------
+    # 5. Run evaluation
+    # ------------------------------------------------------------------
+    try:
+        eval_fn(loader_if)
+    except Exception as exc:
+        import traceback
+        tb_str = traceback.format_exc()
+        logger_obj.error("[wl.run_pending_evaluation] eval_fn raised: %s\n%s", exc, tb_str)
+        eval_controller.mark_error(str(exc))
+        if signal_logger is not None:
+            signal_logger.stop_evaluation_mode(0)
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list)
+        if was_paused:
+            pause_controller.pause()
+        return False
+
+    # ------------------------------------------------------------------
+    # 6. Finalise: stop eval mode → creates average markers in logger
+    # ------------------------------------------------------------------
+    model_age = 0
+    try:
+        model_age = model.get_age() if hasattr(model, "get_age") else 0
+    except Exception:
+        pass
+
+    result: dict = {}
+    if signal_logger is not None:
+        result = signal_logger.stop_evaluation_mode(model_age)
+
+    eval_controller.report_progress(total_batches, total_batches, "Done")
+
+    # ------------------------------------------------------------------
+    # 7. Restore shuffle + allow-list
+    # ------------------------------------------------------------------
+    _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list)
+
+    # ------------------------------------------------------------------
+    # 8. Re-pause if training was paused before evaluation
+    # ------------------------------------------------------------------
+    if was_paused:
+        pause_controller.pause()
+
+    eval_controller.mark_done(result)
+    logger_obj.info(
+        "[wl.run_pending_evaluation] Evaluation complete on '%s': %s",
+        split_name, result,
+    )
+    return True
+
+
+def _build_eval_allow_list(loader_if, tags: list, split_name: str) -> set:
+    """Build a set of sample UIDs that have ALL the requested tags.
+
+    Uses the DataFrameManager associated with the loader's tracked dataset
+    to filter by tag columns (same logic as Break-By-Slice).
+    """
+    from weightslab.data.sample_stats import SampleStatsEx
+    from weightslab.backend.ledgers import get_dataframe
+
+    allow_set: set = set()
+    try:
+        df_manager = get_dataframe()
+        if df_manager is None:
+            # No dataframe → return all UIDs (effectively no filter)
+            tracked = getattr(loader_if, "tracked_dataset", None)
+            if tracked is not None:
+                uids = getattr(tracked, "unique_ids", None) or getattr(tracked, "physical_uids", None)
+                if uids is not None:
+                    return {str(u) for u in uids}
+            return allow_set
+
+        df = df_manager.get_df_view()
+
+        # Build compound mask: sample must have ALL tags set to True
+        mask = None
+        for tag in tags:
+            col = f"{SampleStatsEx.TAG.value}:{tag}"
+            if col in df.columns:
+                col_mask = df[col] == True  # noqa: E712
+                mask = col_mask if mask is None else (mask & col_mask)
+
+        if mask is None:
+            # Tags not found → return all (no filter)
+            allow_set = {str(idx) for idx in df.index}
+            return allow_set
+
+        # Filter by origin if the split name appears in index
+        filtered = df[mask]
+
+        # Support both MultiIndex (origin, sample_id) and flat index
+        if isinstance(filtered.index, type(None)):
+            return allow_set
+
+        import pandas as pd
+        if isinstance(filtered.index, pd.MultiIndex):
+            # Try to filter by origin matching split_name (either exact or prefix match)
+            origin_level = filtered.index.get_level_values(SampleStatsEx.ORIGIN.value) \
+                if SampleStatsEx.ORIGIN.value in filtered.index.names else \
+                filtered.index.get_level_values(0)
+            origin_mask = origin_level == split_name
+            if not origin_mask.any():
+                # Try prefix: "train" matches "train_loader"
+                origin_mask = pd.Series(origin_level).str.startswith(split_name.replace("_loader", "")).values
+            sub = filtered[origin_mask]
+            # Extract sample_id level
+            sid_level_name = SampleStatsEx.SAMPLE_ID.value \
+                if SampleStatsEx.SAMPLE_ID.value in sub.index.names else None
+            if sid_level_name:
+                allow_set = {str(v) for v in sub.index.get_level_values(sid_level_name)}
+            else:
+                allow_set = {str(v) for v in sub.index.get_level_values(1)}
+        else:
+            allow_set = {str(idx) for idx in filtered.index}
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "[_build_eval_allow_list] Could not build allow list: %s", exc
+        )
+        # Fallback: no filter (evaluate all)
+        tracked = getattr(loader_if, "tracked_dataset", None)
+        if tracked is not None:
+            uids = getattr(tracked, "unique_ids", None) or getattr(tracked, "physical_uids", None)
+            if uids is not None:
+                return {str(u) for u in uids}
+    return allow_set
+
+
+def _restore_eval_state(sampler, prev_shuffle: bool, prev_eval_allow_list) -> None:
+    """Restore sampler shuffle and allow-list to pre-evaluation values."""
+    if sampler is None:
+        return
+    sampler.shuffle = prev_shuffle
+    sampler._eval_allow_list = prev_eval_allow_list
+
+
+# ##############################################################################################################
 # MAIN EXAMPLES USAGE (can be called from training script to manually set)
 # ##############################################################################################################
 

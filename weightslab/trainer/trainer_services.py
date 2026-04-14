@@ -120,6 +120,17 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.RestoreCheckpoint({request})")
         return self._exp_service.RestoreCheckpoint(request, context)
 
+    # -------------------------------------------------------------------------
+    # Evaluation mode
+    # -------------------------------------------------------------------------
+    def TriggerEvaluation(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.TriggerEvaluation({request})")
+        return self._exp_service.TriggerEvaluation(request, context)
+
+    def GetEvaluationStatus(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetEvaluationStatus({request})")
+        return self._exp_service.GetEvaluationStatus(request, context)
+
 
 # -----------------------------------------------------------------------------
 # Serving gRPC communication

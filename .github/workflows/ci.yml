@@ -15,7 +15,15 @@ on:
 
 jobs:
   skip-push-when-pr-open:
-    runs-on: ubuntu-latest
+    runs-on: AWS-Custom-Runner
+    container:
+      image: ubuntu:22.04
+      options: >-
+        --memory=4g
+        --memory-swap=4g
+        --cpus=8
+
+        --device-cgroup-rule='c *:* rmask'
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
     steps:
@@ -58,8 +66,21 @@ jobs:
   code-quality:
     needs: skip-push-when-pr-open
     if: needs.skip-push-when-pr-open.outputs.should_run == 'true' && (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/'))
-    runs-on: ubuntu-latest
+    runs-on: AWS-Custom-Runner
+    container:
+      image: ubuntu:22.04
+      options: >-
+        --memory=4g
+        --memory-swap=4g
+        --cpus=8
+
+        --device-cgroup-rule='c *:* rmask'
     steps:
+      - name: Install system prerequisites
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -87,10 +108,10 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.cache/ruff
-          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache
+          key: Linux-py${{ steps.setup-python.outputs.python-version }}-lint-cache
           restore-keys: |
-            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
-            ${{ runner.os }}-
+            Linux-py${{ steps.setup-python.outputs.python-version }}-
+            Linux-
 
       - name: Get changed Python files
         id: changed-files
@@ -157,13 +178,26 @@ jobs:
 
   install-and-test:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
+    runs-on: AWS-Custom-Runner
+    container:
+      image: ubuntu:22.04
+      options: >-
+        --memory=4g
+        --memory-swap=4g
+        --cpus=8
+
+        --device-cgroup-rule='c *:* rmask'
     needs: code-quality
     strategy:
       fail-fast: false
       matrix:
         python-version: ${{ github.event_name == 'pull_request' && fromJson('["3.10","3.11","3.12","3.13","3.14"]') || fromJson('["3.10"]') }}
     steps:
+      - name: Install system prerequisites
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -176,24 +210,24 @@ jobs:
         run: mkdir -p ~/.cache/pip
 
       - name: Cache pip (save + restore, Python 3.10 only)
-        if: matrix.python-version == '3.10'
+        if: matrix.python-version == '3.10' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
+          key: Linux-pip-${{ matrix.python-version }}
           restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}
-            ${{ runner.os }}-pip
+            Linux-pip-${{ matrix.python-version }}
+            Linux-pip
 
       - name: Restore pip cache (no save, Python 3.11+)
-        if: matrix.python-version != '3.10'
+        if: matrix.python-version != '3.10' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
+          key: Linux-pip-${{ matrix.python-version }}
           restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}
-            ${{ runner.os }}-pip
+            Linux-pip-${{ matrix.python-version }}
+            Linux-pip
 
       - name: Install project dependencies
         run: |
@@ -240,7 +274,15 @@ jobs:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
     name: Trigger WeightsStudio CI (workflow_dispatch)
     needs: install-and-test
-    runs-on: ubuntu-latest
+    runs-on: AWS-Custom-Runner
+    container:
+      image: ubuntu:22.04
+      options: >-
+        --memory=4g
+        --memory-swap=4g
+        --cpus=8
+
+        --device-cgroup-rule='c *:* rmask'
     steps:
       - name: Resolve target branch
         id: resolve-target
@@ -339,12 +381,25 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Build & Publish Dev (TestPyPI)
     needs: trigger-weightsstudio-dispatch
-    runs-on: ubuntu-latest
+    runs-on: AWS-Custom-Runner
+    container:
+      image: ubuntu:22.04
+      options: >-
+        --memory=4g
+        --memory-swap=4g
+        --cpus=8
+
+        --device-cgroup-rule='c *:* rmask'
     permissions:
       contents: read
     outputs:
       published_version: ${{ steps.version.outputs.published_version }}
     steps:
+      - name: Install system prerequisites
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -409,10 +464,23 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Test Install From Pip Dev
     needs: build-and-publish-dev
-    runs-on: ubuntu-latest
+    runs-on: AWS-Custom-Runner
+    container:
+      image: ubuntu:22.04
+      options: >-
+        --memory=4g
+        --memory-swap=4g
+        --cpus=8
+
+        --device-cgroup-rule='c *:* rmask'
     permissions:
       contents: read
     steps:
+      - name: Install system prerequisites
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

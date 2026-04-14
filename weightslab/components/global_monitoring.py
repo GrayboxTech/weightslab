@@ -94,10 +94,19 @@ class PauseController:
 
     def wait_if_paused(self):
         # Called from main thread / model forward. Blocks if paused.
-        # Use timeout to allow signal handlers (Ctrl+C, SIGTERM) to be processed
-        while not self._event.wait(timeout=1):
-            # Timeout occurred, loop back to check pause state and allow signals to be handled
-            pass
+        # Use timeout to allow signal handlers (Ctrl+C, SIGTERM) to be processed.
+        # Also wakes up early when an evaluation request is pending so the
+        # training loop can reach run_pending_evaluation() at its next iteration.
+        while not self._event.wait(timeout=0.5):
+            # Timeout occurred – check for evaluation request before looping
+            try:
+                from weightslab.components.evaluation_controller import eval_controller
+                if eval_controller.is_pending():
+                    # An eval was requested while paused: unblock so the
+                    # training loop can reach run_pending_evaluation().
+                    return
+            except Exception:
+                pass
 
     def pause(self):
         self._event.clear()

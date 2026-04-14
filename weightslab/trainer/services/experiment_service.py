@@ -11,6 +11,7 @@ from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve
 from weightslab.backend import ledgers
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
+from weightslab.components.evaluation_controller import eval_controller
 
 
 # Logger
@@ -212,7 +213,9 @@ class ExperimentService:
                             metric_value=s.get("metric_value", 0.0),
                             experiment_hash=s.get("experiment_hash", "N.A."),
                             timestamp=int(s.get("timestamp", time.time())),
-                            sample_id=""  # No sample_id in aggregated mode
+                            sample_id="",  # No sample_id in aggregated mode
+                            is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
+                            split_name=str(s.get("split_name", "")),
                         )
                     )
         else:
@@ -233,7 +236,9 @@ class ExperimentService:
                         metric_value=s.get("metric_value", 0.0),
                         experiment_hash=s.get("experiment_hash", "N.A."),
                         timestamp=int(s.get("timestamp", time.time())),
-                        sample_id=""  # No sample_id in queue mode
+                        sample_id="",  # No sample_id in queue mode
+                        is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
+                        split_name=str(s.get("split_name", "")),
                     )
                 )
 
@@ -329,6 +334,59 @@ class ExperimentService:
                 message=f"Error: {str(e)}"
             )
 
+    # -------------------------------------------------------------------------
+    # Evaluation mode RPC handlers
+    # -------------------------------------------------------------------------
+    def TriggerEvaluation(self, request, context):
+        """Trigger an evaluation pass on the requested split.
+
+        This stores the evaluation request in the global eval_controller.
+        The actual pass runs in the training thread via ``run_pending_evaluation()``.
+        """
+        split_name = request.split_name or ""
+        tags = list(request.tags) if request.tags else []
+        use_full_set = bool(request.use_full_set)
+
+        if not split_name:
+            return pb2.TriggerEvaluationResponse(
+                success=False,
+                message="split_name is required",
+            )
+
+        accepted = eval_controller.request_evaluation(
+            split_name=split_name,
+            tags=tags,
+            use_full_set=use_full_set,
+        )
+
+        if accepted:
+            logger.info(
+                "[ExperimentService] TriggerEvaluation accepted: split=%s tags=%s full=%s",
+                split_name, tags, use_full_set,
+            )
+            return pb2.TriggerEvaluationResponse(
+                success=True,
+                message=f"Evaluation on '{split_name}' requested",
+            )
+        else:
+            return pb2.TriggerEvaluationResponse(
+                success=False,
+                message="Evaluation already in progress",
+            )
+
+    def GetEvaluationStatus(self, request, context):
+        """Return the current state of the evaluation controller."""
+        status = eval_controller.get_status()
+        progress = status.get("progress", {})
+        return pb2.GetEvaluationStatusResponse(
+            status=status.get("status", "idle"),
+            current=int(progress.get("current", 0)),
+            total=int(progress.get("total", 0)),
+            message=str(progress.get("message", "")),
+            error=str(status.get("error", "")),
+            split_name=str(status.get("split_name", "")),
+        )
+
     def _get_live_hyper_parameter_descs(self, components):
         hyper_parameter_descs = list(get_hyper_parameters_pb(self._ctx.hyper_parameters))
 
@@ -418,6 +476,40 @@ class ExperimentService:
                         key_path="experiment_dump_to_train_steps_ratio",
                         value=hyper_parameters.checkpont_frequency
                     )
+
+                # Process evaluation_mode toggle (UI button switch)
+                try:
+                    if hyper_parameters.HasField("evaluation_mode"):
+                        incoming_eval = bool(hyper_parameters.evaluation_mode)
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="evaluation_mode",
+                            value=incoming_eval,
+                        )
+                        if incoming_eval:
+                            # Switching to eval mode implies pausing training
+                            trainer = components.get("trainer")
+                            if trainer:
+                                trainer.pause()
+                                set_hyperparam(name=hp_name, key_path="is_training", value=False)
+                            logger.info("[WeightsLab] UI Command: Switch to EVALUATION Mode")
+                        else:
+                            logger.info("[WeightsLab] UI Command: Exit EVALUATION Mode")
+                except ValueError:
+                    pass
+
+                # If evaluation_config JSON was sent, trigger evaluation immediately
+                try:
+                    if hyper_parameters.HasField("evaluation_config") and hyper_parameters.evaluation_config:
+                        import json as _json
+                        cfg = _json.loads(hyper_parameters.evaluation_config)
+                        eval_controller.request_evaluation(
+                            split_name=cfg.get("split", ""),
+                            tags=cfg.get("tags", []),
+                            use_full_set=cfg.get("use_full_set", True),
+                        )
+                except (ValueError, Exception) as _ec:
+                    logger.debug("evaluation_config parse error: %s", _ec)
 
                 # Process auditor_mode FIRST so mode is set before we resume
                 try:
