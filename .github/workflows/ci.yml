@@ -1,5 +1,9 @@
 name: Code CI
 
+permissions:
+  contents: read
+  pull-requests: read
+
 on:
   push:
     branches: [ main, dev ]
@@ -56,11 +60,6 @@ jobs:
     if: needs.skip-push-when-pr-open.outputs.should_run == 'true' && (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     steps:
-      - name: Install system prerequisites
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
-          rm -rf /var/lib/apt/lists/*
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -88,10 +87,10 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.cache/ruff
-          key: Linux-py${{ steps.setup-python.outputs.python-version }}-lint-cache
+          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache
           restore-keys: |
-            Linux-py${{ steps.setup-python.outputs.python-version }}-
-            Linux-
+            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
+            ${{ runner.os }}-
 
       - name: Get changed Python files
         id: changed-files
@@ -165,11 +164,6 @@ jobs:
       matrix:
         python-version: ${{ github.event_name == 'pull_request' && fromJson('["3.10","3.11","3.12","3.13","3.14"]') || fromJson('["3.10"]') }}
     steps:
-      - name: Install system prerequisites
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
-          rm -rf /var/lib/apt/lists/*
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -182,21 +176,21 @@ jobs:
         run: mkdir -p ~/.cache/pip
 
       - name: Cache pip (save + restore, Python 3.10 only)
-        if: matrix.python-version == '3.10' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        if: matrix.python-version == '3.10'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: Linux-pip-${{ matrix.python-version }}
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
           restore-keys: |
-            Linux-pip-${{ matrix.python-version }}
-            Linux-pip
+            ${{ runner.os }}-pip-${{ matrix.python-version }}
+            ${{ runner.os }}-pip
 
       - name: Restore pip cache (no save, Python 3.11+)
-        if: matrix.python-version != '3.10' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        if: matrix.python-version != '3.10'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
-          key: Linux-pip-${{ matrix.python-version }}
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
           restore-keys: |
             ${{ runner.os }}-pip-${{ matrix.python-version }}
             ${{ runner.os }}-pip
@@ -351,11 +345,6 @@ jobs:
     outputs:
       published_version: ${{ steps.version.outputs.published_version }}
     steps:
-      - name: Install system prerequisites
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
-          rm -rf /var/lib/apt/lists/*
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -424,11 +413,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Install system prerequisites
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
-          rm -rf /var/lib/apt/lists/*
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
