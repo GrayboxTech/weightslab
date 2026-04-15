@@ -59,17 +59,17 @@ The granular statistics and interactive paradigm enable powerful workflows:
 <ul class="tabbed">
   <li>
       <a href="https://sandbox.graybx.com/mnist">
-      <p style="text-indent:20px;">MNIST</p>
+      <p style="text-indent:20px;">MNIST Demo</p>
     </a>
   </li>
   <li>
       <a href="https://sandbox.graybx.com/vla">
-      <p style="text-indent:20px;">VLA</p>
+      <p style="text-indent:20px;">VLA Demo</p>
     </a>
   </li>
   <li>
       <a href="https://sandbox.graybx.com/bdd8k/clean">
-      <p style="text-indent:20px;">BDD</p>
+      <p style="text-indent:20px;">BDD Demo</p>
     </a>
   </li>
 </ul>
