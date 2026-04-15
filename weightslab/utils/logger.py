@@ -418,6 +418,22 @@ class LoggerQueue:
     def get_signal_history_per_sample(self):
         """Reconstruct per-sample history as list-of-dicts from compact array storage."""
         result = {}
+        for graph_name, exps in self._signal_history_per_sample.items():
+            result[graph_name] = {}
+            for exp_hash, buf in exps.items():
+                entries = []
+                for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
+                    entries.append({
+                        "experiment_name": graph_name,
+                        "sample_id": sid,
+                        "model_age": step,
+                        "metric_name": graph_name,
+                        "metric_value": float(val),
+                        "experiment_hash": exp_hash,
+                    })
+                result[graph_name][exp_hash] = entries
+        return result
+
     def query_per_sample(self, graph_name: str, sample_ids=None, exp_hash=None):
         """Efficiently query per-sample history for specific sample IDs.
 

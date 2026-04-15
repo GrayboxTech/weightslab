@@ -2321,10 +2321,6 @@ def run_pending_evaluation(
                 print(f"    {k:30s} = {v:.6f}", flush=True)
             else:
                 print(f"    {k:30s} = {v}", flush=True)
-        summary = ", ".join(
-            f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
-            for k, v in result.items()
-        )
     else:
         print(f"  Status:       No metrics recorded", flush=True)
 
