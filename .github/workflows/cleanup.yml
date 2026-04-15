@@ -10,15 +10,7 @@ permissions:
 
 jobs:
   cleanup-caches:
-    runs-on: AWS-Custom-Runner
-    container:
-      image: ubuntu:22.04
-      options: >-
-        --memory=4g
-        --memory-swap=4g
-        --cpus=8
-
-        --device-cgroup-rule='c *:* rmask'
+    runs-on: ubuntu-latest
     steps:
       - name: Install prerequisites
         run: |
@@ -61,15 +53,7 @@ jobs:
           echo "Cache cleanup complete."
 
   cleanup-artifacts:
-    runs-on: AWS-Custom-Runner
-    container:
-      image: ubuntu:22.04
-      options: >-
-        --memory=4g
-        --memory-swap=4g
-        --cpus=8
-
-        --device-cgroup-rule='c *:* rmask'
+    runs-on: ubuntu-latest
     steps:
       - name: Install prerequisites
         run: |
