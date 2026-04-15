@@ -325,9 +325,15 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
                 continue
             if hp_is_training is not None:
                 controller_paused = pause_controller.is_paused()
-                controller_running = not controller_paused
+
+                # TODO (GP): The logic here is a bit tricky because we want to avoid race conditions where both the controller and the ledger are trying to update each other at the same time. The current approach is:
+                # - The controller is the source of truth for the paused state, since it's what actually blocks the training loop. The ledger's `is_training` is a reflection of that state for visibility in the UI and for external control.
+                # - On each loop, we check the ledger's `is_training` against the controller's state. If they are out of sync, we update the controller to match the ledger. This allows external changes to the ledger to take effect.
+                # - After potentially updating the controller, we check if the controller is paused and if this is not the first resume (to avoid overwriting the ledger state on startup). If the controller is paused but the ledger does
+                # not reflect that, we update the ledger to match the controller. This ensures that if the controller is paused externally (e.g. via pause_controller.pause()), the ledger state is updated accordingly.
 
                 # # Drive controller from ledger when ledger explicitly sets the flag
+                # controller_running = not controller_paused
                 # if isinstance(hp_is_training, bool):
                 #     if controller_paused and hp_is_training:
                 #         resumed = pause_controller.resume()

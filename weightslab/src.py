@@ -2327,7 +2327,6 @@ def run_pending_evaluation(
         )
     else:
         print(f"  Status:       No metrics recorded", flush=True)
-        summary = "no metrics recorded"
 
     print(f"{'='*70}\n", flush=True)
 
