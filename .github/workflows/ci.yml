@@ -1,9 +1,5 @@
 name: Code CI
 
-permissions:
-  contents: read
-  pull-requests: read
-
 on:
   push:
     branches: [ main, dev ]
