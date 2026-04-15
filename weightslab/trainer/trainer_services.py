@@ -120,6 +120,17 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.RestoreCheckpoint({request})")
         return self._exp_service.RestoreCheckpoint(request, context)
 
+    # -------------------------------------------------------------------------
+    # Evaluation mode
+    # -------------------------------------------------------------------------
+    def TriggerEvaluation(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.TriggerEvaluation({request})")
+        return self._exp_service.TriggerEvaluation(request, context)
+
+    def GetEvaluationStatus(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetEvaluationStatus({request})")
+        return self._exp_service.GetEvaluationStatus(request, context)
+
 
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
@@ -170,6 +181,21 @@ def grpc_serve(
             details_limit=watchdog_details_limit,
         )
         watchdog.register_lock("weightslab_rlock", weightslab_rlock)
+
+        # Eval thread monitor — no timeout, just liveness.  Lazy imports avoid
+        # circular dependencies since weightslab.src imports trainer code.
+        def _get_eval_controller():
+            from weightslab.components.evaluation_controller import eval_controller as _ec
+            return _ec
+
+        def _get_eval_thread():
+            import weightslab.src as _src
+            return _src._EVAL_WORKER_THREAD
+
+        watchdog.register_eval_monitor(
+            get_controller=_get_eval_controller,
+            get_thread=_get_eval_thread,
+        )
         watchdog_state = watchdog.rpc_state       # shared with RpcTimingAndWatchdogInterceptor
         server_manager = watchdog.server_manager  # shared with serving_thread_callback
     logger.debug(

@@ -76,6 +76,49 @@ Useful first commands:
 - ``hp`` and ``hp <name>``: inspect hyperparameter sets.
 - ``set_hp [hp_name] <key.path> <value>``: update one hyperparameter value.
 
+Evaluation from the CLI
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The CLI can trigger evaluation exactly as Weights Studio does.  Training is
+paused automatically, evaluation runs in a background thread, and the result
+is printed to the console when it completes.
+
+.. code-block:: text
+
+   # Evaluate on the first registered dataloader (WeightsLab picks it automatically)
+   wl> evaluate
+
+   # Evaluate on a specific split
+   wl> evaluate val_loader
+
+   # Evaluate only the first 50 batches
+   wl> evaluate test_loader --steps 50
+
+   # Evaluate only samples tagged "difficult"
+   wl> evaluate train_loader --tags difficult
+
+   # Poll progress
+   wl> eval_status
+
+   # Cancel
+   wl> cancel_eval
+
+   # Resume training afterwards
+   wl> resume
+
+Audit mode
+~~~~~~~~~~
+
+Audit mode lets you freeze weights (optimizer ``step()`` is skipped) while the
+training loop keeps running, so you can inspect gradients and activations
+without modifying the model.
+
+.. code-block:: text
+
+   wl> audit on     # enable  — optimizer steps are skipped
+   wl> audit off    # disable — normal training restores
+   wl> audit        # show current state
+
 
 Use Weightslab Studio (UI)
 -----------------------
