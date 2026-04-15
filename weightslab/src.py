@@ -753,7 +753,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             raise ValueError("Obj name should contains at least 'model', 'data', 'optimizer' or 'hp'.")
 
         fl = flag.lower()
-        if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters'):
+        if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters', 'config'):
             # If obj is a string, treat as a file path and start watcher
             try:
                 # Initialize CheckpointManager if we have a root dir (fallback to default root)

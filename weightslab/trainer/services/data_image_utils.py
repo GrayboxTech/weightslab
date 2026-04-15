@@ -71,6 +71,21 @@ def rle_encode_mask(mask_flat: np.ndarray) -> bytes:
     return buf.tobytes()
 
 
+def rle_decode_mask(data: bytes) -> np.ndarray:
+    """Decode a RLE-encoded mask back to a flat uint8 numpy array.
+
+    Expects bytes in the format: [value(1B), run_length(2B little-endian)] repeating,
+    as produced by rle_encode_mask.
+    """
+    if not data:
+        return np.empty(0, dtype=np.uint8)
+
+    n = len(data) // 3
+    buf = np.frombuffer(data[:n * 3], dtype=np.dtype([('val', 'u1'), ('run', '<u2')]))
+    # np.repeat handles large masks correctly (no uint16 overflow) and is fully vectorised.
+    return np.repeat(buf['val'], buf['run'].astype(np.intp))
+
+
 def create_data_stat(name, stat_type, shape=None, value=None, value_string="", thumbnail=b""):
     """Helper to create a DataStat proto with all fields properly initialized.
 
