@@ -11,7 +11,7 @@ import os
 import logging
 import threading
 
-from .src import watch_or_edit, serve, keep_serving, save_signals, save_group_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, compute_signals, SignalContext, clear_all
+from .src import watch_or_edit, serve, keep_serving, save_signals, save_group_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, eval_fn, compute_signals, SignalContext, clear_all, run_pending_evaluation, trigger_pending_evaluation_async
 from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory
 from .components.global_monitoring import guard_training_context, guard_testing_context
@@ -75,7 +75,10 @@ __all__ = [
     "get_discarded_samples",
     "SignalContext",
     "clear_all",
-	"guard_training_context", 
+    "run_pending_evaluation",
+	"eval_fn",
+	"trigger_pending_evaluation_async",
+	"guard_training_context",
 	"guard_testing_context",
 
     "_BANNER",

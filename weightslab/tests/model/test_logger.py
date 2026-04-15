@@ -366,5 +366,64 @@ class TestSrcLogSignal(unittest.TestCase):
         mock_logger.add_scalars.assert_not_called()
 
 
+class TestLoggerQueueEvaluationMetadata(unittest.TestCase):
+    def test_stop_evaluation_mode_persists_split_tags_and_marker_flag(self):
+        chkpt = MagicMock()
+        chkpt.get_current_experiment_hash.return_value = "exp-base-001"
+
+        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+            logger = LoggerQueue(register=False)
+
+        logger.start_evaluation_mode("train_loader", "exp-base-001_1", evaluation_tags=["EvalSubset", "priority"])
+        logger.add_scalars(
+            "eval/accuracy",
+            {"eval/accuracy": 0.75},
+            global_step=12,
+            signal_per_sample={1: 0.5, 2: 1.0},
+            aggregate_by_step=False,
+        )
+
+        results = logger.stop_evaluation_mode(model_age=12)
+
+        self.assertAlmostEqual(results["eval/accuracy"], 0.75, places=6)
+        history_entry = logger.get_signal_history()["eval/accuracy"]["exp-base-001_1"][12][0]
+        self.assertTrue(history_entry["is_evaluation_marker"])
+        self.assertEqual(history_entry["split_name"], "train_loader")
+        self.assertEqual(history_entry["evaluation_tags"], ["EvalSubset", "priority"])
+        self.assertIn("timestamp", history_entry)
+
+        queue_entry = logger.get_and_clear_queue()[0]
+        self.assertEqual(queue_entry["evaluation_tags"], ["EvalSubset", "priority"])
+        self.assertTrue(queue_entry["is_evaluation_marker"])
+
+    def test_set_point_note_updates_history_and_pending_queue(self):
+        chkpt = MagicMock()
+        chkpt.get_current_experiment_hash.return_value = "exp-note-001"
+
+        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+            logger = LoggerQueue(register=False)
+
+        logger.add_scalars(
+            "train/loss",
+            {"train/loss": 0.42},
+            global_step=7,
+            signal_per_sample={100: 0.42},
+            aggregate_by_step=False,
+        )
+
+        updated = logger.set_point_note("train/loss", "exp-note-001", 7, "needs review")
+        self.assertTrue(updated)
+
+        history_entry = logger.get_signal_history()["train/loss"]["exp-note-001"][7][0]
+        self.assertEqual(history_entry["point_note"], "needs review")
+
+        queue_entry = logger.get_and_clear_queue()[0]
+        self.assertEqual(queue_entry["point_note"], "needs review")
+
+        cleared = logger.set_point_note("train/loss", "exp-note-001", 7, "")
+        self.assertTrue(cleared)
+        self.assertNotIn("point_note", logger.get_signal_history()["train/loss"]["exp-note-001"][7][0])
+
+
 if __name__ == "__main__":
     unittest.main()
