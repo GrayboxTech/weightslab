@@ -92,16 +92,15 @@ class PauseController:
         # Get the proxy that wraps our dict
         self.hyperparams = get_hyperparams()
 
-    def wait_if_paused(self):
+    def wait_if_paused(self, skip_pause: bool = False):
         # Called from main thread / model forward. Blocks if paused.
         # Use timeout to allow signal handlers (Ctrl+C, SIGTERM) to be processed.
-        # Also wakes up early when an evaluation request is pending so the
-        # training loop can reach run_pending_evaluation() at its next iteration.
+        # Also wakes up early when an evaluation is pending/running so the
+        # training loop and dataloaders can service evaluation mode.
         while not self._event.wait(timeout=0.5):
             # Timeout occurred – check for evaluation request before looping
             try:
-                from weightslab.components.evaluation_controller import eval_controller
-                if eval_controller.is_pending():
+                if skip_pause:
                     # An eval was requested while paused: unblock so the
                     # training loop can reach run_pending_evaluation().
                     return

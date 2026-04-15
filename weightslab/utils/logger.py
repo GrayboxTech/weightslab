@@ -1,4 +1,5 @@
 import torch as th
+import time
 from array import array as _array
 from copy import deepcopy
 
@@ -38,6 +39,7 @@ class LoggerQueue:
         self._eval_mode_active: bool = False
         self._eval_mode_hash: str = ""
         self._eval_mode_split: str = ""
+        self._eval_mode_tags: list[str] = []
         self._eval_accum: dict = {}  # {graph_name: [sum, count]}
 
         lg = None
@@ -82,6 +84,7 @@ class LoggerQueue:
             "metric_name": graph_name,
             "metric_value": metric_value,
             "experiment_hash": exp_hash,
+            "timestamp": int(time.time()),
         }
 
         if graph_name not in self._signal_history:
@@ -138,7 +141,7 @@ class LoggerQueue:
                         pass
         return max_count + 1
 
-    def start_evaluation_mode(self, split_name: str, eval_hash: str) -> None:
+    def start_evaluation_mode(self, split_name: str, eval_hash: str, evaluation_tags=None) -> None:
         """Redirect subsequent add_scalars() calls into the evaluation buffer.
 
         While evaluation mode is active, signals are NOT added to the normal
@@ -156,6 +159,7 @@ class LoggerQueue:
         self._eval_mode_active = True
         self._eval_mode_hash = eval_hash
         self._eval_mode_split = split_name
+        self._eval_mode_tags = list(evaluation_tags or [])
         self._eval_accum = {}
 
     def stop_evaluation_mode(self, model_age: int) -> dict:
@@ -178,6 +182,7 @@ class LoggerQueue:
         self._eval_mode_active = False
         eval_hash = self._eval_mode_hash
         split_name = self._eval_mode_split
+        evaluation_tags = list(self._eval_mode_tags)
         results = {}
 
         for graph_name, (total, count) in self._eval_accum.items():
@@ -201,8 +206,10 @@ class LoggerQueue:
                 "metric_name": graph_name,
                 "metric_value": avg,
                 "experiment_hash": eval_hash,
+                "timestamp": int(time.time()),
                 "is_evaluation_marker": True,
                 "split_name": split_name,
+                "evaluation_tags": evaluation_tags,
             }
             self._signal_history[graph_name][eval_hash][model_age].append(entry)
             self._pending_queue.append(entry)
@@ -210,7 +217,56 @@ class LoggerQueue:
         self._eval_accum = {}
         self._eval_mode_hash = ""
         self._eval_mode_split = ""
+        self._eval_mode_tags = []
         return results
+
+    def abort_evaluation_mode(self) -> None:
+        """Abort evaluation mode and drop all in-progress evaluation data.
+
+        This is used when an evaluation is canceled or timed out.
+        It clears the accumulation buffer and removes any per-sample history
+        that may have been written under the in-flight evaluation hash.
+        """
+        if not self._eval_mode_active:
+            return
+
+        eval_hash = self._eval_mode_hash
+        self._eval_mode_active = False
+        self._eval_accum = {}
+        self._eval_mode_hash = ""
+        self._eval_mode_split = ""
+        self._eval_mode_tags = []
+
+        if not eval_hash:
+            return
+
+        self.remove_evaluation_hash(eval_hash)
+
+    def remove_evaluation_hash(self, eval_hash: str) -> None:
+        """Remove all history/queue entries tied to a specific evaluation hash."""
+        eval_hash = str(eval_hash or "").strip()
+        if not eval_hash:
+            return
+
+        # Remove any marker/history entries tied to the evaluation hash.
+        for graph_name in list(self._signal_history.keys()):
+            try:
+                self._signal_history[graph_name].pop(eval_hash, None)
+            except Exception:
+                pass
+
+        # Remove per-sample traces recorded under the same hash.
+        for graph_name in list(self._signal_history_per_sample.keys()):
+            try:
+                self._signal_history_per_sample[graph_name].pop(eval_hash, None)
+            except Exception:
+                pass
+
+        # Drop queued points that reference this hash.
+        self._pending_queue = [
+            entry for entry in self._pending_queue
+            if str(entry.get("experiment_hash", "")) != eval_hash
+        ]
 
     # Main method for adding signals to the logger - this is called by the WeightsLabCallback and is responsible for updating
     # history and queueing signals for WeightsStudio
@@ -362,22 +418,6 @@ class LoggerQueue:
     def get_signal_history_per_sample(self):
         """Reconstruct per-sample history as list-of-dicts from compact array storage."""
         result = {}
-        for graph_name, exps in self._signal_history_per_sample.items():
-            result[graph_name] = {}
-            for exp_hash, buf in exps.items():
-                entries = []
-                for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
-                    entries.append({
-                        "experiment_name": graph_name,
-                        "sample_id": sid,
-                        "model_age": step,
-                        "metric_name": graph_name,
-                        "metric_value": float(val),
-                        "experiment_hash": exp_hash,
-                    })
-                result[graph_name][exp_hash] = entries
-        return result
-
     def query_per_sample(self, graph_name: str, sample_ids=None, exp_hash=None):
         """Efficiently query per-sample history for specific sample IDs.
 
@@ -457,6 +497,50 @@ class LoggerQueue:
         self._pending_queue.clear()
         return queue_copy
 
+    def set_point_note(self, metric_name: str, experiment_hash: str, model_age: int, note: str) -> bool:
+        """Attach or clear a note for a specific signal point identified by metric/hash/step."""
+        metric_name = str(metric_name or "")
+        experiment_hash = str(experiment_hash or "")
+        if not metric_name or not experiment_hash:
+            return False
+
+        normalized_step = int(model_age)
+        cleaned_note = str(note or "").strip()
+        updated = False
+
+        entries = (
+            self._signal_history.get(metric_name, {})
+            .get(experiment_hash, {})
+            .get(normalized_step, [])
+        )
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if cleaned_note:
+                entry["point_note"] = cleaned_note
+            else:
+                entry.pop("point_note", None)
+            updated = True
+
+        for entry in self._pending_queue:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("metric_name", "")) != metric_name:
+                continue
+            if str(entry.get("experiment_hash", "")) != experiment_hash:
+                continue
+            try:
+                if int(entry.get("model_age", -1)) != normalized_step:
+                    continue
+            except Exception:
+                continue
+            if cleaned_note:
+                entry["point_note"] = cleaned_note
+            else:
+                entry.pop("point_note", None)
+
+        return updated
+
     # Logger saving/loading methods for checkpoint persistence (used in WeightsLabCallback)
     def load_signal_history(self, signals):
         """Load signal history into memory (supports legacy and nested formats)."""
@@ -497,6 +581,7 @@ class LoggerQueue:
                             signal_entry.setdefault("experiment_name", metric_name)
                             signal_entry.setdefault("model_age", step)
                             signal_entry.setdefault("experiment_hash", exp_hash)
+                            signal_entry.setdefault("timestamp", int(time.time()))
                             _append_signal_entry(metric_name, exp_hash, step, signal_entry)
             return
 
@@ -514,6 +599,7 @@ class LoggerQueue:
                 signal_entry.setdefault("experiment_name", metric_name)
                 signal_entry.setdefault("model_age", step)
                 signal_entry.setdefault("experiment_hash", exp_hash)
+                signal_entry.setdefault("timestamp", int(time.time()))
                 self.graph_names.add(metric_name)
                 _append_signal_entry(metric_name, exp_hash, step, signal_entry)
 

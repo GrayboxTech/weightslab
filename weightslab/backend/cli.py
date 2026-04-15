@@ -107,8 +107,8 @@ def _handle_command(cmd: str) -> Any:
                 'ok': True,
                 'description': 'weightslab CLI - available commands and usage',
                 'commands': {
-                    'pause / p': 'Pause training. Syntax: pause [model_name]',
-                    'resume / r': 'Resume training. Syntax: resume [model_name] ',
+                    'pause / p': 'Pause training. Syntax: pause',
+                    'resume / r': 'Resume training. Syntax: resume',
                     'status': 'Show basic status: registered models and optimizers',
                     'list_models': 'List registered model names in the ledger',
                     'list_optimizers': 'List registered optimizer names in the ledger',
@@ -119,6 +119,19 @@ def _handle_command(cmd: str) -> Any:
                     'discard': 'Discard data samples. Syntax: discard <uid> [uid2 ...] [--loader loader_name]',
                     'undiscard': 'Un-discard data samples. Syntax: undiscard <uid> [uid2 ...] [--loader loader_name]',
                     'add_tag': 'Add tag to data sample. Syntax: add_tag <uid> <tag> [--loader loader_name]',
+                    'evaluate / eval': (
+                        'Pause training and trigger an evaluation pass. '
+                        'Syntax: evaluate [split_name] [--steps N] [--tags tag1,tag2]. '
+                        'Default split: first registered dataloader. '
+                        'Evaluation runs in a background thread; use eval_status to poll.'
+                    ),
+                    'eval_status / es': 'Poll the current evaluation status and progress.',
+                    'cancel_eval / ce': 'Cancel a running or pending evaluation.',
+                    'audit / audit on / audit off': (
+                        'Toggle auditor mode. In audit mode the optimizer step is skipped, '
+                        'letting you inspect gradients/activations without modifying weights. '
+                        'Syntax: audit [on|off]. No argument shows current state.'
+                    ),
                     'hp / hyperparams': 'List or show hyperparameters. Syntax: hp -> list, hp <name> -> show',
                     'quit / exit': 'Close the client connection'
                 },
@@ -126,6 +139,19 @@ def _handle_command(cmd: str) -> Any:
                     'list': 'hp',
                     'show': 'hp fashion_mnist',
                     'set': "set_hp <hp_name?> <key.path> <value>  # e.g. set_hp fashion_mnist data.train_loader.batch_size 32",
+                },
+                'evaluate_examples': {
+                    'eval on default split': 'evaluate',
+                    'eval on val_loader': 'evaluate val_loader',
+                    'eval first 50 batches': 'evaluate test_loader --steps 50',
+                    'eval tagged samples': 'evaluate train_loader --tags difficult,outlier',
+                    'check progress': 'eval_status',
+                    'cancel running eval': 'cancel_eval',
+                },
+                'audit_examples': {
+                    'enable audit mode': 'audit on',
+                    'disable audit mode': 'audit off',
+                    'check current state': 'audit',
                 },
                 'data_examples': {
                     'list all UIDs': 'list_uids',
@@ -630,6 +656,123 @@ def _handle_command(cmd: str) -> Any:
                     return {'ok': False, 'error': str(e)}
             except Exception as e:
                 return {'ok': False, 'error': str(e)}
+
+        # ------------------------------------------------------------------
+        # evaluate / eval — pause then request an evaluation pass
+        # ------------------------------------------------------------------
+        if verb in ('evaluate', 'eval', 'ev'):
+            # Syntax: evaluate [split_name] [--steps N] [--tags tag1,tag2]
+            split_name = None
+            max_steps = None
+            tags = []
+            use_full_set = True
+
+            i = 1
+            while i < len(parts):
+                if parts[i] == '--steps' and i + 1 < len(parts):
+                    try:
+                        max_steps = int(parts[i + 1])
+                        i += 2
+                    except ValueError:
+                        return {'ok': False, 'error': 'Invalid --steps value'}
+                elif parts[i] == '--tags' and i + 1 < len(parts):
+                    tags = [t.strip() for t in parts[i + 1].split(',') if t.strip()]
+                    use_full_set = False
+                    i += 2
+                elif not parts[i].startswith('--'):
+                    split_name = parts[i]
+                    i += 1
+                else:
+                    i += 1
+
+            # Default split: first registered dataloader
+            if split_name is None:
+                known = GLOBAL_LEDGER.list_dataloaders()
+                split_name = known[0] if known else 'test_loader'
+
+            # Pause training first (same as WS trigger)
+            pause_controller.pause()
+            try:
+                set_hyperparam(name=name, value=False, key_path='is_training')
+            except Exception:
+                pass
+
+            # Request evaluation via the shared controller
+            from weightslab.components.evaluation_controller import eval_controller
+            accepted = eval_controller.request_evaluation(
+                split_name=split_name,
+                tags=tags,
+                use_full_set=use_full_set,
+                max_steps=max_steps,
+            )
+
+            if not accepted:
+                return {'ok': False, 'error': 'Evaluation already running or could not be accepted'}
+
+            # Kick background worker (mirrors gRPC _kick_eval_worker)
+            try:
+                from weightslab import src as wl_src
+                wl_src.trigger_pending_evaluation_async()
+            except Exception as _e:
+                logger.warning("trigger_pending_evaluation_async failed from CLI: %s", _e)
+
+            return {
+                'ok': True,
+                'action': 'evaluation_requested',
+                'split_name': split_name,
+                'max_steps': max_steps,
+                'tags': tags,
+                'use_full_set': use_full_set,
+                'note': (
+                    'Training paused. Evaluation runs in background. '
+                    'Use eval_status / es to poll progress, '
+                    'cancel_eval / ce to cancel, '
+                    'resume / r to resume training after completion.'
+                ),
+            }
+
+        # ------------------------------------------------------------------
+        # eval_status / es — poll evaluation progress
+        # ------------------------------------------------------------------
+        if verb in ('eval_status', 'es', 'evaluation_status'):
+            from weightslab.components.evaluation_controller import eval_controller
+            status = eval_controller.get_status()
+            return {'ok': True, **status}
+
+        # ------------------------------------------------------------------
+        # cancel_eval / ce — cancel a pending or running evaluation
+        # ------------------------------------------------------------------
+        if verb in ('cancel_eval', 'ce', 'cancel_evaluation'):
+            from weightslab.components.evaluation_controller import eval_controller
+            canceled = eval_controller.request_cancel('Canceled via CLI')
+            if canceled:
+                return {'ok': True, 'action': 'cancel_requested'}
+            return {'ok': False, 'error': 'No active evaluation to cancel'}
+
+        # ------------------------------------------------------------------
+        # audit [on|off] — toggle auditor mode
+        # ------------------------------------------------------------------
+        if verb == 'audit':
+            if len(parts) == 1:
+                # Show current state
+                try:
+                    hp = GLOBAL_LEDGER.get_hyperparams(name)
+                    current = bool(hp.get('auditor_mode', False)) if hasattr(hp, 'get') else False
+                except Exception:
+                    current = False
+                return {'ok': True, 'auditor_mode': current}
+
+            toggle = parts[1].lower()
+            if toggle in ('on', 'true', '1', 'enable', 'enabled'):
+                value = True
+            elif toggle in ('off', 'false', '0', 'disable', 'disabled'):
+                value = False
+            else:
+                return {'ok': False, 'error': f'Unknown audit toggle "{toggle}". Use: audit on  or  audit off'}
+
+            set_hyperparam(name=name, value=value, key_path='auditor_mode')
+            label = 'enabled' if value else 'disabled'
+            return {'ok': True, 'auditor_mode': value, 'action': f'audit_{label}'}
 
         # Editing hyperparameters via CLI is intentionally disabled.
         return {'ok': False, 'error': f'unknown_command: {verb}'}

@@ -16,6 +16,7 @@ It also supports:
 - checkpoint-based data loading and reproducible iterator restoration
 """
 import os
+import threading
 import torch
 import logging
 from typing import Any, Iterator, Optional
@@ -276,6 +277,19 @@ class WeightsLabDataSampler(Sampler):
 
     def __len__(self):
         """Return the number of samples or batches."""
+        # In evaluation mode with an allow-list, compute the exact filtered
+        # cardinality so progress/timeout logic uses the real bounded set size.
+        if self._eval_allow_list is not None:
+            total = sum(1 for _ in self._iter_filtered_indices(list(range(len(self.data_source)))))
+
+            if self.batch_size is not None:
+                b = max(1, int(self.batch_size))
+                if self.drop_last:
+                    return total // b
+                return (total + b - 1) // b
+
+            return total
+
         # Start with total dataset size
         total = len(self.data_source)
 
@@ -750,6 +764,12 @@ class DataLoaderInterface:
     def _wait_if_paused(self) -> None:
         """If the global pause controller is paused, wait until resumed."""
         try:
+            # Only the evaluation worker thread itself bypasses pause — this way
+            # training threads still respect the pause state even while eval runs,
+            # and only the batches fetched by the eval thread are unblocked.
+            if threading.current_thread().name == "WL-EvalWorker":
+                return
+
             pause_controller.wait_if_paused()
             if self.model != None:
                 m_age = self.model.get_age()

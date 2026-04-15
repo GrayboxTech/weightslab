@@ -181,6 +181,31 @@ Data and Cache
        on demand via the CLI).
 
 
+Evaluation Mode
+~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_EVAL_TIMEOUT_MULTIPLIER``
+     - ``1.3``
+     - Dynamic timeout factor for user-triggered evaluation passes.
+       Timeout is computed as ``avg_batch_seconds * nb_batches * multiplier``.
+       Keep ``1.3`` for a 30%% safety margin, increase for slower/unstable
+       hardware, decrease for stricter timeout behavior.
+   * - ``WEIGHTSLAB_EVAL_TIMEOUT_MIN_SECONDS``
+     - ``5``
+     - Minimum timeout floor (seconds) applied to evaluation runs.
+   * - ``WEIGHTSLAB_EVAL_TIMEOUT_SECONDS``
+     - ``0``
+     - Optional absolute timeout override in seconds.
+       ``0`` disables the absolute override and uses the dynamic formula only.
+
+
 AI / LLM API Keys
 ~~~~~~~~~~~~~~~~~
 
@@ -346,6 +371,3 @@ These variables are injected into the browser bundle at build / dev time.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
-
-
-

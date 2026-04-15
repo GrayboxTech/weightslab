@@ -5,6 +5,11 @@ Combines:
                         in the holder thread when the lock is held too long.
   2. gRPC monitoring  — detects stuck in-flight RPCs via RpcWatchdogState and
                         requests a server restart when the threshold is exceeded.
+  3. Eval thread monitoring — checks that the evaluation worker thread is still
+                        alive whenever eval_controller reports is_running() or
+                        is_pending().  If the thread is dead the controller is
+                        transitioned to error state automatically.  No timeout is
+                        applied — evaluation may run for an arbitrarily long time.
 
 Typical usage (inside grpc_serve):
 
@@ -15,6 +20,10 @@ Typical usage (inside grpc_serve):
         exit_on_stuck=False,
     )
     watchdog.register_lock("weightslab_rlock", weightslab_rlock)
+    watchdog.register_eval_monitor(
+        get_controller=lambda: eval_controller,
+        get_thread=lambda: _EVAL_WORKER_THREAD,
+    )
     watchdog.start()
     # watchdog.rpc_state  → pass to RpcTimingAndWatchdogInterceptor
     # watchdog.server_manager → used by serving_thread_callback
@@ -23,7 +32,7 @@ Typical usage (inside grpc_serve):
 import os
 import logging
 import threading
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from weightslab.watchdog.log_level import WATCHDOG  # noqa: F401 — registers level
 from weightslab.watchdog.lock_monitor import MonitoredRLock, raise_in_thread
@@ -57,6 +66,9 @@ class WeighlabsWatchdog:
         # Lock monitoring
         self._monitored_locks: Dict[str, MonitoredRLock] = {}
 
+        # Eval thread monitoring (no timeout — evaluation can run indefinitely)
+        self._eval_monitors: List[Tuple[Callable, Callable]] = []
+
         # Internal state
         self._unhealthy_count: int = 0
         self._stop = threading.Event()
@@ -69,6 +81,25 @@ class WeighlabsWatchdog:
     def register_lock(self, name: str, lock: MonitoredRLock) -> None:
         """Register a MonitoredRLock to be polled by the watchdog."""
         self._monitored_locks[name] = lock
+
+    def register_eval_monitor(
+        self,
+        get_controller: Callable,
+        get_thread: Callable,
+    ) -> None:
+        """Register an evaluation controller/thread pair for liveness monitoring.
+
+        The watchdog will call ``mark_error()`` on the controller when it reports
+        ``is_running()`` or ``is_pending()`` but the worker thread is no longer
+        alive.  **No timeout is applied** — evaluation is allowed to run for as
+        long as needed.
+
+        Args:
+            get_controller: Zero-arg callable that returns the EvaluationController.
+            get_thread:      Zero-arg callable that returns the current worker
+                             ``threading.Thread`` (or ``None`` if not started yet).
+        """
+        self._eval_monitors.append((get_controller, get_thread))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -112,12 +143,16 @@ class WeighlabsWatchdog:
                 self._check_grpc()
             except Exception:
                 logger.exception("[Watchdog] Unexpected error in gRPC check")
+            try:
+                self._check_eval_threads()
+            except Exception:
+                logger.exception("[Watchdog] Unexpected error in eval thread check")
 
     # ------------------------------------------------------------------
     # Lock monitoring
     # ------------------------------------------------------------------
 
-    def _check_locks(self) -> None:
+    def _check_locks(self) -> None:  # noqa: C901
         for name, lock in list(self._monitored_locks.items()):
             duration = lock.held_duration()
             if duration is None:
@@ -140,6 +175,37 @@ class WeighlabsWatchdog:
                             "[Watchdog] Could not deliver interrupt to tid=%s — thread may have already exited",
                             tid,
                         )
+
+    # ------------------------------------------------------------------
+    # Eval thread monitoring
+    # ------------------------------------------------------------------
+
+    def _check_eval_threads(self) -> None:
+        """Detect a dead eval worker whose controller is still in running/pending state."""
+        for get_controller, get_thread in self._eval_monitors:
+            try:
+                controller = get_controller()
+                thread: Optional[threading.Thread] = get_thread()
+            except Exception:
+                logger.exception("[Watchdog] Failed to obtain eval monitor objects")
+                continue
+
+            if not (controller.is_running() or controller.is_pending()):
+                continue  # nothing active — nothing to check
+
+            if thread is not None and thread.is_alive():
+                continue  # worker is alive — all good
+
+            # Controller believes eval is active but the thread is dead or missing.
+            status = controller.get_status() if hasattr(controller, "get_status") else "unknown"
+            logger.watchdog(  # type: ignore[attr-defined]
+                "[Watchdog] Eval controller is '%s' but worker thread is dead — marking error",
+                status,
+            )
+            try:
+                controller.mark_error("Evaluation worker terminated unexpectedly")
+            except Exception:
+                logger.exception("[Watchdog] Failed to mark eval controller error")
 
     # ------------------------------------------------------------------
     # gRPC monitoring

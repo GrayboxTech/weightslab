@@ -37,6 +37,7 @@ _STATUS_IDLE = "idle"
 _STATUS_REQUESTED = "requested"
 _STATUS_RUNNING = "running"
 _STATUS_DONE = "done"
+_STATUS_CANCELED = "canceled"
 _STATUS_ERROR = "error"
 
 
@@ -54,6 +55,7 @@ class EvaluationController:
         self._progress: Dict[str, Any] = {"current": 0, "total": 0, "message": ""}
         self._result: Optional[Dict[str, float]] = None
         self._error: str = ""
+        self._cancel_requested: bool = False
         # Notification queue – drained by gRPC GetLatestLoggerData via special
         # LoggerDataPoints with metric_name == "__eval_notification__"
         self._notification_queue: List[Dict[str, Any]] = []
@@ -68,6 +70,7 @@ class EvaluationController:
         split_name: str,
         tags: List[str],
         use_full_set: bool,
+        max_steps: Optional[int] = None,
     ) -> bool:
         """Register an evaluation request.
 
@@ -91,11 +94,13 @@ class EvaluationController:
                 "tags": list(tags),
                 "use_full_set": use_full_set,
                 "was_paused": was_paused,
+                "max_steps": int(max_steps) if isinstance(max_steps, int) and max_steps > 0 else None,
             }
             self._status = _STATUS_REQUESTED
             self._progress = {"current": 0, "total": 0, "message": "Evaluation pending…"}
             self._result = None
             self._error = ""
+            self._cancel_requested = False
 
             tag_info = f" [tags: {tags}]" if tags and not use_full_set else ""
             self._notification_queue.append({
@@ -112,8 +117,6 @@ class EvaluationController:
 
             # Wake the training thread so it can call run_pending_evaluation()
             self._wake_event.set()
-            if was_paused:
-                pause_controller._event.set()   # Temporarily unblock wait_if_paused
 
         return True
 
@@ -126,6 +129,19 @@ class EvaluationController:
         Returns None if no evaluation is pending.
         """
         with self._lock:
+            if self._status == _STATUS_REQUESTED and self._cancel_requested:
+                self._status = _STATUS_CANCELED
+                self._error = "Evaluation canceled before start"
+                self._cancel_requested = False
+                self._notification_queue.append({
+                    "type": "eval_canceled",
+                    "message": "Evaluation canceled before start",
+                    "timestamp": time.time(),
+                })
+                self._wake_event.clear()
+                self._request = None
+                return None
+
             if self._status == _STATUS_REQUESTED and self._request is not None:
                 req = dict(self._request)
                 self._status = _STATUS_RUNNING
@@ -142,6 +158,33 @@ class EvaluationController:
         with self._lock:
             return self._status == _STATUS_RUNNING
 
+    def request_cancel(self, reason: str = "Canceled by user") -> bool:
+        """Request cancellation of a pending/running evaluation.
+
+        Returns True when cancellation was accepted, False when there is no
+        active evaluation to cancel.
+        """
+        with self._lock:
+            if self._status in {_STATUS_REQUESTED, _STATUS_RUNNING}:
+                self._cancel_requested = True
+                self._notification_queue.append({
+                    "type": "eval_cancel_requested",
+                    "message": reason,
+                    "timestamp": time.time(),
+                })
+                self._progress = {
+                    "current": self._progress.get("current", 0),
+                    "total": self._progress.get("total", 0),
+                    "message": reason,
+                }
+                self._wake_event.set()
+                return True
+        return False
+
+    def is_cancel_requested(self) -> bool:
+        with self._lock:
+            return bool(self._cancel_requested)
+
     # ------------------------------------------------------------------
     # Progress reporting (called from run_pending_evaluation loop)
     # ------------------------------------------------------------------
@@ -156,6 +199,7 @@ class EvaluationController:
         with self._lock:
             self._status = _STATUS_DONE
             self._result = result or {}
+            self._cancel_requested = False
             self._notification_queue.append({
                 "type": "eval_done",
                 "message": "Evaluation completed",
@@ -164,16 +208,61 @@ class EvaluationController:
             })
             logger.info("[EvalController] Evaluation done: %s", result)
 
+    def mark_done_unless_canceled(self, result: Optional[Dict[str, float]] = None) -> bool:
+        """Mark evaluation as done unless a cancel was requested.
+
+        Returns:
+            True if marked done, False if a pending cancel was converted to canceled.
+        """
+        with self._lock:
+            if self._cancel_requested:
+                reason = "Evaluation canceled by user"
+                self._status = _STATUS_CANCELED
+                self._error = reason
+                self._cancel_requested = False
+                self._notification_queue.append({
+                    "type": "eval_canceled",
+                    "message": reason,
+                    "timestamp": time.time(),
+                })
+                logger.info("[EvalController] Evaluation canceled (late-finalization): %s", reason)
+                return False
+
+            self._status = _STATUS_DONE
+            self._result = result or {}
+            self._cancel_requested = False
+            self._notification_queue.append({
+                "type": "eval_done",
+                "message": "Evaluation completed",
+                "result": self._result,
+                "timestamp": time.time(),
+            })
+            logger.info("[EvalController] Evaluation done: %s", result)
+            return True
+
     def mark_error(self, error: str) -> None:
         with self._lock:
             self._status = _STATUS_ERROR
             self._error = error
+            self._cancel_requested = False
             self._notification_queue.append({
                 "type": "eval_error",
                 "message": f"Evaluation failed: {error}",
                 "timestamp": time.time(),
             })
             logger.error("[EvalController] Evaluation error: %s", error)
+
+    def mark_canceled(self, reason: str = "Evaluation canceled") -> None:
+        with self._lock:
+            self._status = _STATUS_CANCELED
+            self._error = reason
+            self._cancel_requested = False
+            self._notification_queue.append({
+                "type": "eval_canceled",
+                "message": reason,
+                "timestamp": time.time(),
+            })
+            logger.info("[EvalController] Evaluation canceled: %s", reason)
 
     def reset(self) -> None:
         """Return to idle state (e.g. after the UI acknowledges completion)."""
@@ -183,6 +272,7 @@ class EvaluationController:
             self._progress = {"current": 0, "total": 0, "message": ""}
             self._result = None
             self._error = ""
+            self._cancel_requested = False
             self._wake_event.clear()
 
     # ------------------------------------------------------------------
