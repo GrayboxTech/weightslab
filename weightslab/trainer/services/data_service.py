@@ -24,7 +24,6 @@ try:
     from omegaconf import DictConfig
 except ImportError:
     DictConfig = dict # type: ignore
-    logger.warning("OmegaConf not found, DictConfig will be treated as dict. Install OmegaConf for full functionality.")
 
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
