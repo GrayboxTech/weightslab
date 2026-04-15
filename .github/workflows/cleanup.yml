@@ -16,7 +16,8 @@ jobs:
       options: >-
         --memory=4g
         --memory-swap=4g
-        --cpus=8
+        --cpus=8
+
         --device-cgroup-rule='c *:* rmask'
     steps:
       - name: Install prerequisites
@@ -66,7 +67,8 @@ jobs:
       options: >-
         --memory=4g
         --memory-swap=4g
-        --cpus=8
+        --cpus=8
+
         --device-cgroup-rule='c *:* rmask'
     steps:
       - name: Install prerequisites
