@@ -78,7 +78,7 @@ The granular statistics and interactive paradigm enable powerful workflows:
 ## Getting Started
 ### Installation
 
-Define a Python environment (Python >= 3.10, <3.15)
+Define a Python environment (Python >=3.10, <3.15)
 ```bash
 python -m venv weightslab_venv
 ./weightslab_venv/Scripts/activate
