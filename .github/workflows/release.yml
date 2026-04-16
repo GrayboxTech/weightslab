@@ -6,30 +6,73 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-publish-main:
-    name: Build & Publish Main (PyPI)
+  detect-release-channel:
+    name: Detect Release Channel
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     outputs:
-      published_version: ${{ steps.main-version.outputs.published_version }}
+      channel: ${{ steps.detect.outputs.channel }}
+      is_prerelease: ${{ steps.detect.outputs.is_prerelease }}
+      simple_index_url: ${{ steps.detect.outputs.simple_index_url }}
+      tag_commit_short: ${{ steps.detect.outputs.tag_commit_short }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify tag commit is on main (alternative method)
+      - name: Detect tag channel (main/dev)
+        id: detect
         run: |
           TAG_COMMIT="$(git rev-list -n 1 "${GITHUB_REF}")"
           echo "Tag ref: ${GITHUB_REF}"
           echo "Tag commit: ${TAG_COMMIT}"
           echo "Main head: $(git rev-parse refs/remotes/origin/main)"
 
-          if ! git merge-base --is-ancestor "${TAG_COMMIT}" refs/remotes/origin/main; then
-            echo "Tag ${GITHUB_REF} does not point to a commit on main"
+          IS_ON_MAIN="false"
+          IS_ON_DEV="false"
+
+          if git merge-base --is-ancestor "${TAG_COMMIT}" refs/remotes/origin/main; then
+            IS_ON_MAIN="true"
+          fi
+
+          if git merge-base --is-ancestor "${TAG_COMMIT}" refs/remotes/origin/dev; then
+            IS_ON_DEV="true"
+          fi
+
+          echo "is_on_main=${IS_ON_MAIN}"
+          echo "is_on_dev=${IS_ON_DEV}"
+
+          TAG_COMMIT_SHORT="$(git rev-parse --short "${TAG_COMMIT}")"
+          echo "tag_commit_short=${TAG_COMMIT_SHORT}" >> "$GITHUB_OUTPUT"
+
+          if [ "${IS_ON_MAIN}" = "true" ]; then
+            echo "channel=main" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "simple_index_url=https://pypi.org/simple/" >> "$GITHUB_OUTPUT"
+          elif [ "${IS_ON_DEV}" = "true" ]; then
+            echo "channel=dev" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "simple_index_url=https://test.pypi.org/simple/" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag ${GITHUB_REF} does not point to a commit on main or dev"
             exit 1
           fi
+
+  build-and-publish:
+    name: Build & Publish
+    needs: detect-release-channel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: ${{ needs.detect-release-channel.outputs.channel == 'main' || needs.detect-release-channel.outputs.channel == 'dev' }}
+    outputs:
+      published_version: ${{ steps.capture-version.outputs.published_version }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -42,7 +85,7 @@ jobs:
         run: python -m build
 
       - name: Capture built version
-        id: main-version
+        id: capture-version
         run: |
           WHEEL_PATH="$(ls dist/weightslab-*.whl | head -n 1)"
           if [ -z "${WHEEL_PATH}" ]; then
@@ -56,12 +99,19 @@ jobs:
             exit 1
           fi
           echo "published_version=${WL_VERSION}" >> $GITHUB_OUTPUT
-          echo "Main published version: ${WL_VERSION}"
+          echo "Built version: ${WL_VERSION}"
 
       - name: Check distributions
         run: python -m twine check dist/*
 
-      - name: Publish to PyPI
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist/*
+
+      - name: Publish to PyPI (main)
+        if: ${{ needs.detect-release-channel.outputs.channel == 'main' }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
@@ -70,15 +120,27 @@ jobs:
             echo "PYPI_API_TOKEN not set; skipping PyPI upload."
             exit 0
           fi
-          python -m twine upload dist/* --non-interactive --verbose
+          python -m twine upload dist/* --repository-url https://upload.pypi.org/legacy/ --non-interactive --verbose
 
-  test-install-from-pip-main:
-    name: Test Install From Pip Main
-    needs: build-and-publish-main
+      - name: Publish to TestPyPI (dev)
+        if: ${{ needs.detect-release-channel.outputs.channel == 'dev' }}
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${{ secrets.TEST_PYPI_API_TOKEN }}" ]; then
+            echo "TEST_PYPI_API_TOKEN not set; skipping TestPyPI upload."
+            exit 0
+          fi
+          python -m twine upload dist/* --repository-url https://test.pypi.org/legacy/ --non-interactive --verbose
+
+  test-install-from-pip:
+    name: Test Install From Pip
+    needs: [detect-release-channel, build-and-publish]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ needs.detect-release-channel.outputs.channel == 'main' || needs.detect-release-channel.outputs.channel == 'dev' }}
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -89,9 +151,11 @@ jobs:
         run: |
           python -m venv .venv-ci
 
-      - name: Install from PyPI (with retry)
+      - name: Install from package index (with retry)
         env:
-          WL_VERSION: ${{ needs.build-and-publish-main.outputs.published_version }}
+          WL_VERSION: ${{ needs.build-and-publish.outputs.published_version }}
+          WL_CHANNEL: ${{ needs.detect-release-channel.outputs.channel }}
+          WL_SIMPLE_INDEX: ${{ needs.detect-release-channel.outputs.simple_index_url }}
         run: |
           . .venv-ci/bin/activate
           python -m pip install --upgrade pip
@@ -100,27 +164,46 @@ jobs:
             exit 1
           fi
 
-          # PyPI can take a few minutes to expose newly uploaded versions.
+          if [ -z "${WL_SIMPLE_INDEX}" ]; then
+            echo "Missing package index URL from channel detection"
+            exit 1
+          fi
+
+          # Package indexes can take a few minutes to expose newly uploaded versions.
           for attempt in $(seq 1 60); do
-            echo "Checking pip visibility for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+            echo "Checking pip visibility for weightslab==${WL_VERSION} in ${WL_SIMPLE_INDEX} (attempt ${attempt}/60)"
             if python -m pip download \
-                --index-url https://pypi.org/simple/ \
+                --index-url "${WL_SIMPLE_INDEX}" \
                 --no-deps \
                 "weightslab==${WL_VERSION}" \
                 -d /tmp/wl-probe >/dev/null 2>&1; then
-              echo "Found weightslab==${WL_VERSION} in PyPI simple index"
+              echo "Found weightslab==${WL_VERSION}"
               break
             fi
 
             if [ "${attempt}" -eq 60 ]; then
-              echo "Timed out waiting for weightslab==${WL_VERSION} on PyPI simple index"
+              echo "Timed out waiting for weightslab==${WL_VERSION} on ${WL_SIMPLE_INDEX}"
               exit 1
             fi
             sleep 7
           done
 
-          python -m pip install --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu "weightslab==${WL_VERSION}" --no-cache-dir
-          echo "weightslab==${WL_VERSION} installed from PyPI"
+          if [ "${WL_CHANNEL}" = "dev" ]; then
+            python -m pip install \
+              --index-url "${WL_SIMPLE_INDEX}" \
+              --extra-index-url https://pypi.org/simple/ \
+              --extra-index-url https://download.pytorch.org/whl/cpu \
+              "weightslab==${WL_VERSION}" \
+              --no-cache-dir
+          else
+            python -m pip install \
+              --index-url "${WL_SIMPLE_INDEX}" \
+              --extra-index-url https://download.pytorch.org/whl/cpu \
+              "weightslab==${WL_VERSION}" \
+              --no-cache-dir
+          fi
+
+          echo "weightslab==${WL_VERSION} installed from ${WL_SIMPLE_INDEX}"
 
       - name: Verify package import
         run: |
@@ -129,21 +212,50 @@ jobs:
 
   create_release:
     runs-on: ubuntu-latest
-    needs: test-install-from-pip-main
+    needs: [detect-release-channel, build-and-publish, test-install-from-pip]
     permissions:
       contents: write
+    if: ${{ needs.detect-release-channel.outputs.channel == 'main' || needs.detect-release-channel.outputs.channel == 'dev' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist
+
+      - name: Build release header
+        env:
+          WL_CHANNEL: ${{ needs.detect-release-channel.outputs.channel }}
+          WL_COMMIT_SHORT: ${{ needs.detect-release-channel.outputs.tag_commit_short }}
+        run: |
+          DATE_UTC="$(date -u +'%Y-%m-%d')"
+          cat > release_header.md <<EOF
+          <div align="center">
+            <img src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/GitHub_banner_WL.png" alt="WeightsLab banner" height="240" />
+          </div>
+
+          ## WeightsLab Release
+
+          - Date (UTC): ${DATE_UTC}
+          - Commit: ${WL_COMMIT_SHORT}
+          - Channel: ${WL_CHANNEL}
+
+          EOF
 
       - name: Create GitHub Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
-          body_path: CHANGELOG.md
+          name: Release ${{ github.ref_name }}${{ needs.detect-release-channel.outputs.channel == 'dev' && ' (Dev/TestPyPI)' || '' }}
+          prerelease: ${{ needs.detect-release-channel.outputs.is_prerelease == 'true' }}
+          body_path: release_header.md
+          generate_release_notes: true
+          append_body: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
