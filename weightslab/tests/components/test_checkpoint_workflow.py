@@ -314,6 +314,8 @@ class CheckpointSystemTests(unittest.TestCase):
             'experiment_name': EXP_NAME,
             'device': DEVICE,
             'root_log_dir': cls.log_dir,
+            'experiment_dump_to_train_steps_ratio': 5,
+            'skip_checkpoint_load': False,
 
             # Data parameters
             'data': {
@@ -323,8 +325,10 @@ class CheckpointSystemTests(unittest.TestCase):
                 },
             },
 
-            'experiment_dump_to_train_steps_ratio': 5,
-            'skip_checkpoint_load': False,
+            # Checkpoint manager parameters
+            'checkpoint_manager': {
+                'dump_model_architecture': True,
+            },
 
             # Configure global dataframe storage
             'ledger_enable_flushing_threads': True,

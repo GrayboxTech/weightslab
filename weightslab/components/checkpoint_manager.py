@@ -90,6 +90,7 @@ class CheckpointManager:
         """
         self.root_log_dir = Path(root_log_dir).absolute()
         self.root_log_dir.mkdir(parents=True, exist_ok=True)
+        self.config = ledgers.get_hyperparams() or {}
 
         # Create main subdirectories
         self.data_dir = self.root_log_dir / "data"
@@ -974,7 +975,8 @@ class CheckpointManager:
                 self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name, self._step_counter)
 
             # If model architecture doesn't exist in this hash directory, save a reference to where it is
-            # self._save_architecture_reference_if_needed()  # TODO (GP): Disable for now because it adds complexity for big models, and we want to ensure architecture is always saved with weights for simplicity
+            if self.config.get('checkpoint_manager', {}).get('dump_model_architecture', True):
+                self._save_architecture_reference_if_needed()  # TODO (GP): Disable for now because it adds complexity for big models, and we want to ensure architecture is always saved with weights for simplicity
 
             # Persist logger queues alongside weight checkpoints
             try:
@@ -1930,7 +1932,7 @@ class CheckpointManager:
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply data: {e}")
                 self.error_loading_checkpoint.append('data') if 'data' not in self.error_loading_checkpoint else None  # Reset first_time to allow future auto-resume attempts if data application failed
-                
+
         # Restore RNG state if provided and not already restored
         if checkpoint_data.get('rng_state'):
             try:
