@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import threading
 
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
@@ -662,7 +662,7 @@ class DataSampleTrackingWrapper(Dataset):
             """Compute unique ID for a single sample."""
             try:
                 # Get the data from the dataset
-                data = dataset[idx]
+                data = dataset[idx] if not hasattr(dataset, 'get_items') else dataset.get_items(idx, include_metadata=False, include_labels=False, include_images=True)
 
                 # Extract the actual data array (first element of tuple typically)
                 if isinstance(data, tuple):
@@ -683,13 +683,13 @@ class DataSampleTrackingWrapper(Dataset):
                 logger.warning(f"Failed to generate ID for sample {idx}: {e}")
                 return idx, idx  # Fallback to index as ID
 
-        # Use ThreadPoolExecubased on your system (typically CPU count)
+        # Use ThreadPoolExecutor; track progress on completed tasks.
         with ThreadPoolExecutor(thread_name_prefix="unique_id_generator") as executor:
             # Submit all tasks
-            futures = {executor.submit(compute_id, idx): idx for idx in trange(n_samples, desc="Generating unique IDs", unit="sample")}
+            futures = {executor.submit(compute_id, idx): idx for idx in range(n_samples)}
 
             # Collect results as they complete
-            for future in as_completed(futures):
+            for future in tqdm(as_completed(futures), total=n_samples, desc="Generating unique IDs", unit="sample"):
                 idx, uid = future.result()
                 uid = str(uid)  # Ensure UID is a string for consistent handling
                 unique_ids[idx] = uid
