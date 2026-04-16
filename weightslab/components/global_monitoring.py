@@ -125,7 +125,7 @@ class PauseController:
         if self.checkpoint_manager == None:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager != None:
-            self.checkpoint_manager.update_experiment_hash(firsttime=True)
+            self.checkpoint_manager.update_experiment_hash(first_time=True)
             self.checkpoint_manager.save_pending_changes()  # Write pending change to disk
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:

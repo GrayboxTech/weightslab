@@ -56,6 +56,7 @@ from weightslab.backend import ledgers
 from weightslab.utils.logger import LoggerQueue
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.tools import capture_rng_state, restore_rng_state
+from weightslab.utils.utils import recursive_update
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl
 
 # Init logger
@@ -126,7 +127,8 @@ class CheckpointManager:
         self._last_time_loaded: Optional[float] = time.time()  # Track last load time for model hash uniqueness
 
         # First time only
-        self.firsttime = True
+        self.first_time = True
+        self.error_loading_checkpoint = []
 
         # Pending changes tracking
         self._pending_model = None
@@ -142,8 +144,7 @@ class CheckpointManager:
         self._load_all_logger_snapshots()
 
         # Automatically resume latest state when an existing root_log_dir is provided
-        self._bootstrap_latest_state(load_model=load_model, load_config=load_config, load_data=load_data)
-
+        self._bootstrap_latest_state(load_model=load_model, load_config=load_config, load_data=load_data, force=self.first_time)
         logger.info(f"CheckpointManager initialized at {self.root_log_dir}")
 
     def __repr__(self) -> str:
@@ -246,7 +247,8 @@ class CheckpointManager:
                         lname = record.get("logger_name")
                         payload = record.get("payload")
                         if lname:
-                            snapshot["loggers"][lname] = payload or {}
+                            existing_payload = snapshot["loggers"].get(lname, {})
+                            snapshot["loggers"][lname] = recursive_update(existing_payload, payload or {})
                 except Exception as e:
                     logger.warning(f"Failed to load logger snapshot chunk {path}: {e}")
             if snapshot["loggers"]:
@@ -343,7 +345,7 @@ class CheckpointManager:
         except Exception as e:
             logger.warning(f"Failed to update manifest weight checkpoint: {e}")
 
-    def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = True, load_data: bool = True):
+    def _bootstrap_latest_state(self, load_model: bool = True, load_config: bool = True, load_data: bool = True, force: bool = False):
         """If a current hash is known (or manifest has one), load and apply it.
 
         This enables auto-resume when instantiating the manager on an existing
@@ -353,7 +355,7 @@ class CheckpointManager:
         if not target:
             return
         try:
-            self.load_state(target, load_model=load_model, load_config=load_config, load_data=load_data)
+            self.load_state(target, load_model=load_model, load_config=load_config, load_data=load_data, force=force)
         except Exception as e:
             logger.warning(f"Auto-resume failed for {target}: {e}")
 
@@ -575,7 +577,7 @@ class CheckpointManager:
         hp_snapshot: Optional[Dict[str, Any]] = None,
         dfm_snapshot: Optional[Dict[str, Any]] = None,
         force: bool = False,
-        firsttime: bool = False,
+        first_time: bool = False,
         dump_immediately: bool = False
     ) -> tuple[str, bool, Set[str]]:
         """Update experiment hash and track changes (pending or immediate).
@@ -595,9 +597,9 @@ class CheckpointManager:
             tuple: (exp_hash: str, is_new: bool, changed_components: Set[str])
         """
         # Init first time saving the init state when first resumes
-        if firsttime and self.firsttime and not force:
+        if first_time and self.first_time and not force:
             logger.info("First time initialization; skipping hash update.")
-            self.firsttime = False
+            self.first_time = False
             force = True
             dump_immediately = True
 
@@ -1195,7 +1197,7 @@ class CheckpointManager:
                 existing = self._load_logger_snapshot_payload()
                 existing_loggers = existing.get("loggers", {}) if isinstance(existing, dict) else {}
                 if existing_loggers:
-                    existing_loggers.update(snapshot.get("loggers", {}))
+                    recursive_update(existing_loggers, snapshot.get("loggers", {}))
                     snapshot["loggers"] = existing_loggers
             except Exception as e:
                 logger.warning(f"Failed to merge existing logger snapshot: {e}")
@@ -1770,20 +1772,21 @@ class CheckpointManager:
         load_logger: bool = True,
         target_step: Optional[int] = None,
     ) -> bool:
-        """Load and apply a complete checkpoint state by experiment hash.
+        """
+            Load and apply a complete checkpoint state by experiment hash.
 
-        This method loads all components and updates the system state in-place:
-        - Updates model in ledger (architecture + weights)
-        - Updates config in ledger
-        - Updates dataframe manager with loaded data
-        - Updates current experiment hash
+            This method loads all components and updates the system state in-place:
+            - Updates model in ledger (architecture + weights)
+            - Updates config in ledger
+            - Updates dataframe manager with loaded data
+            - Updates current experiment hash
 
-        Args:
-            exp_hash: The 24-byte experiment hash to load and apply
-            force: If True, force reload of all components regardless of hash comparison
+            Args:
+                exp_hash: The 24-byte experiment hash to load and apply
+                force: If True, force reload of all components regardless of hash comparison
 
-        Returns:
-            bool: True if state was successfully loaded and applied
+            Returns:
+                bool: True if state was successfully loaded and applied
         """
         logger.info(f"\n{'='*60}")
         logger.info(f"Loading and applying state: {exp_hash[:16]}...")
@@ -1802,7 +1805,6 @@ class CheckpointManager:
         if not checkpoint_data['loaded_components']:
             logger.warning("No components were loaded")
             return False
-        success = True
 
         # Apply model (architecture + weights)
         if 'model' in checkpoint_data['loaded_components']:
@@ -1828,10 +1830,10 @@ class CheckpointManager:
                     except Exception:
                         pass
                 logger.info(f"[OK] Applied model architecture and weights (step {loaded_step})")
-
+                self.error_loading_checkpoint.remove('model') if 'model' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply model: {e}")
-                success = False
+                self.error_loading_checkpoint.append('model') if 'model' not in self.error_loading_checkpoint else None
 
         if 'weights' in checkpoint_data['loaded_components']:
             # Only weights changed, apply to existing model
@@ -1869,6 +1871,7 @@ class CheckpointManager:
 
                     if not model_data['loaded_components']:
                         logger.warning("No components were loaded")
+                        self.error_loading_checkpoint.append('weights')
                         return False
 
                 try:
@@ -1891,9 +1894,10 @@ class CheckpointManager:
                     guard_training_context.model = model  # Train
                     guard_testing_context.model = model  # Eval
 
+                    self.error_loading_checkpoint.remove('weights') if 'weights' in self.error_loading_checkpoint else None
                 except Exception as e:
                     logger.error(f"[ERROR] Failed to apply weights: {e}")
-                    success = False
+                    self.error_loading_checkpoint.append('weights') if 'weights' not in self.error_loading_checkpoint else None
 
         # Apply config
         if 'config' in checkpoint_data['loaded_components']:
@@ -1901,9 +1905,10 @@ class CheckpointManager:
                 config = checkpoint_data['config']
                 ledgers.register_hyperparams(config)
                 logger.info(f"[OK] Applied hyperparameters config")
+                self.error_loading_checkpoint.remove('config') if 'config' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply config: {e}")
-                success = False
+                self.error_loading_checkpoint.append('config') if 'config' not in self.error_loading_checkpoint else None  # Reset first_time to allow future auto-resume attempts if config application failed
 
         # Apply data (merge snapshot columns into current dataframe)
         if 'data' in checkpoint_data['loaded_components']:
@@ -1922,10 +1927,11 @@ class CheckpointManager:
                         # This updates existing rows without replacing all data
                         dfm.upsert_df(snapshot_df, force_flush=True)
                         logger.info(f"[OK] Applied data snapshot ({len(snapshot_df)} rows)")
+                self.error_loading_checkpoint.remove('data') if 'data' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply data: {e}")
-                success = False
-
+                self.error_loading_checkpoint.append('data') if 'data' not in self.error_loading_checkpoint else None  # Reset first_time to allow future auto-resume attempts if data application failed
+                
         # Restore RNG state if provided and not already restored
         if checkpoint_data.get('rng_state'):
             try:
@@ -1945,11 +1951,11 @@ class CheckpointManager:
                 # Restore RNG state again after resetting dataloaders
                 restore_rng_state(checkpoint_data['rng_state'])
                 logger.debug(f"Restored RNG state from checkpoint")
-
+                self.error_loading_checkpoint.remove('rng') if 'rng' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to restore RNG state: {e}")
                 pause_ctrl.pause()
-                success = False
+                self.error_loading_checkpoint.append('rng') if 'rng' not in self.error_loading_checkpoint else None
 
         # Restore dataloader iteration state if provided
         if checkpoint_data.get('dataloader_iteration_state'):
@@ -1985,19 +1991,23 @@ class CheckpointManager:
 
                 if not restored_any:
                     logger.warning("No dataloader iteration state could be applied to registered loaders")
+                self.error_loading_checkpoint.remove('dataloader_iteration') if 'dataloader_iteration' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to restore dataloader iteration state: {e}")
-                success = False
+                self.error_loading_checkpoint.append('dataloader_iteration') if 'dataloader_iteration' not in self.error_loading_checkpoint else None
 
         # Restore logger snapshot for this experiment if available
         logger_len = self.get_logger_length()
         if load_logger and logger_len == 0:  # Load logger if requested and logger is currently empty (e.g. on fresh start)
             try:
                 self.load_logger_snapshot()
+                self.error_loading_checkpoint.remove('logger') if 'logger' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.warning(f"Failed to restore logger snapshot for {exp_hash}: {e}")
+                self.error_loading_checkpoint.append('logger') if 'logger' not in self.error_loading_checkpoint else None
 
-        # Update current experiment hash
+        # Update current experiment hash after everything is loaded
+        success = len(self.error_loading_checkpoint) == 0
         if success:
             old_hash = self.current_exp_hash
             self.current_exp_hash = exp_hash
@@ -2013,11 +2023,10 @@ class CheckpointManager:
                 'combined': exp_hash
             }
             self.hash_generator.restore_hashes(component_hashes, combined_hash=exp_hash)
-
             self._save_manager_state()
             logger.info(f"\n[OK] Successfully loaded and applied state: {exp_hash[:16]}")
         else:
-            logger.warning(f"\n[WARNING] State loaded with errors")
+            logger.warning(f"\n[WARNING] State loaded with errors: {self.error_loading_checkpoint}")
 
         logger.info(f"{'='*60}\n")
         return success

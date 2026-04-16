@@ -398,6 +398,7 @@ class DataLoaderInterface:
                 "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !! "
                 "Otherwise, prefer passing a Dataset and let the interface build the DataLoader."
                 )
+            
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
             self.tracked_dataset = DataSampleTrackingWrapper(
@@ -409,6 +410,10 @@ class DataLoaderInterface:
                 loader_name=loader_name,
                 **kwargs
             )
+
+            # Then, load checkpoint data early (before dataloader is used)
+            self._load_checkpoint_data()
+
             self.tracked_dataset._map_updates_hook_fns.append(
                 (
                     self._reset_iterator,
@@ -529,7 +534,13 @@ class DataLoaderInterface:
                     pass
 
             if _skip:
-                logger.info(f"Skipping data checkpoint auto-load for {self._ledger_name or 'unnamed loader'} as requested.")
+                loader_label = self._ledger_name or 'unnamed loader'
+                attention_message = (
+                    f"[ATTENTION] Checkpoint data auto-load is disabled for {loader_label}. "
+                    "Hyperparameters requested skip_checkpoint_load=True, so previous checkpoint data will not be restored."
+                )
+                logger.warning(attention_message)
+                print(f"\n{'!' * 90}\n{attention_message}\n{'!' * 90}\n", flush=True)
                 return
 
             # Get latest experiment hash

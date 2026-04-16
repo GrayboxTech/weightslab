@@ -315,7 +315,7 @@ class DataSampleTrackingWrapper(Dataset):
                 if hasattr(wrapped_dataset, 'get_items'):
                     raw_item = wrapped_dataset.get_items(p_idx, include_metadata=preload_metadata, include_labels=preload_labels, include_images=False)  # Try to get metadata if supported
                 else:
-                    logger.warning(f"Wrapped dataset for split '{split}' does not have get_items method. Falling back to __getitem__, which may cause issues if the dataset is not designed for it. Consider implementing get_items for better performance and compatibility.")
+                    # logger.warning(f"Wrapped dataset for split '{split}' does not have get_items method. Falling back to __getitem__, which may cause issues if the dataset is not designed for it. Consider implementing get_items for better performance and compatibility.")
                     raw_item = wrapped_dataset[p_idx]  # By default load everything
             except Exception as e:
                 logger.error(f"Failed to load physical index {p_idx} during initialization: {e}")

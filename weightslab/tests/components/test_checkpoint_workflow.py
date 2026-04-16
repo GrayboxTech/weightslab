@@ -440,7 +440,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print(f"{'='*80}\n")
 
         # Initialize hyperparameters with model_age
-        exp_hash_a, _, changed = self.chkpt_manager.update_experiment_hash(firsttime=True)
+        exp_hash_a, _, changed = self.chkpt_manager.update_experiment_hash(first_time=True)
 
         print(f"\n[OK] Experiment hash A: {exp_hash_a}")
         print(f"[OK] Changed components: {changed}")

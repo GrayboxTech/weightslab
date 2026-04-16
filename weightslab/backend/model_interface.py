@@ -215,7 +215,11 @@ class ModelInterface(NetworkWithOps):
             logger.info("Using checkpoint manager from ledger")
 
             if _skip_checkpoint_load:
-                logger.info("Skipping model checkpoint auto-load as requested.")
+                attention_message = (
+                    f"[ATTENTION] Checkpoint data auto-load is disabled for model. "
+                    "Hyperparameters requested skip_checkpoint_load=True, so previous model checkpoint will not be restored."
+                )
+                logger.warning(attention_message)
             else:
                 # Early auto-load latest model architecture and weights if checkpoints exist
                 try:

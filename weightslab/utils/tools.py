@@ -10,28 +10,38 @@ import random
 
 from typing import Union
 from copy import deepcopy
-from typing import List, Union
+from typing import List, Union, Any, Dict
 
 
 # Global logger
 logger = logging.getLogger(__name__)
 
 
-class _NoOpLock:
-    """No-op lock that does nothing - useful for disabling locking."""
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        pass
-    def acquire(self, *args, **kwargs):
-        return True
-    def release(self):
-        pass
-
-
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
+def recursive_update(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively update a dictionary with another dictionary.
+
+    Nested dictionaries are merged key-by-key. Non-dictionary values are
+    replaced by values from ``updates``.
+    """
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(updates, dict):
+        return base
+
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            recursive_update(base[key], value)
+        elif isinstance(value, dict):
+            base[key] = value
+        else:
+            base[key] = value
+
+    return base
+
+
 def seed_everything(seed=42):
     """Seed everything for reproducibility."""
     np.random.seed(seed)
