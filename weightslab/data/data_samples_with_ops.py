@@ -330,14 +330,18 @@ class DataSampleTrackingWrapper(Dataset):
                         metadata.update(m)
 
             # Detect UIDs from metadata or generate them
-            uids = metadata.get('uids', raw_item[1] if isinstance(raw_item, tuple) and len(raw_item) > 1 else None)
+            default_uid = f"{split}_{p_idx}"
+            uids = self.unique_ids[p_idx] if len(self.unique_ids) else metadata.get(
+                'uids',
+                raw_item[1] if isinstance(raw_item, tuple) and len(raw_item) > 2 else None
+            )
             if uids is None:
                 # Fallback to the single UID that would have been generated
                 # (We use the one already generated in _generate_uids for this physical index)
-                uids = [str(self.unique_ids[p_idx])]
-            elif isinstance(uids, (str, int)):
+                uids = [str(self.unique_ids[p_idx]) if len(self.unique_ids) else default_uid]
+            elif not isinstance(uids, list) and isinstance(uids, (str, float, int)):
                 uids = [str(uids)]
-            
+
             # Detect Group ID
             group_id = metadata.get('group_id')
             if group_id is None:

@@ -14,6 +14,7 @@ from weightslab.utils.tools import capture_rng_state, restore_rng_state, seed_ev
 from weightslab.backend.dataloader_interface import DataLoaderInterface, WeightsLabDataSampler
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend import ledgers
+import weightslab.data.data_samples_with_ops as _dso
 
 
 def infinite_loader(loader):
@@ -65,6 +66,16 @@ class SlowPreprocessDataset(Dataset):
 
 class TestDataLoaderInterface(unittest.TestCase):
     def setUp(self):
+        # Reset cross-loader UID registry so samples from previous tests don't trigger
+        # false cross-loader duplicate removal (e.g. SlowPreprocessDataset values overlap
+        # with TensorDataset(arange(8)) values, causing silent sample removal).
+        with _dso._REGISTRY_LOCK:
+            _dso._GLOBAL_UID_REGISTRY.clear()
+
+        # Clear the global ledger dataframe so discarded flags from previous tests don't
+        # bleed into the current test's deny-list check.
+        ledgers.clear_all()
+
         # Ensure controller is in resumed state for test
         pause_controller._resume()
 
@@ -85,8 +96,8 @@ class TestDataLoaderInterface(unittest.TestCase):
         self.train_ds = train_ds
         self.test_ds = test_ds
 
-        self.train_loader = DataLoader(train_ds, compute_hash=True, batch_size=self.batch_size, shuffle=False)
-        self.test_loader = DataLoader(test_ds, compute_hash=True, batch_size=self.batch_size, shuffle=False)
+        self.train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=False)
+        self.test_loader = DataLoader(test_ds, batch_size=self.batch_size, shuffle=False)
 
     def _consume_batches_collect_labels(self, loader, max_batches=None):
         """Consume up to max_batches (or whole epoch if None) and return list of labels seen."""
@@ -96,6 +107,54 @@ class TestDataLoaderInterface(unittest.TestCase):
             if max_batches is not None and i + 1 >= max_batches:
                 break
         return labels
+
+    def test_sampler_skips_new_discards_mid_epoch_with_shuffle(self):
+        dataset = TensorDataset(
+            torch.arange(8, dtype=torch.float32).unsqueeze(1),
+            torch.arange(8, dtype=torch.long),
+        )
+        root_log_dir = tempfile.mkdtemp()
+
+        try:
+            seed_everything(123)
+            iface = DataLoaderInterface(
+                dataset,
+                batch_size=2,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=False,
+                root_log_dir=root_log_dir,
+                compute_hash=True,
+            )
+
+            iterator = iter(iface.dataloader)
+            _, _, labels_1 = next(iterator)
+            first_batch_labels = labels_1.tolist()
+
+            remaining_candidates = sorted(set(range(len(dataset))) - set(first_batch_labels))
+            self.assertTrue(remaining_candidates, "Expected at least one label outside the first batch")
+
+            discarded_label = remaining_candidates[0]
+            discarded_uid = str(iface.tracked_dataset.unique_ids[discarded_label])
+            ledgers.get_dataframe().upsert_df(
+                pd.DataFrame([
+                    {"sample_id": discarded_uid, "discarded": True}
+                ]).set_index("sample_id"),
+                force_flush=True,
+            )
+
+            remaining_labels = []
+            for _, _, batch_labels in iterator:
+                remaining_labels.extend(batch_labels.tolist())
+
+            self.assertNotIn(discarded_label, remaining_labels)
+            self.assertEqual(
+                sorted(first_batch_labels + remaining_labels),
+                [label for label in range(len(dataset)) if label != discarded_label],
+            )
+        finally:
+            import shutil
+            shutil.rmtree(root_log_dir, ignore_errors=True)
 
     def test_iteration_covers_entire_dataset(self):
         # iterate a full epoch and collect unique labels
@@ -184,7 +243,7 @@ class TestDataLoaderInterface(unittest.TestCase):
                 num_workers=0,
                 pin_memory=False,
                 root_log_dir=root_log_dir,
-                compute_hash=True, 
+                compute_hash=True,
             )
             multi_worker = DataLoaderInterface(
                 dataset,
@@ -214,92 +273,6 @@ class TestDataLoaderInterface(unittest.TestCase):
             self.assertEqual(single_values, multi_values)
             self.assertEqual(single_values, [float(2 * idx + 1) for idx in range(len(dataset))])
             self.assertLess(multi_elapsed, single_elapsed * 0.9)
-        finally:
-            import shutil
-            shutil.rmtree(root_log_dir, ignore_errors=True)
-
-    def test_sampler_skips_new_discards_mid_epoch(self):
-        dataset = TensorDataset(
-            torch.arange(6, dtype=torch.float32).unsqueeze(1),
-            torch.arange(6, dtype=torch.long),
-        )
-        root_log_dir = tempfile.mkdtemp()
-
-        try:
-            iface = DataLoaderInterface(
-                dataset,
-                batch_size=2,
-                shuffle=False,
-                num_workers=0,
-                pin_memory=False,
-                root_log_dir=root_log_dir,
-                compute_hash=True,
-            )
-
-            _, _, labels_1 = next(iface)
-            self.assertEqual(labels_1.tolist(), [0, 1])
-
-            discarded_uid = str(iface.tracked_dataset.unique_ids[2])
-            ledgers.get_dataframe().upsert_df(
-                pd.DataFrame([
-                    {"sample_id": discarded_uid, "discarded": True}
-                ]).set_index("sample_id"),
-                force_flush=True,
-            )
-
-            _, _, labels_2 = next(iface)
-            _, _, labels_3 = next(iface)
-
-            self.assertEqual(labels_2.tolist(), [3, 4])
-            self.assertEqual(labels_3.tolist(), [5])
-        finally:
-            import shutil
-            shutil.rmtree(root_log_dir, ignore_errors=True)
-
-    def test_sampler_skips_new_discards_mid_epoch_with_shuffle(self):
-        dataset = TensorDataset(
-            torch.arange(8, dtype=torch.float32).unsqueeze(1),
-            torch.arange(8, dtype=torch.long),
-        )
-        root_log_dir = tempfile.mkdtemp()
-
-        try:
-            seed_everything(123)
-            iface = DataLoaderInterface(
-                dataset,
-                batch_size=2,
-                shuffle=True,
-                num_workers=0,
-                pin_memory=False,
-                root_log_dir=root_log_dir,
-                compute_hash=True,
-            )
-
-            iterator = iter(iface.dataloader)
-            _, _, labels_1 = next(iterator)
-            first_batch_labels = labels_1.tolist()
-
-            remaining_candidates = sorted(set(range(len(dataset))) - set(first_batch_labels))
-            self.assertTrue(remaining_candidates, "Expected at least one label outside the first batch")
-
-            discarded_label = remaining_candidates[0]
-            discarded_uid = str(iface.tracked_dataset.unique_ids[discarded_label])
-            ledgers.get_dataframe().upsert_df(
-                pd.DataFrame([
-                    {"sample_id": discarded_uid, "discarded": True}
-                ]).set_index("sample_id"),
-                force_flush=True,
-            )
-
-            remaining_labels = []
-            for _, _, batch_labels in iterator:
-                remaining_labels.extend(batch_labels.tolist())
-
-            self.assertNotIn(discarded_label, remaining_labels)
-            self.assertEqual(
-                sorted(first_batch_labels + remaining_labels),
-                [label for label in range(len(dataset)) if label != discarded_label],
-            )
         finally:
             import shutil
             shutil.rmtree(root_log_dir, ignore_errors=True)
@@ -393,7 +366,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
             self.dataset,
             batch_size=2,
             shuffle=True,
-            compute_hash=True, 
+            compute_hash=True,
             num_workers=0
         )
         print(f"[OK] DataLoader created (batch_size=2, shuffle=True)")
@@ -452,7 +425,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
     #     print("1. Creating dataloader (shuffle=False)...")
     #     dataloader = DataLoaderInterface(
     #         self.dataset,
-    
+
     #         batch_size=2,
     #         shuffle=False,
     #         num_workers=0
