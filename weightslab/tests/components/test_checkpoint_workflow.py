@@ -1265,6 +1265,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print(f"[OK] Checkpoint loaded to reach target state {target_hash[:16]}")
         print("\nTraining for 11 epochs to verify reproducibility...")
         pause_controller.resume()
+        model_restarted = ledgers.get_model()  # Get model after loading state
         _, _ = self.train_epochs(model_restarted, dataloader, optimizer_restarted, criterion, num_epochs=self.config['training']['num_epochs'],
             criterion_bin=criterion_bin)
         pause_controller.pause()
