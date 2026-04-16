@@ -375,10 +375,13 @@ class Proxy:
         # Try attribute access first (works for DictConfig, regular objects, etc.)
         try:
             value = getattr(obj, item)
-            # For plain nested dicts, return a live _ValueProxy so that
-            # dot-chaining (proxy.dataset.batch_size) continues to resolve
-            # correctly via the same fallback logic.
-            if isinstance(value, dict):
+            # Only wrap in _ValueProxy when the proxy wraps a dict-like object so
+            # that dot-chaining (proxy.dataset.batch_size) resolves correctly.
+            # For non-dict objects that happen to have dict-valued attributes
+            # (e.g. optimizer.state, model.state_dict()), return the value
+            # directly — wrapping them breaks callers like PyTorch Lightning that
+            # iterate optimizer.state.items() and get a dead _ValueProxy instead.
+            if isinstance(value, dict) and hasattr(obj, "__getitem__") and hasattr(obj, "keys"):
                 return Proxy._ValueProxy(self, item)
             return value
         except AttributeError:
