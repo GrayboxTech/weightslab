@@ -337,7 +337,7 @@ class DataSampleTrackingWrapper(Dataset):
                 uids = [str(self.unique_ids[p_idx])]
             elif isinstance(uids, (str, int)):
                 uids = [str(uids)]
-
+            
             # Detect Group ID
             group_id = metadata.get('group_id')
             if group_id is None:

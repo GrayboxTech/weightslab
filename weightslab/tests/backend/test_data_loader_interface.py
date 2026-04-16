@@ -85,8 +85,8 @@ class TestDataLoaderInterface(unittest.TestCase):
         self.train_ds = train_ds
         self.test_ds = test_ds
 
-        self.train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=False)
-        self.test_loader = DataLoader(test_ds, batch_size=self.batch_size, shuffle=False)
+        self.train_loader = DataLoader(train_ds, compute_hash=True, batch_size=self.batch_size, shuffle=False)
+        self.test_loader = DataLoader(test_ds, compute_hash=True, batch_size=self.batch_size, shuffle=False)
 
     def _consume_batches_collect_labels(self, loader, max_batches=None):
         """Consume up to max_batches (or whole epoch if None) and return list of labels seen."""
@@ -119,7 +119,7 @@ class TestDataLoaderInterface(unittest.TestCase):
             next(it)
 
     def test_dataloader_interface_worker_defaults_and_override(self):
-        iface_default = DataLoaderInterface(self.train_ds, batch_size=self.batch_size)
+        iface_default = DataLoaderInterface(self.train_ds, compute_hash=True, batch_size=self.batch_size)
         self.assertEqual(iface_default.dataloader.num_workers, 0)
         self.assertTrue(iface_default.dataloader.pin_memory)
 
@@ -128,6 +128,7 @@ class TestDataLoaderInterface(unittest.TestCase):
             batch_size=self.batch_size,
             num_workers=2,
             pin_memory=False,
+            compute_hash=True
         )
         self.assertEqual(iface_override.dataloader.num_workers, 2)
         self.assertFalse(iface_override.dataloader.pin_memory)
@@ -139,6 +140,7 @@ class TestDataLoaderInterface(unittest.TestCase):
             dataset,
             batch_size=1,
             shuffle=False,
+            compute_hash=True,
             num_workers=2,
             pin_memory=False,
         )
@@ -147,6 +149,7 @@ class TestDataLoaderInterface(unittest.TestCase):
             dataset,
             batch_size=1,
             shuffle=False,
+            compute_hash=True,
             num_workers=2,
             pin_memory=False,
         )
@@ -181,7 +184,7 @@ class TestDataLoaderInterface(unittest.TestCase):
                 num_workers=0,
                 pin_memory=False,
                 root_log_dir=root_log_dir,
-                compute_hash=False,
+                compute_hash=True, 
             )
             multi_worker = DataLoaderInterface(
                 dataset,
@@ -190,7 +193,7 @@ class TestDataLoaderInterface(unittest.TestCase):
                 num_workers=2,
                 pin_memory=False,
                 root_log_dir=root_log_dir,
-                compute_hash=False,
+                compute_hash=True,
             )
 
             def _measure_epoch(iface):
@@ -230,7 +233,7 @@ class TestDataLoaderInterface(unittest.TestCase):
                 num_workers=0,
                 pin_memory=False,
                 root_log_dir=root_log_dir,
-                compute_hash=False,
+                compute_hash=True,
             )
 
             _, _, labels_1 = next(iface)
@@ -269,7 +272,7 @@ class TestDataLoaderInterface(unittest.TestCase):
                 num_workers=0,
                 pin_memory=False,
                 root_log_dir=root_log_dir,
-                compute_hash=False,
+                compute_hash=True,
             )
 
             iterator = iter(iface.dataloader)
@@ -390,6 +393,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
             self.dataset,
             batch_size=2,
             shuffle=True,
+            compute_hash=True, 
             num_workers=0
         )
         print(f"[OK] DataLoader created (batch_size=2, shuffle=True)")
@@ -448,6 +452,7 @@ class TestDataLoaderReproducibility(unittest.TestCase):
     #     print("1. Creating dataloader (shuffle=False)...")
     #     dataloader = DataLoaderInterface(
     #         self.dataset,
+    
     #         batch_size=2,
     #         shuffle=False,
     #         num_workers=0
