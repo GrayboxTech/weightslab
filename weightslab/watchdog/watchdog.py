@@ -157,7 +157,7 @@ class WeighlabsWatchdog:
             duration = lock.held_duration()
             if duration is None:
                 continue
-            if duration >= self._stuck_threshold_s:
+            if duration >= (lock.get_timeout() or self._stuck_threshold_s):
                 tid = lock.holder_tid()
                 logger.watchdog(  # type: ignore[attr-defined]
                     "[Watchdog] Lock '%s' held for %.1fs by tid=%s — sending interrupt",

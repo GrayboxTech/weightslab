@@ -1074,7 +1074,7 @@ class CheckpointManager:
             with open(config_file, 'w') as f:
                 yaml.dump(config_with_meta, f, default_flow_style=False)
 
-            logger.info(f"Saved config: {config_file.name}")
+            logger.info(f"Saved config: {config_file.name if hasattr(config_file, 'name') else config_file} with exp_hash prefix: {self.current_exp_hash[:8]}")
             return config_file
         except Exception as e:
             logger.error(f"Failed to save config: {e}")

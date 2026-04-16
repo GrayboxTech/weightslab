@@ -11,6 +11,7 @@ import time
 import types
 import threading
 import logging
+import inspect
 import functools
 import numpy as np
 import torch as th
@@ -352,6 +353,17 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
+@functools.lru_cache(maxsize=128)
+def _fwd_params(fn):
+    """Return the frozenset of parameter names accepted by *fn*. Cached per function."""
+    try:
+        return frozenset(inspect.signature(fn).parameters)
+    except (ValueError, TypeError):
+        return frozenset()
+
+_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals')
+
+
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     """
         Wrapper for forward methods to log and save statistics.
@@ -363,12 +375,16 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             The output of the original forward method.
     """
 
-    # Remove parameters
-    _ = kw.pop('flag', None)
-    ids = kw.pop('batch_ids', None)
-    group_ids = kw.pop('group_id', None)
-    preds = kw.pop('preds', None)
-    batch_scalar = kw.pop('signals', None)
+    # Pop WL-specific kwargs only when original_forward doesn't accept them,
+    # so that forwards that declare e.g. batch_ids/preds receive them as usual.
+    fwd_params = _fwd_params(original_forward)
+    wl_kw = {k: kw.pop(k) for k in _WL_KWARGS if k in kw and k not in fwd_params}
+
+    _ = wl_kw.get('flag')
+    batch_ids = wl_kw.get('batch_ids')
+    group_ids = wl_kw.get('group_id')
+    preds = wl_kw.get('preds')
+    batch_scalar = wl_kw.get('signals')
     preds_raw = a[0] if len(a) > 0 else None
     targets = a[1] if len(a) > 1 else None
 
@@ -378,7 +394,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # discarded samples/tainted groups from the loss tensor.
     origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
 
-    if origin and ids is not None and hasattr(out, 'device') and out.ndim > 0:
+    if origin and batch_ids is not None and hasattr(out, 'device') and out.ndim > 0:
         try:
             # Multi-sample Group Masking
             if group_ids is not None:
@@ -388,7 +404,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
             # Per-sample Individual Masking
             else:
-                mask = get_active_sample_mask(ids, origin).to(out.device)
+                mask = get_active_sample_mask(batch_ids, origin).to(out.device)
                 if len(mask) == len(out):
                     out = out * mask
         except Exception as e:
@@ -399,7 +415,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
 
     # Extract scalar from tensor
-    scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, ids)
+    scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, batch_ids)
 
     # Log if requested
     step = _get_step(None)
@@ -409,15 +425,15 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Allows @wl.signal(subscribe_to="metric_name")
     dynamic_updates = {}
     ids_np = None
-    if ids is not None:
-        if hasattr(ids, 'detach'):
-            ids_np = ids.detach().cpu().numpy()
+    if batch_ids is not None:
+        if hasattr(batch_ids, 'detach'):
+            ids_np = batch_ids.detach().cpu().numpy()
         else:
             try:
                 # Handle list of tensors (common in Siamese/multi-output)
-                ids_np = np.array([i.detach().cpu().numpy() if hasattr(i, 'detach') else i for i in ids])
+                ids_np = np.array([i.detach().cpu().numpy() if hasattr(i, 'detach') else i for i in batch_ids])
             except Exception:
-                ids_np = np.asarray(ids)
+                ids_np = np.asarray(batch_ids)
 
     if ids_np is not None:
          # Identify Subscribers for this specific signal (reg_name)
@@ -498,14 +514,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          pass # User function error, skip
 
     # Save statistics if requested and applicable
-    if (batch_scalar is not None and ids is not None) or dynamic_updates:
+    if (batch_scalar is not None and batch_ids is not None) or dynamic_updates:
         signals = {
             reg_name: list(batch_scalar.values()) if isinstance(batch_scalar, dict) else batch_scalar.detach().cpu().tolist()
         } if batch_scalar is not None else {}
         signals.update(dynamic_updates) # Merge dynamic signals
 
         save_signals(
-            batch_ids=ids,
+            batch_ids=batch_ids,
             preds=preds,
             preds_raw=preds_raw,
             signals=signals,
@@ -1451,11 +1467,11 @@ def save_signals(
             return
 
     # Convert tensors to numpy for lightweight buffering
-    # Convert tensors to numpy for lightweight buffering, forcing to strings for consistent ledger indexing
     if isinstance(batch_ids, th.Tensor):
-        batch_ids_np = batch_ids.detach().cpu().numpy().astype(str)
+        batch_ids_np = [str(i) for i in batch_ids.detach().cpu().tolist()]
     else:
-        batch_ids_np = np.asarray(batch_ids).astype(str)
+        batch_ids_np = [str(i) for i in batch_ids] if batch_ids is not None else None
+        
     if preds is not None:
         pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
         if np.issubdtype(pred_np.dtype, np.floating):

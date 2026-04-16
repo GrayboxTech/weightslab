@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 # held too long and raise _WatchdogInterrupt in the holder thread, causing
 # any finally/with block to release it cleanly.
 weightslab_rlock = MonitoredRLock()
-weightslab_lock = Lock()
 
 # Timeout for acquiring weightslab_rlock in gRPC handlers.
 # Mirrors GRPC_WATCHDOG_STUCK_SECONDS so an RPC that cannot grab the lock fails
 # cleanly before the watchdog would flag it as an infinite hang.
-_GRPC_LOCK_TIMEOUT_S: float = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "60"))
+# TODO (GP): Now set to -1 (no timeout) to avoid interrupting long-running RPCs that are doing heavy work while holding the lock. We should eventually remove this timeout and rely solely on the watchdog to detect and handle stuck locks, to avoid unintended interruptions.
+_GRPC_LOCK_TIMEOUT_S: float = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "-1"))
 
 
 def try_acquire_rlock(timeout_s: float = _GRPC_LOCK_TIMEOUT_S) -> bool:
@@ -161,37 +161,6 @@ class PauseController:
 
 # Global pause controller instance
 pause_controller = PauseController()
-
-
-class OpContext:
-    """
-    The actual context manager class that handles __enter__ and __exit__.
-    It holds a reference to the outer WeightsLab instance.
-    """
-    def __init__(self):
-        self.op_guard = weightslab_lock
-        self.model = None
-
-    def __enter__(self):
-        """
-        Executed upon entering the 'with' block. Sets the model to training mode.
-        """
-
-        self.op_guard.__enter__()
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
-        """
-        Executed upon exiting the 'with' block (after user code runs).
-        Reverts the model state.
-        """
-
-        self.op_guard.__exit__(exc_type, exc_value, traceback)
-
-        # If exc_type is not None, an exception occurred in the block.
-        # Returning False (default) allows the exception to propagate.
-        return False
-
-op_context = OpContext()
 
 
 class GuardContext:
