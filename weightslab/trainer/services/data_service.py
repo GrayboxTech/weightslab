@@ -568,7 +568,7 @@ class DataService:
         if self._agent is None:
             return False
         try:
-            return self._agent.is_ollama_available()
+            return self._agent.is_available()
         except Exception as e:
             logger.debug(f"Error checking agent availability: {e}")
             return False
@@ -3028,17 +3028,3 @@ class DataService:
                 success=False,
                 split_names=[]
             )
-
-    def CheckAgentHealth(self, request, context):
-        """
-        gRPC method to check if the agent is available for natural language queries.
-        Returns:
-            AgentHealthResponse { available: bool, message: str }
-        """
-
-        try:
-            available = self._is_agent_available()
-            msg = "Agent is available" if available else "Agent is not available"
-            return pb2.AgentHealthResponse(available=available, message=msg)
-        except Exception as e:
-            return pb2.AgentHealthResponse(available=False, message=f"Error: {e}")

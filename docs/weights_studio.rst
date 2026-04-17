@@ -38,12 +38,24 @@ Quick start (Docker)
 
 1. Start your Weightslab backend (gRPC on host, default port ``50051``).
 2. Load environment variables from ``../weights_studio/docker/.env``.
-3. Start studio stack from ``../weights_studio/docker``:
+3. Generate local TLS certificates (dev only):
+
+  .. code-block:: powershell
+
+    # from ../weights_studio/docker
+    .\generate-dev-certs.ps1
+
+  .. code-block:: bash
+
+    # from ../weights_studio/docker
+    ./generate-dev-certs.sh
+
+4. Start studio stack from ``../weights_studio/docker``:
 
    - Envoy
    - Frontend (Vite)
 
-4. Open Weights Studio in your browser.
+5. Open Weights Studio in your browser.
 
 Docker services and ports
 -------------------------
@@ -51,8 +63,8 @@ Docker services and ports
 From ``../weights_studio/docker/docker-compose.yml`` and ``../weights_studio/envoy/envoy.yaml``:
 
 - Frontend: ``VITE_PORT`` (default ``5173``)
-- Envoy gRPC-Web endpoint: ``ENVOY_PORT`` (default ``8080``)
-- Envoy admin: ``ENVOY_ADMIN_PORT`` (default ``9901``)
+- Envoy gRPC-Web endpoint over TLS: ``ENVOY_PORT`` (default ``8080``)
+- Envoy admin: ``ENVOY_ADMIN_PORT`` (default ``9901``), bound to loopback and not published by default
 - Backend target from Envoy: ``host.docker.internal:50051``
 
 Default values in ``../weights_studio/docker/.env``:
@@ -61,7 +73,7 @@ Default values in ``../weights_studio/docker/.env``:
 - ``VITE_HISTOGRAM_MAX_BINS=512``
 - ``WS_SERVER_HOST=localhost``
 - ``WS_SERVER_PORT=8080``
-- ``WS_SERVER_PROTOCOL=http``
+- ``WS_SERVER_PROTOCOL=https``
 - ``ENVOY_PORT=8080``
 - ``ENVOY_ADMIN_PORT=9901``
 - ``GRPC_BACKEND_PORT=50051``
@@ -83,20 +95,89 @@ Environment/configuration checklist
 Backend:
 
 - Ensure Weightslab serves gRPC and listens on host ``0.0.0.0:50051``.
+- Enable backend TLS and client-auth for Envoy by setting:
+
+  - ``GRPC_TLS_ENABLED=1``
+  - ``GRPC_TLS_REQUIRE_CLIENT_AUTH=1``
+  - ``GRPC_TLS_CERT_FILE`` / ``GRPC_TLS_KEY_FILE`` / ``GRPC_TLS_CA_FILE``
+- Optionally set ``GRPC_AUTH_TOKEN`` (or ``GRPC_AUTH_TOKENS``) to enforce
+  metadata token authentication in addition to mTLS.
 
 Envoy:
 
 - Ensure ``envoy.yaml`` cluster points to host backend:
   ``host.docker.internal:50051``.
+- Ensure cert files exist at ``../weights_studio/envoy/certs``:
+
+  - ``envoy-server.crt`` / ``envoy-server.key`` (browser->Envoy TLS)
+  - ``envoy-client.crt`` / ``envoy-client.key`` and ``ca.crt`` (Envoy->backend mTLS)
 
 Frontend:
 
-- Ensure frontend points to Envoy (default ``http://localhost:8080``).
+- Ensure frontend points to Envoy (default ``https://localhost:8080``).
 
 Sanity checks:
 
 - Studio reachable at ``http://localhost:5173``.
-- Envoy admin reachable at ``http://localhost:9901``.
+- Envoy endpoint reachable at ``https://localhost:8080``.
+- Envoy admin is private by default (loopback inside container).
+
+Agent Usage in Weights Studio
+-----------------------------
+
+Weights Studio includes an agent bar and an expandable agent history window.
+The agent can run with either:
+
+- a local Ollama provider configured on the backend
+- a cloud OpenRouter provider configured at startup or initialized from the UI
+
+Local Ollama workflow
+~~~~~~~~~~~~~~~~~~~~~
+
+If the backend is configured with ``provider: ollama`` and the Ollama server is
+running, the agent is available immediately after backend startup.
+
+Typical local setup:
+
+1. Start Ollama.
+2. Start WeightsLab.
+3. Open Weights Studio.
+4. Ask questions directly in the agent bar.
+
+Cloud OpenRouter workflow
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If the backend is not initialized with a cloud key yet, Weights Studio shows
+the agent as unconfigured and the input placeholder instructs the user to type
+``/init``.
+
+``/init`` flow:
+
+1. Type ``/init`` in the agent input.
+2. Choose manual API key entry or the OpenRouter OAuth flow.
+3. Select a model from the available model list.
+4. Confirm to initialize the runtime connection.
+
+The default cloud model is ``meta-llama/llama-3.3-70b-instruct``.
+
+Available agent commands
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The agent bar supports these commands:
+
+- ``/init`` initializes OpenRouter from the UI
+- ``/model`` opens the model chooser to switch the active OpenRouter model
+- ``/reset`` clears the current agent runtime connection and status
+
+History behavior
+~~~~~~~~~~~~~~~~
+
+- Command entries such as ``/init``, ``/model``, and ``/reset`` are shown on
+  the user side of the history.
+- Agent lifecycle events such as connection setup, model changes, and reset
+  events are shown as separate log-style entries.
+- A pinned instruction line at the top of the history summarizes the available
+  commands and shows the full instruction text on hover.
 
 Server integration (AWS example)
 --------------------------------
@@ -482,4 +563,3 @@ Troubleshooting
   verify ``WS_SERVER_HOST/PORT/PROTOCOL`` in docker environment.
 - No plot updates:
   verify plot auto-refresh setting and backend logger data availability.
-

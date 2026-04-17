@@ -1471,7 +1471,7 @@ def save_signals(
         batch_ids_np = [str(i) for i in batch_ids.detach().cpu().tolist()]
     else:
         batch_ids_np = [str(i) for i in batch_ids] if batch_ids is not None else None
-        
+
     if preds is not None:
         pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
         if np.issubdtype(pred_np.dtype, np.floating):

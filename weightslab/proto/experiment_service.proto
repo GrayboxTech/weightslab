@@ -20,6 +20,10 @@ service ExperimentService {
   rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
   rpc GetDataSplits (Empty) returns (DataSplitsResponse);
   rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
+  rpc InitializeAgent (InitializeAgentRequest) returns (InitializeAgentResponse);
+  rpc ChangeAgentModel (ChangeAgentModelRequest) returns (ChangeAgentModelResponse);
+  rpc GetAgentModels (GetAgentModelsRequest) returns (GetAgentModelsResponse);
+  rpc ResetAgent (Empty) returns (ResetAgentResponse);
 
   // Checkpoint restore
   rpc RestoreCheckpoint (RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
@@ -391,6 +395,44 @@ message DataSplitsResponse {
 
 message AgentHealthResponse {
   bool available = 1;
+  string message = 2;
+}
+
+// --- Agent Onboarding ---
+enum AgentProviderType {
+  PROVIDER_OPENROUTER = 0;
+}
+
+message InitializeAgentRequest {
+  string api_key = 1;
+  AgentProviderType provider = 2;
+  string model = 3;
+}
+
+message InitializeAgentResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ChangeAgentModelRequest {
+  string model = 1;
+}
+
+message ChangeAgentModelResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetAgentModelsRequest {}
+
+message GetAgentModelsResponse {
+  bool success = 1;
+  repeated string models = 2;
+  string message = 3;
+}
+
+message ResetAgentResponse {
+  bool success = 1;
   string message = 2;
 }
 
