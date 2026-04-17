@@ -87,6 +87,32 @@ gRPC Server
      - *(gRPC default)*
      - Override the C-core gRPC log verbosity (``DEBUG``, ``INFO``, ``ERROR``).
        Leave unset for normal operation.
+   * - ``GRPC_TLS_ENABLED``
+     - ``1``
+     - Enables TLS on the backend gRPC socket.
+       Set to ``0`` only for isolated local debugging.
+   * - ``GRPC_TLS_KEY_FILE``
+     - ``certs/backend-server.key``
+     - Path to backend private key file (PEM).
+   * - ``GRPC_TLS_CERT_FILE``
+     - ``certs/backend-server.crt``
+     - Path to backend server certificate file (PEM).
+   * - ``GRPC_TLS_CA_FILE``
+     - ``certs/ca.crt``
+     - Path to CA certificate used to validate mTLS client certificates.
+   * - ``GRPC_TLS_REQUIRE_CLIENT_AUTH``
+     - ``1``
+     - Requires client certificates (mTLS) when set.
+   * - ``GRPC_AUTH_TOKEN``
+     - *(unset)*
+     - Optional shared token accepted from gRPC metadata headers
+       (``authorization: Bearer ...``, ``x-api-key``, or ``x-grpc-auth-token``).
+   * - ``GRPC_AUTH_TOKENS``
+     - *(unset)*
+     - Comma-separated token list for rotation support.
+
+Backend startup validates these security inputs at boot time and fails fast with
+an explicit error when required TLS files are missing or invalid.
 
 
 Watchdog
@@ -414,10 +440,11 @@ Backend Connection
      - Hostname of the Envoy proxy the browser connects to.
    * - ``ENVOY_PORT``
      - ``8080``
-     - Port Envoy listens on for HTTP / gRPC-Web traffic.
+     - Port Envoy listens on for HTTPS / gRPC-Web traffic.
    * - ``ENVOY_ADMIN_PORT``
      - ``9901``
      - Envoy admin interface port (metrics, health checks).
+       Bound to loopback and not published by Docker Compose by default.
 
 
 Vite Dev Server
@@ -457,7 +484,7 @@ These variables are injected into the browser bundle at build / dev time.
      - ``8080``
      - Port the browser uses to reach the backend.
    * - ``VITE_SERVER_PROTOCOL``
-     - ``http``
+     - ``https``
      - Protocol (``http`` or ``https``) for browser-to-backend requests.
    * - ``VITE_IS_A_SANDBOX``
      - ``0``

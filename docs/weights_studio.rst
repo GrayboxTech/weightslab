@@ -38,12 +38,24 @@ Quick start (Docker)
 
 1. Start your Weightslab backend (gRPC on host, default port ``50051``).
 2. Load environment variables from ``../weights_studio/docker/.env``.
-3. Start studio stack from ``../weights_studio/docker``:
+3. Generate local TLS certificates (dev only):
+
+  .. code-block:: powershell
+
+    # from ../weights_studio/docker
+    .\generate-dev-certs.ps1
+
+  .. code-block:: bash
+
+    # from ../weights_studio/docker
+    ./generate-dev-certs.sh
+
+4. Start studio stack from ``../weights_studio/docker``:
 
    - Envoy
    - Frontend (Vite)
 
-4. Open Weights Studio in your browser.
+5. Open Weights Studio in your browser.
 
 Docker services and ports
 -------------------------
@@ -51,8 +63,8 @@ Docker services and ports
 From ``../weights_studio/docker/docker-compose.yml`` and ``../weights_studio/envoy/envoy.yaml``:
 
 - Frontend: ``VITE_PORT`` (default ``5173``)
-- Envoy gRPC-Web endpoint: ``ENVOY_PORT`` (default ``8080``)
-- Envoy admin: ``ENVOY_ADMIN_PORT`` (default ``9901``)
+- Envoy gRPC-Web endpoint over TLS: ``ENVOY_PORT`` (default ``8080``)
+- Envoy admin: ``ENVOY_ADMIN_PORT`` (default ``9901``), bound to loopback and not published by default
 - Backend target from Envoy: ``host.docker.internal:50051``
 
 Default values in ``../weights_studio/docker/.env``:
@@ -61,7 +73,7 @@ Default values in ``../weights_studio/docker/.env``:
 - ``VITE_HISTOGRAM_MAX_BINS=512``
 - ``WS_SERVER_HOST=localhost``
 - ``WS_SERVER_PORT=8080``
-- ``WS_SERVER_PROTOCOL=http``
+- ``WS_SERVER_PROTOCOL=https``
 - ``ENVOY_PORT=8080``
 - ``ENVOY_ADMIN_PORT=9901``
 - ``GRPC_BACKEND_PORT=50051``
@@ -83,20 +95,32 @@ Environment/configuration checklist
 Backend:
 
 - Ensure Weightslab serves gRPC and listens on host ``0.0.0.0:50051``.
+- Enable backend TLS and client-auth for Envoy by setting:
+
+  - ``GRPC_TLS_ENABLED=1``
+  - ``GRPC_TLS_REQUIRE_CLIENT_AUTH=1``
+  - ``GRPC_TLS_CERT_FILE`` / ``GRPC_TLS_KEY_FILE`` / ``GRPC_TLS_CA_FILE``
+- Optionally set ``GRPC_AUTH_TOKEN`` (or ``GRPC_AUTH_TOKENS``) to enforce
+  metadata token authentication in addition to mTLS.
 
 Envoy:
 
 - Ensure ``envoy.yaml`` cluster points to host backend:
   ``host.docker.internal:50051``.
+- Ensure cert files exist at ``../weights_studio/envoy/certs``:
+
+  - ``envoy-server.crt`` / ``envoy-server.key`` (browser->Envoy TLS)
+  - ``envoy-client.crt`` / ``envoy-client.key`` and ``ca.crt`` (Envoy->backend mTLS)
 
 Frontend:
 
-- Ensure frontend points to Envoy (default ``http://localhost:8080``).
+- Ensure frontend points to Envoy (default ``https://localhost:8080``).
 
 Sanity checks:
 
 - Studio reachable at ``http://localhost:5173``.
-- Envoy admin reachable at ``http://localhost:9901``.
+- Envoy endpoint reachable at ``https://localhost:8080``.
+- Envoy admin is private by default (loopback inside container).
 
 Agent Usage in Weights Studio
 -----------------------------
