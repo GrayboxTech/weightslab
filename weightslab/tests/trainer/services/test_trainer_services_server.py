@@ -64,6 +64,29 @@ class TestExperimentServiceServicerDelegation(_TimeoutMixin, unittest.TestCase):
 
 
 class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
+    @patch.dict(
+        "os.environ",
+        {
+            "GRPC_TLS_ENABLED": "1",
+            "GRPC_TLS_CERT_FILE": "missing/backend-server.crt",
+            "GRPC_TLS_KEY_FILE": "missing/backend-server.key",
+            "GRPC_TLS_CA_FILE": "missing/ca.crt",
+            "GRPC_TLS_REQUIRE_CLIENT_AUTH": "1",
+        },
+        clear=False,
+    )
+    def test_grpc_serve_fails_fast_when_tls_files_are_missing(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            trainer_services.grpc_serve(
+                n_workers_grpc=1,
+                grpc_host="127.0.0.1",
+                grpc_port=50099,
+                force_parameters=True,
+            )
+
+        self.assertIn("GRPC_TLS_KEY_FILE", str(ctx.exception))
+
+    @patch.dict("os.environ", {"GRPC_TLS_ENABLED": "0", "GRPC_AUTH_TOKEN": ""}, clear=False)
     def test_grpc_serve_starts_thread_and_server(self):
         fake_server = MagicMock()
         # add_insecure_port must return non-zero to indicate successful binding.
@@ -124,7 +147,7 @@ class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
 
 
 
-    @patch.dict("os.environ", {"WEIGHTSLAB_DISABLE_WATCHDOGS": "1"}, clear=False)
+    @patch.dict("os.environ", {"WEIGHTSLAB_DISABLE_WATCHDOGS": "1", "GRPC_TLS_ENABLED": "0", "GRPC_AUTH_TOKEN": ""}, clear=False)
     def test_grpc_serve_can_disable_watchdogs_via_env(self):
         fake_server = MagicMock()
         fake_server.add_insecure_port.return_value = 50099
