@@ -343,16 +343,14 @@ class DataManipulationAgent:
         self._build_column_index()
 
     def _load_config(self):
-        self.preferred_provider = "ollama"
-        self.google_model = "gemini-1.5-flash-latest"
-        self.openai_model = "gpt-4o-mini"
-        self.openrouter_model = "mistralai/mistral-7b-instruct:free"
+        self.preferred_provider = "openrouter"
+        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
         self.openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
         self.fallback_to_local = True
         self.ollama_host = "localhost"
         self.ollama_port = "11435"
-        self.ollama_model = "qwen2.5:3b-instruct"
+        self.ollama_model = "llama3.2:3b"
 
         repo_root = Path(__file__).resolve().parents[4]
         inner_pkg = Path(__file__).resolve().parents[3]
@@ -386,12 +384,6 @@ class DataManipulationAgent:
                 self.openrouter_base_url = a_cfg.get("openrouter_base_url", self.openrouter_base_url)
                 self.openrouter_api_key = a_cfg.get("openrouter_api_key", os.environ.get("OPENROUTER_API_KEY"))
                 self.openrouter_request_timeout = float(a_cfg.get("openrouter_request_timeout", self.openrouter_request_timeout))
-                # OPENAI
-                self.openai_model = a_cfg.get("openai_model", self.openai_model)
-                self.openai_api_key = a_cfg.get("openai_api_key", os.environ.get("OPENAI_API_KEY"))
-                # GOOGLE
-                self.google_model = a_cfg.get("google_model", self.google_model)
-                self.google_api_key = a_cfg.get("google_api_key", os.environ.get("GOOGLE_API_KEY"))
                 # OLLAMA
                 self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
                 self.ollama_port = a_cfg.get("ollama_port", self.ollama_port)
@@ -426,39 +418,14 @@ class DataManipulationAgent:
         return urlunparse((parsed.scheme, netloc, path, "", "", ""))
 
     def _setup_providers(self):
-        self.chain_openai = None
-        self.chain_google = None
         self.chain_ollama = None
         self.chain_openrouter = None
+        initialized = False
 
         # Determine which providers to initialize
         active_providers = {self.preferred_provider}
         if self.fallback_to_local:
             active_providers.add("ollama")
-
-        # OPEN AI
-        if "openai" in active_providers and self.openai_api_key:
-            _LOGGER.info(f"Setting up OpenAI with model {self.openai_model}")
-            try:
-                llm = ChatOpenAI(model=self.openai_model, temperature=0, api_key=self.openai_api_key, max_retries=1)
-                self.chain_openai = llm.with_structured_output(Intent)
-                _LOGGER.info(f"[Agent] OpenAI enabled: {self.openai_model}")
-            except Exception as e: _LOGGER.error(f"OpenAI error: {e}")
-
-        # GOOGLE
-        if "google" in active_providers and self.google_api_key:
-            _LOGGER.info(f"Setting up Google with model {self.google_model}")
-            try:
-                llm = ChatOpenAI(
-                    model=self.google_model,
-                    temperature=0,
-                    api_key=self.google_api_key,
-                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                    max_retries=1
-                )
-                self.chain_google = llm
-                _LOGGER.info(f"[Agent] Google Gemini enabled: {self.google_model}")
-            except Exception as e: _LOGGER.error(f"Google error: {e}")
 
         # OPEN ROUTER
         if "openrouter" in active_providers and self.openrouter_api_key:
@@ -475,6 +442,7 @@ class DataManipulationAgent:
                     streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
                 )
                 self.chain_openrouter = llm
+                initialized = True
                 _LOGGER.info(
                     f"[Agent] OpenRouter enabled: {self.openrouter_model} via {parsed.hostname}:{effective_port}"
                 )
@@ -488,13 +456,163 @@ class DataManipulationAgent:
                 port = self.ollama_port
                 llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
                 self.chain_ollama = llm
+                initialized = True
                 _LOGGER.info(f"[Agent] Ollama enabled: {self.ollama_model}")
             except Exception as e: _LOGGER.error(f"Ollama error: {e}")
+
+        return initialized
+
+    def _check_chat_provider(self, provider: str) -> "tuple[bool, str]":
+        """Run a minimal chat request to verify the provider is actually usable."""
+        chain = getattr(self, f"chain_{provider}", None)
+        if chain is None:
+            return False, f"{provider} client was not initialized."
+
+        try:
+            response = chain.invoke("Reply with OK.")
+        except Exception as e:
+            _LOGGER.warning(f"[{provider}] connectivity check failed: {e}")
+            return False, f"{provider} connectivity check failed: {e}"
+
+        text = response.content if hasattr(response, "content") else str(response)
+        if not str(text).strip():
+            return False, f"{provider} connectivity check returned an empty response."
+
+        return True, f"{provider} connectivity check succeeded."
 
     def is_ollama_available(self) -> bool:
         return self.chain_ollama is not None
 
+    def is_available(self) -> bool:
+        """
+        Return True if any LLM provider is actually ready to serve requests.
+
+        OpenRouter is considered ready as soon as its chain is set up.
+
+        Ollama requires an active HTTP connection check because the ChatOllama
+        constructor succeeds even when the daemon is not running.
+        """
+        if self.chain_openrouter is not None:
+            return True
+        if self.chain_ollama is not None:
+            return self._is_ollama_reachable()
+        return False
+
+    def _is_ollama_reachable(self) -> bool:
+        """Ping the Ollama HTTP endpoint to verify the daemon is actually running."""
+        try:
+            import urllib.request as _ur
+            host = self.ollama_host.split(':')[0]
+            url = f"http://{host}:{self.ollama_port}/api/version"
+            with _ur.urlopen(_ur.Request(url), timeout=2) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def initialize_with_cloud_key(self, api_key: str, provider: str, model: Optional[str] = None) -> "tuple[bool, str]":
+        """
+        Initialize (or reinitialize) the OpenRouter cloud provider.
+
+        Args:
+            api_key:  The API key obtained from the provider's website.
+            provider: Must be ``"openrouter"``.
+            model:    OpenRouter model identifier chosen by the user.
+
+        Returns:
+            ``(True, success_message)`` or ``(False, error_message)``.
+        """
+        if not api_key or not api_key.strip():
+            return False, "API key cannot be empty."
+
+        if provider.lower() != "openrouter":
+            return False, "Only OpenRouter cloud onboarding is supported."
+
+        if model is not None and not model.strip():
+            return False, "Model cannot be empty."
+
+        self.openrouter_api_key = api_key.strip()
+        self.openrouter_base_url = "https://openrouter.ai/api/v1"
+        self.openrouter_model = model.strip() if model and model.strip() else self.openrouter_model
+        self.preferred_provider = "openrouter"
+
+        success = self._setup_providers()
+
+        if self.chain_openrouter is None or not success:
+            return False, "Provider client initialization failed. Please verify your API key, base URL, and model."
+
+        chat_ok, chat_message = self._check_chat_provider("openrouter")
+        if not chat_ok:
+            self.chain_openrouter = None
+            return False, chat_message
+
+        return True, "Agent initialized successfully. Ready to help you."
+
+    def change_model(self, model: str) -> "tuple[bool, str]":
+        """
+        Switch the active OpenRouter model without re-entering the API key.
+
+        Args:
+            model: OpenRouter model identifier (e.g. ``"openai/gpt-4o"``).
+
+        Returns:
+            ``(True, success_message)`` or ``(False, error_message)``.
+        """
+        if not model or not model.strip():
+            return False, "Model cannot be empty."
+
+        if not getattr(self, "openrouter_api_key", None):
+            return False, "No API key configured. Please initialize the agent first (/init)."
+
+        self.openrouter_model = model.strip()
+        success = self._setup_providers()
+
+        if self.chain_openrouter is None or not success:
+            return False, "Provider reinitialization failed. Please verify the model name."
+
+        chat_ok, chat_message = self._check_chat_provider("openrouter")
+        if not chat_ok:
+            self.chain_openrouter = None
+            return False, chat_message
+
+        return True, f"Model switched to {self.openrouter_model}. Ready to help you."
+
+    def get_available_models(self) -> "tuple[bool, list[str], str]":
+        """
+        Fetch the list of models available via the configured OpenRouter API key.
+
+        Returns:
+            ``(True, model_ids, "")`` on success, or ``(False, [], error_message)``.
+        """
+        import urllib.request as _ur
+        import json as _json
+
+        api_key = getattr(self, "openrouter_api_key", None)
+        if not api_key:
+            return False, [], "No API key configured. Please initialize the agent first (/init)."
+
+        try:
+            url = "https://openrouter.ai/api/v1/models"
+            req = _ur.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+            with _ur.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode())
+            models = sorted(entry["id"] for entry in data.get("data", []) if "id" in entry)
+            return True, models, ""
+        except Exception as exc:
+            _LOGGER.warning("get_available_models error: %s", exc)
+            return False, [], f"Could not fetch models: {exc}"
+
+    def reset_connection(self) -> "tuple[bool, str]":
+        """Clear the active cloud connection and revert the agent to the uninitialized state."""
+        self.chain_ollama = None
+        self.chain_openrouter = None
+        self.openrouter_api_key = None
+        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
+        self.preferred_provider = "openrouter"
+
+        return True, "Agent connection reset. Type /init to set up again."
+
     def _build_column_index(self):
+        """Builds normalized token indexes and lightweight synonyms for column resolution."""
         self._cols = list(self.df_schema['columns'])
         self._col_tokens = {c: set(t for t in re.split(r"[ _/\.]+", str(c).lower()) if t) for c in self._cols}
         self._column_synonyms = {
@@ -770,7 +888,7 @@ class DataManipulationAgent:
             return None
 
     def _try_query_provider(self, provider: str, instruction: str, system_prompt: str) -> Optional[List[dict]]:
-            # 1. Dynamically find the chain (chain_openai, chain_google, chain_ollama)
+            # 1. Dynamically find the chain (chain_openrouter, chain_ollama)
             chain = getattr(self, f"chain_{provider}", None)
 
             # 2. If it exists, use the standard LangChain method
@@ -827,7 +945,7 @@ class DataManipulationAgent:
 
         # If we get here, all providers failed
         error_msg = "Internal Agent Error: Failed to generate a plan."
-        if not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
-            error_msg = "No LLM providers configured. Please check your API keys or Ollama status."
+        if not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY"):
+            error_msg = "No LLM providers configured. Please check your API keys or local Ollama setup. Initialize the agent with /init."
 
         return [{"function": "out_of_scope", "params": {"reason": error_msg}}]

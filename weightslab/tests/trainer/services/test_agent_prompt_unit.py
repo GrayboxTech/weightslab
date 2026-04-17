@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from weightslab.trainer.services.agent.intent_prompt import INTENT_PROMPT
 
@@ -31,6 +32,18 @@ class _FakeAgent:
     def _build_python_mask(self, conditions, n=None):
         self._seen = (conditions, n)
         return "df['signals//train_loss'] > 0.2"
+
+
+class _FakeChatModel:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def with_structured_output(self, schema):
+        return self
+
+    def invoke(self, prompt):
+        return SimpleNamespace(content="OK")
 
 
 class TestAgentPromptUnit(unittest.TestCase):
@@ -92,6 +105,58 @@ class TestAgentPromptUnit(unittest.TestCase):
             SimpleNamespace(reasoning="save"),
         )
         self.assertEqual(action["function"], "action.save")
+
+    def test_initialize_with_cloud_key_checks_chat_connectivity(self):
+        with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
+            agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
+
+        ctx = SimpleNamespace(
+            _all_datasets_df=agent_mod.pd.DataFrame({"metric": [1.0, 2.0]}),
+        )
+
+        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
+            agent = agent_mod.DataManipulationAgent(ctx)
+            ok, message = agent.initialize_with_cloud_key("test-key", "openrouter", "google/gemini-2.5-flash")
+
+        self.assertTrue(ok)
+        self.assertIn("initialized successfully", message)
+        self.assertIsNotNone(agent.chain_openrouter)
+        self.assertEqual(agent.openrouter_model, "google/gemini-2.5-flash")
+
+    def test_initialize_with_cloud_key_fails_when_probe_fails(self):
+        with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
+            agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
+
+        class _FailingChatModel(_FakeChatModel):
+            def invoke(self, prompt):
+                raise RuntimeError("401 Unauthorized")
+
+        ctx = SimpleNamespace(
+            _all_datasets_df=agent_mod.pd.DataFrame({"metric": [1.0, 2.0]}),
+        )
+
+        with mock.patch.object(agent_mod, "ChatOpenAI", _FailingChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
+            agent = agent_mod.DataManipulationAgent(ctx)
+            ok, message = agent.initialize_with_cloud_key("bad-key", "openrouter", "meta-llama/llama-3.3-70b-instruct")
+
+        self.assertFalse(ok)
+        self.assertIn("connectivity check failed", message)
+        self.assertIsNone(agent.chain_openrouter)
+
+    def test_initialize_with_cloud_key_rejects_non_openrouter_provider(self):
+        with unittest.mock.patch.dict(sys.modules, _install_agent_dependency_stubs(), clear=False):
+            agent_mod = importlib.import_module("weightslab.trainer.services.agent.agent")
+
+        ctx = SimpleNamespace(
+            _all_datasets_df=agent_mod.pd.DataFrame({"metric": [1.0, 2.0]}),
+        )
+
+        with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
+            agent = agent_mod.DataManipulationAgent(ctx)
+            ok, message = agent.initialize_with_cloud_key("test-key", "grok", "grok-3-mini")
+
+        self.assertFalse(ok)
+        self.assertIn("Only OpenRouter", message)
 
 
 if __name__ == "__main__":

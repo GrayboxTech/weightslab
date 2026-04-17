@@ -113,8 +113,8 @@ Quickstart examples:
 
 ## Configuration
 
-WeightsLab and Weights Studio are configured through environment variables.
-A fully-commented `.env` template is included at the repository root — copy it and adjust for your setup:
+WeightsLab and Weightslab UI are configured through environment variables.
+A fully commented .env template is included at the repository root — copy it and adjust for your setup:
 
 ```bash
 cp .env .env.local   # or edit .env directly
@@ -123,17 +123,101 @@ cp .env .env.local   # or edit .env directly
 | Category | Key variables |
 |---|---|
 | **Logging** | `WEIGHTSLAB_LOG_LEVEL`, `WEIGHTSLAB_LOG_TO_FILE`, `WEIGHTSLAB_ROOT_LOG_DIR` |
-| **gRPC server** | `GRPC_BACKEND_HOST`, `GRPC_BACKEND_PORT`, `GRPC_MAX_MESSAGE_BYTES` |
+| **gRPC server** | `GRPC_BACKEND_HOST`, `GRPC_BACKEND_PORT`, `GRPC_MAX_MESSAGE_BYTES`, `GRPC_TLS_ENABLED`, `GRPC_TLS_CERT_FILE`, `GRPC_TLS_KEY_FILE`, `GRPC_TLS_CA_FILE`, `GRPC_TLS_REQUIRE_CLIENT_AUTH`, `GRPC_AUTH_TOKEN`, `GRPC_AUTH_TOKENS` |
 | **Watchdog** | `GRPC_WATCHDOG_STUCK_SECONDS`, `GRPC_WATCHDOG_INTERVAL_SECONDS`, `GRPC_WATCHDOG_RESTART_THRESHOLD`, `GRPC_WATCHDOG_EXIT_ON_STUCK` |
 | **Data / cache** | `WL_MAX_PREVIEW_CACHE_SIZE`, `WL_PREVIEW_CACHE_WARMUP_WAIT_MS`, `WL_DEFAULT_THUMBNAIL_SIZE`, `WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5` |
-| **AI keys** | `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` |
+| **AI keys** | `OPENROUTER_API_KEY` |
 | **Agent config** | `AGENT_CONFIG_PATH` |
-| **Weights Studio** | `VITE_SERVER_HOST`, `VITE_SERVER_PORT`, `VITE_HISTOGRAM_MAX_BINS`, `ENVOY_HOST`, `ENVOY_PORT` |
+| **Weightslab UI** | `VITE_SERVER_HOST`, `VITE_SERVER_PORT`, `VITE_HISTOGRAM_MAX_BINS`, `ENVOY_HOST`, `ENVOY_PORT` |
 
 `AGENT_CONFIG_PATH` lets you point the data agent to a custom directory that contains `agent_config.yaml`.
 If set, WeightsLab looks for `<AGENT_CONFIG_PATH>/agent_config.yaml` before fallback locations.
 
 > Full documentation with all variables and their descriptions: [docs/configuration.rst](docs/configuration.rst)
+
+
+## AI Agent
+
+WeightsLab can run its data agent in two modes:
+
+- Local provider with Ollama
+- Cloud provider with OpenRouter
+
+Use local Ollama when you want a fully local setup and do not need cloud-hosted models.
+Use OpenRouter when you want larger hosted models and model selection directly from Weightslab UI.
+
+### Option A: Local Ollama
+
+Start Ollama on the same machine as the WeightsLab backend and pull the model first with Docker:
+
+```bash
+ollama pull llama3.2:3b
+ollama serve
+```
+
+Then configure the agent provider in `agent_config.yaml`:
+
+```yaml
+agent:
+  provider: ollama
+  ollama_model: llama3.2:3b
+  ollama_host: localhost
+  ollama_port: 11435
+  fallback_to_local: false
+```
+
+In this mode, the agent is ready when the backend starts. You can open Weightslab UI and query the agent directly from the chat bar.
+
+### Option B: Cloud OpenRouter
+
+You can either preconfigure OpenRouter in `agent_config.yaml` / `.env`, or initialize it interactively from Weightslab UI.
+
+Example static configuration:
+
+```yaml
+agent:
+  provider: openrouter
+  openrouter_model: meta-llama/llama-3.3-70b-instruct
+  fallback_to_local: false
+  # openrouter_api_key: ${OPENROUTER_API_KEY}
+```
+
+Environment variable:
+
+```bash
+export OPENROUTER_API_KEY=your_key_here
+```
+
+Interactive setup from Weightslab UI:
+
+1. Click in the agent bar or double-click to expand the agent window.
+2. Type `/init`.
+3. Choose either:
+   - `A` Enter your OpenRouter API key manually
+   - `B` Use the OpenRouter OAuth flow
+4. Select a model from the fetched list, then confirm.
+
+The default OpenRouter model, as recommended by Graybx, is `meta-llama/llama-3.3-70b-instruct`.
+
+### Agent Commands in Weightslab UI
+
+The agent input supports these commands:
+
+- `/init` initializes the cloud provider flow for OpenRouter
+- `/model` opens the model chooser and switches the active OpenRouter model
+- `/reset` clears the current runtime agent connection and status
+
+The agent history also records setup and model-change events as log-style entries, separate from normal agent responses.
+
+### Typical Usage Flow
+
+1. Start your WeightsLab backend (e.g., "main.py").
+2. Start Weightslab UI.
+3. If you use Ollama, query the agent directly.
+4. If you use OpenRouter and the agent is not configured yet, type `/init`.
+5. Ask natural-language data operations such as sorting, filtering, slicing, and inspection requests. You can also ask questions about the data.
+6. Use `/model` to try another cloud model without re-entering the key.
+7. Use `/reset` if you want to clear the current connection and start over.
 
 
 ## Documentation (API + SDK)
@@ -149,17 +233,3 @@ If set, WeightsLab looks for `<AGENT_CONFIG_PATH>/agent_config.yaml` before fall
 
 Graybx is building a wonderful community of AI researchers and engineers.
 Are you interested in joining our project? Contact us at hello [at] graybx [dot] com
-
-<!--
-### Citation
-
-If you publish work that uses Graybx, please cite Graybx as follows:
-
-```bibtex
-@article{graybx2025,
-  title={Graybox: A Friendly BlackBox interactive approach},
-  author={Luigi, Alex, Marc, And Guillaume},
-  year={2025}
-}
-```
--->
