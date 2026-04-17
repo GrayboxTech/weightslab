@@ -67,7 +67,7 @@ class AgentService:
         """
         available = self._is_available()
         message = (
-            "Ready to help you. Type /model to test another model or /reset to clear your API key and start over."
+            "Agent available. Ready to help you. Type /model to test another model or /reset to clear your API key and start over."
             if available
             else "Agent not configured. Type /init to set up."
         )

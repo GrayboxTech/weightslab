@@ -244,10 +244,13 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
     def CheckAgentHealth(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
+<<<<<<< Updated upstream
 <<<<<<< HEAD
 <<<<<<< Updated upstream
         return self._exp_service.data_service.CheckAgentHealth(request, context)
 =======
+=======
+>>>>>>> Stashed changes
         # Prefer explicit AgentService when present (new wiring).
         # Use vars(...) to avoid MagicMock auto-creating attributes that can
         # hide the real fallback path in unit/integration tests.
@@ -278,9 +281,12 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
                 return pb2.AgentHealthResponse(available=available, message=message)
 
         raise RuntimeError("ExperimentServiceServicer has no agent health provider configured")
+<<<<<<< Updated upstream
 =======
         return self._exp_service.agent_service.CheckAgentHealth(request, context)
 >>>>>>> 8fb02726683a5570d7915870041938273642a184
+=======
+>>>>>>> Stashed changes
 
     def InitializeAgent(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.InitializeAgent({request})")
