@@ -218,21 +218,19 @@ These keys are required only when using the agentic data-query features.
    * - Variable
      - Default
      - Description
-   * - ``OPENAI_API_KEY``
-     - *(empty)*
-     - OpenAI API key ? required for GPT-based natural-language data queries.
-   * - ``GOOGLE_API_KEY``
-     - *(empty)*
-     - Google API key ? required for Gemini-based data queries.
    * - ``OPENROUTER_API_KEY``
      - *(empty)*
-     - OpenRouter API key ? alternative multi-model routing endpoint.
+     - OpenRouter API key ? required for cloud agent setup in Weights Studio.
 
 
 Agent Configuration
 ~~~~~~~~~~~~~~~~~~~
 
 These variables control how the data-query agent finds its YAML configuration.
+The agent supports two provider families:
+
+- ``ollama`` for local inference
+- ``openrouter`` for cloud-hosted models
 
 .. list-table::
    :header-rows: 1
@@ -263,6 +261,117 @@ Example
    export AGENT_CONFIG_PATH=/opt/weightslab/config
    # WeightsLab will look for:
    # /opt/weightslab/config/agent_config.yaml
+
+
+Agent Provider Setup
+~~~~~~~~~~~~~~~~~~~~
+
+The runtime agent is configured from ``agent_config.yaml`` plus optional
+environment variables such as ``OPENROUTER_API_KEY``.
+
+Supported YAML keys
+^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Key
+     - Example
+     - Description
+   * - ``agent.provider``
+     - ``ollama``
+     - Active provider. Common values: ``ollama`` or ``openrouter``.
+   * - ``agent.ollama_model``
+     - ``llama3.2:3b``
+     - Local Ollama model name.
+   * - ``agent.ollama_host``
+     - ``localhost``
+     - Ollama host.
+   * - ``agent.ollama_port``
+     - ``11435``
+     - Ollama HTTP port used by WeightsLab.
+   * - ``agent.openrouter_model``
+     - ``meta-llama/llama-3.3-70b-instruct``
+     - Default OpenRouter model.
+   * - ``agent.openrouter_base_url``
+     - ``https://openrouter.ai/api/v1``
+     - OpenRouter-compatible base URL.
+   * - ``agent.openrouter_request_timeout``
+     - ``15.0``
+     - Request timeout in seconds for OpenRouter calls.
+   * - ``agent.openrouter_api_key``
+     - *(secret)*
+     - Optional API key in YAML. Prefer environment variables or UI init when possible.
+   * - ``agent.fallback_to_local``
+     - ``false``
+     - If enabled, WeightsLab also tries the local Ollama provider as fallback.
+
+Local Ollama example
+^^^^^^^^^^^^^^^^^^^^
+
+Use this mode when you want the agent available immediately at backend startup.
+
+.. code-block:: yaml
+
+   agent:
+     provider: ollama
+     ollama_model: llama3.2:3b
+     ollama_host: localhost
+     ollama_port: 11435
+     fallback_to_local: false
+
+Operational steps:
+
+1. Install Ollama.
+2. Pull a model, for example ``ollama pull llama3.2:3b``.
+3. Start the Ollama server.
+4. Start WeightsLab.
+5. Open Weights Studio and query the agent directly.
+
+Cloud OpenRouter example
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use this mode when you want hosted models and interactive setup from Weights Studio.
+
+.. code-block:: yaml
+
+   agent:
+     provider: openrouter
+     openrouter_model: meta-llama/llama-3.3-70b-instruct
+     fallback_to_local: false
+
+Recommended secret handling:
+
+.. code-block:: bash
+
+   export OPENROUTER_API_KEY=your_openrouter_key
+
+Weights Studio commands
+^^^^^^^^^^^^^^^^^^^^^^^
+
+When using Weights Studio, the agent bar supports these runtime commands:
+
+1. ``/init``
+   Opens the OpenRouter onboarding flow.
+   Users can enter an API key manually or use the OAuth flow, then select a model.
+2. ``/model``
+   Opens the model browser and switches the active OpenRouter model without
+   requiring a full reinitialization.
+3. ``/reset``
+   Clears the current runtime connection state and returns the agent to the
+   uninitialized status.
+
+Notes
+^^^^^
+
+- The default OpenRouter model is ``meta-llama/llama-3.3-70b-instruct``.
+- The model browser fetches the available models from OpenRouter using the
+  configured API key.
+- Connection and model-change actions are recorded in the agent history as
+  log-style entries.
+- ``/reset`` clears the current runtime agent state. If your startup config is
+  local-only and you want that provider back immediately, restart the backend.
 
 
 Testing

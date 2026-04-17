@@ -45,7 +45,7 @@ dependencies = [
   "torchvision>=0.24,<1; python_version >= '3.13'",
 
   # Serving / schema
-  "grpcio>=1.62,<2",
+  "grpcio>=1.80,<2",
   "protobuf>=4.25,<7",
   "pydantic>=2.7,<3",
 

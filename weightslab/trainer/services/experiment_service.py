@@ -11,6 +11,7 @@ from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve
 from weightslab.backend import ledgers
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
+from weightslab.trainer.services.agent_service import AgentService
 from weightslab.components.evaluation_controller import eval_controller
 
 
@@ -31,6 +32,7 @@ class ExperimentService:
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
+        self.agent_service = AgentService(self.data_service)
         # Per-instance in-flight counter for GetLatestLoggerData
         self._logger_data_in_flight = 0
         self._logger_data_counter_lock = threading.Lock()

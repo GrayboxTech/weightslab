@@ -98,6 +98,63 @@ Sanity checks:
 - Studio reachable at ``http://localhost:5173``.
 - Envoy admin reachable at ``http://localhost:9901``.
 
+Agent Usage in Weights Studio
+-----------------------------
+
+Weights Studio includes an agent bar and an expandable agent history window.
+The agent can run with either:
+
+- a local Ollama provider configured on the backend
+- a cloud OpenRouter provider configured at startup or initialized from the UI
+
+Local Ollama workflow
+~~~~~~~~~~~~~~~~~~~~~
+
+If the backend is configured with ``provider: ollama`` and the Ollama server is
+running, the agent is available immediately after backend startup.
+
+Typical local setup:
+
+1. Start Ollama.
+2. Start WeightsLab.
+3. Open Weights Studio.
+4. Ask questions directly in the agent bar.
+
+Cloud OpenRouter workflow
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If the backend is not initialized with a cloud key yet, Weights Studio shows
+the agent as unconfigured and the input placeholder instructs the user to type
+``/init``.
+
+``/init`` flow:
+
+1. Type ``/init`` in the agent input.
+2. Choose manual API key entry or the OpenRouter OAuth flow.
+3. Select a model from the available model list.
+4. Confirm to initialize the runtime connection.
+
+The default cloud model is ``meta-llama/llama-3.3-70b-instruct``.
+
+Available agent commands
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The agent bar supports these commands:
+
+- ``/init`` initializes OpenRouter from the UI
+- ``/model`` opens the model chooser to switch the active OpenRouter model
+- ``/reset`` clears the current agent runtime connection and status
+
+History behavior
+~~~~~~~~~~~~~~~~
+
+- Command entries such as ``/init``, ``/model``, and ``/reset`` are shown on
+  the user side of the history.
+- Agent lifecycle events such as connection setup, model changes, and reset
+  events are shown as separate log-style entries.
+- A pinned instruction line at the top of the history summarizes the available
+  commands and shows the full instruction text on hover.
+
 Server integration (AWS example)
 --------------------------------
 
@@ -482,4 +539,3 @@ Troubleshooting
   verify ``WS_SERVER_HOST/PORT/PROTOCOL`` in docker environment.
 - No plot updates:
   verify plot auto-refresh setting and backend logger data availability.
-

@@ -90,7 +90,23 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
     def CheckAgentHealth(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
-        return self._exp_service.data_service.CheckAgentHealth(request, context)
+        return self._exp_service.agent_service.CheckAgentHealth(request, context)
+
+    def InitializeAgent(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.InitializeAgent({request})")
+        return self._exp_service.agent_service.InitializeAgent(request, context)
+
+    def ChangeAgentModel(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ChangeAgentModel({request})")
+        return self._exp_service.agent_service.ChangeAgentModel(request, context)
+
+    def GetAgentModels(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetAgentModels({request})")
+        return self._exp_service.agent_service.GetAgentModels(request, context)
+
+    def ResetAgent(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ResetAgent({request})")
+        return self._exp_service.agent_service.ResetAgent(request, context)
 
     # -------------------------------------------------------------------------
     # Logger data sync for WeightsStudio
@@ -289,8 +305,3 @@ def grpc_serve(
 
 if __name__ == "__main__":
     grpc_serve()
-
-
-
-
-
