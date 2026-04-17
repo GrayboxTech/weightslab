@@ -90,7 +90,56 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
     def CheckAgentHealth(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
+<<<<<<< Updated upstream
         return self._exp_service.data_service.CheckAgentHealth(request, context)
+=======
+        # Prefer explicit AgentService when present (new wiring).
+        # Use vars(...) to avoid MagicMock auto-creating attributes that can
+        # hide the real fallback path in unit/integration tests.
+        agent_service = vars(self._exp_service).get("agent_service")
+        if agent_service is not None and hasattr(agent_service, "CheckAgentHealth"):
+            return agent_service.CheckAgentHealth(request, context)
+
+        data_service = vars(self._exp_service).get("data_service")
+        if data_service is not None:
+            # Backward-compatible delegation expected by older tests/mocks.
+            if hasattr(data_service, "CheckAgentHealth"):
+                return data_service.CheckAgentHealth(request, context)
+
+            # Real DataService fallback when no dedicated RPC method exists.
+            if hasattr(data_service, "_is_agent_available"):
+                import weightslab.proto.experiment_service_pb2 as pb2
+
+                try:
+                    available = bool(data_service._is_agent_available())
+                except Exception:
+                    available = False
+
+                message = (
+                    "Agent available. Ready to help you. Type /model to test another model or /reset to clear your API key and start over."
+                    if available
+                    else "Agent not configured. Type /init to set up."
+                )
+                return pb2.AgentHealthResponse(available=available, message=message)
+
+        raise RuntimeError("ExperimentServiceServicer has no agent health provider configured")
+
+    def InitializeAgent(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.InitializeAgent({request})")
+        return self._exp_service.agent_service.InitializeAgent(request, context)
+
+    def ChangeAgentModel(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ChangeAgentModel({request})")
+        return self._exp_service.agent_service.ChangeAgentModel(request, context)
+
+    def GetAgentModels(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetAgentModels({request})")
+        return self._exp_service.agent_service.GetAgentModels(request, context)
+
+    def ResetAgent(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ResetAgent({request})")
+        return self._exp_service.agent_service.ResetAgent(request, context)
+>>>>>>> Stashed changes
 
     # -------------------------------------------------------------------------
     # Logger data sync for WeightsStudio
