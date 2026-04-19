@@ -87,13 +87,12 @@ Or install directly on your machine.
 
 Install our framework:
 ```bash
-python -m pip install weightslab
+pip install weightslab
 ```
 
 Deploy our interface with Docker:
 ```bash
-cd ./ui
-docker compose up -d
+weightslab ui launch
 ```
 
 > [!IMPORTANT]
