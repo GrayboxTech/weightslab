@@ -608,6 +608,21 @@ class DataService:
                 if df.index.name == SampleStatsEx.SAMPLE_ID.value:
                     df = df.reset_index()
 
+                # Prefer integer sample_id index when every value is integer-like.
+                # If any value is non-numeric/non-integer, keep string ids for compatibility.
+                if SampleStatsEx.SAMPLE_ID.value in df.columns:
+                    sample_ids = df[SampleStatsEx.SAMPLE_ID.value]
+                    numeric_ids = pd.to_numeric(sample_ids, errors="coerce")
+                    can_use_int_ids = bool(
+                        numeric_ids.notna().all()
+                        and np.isfinite(numeric_ids.to_numpy()).all()
+                        and np.equal(np.mod(numeric_ids.to_numpy(), 1), 0).all()
+                    )
+                    if can_use_int_ids:
+                        df[SampleStatsEx.SAMPLE_ID.value] = numeric_ids.astype(np.int64)
+                    else:
+                        df[SampleStatsEx.SAMPLE_ID.value] = sample_ids.astype(str)
+
                 # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
                 # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
                 # exploding the dataframe size due to duplicate sample_id index labels.
@@ -1626,6 +1641,35 @@ class DataService:
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
         return operations
 
+    def _sort_includes_sample_id(self, by) -> bool:
+        by_list = [by] if isinstance(by, str) else list(by or [])
+        return SampleStatsEx.SAMPLE_ID.value in by_list
+
+    def _sample_id_sortable_series(self, values):
+        """Return numeric values for sorting when all sample_ids are integer-like, else string values."""
+        numeric = pd.to_numeric(values, errors="coerce")
+        arr = np.asarray(numeric)
+        if (
+            getattr(numeric, "notna", lambda: pd.Series(numeric).notna())().all()
+            and np.isfinite(arr).all()
+            and np.equal(np.mod(arr, 1), 0).all()
+        ):
+            return numeric
+        return values.astype(str)
+
+    def _sort_values_numeric_aware(self, df: pd.DataFrame, sort_params: dict) -> None:
+        """Sort dataframe while treating sample_id as numeric when possible."""
+        params = dict(sort_params)
+        if params.get("key") is None and self._sort_includes_sample_id(params.get("by")):
+            def _key(series: pd.Series):
+                if str(getattr(series, "name", "")) == SampleStatsEx.SAMPLE_ID.value:
+                    return self._sample_id_sortable_series(series)
+                return series
+
+            params["key"] = _key
+
+        df.sort_values(inplace=True, **params)
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -1832,7 +1876,7 @@ class DataService:
                              sub_df.sort_index(inplace=True, ascending=ascending_val)
                          else:
                              try:
-                                 sub_df.sort_values(inplace=True, **sort_params)
+                                 self._sort_values_numeric_aware(sub_df, sort_params)
                              except (TypeError, ValueError, KeyError) as e:
                                  # Fallback for ambiguity or missing column (if it's in the index)
                                  # Most common case: 'origin' or 'sample_id' are in the index but not columns
@@ -1854,7 +1898,7 @@ class DataService:
 
                                               # Adjust 'by' if needed (e.g. if 'index' was used, it's now 'sample_id' etc)
                                               # but here columns usually match.
-                                              temp_df.sort_values(inplace=True, **sort_params)
+                                              self._sort_values_numeric_aware(temp_df, sort_params)
 
                                               # Restore index and update sub_df
                                               sub_df = temp_df.set_index(list(orig_index_names))
@@ -1900,7 +1944,7 @@ class DataService:
                 if func_name == "sort_values":
                     # Params are already cleaned by the Agent's SortHandler
                     try:
-                        df.sort_values(inplace=True, **params)
+                        self._sort_values_numeric_aware(df, params)
                     except (TypeError, ValueError, KeyError) as e:
                         # Fallback for ambiguity or missing column (if it's in the index)
                         if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
@@ -1908,7 +1952,15 @@ class DataService:
                              by = params.get("by")
                              if isinstance(by, str) and by in getattr(df.index, 'names', []):
                                  ascending = params.get("ascending", True)
-                                 df.sort_index(level=by, inplace=True, ascending=ascending)
+                                 if by == SampleStatsEx.SAMPLE_ID.value and params.get("key") is None:
+                                     df.sort_index(
+                                         level=by,
+                                         inplace=True,
+                                         ascending=ascending,
+                                         key=self._sample_id_sortable_series,
+                                     )
+                                 else:
+                                     df.sort_index(level=by, inplace=True, ascending=ascending)
                              elif isinstance(e, KeyError):
                                  # It's actually missing, raise the original error
                                  raise e
