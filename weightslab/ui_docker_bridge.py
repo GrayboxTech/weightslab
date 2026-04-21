@@ -19,12 +19,12 @@ logger = logging.getLogger(__name__)
 
 def _get_compose_file():
     """Return the path to the bundled docker-compose.yml."""
-    return files("weightslab.ui") / "docker-compose.yml"
+    return files("weightslab.ui.docker") / "docker-compose.yml"
 
 
 def _get_envoy_config():
     """Return the path to the bundled envoy.yaml."""
-    return files("weightslab.ui") / "envoy.yaml"
+    return files("weightslab.ui.envoy") / "envoy.yaml"
 
 
 def _get_bootstrap_script() -> Path:

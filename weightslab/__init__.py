@@ -48,8 +48,9 @@ if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
 	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
 	logger.info(_BANNER)
 
-	# Initialize secure certs and auth tokens if not disabled
-	if os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
+	# Initialize secure certs and auth tokens if not disabled and TLS is enabled
+	grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
+	if grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
 		try:
 			from weightslab.security import CertAuthManager
 

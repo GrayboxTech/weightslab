@@ -107,13 +107,19 @@ class CertAuthManager:
         if not self.enable_auth:
             return ""
 
-        # Check if token exists
+        # Check if token is already set in environment (from bootstrap script)
+        env_token = os.environ.get('GRPC_AUTH_TOKEN', '').strip()
+        if env_token:
+            logger.debug("Using GRPC_AUTH_TOKEN from environment")
+            return env_token
+
+        # Check if token exists in file
         if self.token_file.exists():
             try:
                 with open(self.token_file, 'r') as f:
                     token = f.read().strip()
                     if token:
-                        logger.debug("Using existing gRPC auth token")
+                        logger.debug("Using existing gRPC auth token from file")
                         return token
             except Exception as e:
                 logger.warning(f"Could not read existing token: {e}")
