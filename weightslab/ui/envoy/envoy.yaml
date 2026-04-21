@@ -1,6 +1,7 @@
 static_resources:
   listeners:
   - name: listener_0
+    per_connection_buffer_limit_bytes: 268435456  # 256 MB — matches GRPC_MAX_MESSAGE_BYTES
     address:
       socket_address:
         address: 0.0.0.0
@@ -34,19 +35,23 @@ static_resources:
                   cluster: grpc_service
                   timeout: 300s
                   retry_policy:
-                    retry_on: "unavailable,resource-exhausted"
-                    num_retries: 3
+                    retry_on: connect-failure,refused-stream,reset
+                    num_retries: 1
                     per_try_timeout: 60s
                   max_stream_duration:
                     grpc_timeout_header_max: 300s
               cors:
                 allow_origin_string_match:
+                - exact: "http://localhost"
+                - exact: "http://127.0.0.1"
+                - exact: "http://localhost:5173"
+                - exact: "http://127.0.0.1:5173"
                 - exact: "https://localhost"
                 - exact: "https://127.0.0.1"
                 - exact: "https://localhost:5173"
                 - exact: "https://127.0.0.1:5173"
                 allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout
+                allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout,authorization,x-grpc-token
                 max_age: "1728000"
                 expose_headers: custom-header-1,grpc-status,grpc-message
           http_filters:
@@ -65,12 +70,15 @@ static_resources:
     connect_timeout: 1s
     type: STRICT_DNS
     lb_policy: ROUND_ROBIN
-    dns_lookup_family: V4_ONLY           # force IPv4 (avoids IPv6-only resolution issues)
-    http2_protocol_options: {}          # enable HTTP/2 (required for gRPC)
+    dns_lookup_family: V4_ONLY
+    http2_protocol_options: {}
     circuit_breakers:
       thresholds:
-      - max_requests: 64
-        max_pending_requests: 64
+      - priority: DEFAULT
+        max_connections: 100
+        max_pending_requests: 100
+        max_requests: 200
+        max_retries: 3
     load_assignment:
       cluster_name: grpc_service
       endpoints:
@@ -78,7 +86,7 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: host.docker.internal  # container -> host (make sure extra_hosts is set)
+                address: grpc-backend
                 port_value: __GRPC_BACKEND_PORT__
     transport_socket:
       name: envoy.transport_sockets.tls

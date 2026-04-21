@@ -158,6 +158,12 @@ class DataService:
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
+        try:
+            import weightslab.backend.cli as cli_backend
+
+            cli_backend.set_cli_data_service(self)
+        except Exception:
+            logger.debug("[DataService] Could not attach agent to CLI", exc_info=True)
 
         self._last_internals_update_time = 0.0
 

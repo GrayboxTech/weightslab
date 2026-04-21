@@ -224,6 +224,47 @@ The agent input supports these commands:
 
 The agent history also records setup and model-change events as log-style entries, separate from normal agent responses.
 
+### Agent Commands in the Backend CLI
+
+The local WeightsLab CLI also exposes agent control and querying commands.
+
+Available commands:
+
+- `agent status` checks whether the agent is attached and ready.
+- `agent init --api-key KEY [--model MODEL] [--timeout SEC]` initializes OpenRouter from the CLI.
+- `agent models` lists models available for the configured OpenRouter key.
+- `agent model MODEL_NAME` switches the active OpenRouter model.
+- `agent reset` clears the current agent connection.
+- `agent query <prompt>` sends a natural-language request through the agent.
+- `query <prompt>` and `ask <prompt>` are shortcuts for `agent query`.
+
+Examples:
+
+```bash
+agent status
+agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20
+agent models
+agent model meta-llama/llama-3.3-70b-instruct
+agent query discard all samples with loss > 5 and tag them as hard_examples
+ask tag validation samples as goldset
+```
+
+### CLI Sample-ID Commands
+
+The backend CLI supports editing data directly from `sample_id` values.
+
+- `discard <sample_id> [sample_id2 ...]` marks samples as discarded.
+- `undiscard <sample_id> [sample_id2 ...]` restores samples.
+- `add_tag <sample_id> <tag> [sample_id2 ...]` applies the same tag to one or more samples.
+
+Examples:
+
+```bash
+discard sample_001 sample_002 sample_003
+undiscard sample_002
+add_tag sample_001 goldset sample_002 sample_003
+```
+
 ### Typical Usage Flow
 
 1. Start your WeightsLab backend (e.g., "main.py").

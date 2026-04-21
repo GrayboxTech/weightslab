@@ -1,0 +1,31 @@
+# Production port bindings for Weights Studio
+# Usage:
+# docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+services:
+  weights_studio:
+    build:
+      args:
+        - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
+        - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-}
+    ports:
+      - "${VITE_PORT:-5173}:80"
+    environment:
+      - VITE_HOST=${VITE_HOST:-0.0.0.0}
+      - VITE_PORT=${VITE_PORT:-5173}
+      - VITE_MAX_PREFETCH_BATCHES=${VITE_MAX_PREFETCH_BATCHES:-1}
+      - VITE_HISTOGRAM_MAX_BINS=${VITE_HISTOGRAM_MAX_BINS:-512}
+      - VITE_IS_A_SANDBOX=${IS_A_SANDBOX:-0}
+      - NODE_ENV=${NODE_ENV:-production}
+      - VITE_SERVER_HOST=${VITE_SERVER_HOST:-localhost}
+      - VITE_SERVER_PORT=${VITE_SERVER_PORT:-8080}
+      - VITE_SERVER_PROTOCOL=${VITE_SERVER_PROTOCOL:-https}
+      - VITE_DEV_SERVER_HTTPS=${VITE_DEV_SERVER_HTTPS:-1}
+      - VITE_DEV_SERVER_CERT_FILE=${VITE_DEV_SERVER_CERT_FILE:-/app/envoy/certs/envoy-server.crt}
+      - VITE_DEV_SERVER_KEY_FILE=${VITE_DEV_SERVER_KEY_FILE:-/app/envoy/certs/envoy-server.key}
+      - IS_A_SANDBOX=${IS_A_SANDBOX:-0}
+
+      - WS_SERVER_HOST=${WS_SERVER_HOST:-localhost}
+      - WS_SERVER_PORT=${WS_SERVER_PORT:-8080}
+      - WS_SERVER_PROTOCOL=${WS_SERVER_PROTOCOL:-https}
+      - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
+      - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-}

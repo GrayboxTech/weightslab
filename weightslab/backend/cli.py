@@ -86,6 +86,34 @@ _server_thread: Optional[threading.Thread] = None
 _server_sock: Optional[socket.socket] = None
 _server_host: str = '127.0.0.1'
 _server_port: int = 0
+_cli_agent: Any = None
+_cli_data_service: Any = None
+
+
+def set_cli_agent(agent: Any = None) -> None:
+    """Attach the live data agent to the CLI process."""
+    global _cli_agent
+    _cli_agent = agent
+
+
+def set_cli_data_service(data_service: Any = None) -> None:
+    """Attach the live data service so CLI can execute agent queries."""
+    global _cli_data_service, _cli_agent
+    _cli_data_service = data_service
+    if data_service is not None:
+        _cli_agent = getattr(data_service, '_agent', _cli_agent)
+
+
+def _get_cli_agent() -> Any:
+    if _cli_agent is not None:
+        return _cli_agent
+    if _cli_data_service is not None:
+        return getattr(_cli_data_service, '_agent', None)
+    return None
+
+
+def _get_cli_data_service() -> Any:
+    return _cli_data_service
 
 
 def _handle_command(cmd: str) -> Any:
@@ -118,7 +146,13 @@ def _handle_command(cmd: str) -> Any:
                     'plot_model': 'Show ASCII tree of model architecture. Syntax: plot_model [<model_name>]',
                     'discard': 'Discard data samples. Syntax: discard <uid> [uid2 ...] [--loader loader_name]',
                     'undiscard': 'Un-discard data samples. Syntax: undiscard <uid> [uid2 ...] [--loader loader_name]',
-                    'add_tag': 'Add tag to data sample. Syntax: add_tag <uid> <tag> [--loader loader_name]',
+                    'add_tag': 'Add tag to one or more data samples by sample_id. Syntax: add_tag <sample_id> <tag> [sample_id2 ...] [--loader loader_name]',
+                    'agent': (
+                        'Agent control and querying. Syntax: '
+                        'agent status | agent init --api-key KEY [--model MODEL] [--timeout SEC] | '
+                        'agent model <MODEL> | agent models | agent reset | agent query <prompt>'
+                    ),
+                    'query / ask': 'Shortcut for agent query. Syntax: query <prompt> or ask <prompt>',
                     'evaluate / eval': (
                         'Pause training and trigger an evaluation pass. '
                         'Syntax: evaluate [split_name] [--steps N] [--tags tag1,tag2]. '
@@ -157,9 +191,17 @@ def _handle_command(cmd: str) -> Any:
                     'list all UIDs': 'list_uids',
                     'list specific loader': 'list_uids train_loader',
                     'list discarded only': 'list_uids --discarded',
-                    'discard samples': 'discard sample_001 sample_002',
-                    'undiscard samples': 'undiscard sample_001',
-                    'add tag': 'add_tag sample_001 difficult',
+                    'discard by sample_id': 'discard sample_001 sample_002',
+                    'restore by sample_id': 'undiscard sample_001',
+                    'tag by sample_id': 'add_tag sample_001 difficult sample_002 sample_003',
+                },
+                'agent_examples': {
+                    'check agent': 'agent status',
+                    'initialize openrouter': 'agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20',
+                    'list available models': 'agent models',
+                    'switch model': 'agent model meta-llama/llama-3.3-70b-instruct',
+                    'query the agent': 'agent query discard all samples with loss > 5 and tag them as hard_examples',
+                    'query shortcut': 'ask tag train samples with loss > 1.2 as goldset',
                 }
             }
 
@@ -455,6 +497,15 @@ def _handle_command(cmd: str) -> Any:
             discard_status = 1 if verb == 'discard' else 0
 
             try:
+                if loader_name is None:
+                    try:
+                        from weightslab.src import discard_samples as _discard_samples
+
+                        if _discard_samples(sample_ids=uids, discarded=bool(discard_status)):
+                            return {'ok': True, 'updated': {'dataframe': uids}}
+                    except Exception:
+                        pass
+
                 # Get loader(s)
                 if loader_name:
                     loaders_to_update = {loader_name: GLOBAL_LEDGER.get_dataloader(loader_name)}
@@ -516,21 +567,46 @@ def _handle_command(cmd: str) -> Any:
                 return {'ok': False, 'error': str(e)}
 
         if verb in ('add_tag', 'tag'):
-            # Syntax: add_tag <uid> <tag> [--loader loader_name]
-            # Tags are now stored as individual boolean columns (tags_<tagname>)
+            # Syntax: add_tag <sample_id> <tag> [sample_id2 ...] [--loader loader_name]
 
             if len(parts) < 3:
-                return {'ok': False, 'error': 'usage: add_tag <uid> <tag> [--loader loader_name]'}
+                return {'ok': False, 'error': 'usage: add_tag <sample_id> <tag> [sample_id2 ...] [--loader loader_name]'}
 
-            uid = parts[1]
-            tag = parts[2]
             loader_name = None
+            uids = []
+            tag = None
 
-            # Parse optional --loader argument
-            if len(parts) >= 5 and parts[3] == '--loader':
-                loader_name = parts[4]
+            i = 1
+            while i < len(parts):
+                if parts[i] == '--loader' and i + 1 < len(parts):
+                    loader_name = parts[i + 1]
+                    i += 2
+                    continue
+
+                if not uids:
+                    uids.append(parts[i])
+                    if i + 1 >= len(parts) or parts[i + 1].startswith('--'):
+                        return {'ok': False, 'error': 'usage: add_tag <sample_id> <tag> [sample_id2 ...] [--loader loader_name]'}
+                    tag = parts[i + 1]
+                    i += 2
+                    continue
+
+                uids.append(parts[i])
+                i += 1
+
+            if not uids or tag is None:
+                return {'ok': False, 'error': 'usage: add_tag <sample_id> <tag> [sample_id2 ...] [--loader loader_name]'}
 
             try:
+                if loader_name is None:
+                    try:
+                        from weightslab.src import tag_samples as _tag_samples
+
+                        if _tag_samples(sample_ids=uids, tag=tag, mode='add'):
+                            return {'ok': True, 'updated': {'dataframe': f'Tagged {len(uids)} sample(s) with "{tag}"'}}
+                    except Exception:
+                        pass
+
                 # Get loader(s)
                 if loader_name:
                     loaders_to_update = {loader_name: GLOBAL_LEDGER.get_dataloader(loader_name)}
@@ -556,26 +632,28 @@ def _handle_command(cmd: str) -> Any:
                         continue
 
                     try:
-                        # Try different methods to add tags - with new tag system, use set() method
-                        sample_id = str(uid) if uid.isdigit() else uid
+                        tagged_uids = []
+                        for uid in uids:
+                            sample_id = uid
 
-                        if hasattr(dataset, 'set') and callable(dataset.set):
-                            # New tag system: use set() to create tags_<tagname> column
-                            dataset.set(sample_id=sample_id, stat_name="tags", value=tag)
-                            results['updated'][lname] = f'Tagged sample {uid} with "{tag}"'
-                        elif hasattr(dataset, 'add_tag'):
-                            # Fallback: legacy add_tag method
-                            dataset.add_tag(uid, tag)
-                            results['updated'][lname] = f'Added tag "{tag}" to {uid}'
-                        elif hasattr(dataset, 'sample_tags'):
-                            # Fallback: direct dict manipulation
-                            if uid not in dataset.sample_tags:
-                                dataset.sample_tags[uid] = []
-                            if tag not in dataset.sample_tags[uid]:
-                                dataset.sample_tags[uid].append(tag)
-                            results['updated'][lname] = f'Added tag "{tag}" to {uid}'
-                        else:
-                            results['errors'][lname] = 'No tag method available'
+                            if hasattr(dataset, 'set') and callable(dataset.set):
+                                dataset.set(sample_id=sample_id, stat_name="tags", value=tag)
+                                tagged_uids.append(uid)
+                            elif hasattr(dataset, 'add_tag'):
+                                dataset.add_tag(uid, tag)
+                                tagged_uids.append(uid)
+                            elif hasattr(dataset, 'sample_tags'):
+                                if uid not in dataset.sample_tags:
+                                    dataset.sample_tags[uid] = []
+                                if tag not in dataset.sample_tags[uid]:
+                                    dataset.sample_tags[uid].append(tag)
+                                tagged_uids.append(uid)
+                            else:
+                                results['errors'][lname] = 'No tag method available'
+                                break
+
+                        if tagged_uids:
+                            results['updated'][lname] = f'Tagged sample(s) {tagged_uids} with "{tag}"'
                     except Exception as e:
                         results['errors'][lname] = str(e)
 
@@ -586,6 +664,158 @@ def _handle_command(cmd: str) -> Any:
 
             except Exception as e:
                 return {'ok': False, 'error': str(e)}
+
+        if verb in ('agent', 'query', 'ask'):
+            agent = _get_cli_agent()
+            data_service = _get_cli_data_service()
+
+            if verb in ('query', 'ask'):
+                subverb = 'query'
+                agent_parts = parts[1:]
+            else:
+                if len(parts) == 1:
+                    available = False
+                    try:
+                        available = bool(agent and agent.is_available())
+                    except Exception:
+                        available = False
+                    return {
+                        'ok': True,
+                        'available': available,
+                        'message': 'Agent available.' if available else 'Agent not configured. Use: agent init --api-key KEY [--model MODEL] [--timeout SEC]',
+                        'commands': {
+                            'agent status': 'Check whether the agent is available',
+                            'agent init': 'Initialize OpenRouter with API key, model, and optional timeout',
+                            'agent model': 'Switch the active OpenRouter model',
+                            'agent models': 'List available OpenRouter models',
+                            'agent reset': 'Clear the active agent connection',
+                            'agent query': 'Execute a natural-language query through the agent',
+                        },
+                    }
+                subverb = parts[1].lower()
+                agent_parts = parts[2:]
+
+            if subverb in ('status', 'health'):
+                if agent is None:
+                    return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
+                available = False
+                try:
+                    available = bool(agent.is_available())
+                except Exception:
+                    available = False
+                return {
+                    'ok': True,
+                    'available': available,
+                    'preferred_provider': getattr(agent, 'preferred_provider', None),
+                    'openrouter_model': getattr(agent, 'openrouter_model', None),
+                    'openrouter_timeout': getattr(agent, 'openrouter_request_timeout', None),
+                    'message': 'Agent available. Ready to help you.' if available else 'Agent not configured. Use agent init.',
+                }
+
+            if subverb == 'init':
+                if agent is None:
+                    return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
+
+                api_key = None
+                provider = 'openrouter'
+                model = None
+                timeout = None
+
+                i = 0
+                while i < len(agent_parts):
+                    token = agent_parts[i]
+                    if token == '--api-key' and i + 1 < len(agent_parts):
+                        api_key = agent_parts[i + 1]
+                        i += 2
+                    elif token == '--provider' and i + 1 < len(agent_parts):
+                        provider = agent_parts[i + 1]
+                        i += 2
+                    elif token == '--model' and i + 1 < len(agent_parts):
+                        model = agent_parts[i + 1]
+                        i += 2
+                    elif token == '--timeout' and i + 1 < len(agent_parts):
+                        timeout = agent_parts[i + 1]
+                        i += 2
+                    else:
+                        return {'ok': False, 'error': 'usage: agent init --api-key KEY [--provider openrouter] [--model MODEL] [--timeout SEC]'}
+
+                api_key = api_key or os.environ.get('OPENROUTER_API_KEY')
+                if not api_key:
+                    return {'ok': False, 'error': 'usage: agent init --api-key KEY [--provider openrouter] [--model MODEL] [--timeout SEC]'}
+
+                if timeout is not None:
+                    try:
+                        timeout_value = float(timeout)
+                    except ValueError:
+                        return {'ok': False, 'error': 'Invalid --timeout value'}
+                    os.environ['OPENROUTER_REQUEST_TIMEOUT'] = str(timeout_value)
+                    try:
+                        agent.openrouter_request_timeout = timeout_value
+                    except Exception:
+                        pass
+
+                success, message = agent.initialize_with_cloud_key(api_key, provider, model)
+                return {
+                    'ok': success,
+                    'message': message,
+                    'provider': provider,
+                    'model': getattr(agent, 'openrouter_model', model),
+                    'timeout': getattr(agent, 'openrouter_request_timeout', None),
+                }
+
+            if subverb in ('model', 'set-model'):
+                if agent is None:
+                    return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
+                if not agent_parts:
+                    return {'ok': False, 'error': 'usage: agent model <MODEL_NAME>'}
+                model = ' '.join(agent_parts).strip()
+                success, message = agent.change_model(model)
+                return {'ok': success, 'message': message, 'model': getattr(agent, 'openrouter_model', model)}
+
+            if subverb in ('models', 'list-models'):
+                if agent is None:
+                    return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
+                ok, models, message = agent.get_available_models()
+                return {'ok': ok, 'models': models, 'message': message}
+
+            if subverb == 'reset':
+                if agent is None:
+                    return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
+                success, message = agent.reset_connection()
+                return {'ok': success, 'message': message}
+
+            if subverb in ('query', 'ask'):
+                prompt = ' '.join(agent_parts).strip()
+                if not prompt:
+                    return {'ok': False, 'error': 'usage: agent query <prompt>'}
+
+                if data_service is not None and hasattr(data_service, 'ApplyDataQuery'):
+                    try:
+                        import weightslab.proto.experiment_service_pb2 as pb2
+
+                        response = data_service.ApplyDataQuery(
+                            pb2.DataQueryRequest(query=prompt, accumulate=True, is_natural_language=True),
+                            None,
+                        )
+                        return {
+                            'ok': bool(response.success),
+                            'message': response.message,
+                            'analysis_result': getattr(response, 'analysis_result', ''),
+                            'unique_tags': list(getattr(response, 'unique_tags', [])),
+                            'number_of_all_samples': getattr(response, 'number_of_all_samples', 0),
+                            'number_of_samples_in_the_loop': getattr(response, 'number_of_samples_in_the_loop', 0),
+                            'number_of_discarded_samples': getattr(response, 'number_of_discarded_samples', 0),
+                        }
+                    except Exception as e:
+                        return {'ok': False, 'error': str(e)}
+
+                if agent is None:
+                    return {'ok': False, 'error': 'agent_unavailable', 'message': 'Agent backend is not attached to the CLI.'}
+
+                operations = agent.query(prompt)
+                return {'ok': True, 'message': 'Agent plan generated.', 'operations': operations}
+
+            return {'ok': False, 'error': 'unknown_agent_command'}
 
         # Hyperparameters: list / show details and set
         if verb in ('hp', 'hyperparams'):
@@ -843,6 +1073,11 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
     """
 
     global _server_thread, _server_port, _server_host
+    if _.get('agent', None) is not None:
+        set_cli_agent(_.get('agent'))
+    if _.get('data_service', None) is not None:
+        set_cli_data_service(_.get('data_service'))
+
     cli_host = os.environ.get('CLI_HOST', cli_host)
     cli_port = int(os.environ.get('CLI_PORT', cli_port))
 

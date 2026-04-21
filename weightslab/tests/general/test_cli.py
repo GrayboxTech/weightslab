@@ -78,6 +78,8 @@ class TestCLICommands(unittest.TestCase):
         GLOBAL_LEDGER._dataloaders.clear()
         GLOBAL_LEDGER._optimizers.clear()
         GLOBAL_LEDGER._hyperparams.clear()
+        cli_backend.set_cli_agent(None)
+        cli_backend.set_cli_data_service(None)
 
     def test_help_command(self):
         """Test the help command returns all available commands."""
@@ -86,7 +88,19 @@ class TestCLICommands(unittest.TestCase):
         self.assertIn('commands', result)
         self.assertIn('pause / p', result['commands'])
         self.assertIn('plot_model', result['commands'])
+        self.assertIn('agent', result['commands'])
         self.assertIn('hyperparams_examples', result)
+
+    def test_agent_command_without_agent_returns_usage_payload(self):
+        result = _handle_command('agent')
+        self.assertTrue(result['ok'])
+        self.assertIn('commands', result)
+        self.assertFalse(result['available'])
+
+    def test_query_shortcut_without_prompt_returns_usage(self):
+        result = _handle_command('query')
+        self.assertFalse(result['ok'])
+        self.assertIn('usage', result['error'])
 
     def test_help_alias(self):
         """Test help command aliases."""
