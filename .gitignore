@@ -57,6 +57,11 @@ weightslab/ui/certs/*.crt
 weightslab/ui/certs/*.key
 weightslab/ui/certs/*.csr
 weightslab/ui/certs/*.srl
+**/certs/
+**/certs/*.crt
+**/certs/*.key
+**/certs/*.csr
+**/certs/*.srl
 
 # Ignore documentation build artifacts
 _build
