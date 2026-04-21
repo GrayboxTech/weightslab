@@ -3,12 +3,14 @@
 # docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
 services:
   weights_studio:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      args:
-        - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
-        - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-}
+    image: graybx/weightslab:latest
+    # Override with local build if needed:
+    # build:
+    #   context: ..
+    #   dockerfile: Dockerfile
+    #   args:
+    #     - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
+    #     - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-}
     ports:
       - "${VITE_PORT:-5173}:80"
     environment:
