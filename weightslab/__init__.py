@@ -47,6 +47,23 @@ if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
 	logger = logging.getLogger(__name__)
 	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
 	logger.info(_BANNER)
+
+	# Initialize secure certs and auth tokens if not disabled
+	if os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
+		try:
+			from weightslab.security import CertAuthManager
+
+			enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
+			manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
+
+			success, msg = manager.initialize()
+			if success:
+				logger.debug(f"Secure initialization: {msg}")
+			else:
+				logger.warning(f"Secure initialization warning: {msg}")
+		except Exception as e:
+			logger.debug(f"Secure initialization skipped: {e}")
+
 	os.environ['WEIGHTSLAB_initialized'] = 'true'  # Ensure WL init once
 
 # Get Package Metadata
