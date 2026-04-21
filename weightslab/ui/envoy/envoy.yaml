@@ -86,7 +86,7 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: grpc-backend
+                address: host.docker.internal
                 port_value: __GRPC_BACKEND_PORT__
     transport_socket:
       name: envoy.transport_sockets.tls

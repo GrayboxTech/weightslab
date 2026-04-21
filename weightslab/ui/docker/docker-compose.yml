@@ -37,6 +37,8 @@ services:
       - WS_SERVER_PROTOCOL=${WS_SERVER_PROTOCOL:-https}
     depends_on:
       - envoy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - weights_studio_network
     restart: unless-stopped
