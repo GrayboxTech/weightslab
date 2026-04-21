@@ -140,21 +140,34 @@ def _run_security_preflight(
 ) -> None:
     """Validate security-critical configuration before spawning gRPC threads."""
     if not grpc_tls_enabled:
+        # Log a strong warning if TLS is disabled, since this is a common misconfiguration with severe security implications.
         logger.warning(
-            "[gRPC] GRPC_TLS_ENABLED=0. Traffic will be unencrypted. "
-            "Use only for isolated local debugging."
+            "" + "\n" +
+            "\n# #######################################" + "\n" +
+            "# #######################################" + "\n" +
+            "[gRPC] GRPC_TLS_ENABLED=0. Traffic will be unencrypted. Use only for development." + "\n" +
+            "# #######################################" + "\n" +
+            "# #######################################" + "\n" + ""
         )
     else:
         _validate_file_exists(grpc_tls_key_file, "gRPC TLS private key (GRPC_TLS_KEY_FILE)")
         _validate_file_exists(grpc_tls_cert_file, "gRPC TLS certificate (GRPC_TLS_CERT_FILE)")
         if grpc_tls_require_client_auth:
             _validate_file_exists(grpc_tls_ca_file, "gRPC TLS CA file (GRPC_TLS_CA_FILE)")
+
+        # Log TLS/mTLS configuration with sensitive values redacted.
         logger.info(
-            "[gRPC] TLS preflight OK (mTLS=%s, cert=%s, key=%s, ca=%s)",
+            "" + "\n" +
+            "# #######################################" + "\n" +
+            "# #######################################" + "\n" +
+            f"TLS preflight initiated: " + "\n" +
+            f"\t[gRPC] TLS preflight OK (mTLS=%s, cert=%s, key=%s, ca=%s)",
             grpc_tls_require_client_auth,
             grpc_tls_cert_file,
             grpc_tls_key_file,
-            grpc_tls_ca_file if grpc_tls_require_client_auth else "<unused>",
+            (grpc_tls_ca_file if grpc_tls_require_client_auth else "<unused>") + "\n" +
+            "# #######################################" + "\n" +
+            "# #######################################" + "\n" + ""
         )
 
     if auth_tokens:

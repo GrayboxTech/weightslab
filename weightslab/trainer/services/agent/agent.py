@@ -414,7 +414,7 @@ class DataManipulationAgent:
             f"\tOpenRouter Model={self.openrouter_model}, with API Key={f'{self.openrouter_api_key[:4]}****{self.openrouter_api_key[-4:]}' if self.openrouter_api_key else 'None'} and openrouter_base_url={self.openrouter_base_url}, " + "\n" +
             f"\tOllama Model={self.ollama_model}" + "\n" +
             "# #######################################" + "\n" +
-            "# #######################################"
+            "# #######################################" + "\n" + ""
         )
 
     @staticmethod
