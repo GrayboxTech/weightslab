@@ -4,6 +4,8 @@
 services:
   weights_studio:
     build:
+      context: ..
+      dockerfile: Dockerfile
       args:
         - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
         - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-}
