@@ -411,7 +411,9 @@ class DataManipulationAgent:
             f"Agent initialized from configuration {path}: " + "\n" +
             f"\tFinal Agent Configuration: Preferred Provider={self.preferred_provider}, " + "\n" +
             f"\tFallback to Local={self.fallback_to_local}, " + "\n" +
-            f"\tOpenRouter Model={self.openrouter_model}, with API Key={f'{self.openrouter_api_key[:4]}****{self.openrouter_api_key[-4:]}' if self.openrouter_api_key else 'None'} and openrouter_base_url={self.openrouter_base_url}, " + "\n" +
+            f"\tOpenRouter Model={self.openrouter_model} with:" + "\n" +
+            f"\t\tAPI Key={f'{self.openrouter_api_key[:4]}****{self.openrouter_api_key[-4:]}' if self.openrouter_api_key else 'None'}" + "\n" +
+            f"\t\tBase URL={self.openrouter_base_url}, " + "\n" +
             f"\tOllama Model={self.ollama_model}" + "\n" +
             "# #######################################" + "\n" +
             "# #######################################" + "\n" + ""
