@@ -1946,17 +1946,16 @@ class DataService:
                     try:
                         # tmp fix for sample_id index sorting when sample_id is not a column (legacy datasets). We want to sort by sample_id as numeric if possible, but it may be in the index.
                         try:
-                            df = df.reset_index()
+                            df.reset_index(inplace=True)
                             if 'level_0' in df.columns:
                                 df.pop('level_0')
                             if 'index' in df.columns:
                                 df.pop('index')
                             df['sample_id'] = df['sample_id'].astype(int)
-                            df = df.set_index(['sample_id', 'origin'])
+                            df.sort_values(inplace=True, **params)
+                            df.set_index(['sample_id', 'origin'], inplace=True)
                         except:
                             pass
-                        df.sort_values(inplace=True, **params)
-
                     except (TypeError, ValueError, KeyError) as e:
                         # Fallback for ambiguity or missing column (if it's in the index)
                         if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
