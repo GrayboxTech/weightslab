@@ -1058,18 +1058,21 @@ class DataService:
                     value = int(value)
 
                 # Check if it s a tag column here and handle it as a string stat with the tag name as value
+                value_string = str(value)
                 if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
-                    if value == 1:
-                        tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
-                        if value:  # Only include if the tag is True for this sample
-                            data_stats.append(
-                                create_data_stat(f"{SampleStatsEx.TAG.value}:{tag_name}", "string", shape=[1], value_string="1", thumbnail=b"")
-                            )
-                    else:
-                        continue  # Skip false tags
+                    tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
+                    data_stats.append(
+                        create_data_stat(
+                            f"{SampleStatsEx.TAG.value}:{tag_name}",
+                            "string",
+                            shape=[1],
+                            value_string=value_string,
+                            thumbnail=b""
+                        )
+                    )
                 else:
                     data_stats.append(
-                        create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
+                        create_data_stat(stat_name, "string", shape=[1], value_string=value_string[:512], thumbnail=b"")
                     )
 
             # ====== Step 6: Add origin and task_type stats ======
@@ -1714,8 +1717,36 @@ class DataService:
                          # because heuristics fail on column names like 'signals//loss'
                          pass
 
-                # 1. Evaluate the expression with safe context
-                new_values = eval(code, {"df": df, "np": np, "pd": pd})
+                # 1. Evaluate the expression with safe context.
+                # Keep df as-is (no copy), but expose `origin` whether it is a column or an index level.
+                origin_series = None
+                if SampleStatsEx.ORIGIN.value in df.columns:
+                    origin_series = df[SampleStatsEx.ORIGIN.value]
+                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in df.index.names:
+                    origin_series = pd.Series(
+                        df.index.get_level_values(SampleStatsEx.ORIGIN.value),
+                        index=df.index,
+                    )
+                elif df.index.name == SampleStatsEx.ORIGIN.value:
+                    origin_series = pd.Series(df.index, index=df.index)
+
+                eval_globals = {"df": df, "np": np, "pd": pd}
+                if origin_series is not None:
+                    eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
+
+                try:
+                    new_values = eval(code, eval_globals)
+                except KeyError as e:
+                    # Backward-compat: agent often emits df['origin'] even when origin is in index.
+                    if str(e).strip("'\"") == SampleStatsEx.ORIGIN.value and origin_series is not None:
+                        patched_code = re.sub(
+                            r"df\[\s*['\"]origin['\"]\s*\]",
+                            SampleStatsEx.ORIGIN.value,
+                            code,
+                        )
+                        new_values = eval(patched_code, eval_globals)
+                    else:
+                        raise
 
                 # 2. Check for scalar vs series compatibility
                 # (Pandas handles most of this, but we ensure robustness)
@@ -1738,7 +1769,7 @@ class DataService:
                 # We must split the updates by origin and upsert them to the manager
                 if self._df_manager is not None:
                     # Create a minimal update dataframe with just the modified column
-                    update_payload = df[[col]].copy()
+                    update_payload = df[[col]]  #  .copy()  # Remove copy because memory waste and slowdown
 
                     # Ensure origin is available for grouping
                     if isinstance(df.index, pd.MultiIndex) and "origin" in df.index.names:
@@ -1787,7 +1818,7 @@ class DataService:
                      if start < len(df):
                          logger.debug(f"[sort_view_slice] Sorting slice {start}:{end}")
                          # Extract and sort slice
-                         sub_df = df.iloc[start:end].copy()
+                         sub_df = df.iloc[start:end]  #  .copy()  # Remove copy because memory waste and slowdown
 
                          # Apply sort to slice
                          # Filter params for sort_values
@@ -1847,12 +1878,12 @@ class DataService:
                          # otherwise Sample ID X will point to data from Sample ID Y (corruption).
                          try:
                              if isinstance(df.index, pd.MultiIndex):
-                                 new_index_values = df.index.to_numpy().copy()
+                                 new_index_values = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
                                  new_index_values[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.MultiIndex.from_tuples(new_index_values, names=df.index.names)
                              else:
                                  idx_name = df.index.name
-                                 new_index = df.index.to_numpy().copy()
+                                 new_index = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
                                  new_index[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.Index(new_index, name=idx_name)
                          except Exception as e:
@@ -2490,7 +2521,7 @@ class DataService:
                         self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
 
                     # Work on a copy to allow concurrent readers to see a consistent state
-                    df = self._all_datasets_df.copy()
+                    df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
                     messages = []
 
 
@@ -2521,7 +2552,7 @@ class DataService:
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
                     with self._lock:
                         # Work on a copy to allow concurrent readers to see a consistent state
-                        working_df = self._all_datasets_df.copy()
+                        working_df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
                         df, message = execute_df_operation(working_df, request.query)  # in-place operation, or replace previous dataframe
                         logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
                         if operations:
@@ -2587,7 +2618,7 @@ class DataService:
                         if self._all_datasets_df is None:
                             self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
 
-                        df = self._all_datasets_df.copy()
+                        df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
                         messages = []
                         intent_type = pb2.INTENT_FILTER
                         analysis_result = ""

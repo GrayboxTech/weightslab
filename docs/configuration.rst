@@ -91,14 +91,18 @@ gRPC Server
      - ``1``
      - Enables TLS on the backend gRPC socket.
        Set to ``0`` only for isolated local debugging.
+   * - ``GRPC_TLS_CERT_DIR``
+     - ``~/certs``
+     - Base directory used for default TLS file lookup when the per-file
+       ``GRPC_TLS_*_FILE`` variables are not set.
    * - ``GRPC_TLS_KEY_FILE``
-     - ``certs/backend-server.key``
+     - ``~/certs/backend-server.key``
      - Path to backend private key file (PEM).
    * - ``GRPC_TLS_CERT_FILE``
-     - ``certs/backend-server.crt``
+     - ``~/certs/backend-server.crt``
      - Path to backend server certificate file (PEM).
    * - ``GRPC_TLS_CA_FILE``
-     - ``certs/ca.crt``
+     - ``~/certs/ca.crt``
      - Path to CA certificate used to validate mTLS client certificates.
    * - ``GRPC_TLS_REQUIRE_CLIENT_AUTH``
      - ``1``
@@ -113,6 +117,15 @@ gRPC Server
 
 Backend startup validates these security inputs at boot time and fails fast with
 an explicit error when required TLS files are missing or invalid.
+
+When hyperparameters/config are registered, WeightsLab resolves gRPC TLS settings
+with config-first precedence:
+
+- TLS flags: ``grpc_tls_enabled`` then ``GRPC_TLS_ENABLED``;
+  ``grpc_tls_require_client_auth`` then ``GRPC_TLS_REQUIRE_CLIENT_AUTH``.
+- TLS paths (when TLS is enabled):
+  ``grpc_tls_*_file`` -> ``GRPC_TLS_*_FILE`` -> ``grpc_tls_cert_dir`` ->
+  ``GRPC_TLS_CERT_DIR`` -> default ``~/certs``.
 
 
 Watchdog

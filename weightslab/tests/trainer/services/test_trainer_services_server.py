@@ -63,6 +63,104 @@ class TestExperimentServiceServicerDelegation(_TimeoutMixin, unittest.TestCase):
         exp_service.RestoreCheckpoint.assert_called_once_with(req, ctx)
 
 
+class TestTlsPathResolution(_TimeoutMixin, unittest.TestCase):
+    @patch.dict("os.environ", {}, clear=True)
+    def test_resolve_grpc_tls_path_defaults_to_user_home_certs_dir(self):
+        resolved = trainer_services._resolve_grpc_tls_path(
+            {},
+            "grpc_tls_cert_file",
+            "GRPC_TLS_CERT_FILE",
+            "backend-server.crt",
+        )
+
+        expected = os.path.join(
+            os.path.expanduser(os.path.join("~", "certs")),
+            "backend-server.crt",
+        )
+        self.assertEqual(resolved, expected)
+
+    @patch.dict("os.environ", {"GRPC_TLS_CERT_DIR": "~/custom-certs"}, clear=True)
+    def test_resolve_grpc_tls_path_uses_shared_cert_dir_override(self):
+        resolved = trainer_services._resolve_grpc_tls_path(
+            {},
+            "grpc_tls_key_file",
+            "GRPC_TLS_KEY_FILE",
+            "backend-server.key",
+        )
+
+        expected = os.path.join(
+            os.path.expanduser("~/custom-certs"),
+            "backend-server.key",
+        )
+        self.assertEqual(resolved, expected)
+
+    @patch.dict("os.environ", {"GRPC_TLS_CERT_DIR": "~/env-certs"}, clear=True)
+    def test_resolve_grpc_tls_path_prefers_config_dir_over_env_dir(self):
+        resolved = trainer_services._resolve_grpc_tls_path(
+            {"grpc_tls_cert_dir": "~/config-certs"},
+            "grpc_tls_key_file",
+            "GRPC_TLS_KEY_FILE",
+            "backend-server.key",
+        )
+
+        expected = os.path.join(
+            os.path.expanduser("~/config-certs"),
+            "backend-server.key",
+        )
+        self.assertEqual(resolved, expected)
+
+    @patch.dict("os.environ", {"GRPC_TLS_CA_FILE": "~/override/ca.pem"}, clear=True)
+    def test_resolve_grpc_tls_path_prefers_config_file_over_env_file(self):
+        resolved = trainer_services._resolve_grpc_tls_path(
+            {"grpc_tls_ca_file": "~/from-config/ca.crt", "grpc_tls_cert_dir": "~/config-certs"},
+            "grpc_tls_ca_file",
+            "GRPC_TLS_CA_FILE",
+            "ca.crt",
+        )
+
+        self.assertEqual(resolved, os.path.expanduser("~/from-config/ca.crt"))
+
+    @patch.dict("os.environ", {"GRPC_TLS_CA_FILE": "~/override/ca.pem"}, clear=True)
+    def test_resolve_grpc_tls_path_uses_env_file_when_config_file_missing(self):
+        resolved = trainer_services._resolve_grpc_tls_path(
+            {"grpc_tls_cert_dir": "~/config-certs"},
+            "grpc_tls_ca_file",
+            "GRPC_TLS_CA_FILE",
+            "ca.crt",
+        )
+
+        self.assertEqual(resolved, os.path.expanduser("~/override/ca.pem"))
+
+    def test_resolve_bool_setting_prefers_config_over_env(self):
+        with patch.dict("os.environ", {"GRPC_TLS_ENABLED": "0"}, clear=True):
+            self.assertTrue(
+                trainer_services._resolve_bool_setting(
+                    {"grpc_tls_enabled": True},
+                    "grpc_tls_enabled",
+                    "GRPC_TLS_ENABLED",
+                    "1",
+                )
+            )
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_resolve_tls_client_auth_defaults_to_tls_enabled_when_undefined(self):
+        self.assertTrue(trainer_services._resolve_tls_client_auth_setting({}, True))
+        self.assertFalse(trainer_services._resolve_tls_client_auth_setting({}, False))
+
+    @patch.dict("os.environ", {"GRPC_TLS_REQUIRE_CLIENT_AUTH": "0"}, clear=True)
+    def test_resolve_tls_client_auth_uses_env_when_defined(self):
+        self.assertFalse(trainer_services._resolve_tls_client_auth_setting({}, True))
+
+    @patch.dict("os.environ", {"GRPC_TLS_REQUIRE_CLIENT_AUTH": "0"}, clear=True)
+    def test_resolve_tls_client_auth_prefers_config_over_env(self):
+        self.assertTrue(
+            trainer_services._resolve_tls_client_auth_setting(
+                {"grpc_tls_require_client_auth": True},
+                False,
+            )
+        )
+
+
 class TestGrpcServe(_TimeoutMixin, unittest.TestCase):
     @patch.dict(
         "os.environ",

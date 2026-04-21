@@ -26,7 +26,7 @@ Prerequisites
 Environment variables
 ---------------------
   BDD1K_DATA_ROOT  Path to the bdd1k dataset   (default: ~/Documents/Codes/datasets/bdd1k)
-  WL_UI_URL        WeightsLab UI base URL       (default: http://localhost:5173)
+  WL_UI_URL        WeightsLab UI base URL       (default: https://localhost:5173)
   WL_TEST_TIMEOUT  Per-test timeout in seconds  (default: 600)
   WL_SKIP_DOCKER   Set to 1 to skip docker launch
   HEADLESS         Set to 0 to watch the browser (default: 1)
@@ -73,7 +73,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _TEST_TIMEOUT = int(os.getenv("WL_TEST_TIMEOUT", "600"))
-_UI_URL = os.getenv("WL_UI_URL", "http://localhost:5173")
+_UI_URL = os.getenv("WL_UI_URL", "https://localhost:5173")
 _BDD1K_ROOT = os.getenv(
     "BDD1K_DATA_ROOT",
     str(Path.home() / "Documents" / "Codes" / "datasets" / "bdd1k"),

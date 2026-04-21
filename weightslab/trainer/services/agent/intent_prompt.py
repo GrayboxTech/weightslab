@@ -6,7 +6,10 @@ Your goal is to translate natural language into a structured execution plan for 
 The dataset contains {row_count} rows. The schema below distinguishes between Index levels (`[INDEX]`) and standard columns (`[COL]`):
 {schema}
 
-**CRITICAL RULE**: You must ONLY use column names that appear in the schema above. The examples below use *generic* names (e.g., `some_metric`, `category_col`) which you must map to the *actual* columns in the provided schema.
+**CRITICAL RULE**:
+You must ONLY use column names that appear in the schema above. The examples below use *generic* names (e.g., `some_metric`, `category_col`) which you must map to the *actual* columns in the provided schema.
+And if the user refers to a specific origin of the data, like train/val/test, you should use the `origin` column to filter by that set, but first find to which value the user refers. For example, "train samples" means `origin == 'train'`.
+You can use regex first to map origins value in the dataframe and origin ask by the user. If you don't find any correlation, you can ask the user for clarification about the origin value they are referring to.
 
 - **History (Last 5 turns)**:
 {history}
@@ -34,7 +37,15 @@ Choose the `kind` based on the user's VERB and INTENT:
 3. **Index Access**: Columns marked `[INDEX]` must be accessed via `df.index.get_level_values('name')` in `analysis_expression`.
 4. **ML Terminology**: "class" = `target`/`label`. "set" = `origin` (train/val/test). "lowest/best loss" = `min`.
 5. **Denylisting**: "Discarding", "Excluding", or "Banning" samples means setting the `discarded` column to `True`. Do NOT use `drop` for this, as `drop` only hides them from the view.
-6. **Tags Filtering**: The `tags` column contains semicolon-separated values. ALWAYS use `op="contains"` instead of `==` for searching tags.
+6. **Tagging Schema (IMPORTANT)**:
+  - Do NOT append values into a single `tag`/`tags` string column.
+  - Tags are boolean columns named exactly `tag:COLUMN_NAME`.
+  - If the user does not provide a tag name, infer `COLUMN_NAME` from intent (short, semantic snake_case).
+  - If the user provides a tag name (e.g., "goldset"), use `tag:goldset`.
+  - If the column already exists, update it. If it does not exist, create it via `transform`.
+  - For filtering by a tag, use the boolean tag column directly (e.g., `column='tag:goldset', op='==', value=true`).
+  - "Remove tag" or "untag" means setting the corresponding `tag:COLUMN_NAME` values to `False` for targeted rows.
+  - "Rename tag A to B" means transferring `True` flags from `tag:A` into `tag:B` (create/update) and clearing `tag:A` to `False`.
 
 ---
 ## 4. SCHEMA RULES (STRICT)
@@ -181,29 +192,34 @@ User: "Reset all filters"
 
 
 **Ex11: Smart Tagging (Conditionals)**
-User: "Add tag 'FOUR' to target 4"
+User: "Tag train samples with train loss greater than 1.5"
 {{
-  "reasoning": "Vectorized update. Nested np.where handles the semicolon delimiter logic safely.",
+  "reasoning": "No explicit tag name was provided, so infer a semantic boolean tag column and set it to True for matching rows.",
   "primary_goal": "ui_manipulation",
   "steps": [
     {{
       "kind": "transform",
-      "target_column": "tags",
-      "transform_code": "np.where(df['target'] == 4, np.where(df['tags'] == '', 'FOUR', df['tags'] + ';FOUR'), df['tags'])"
+      "target_column": "tag:high_train_loss",
+      "transform_code": "np.where((df['origin'] == 'train') & (df['train_loss'] > 1.5), True, df.get('tag:high_train_loss', False))"
     }}
   ]
 }}
 
 
 **Ex12: Sampling (Fraction)**
-User: "Remove 50% of the samples with tags 'delete'"
+User: "Tag as 'goldset' train samples with train loss greater than 1.65, then remove 50% of them"
 {{
-  "reasoning": "Target: Randomly drop half of the rows matching the tag condition. Strategy: Kind=Drop with drop_frac=0.5.",
+  "reasoning": "Explicit tag name provided -> use tag:goldset boolean column (create or update), then sample-drop half of rows where this tag is True.",
   "primary_goal": "ui_manipulation",
   "steps": [
     {{
+      "kind": "transform",
+      "target_column": "tag:goldset",
+      "transform_code": "np.where((df['origin'] == 'train') & (df['train_loss'] > 1.65), True, df.get('tag:goldset', False))"
+    }},
+    {{
       "kind": "drop",
-      "conditions": [{{ "column": "tags", "op": "contains", "value": "delete" }}],
+      "conditions": [{{ "column": "tag:goldset", "op": "==", "value": true }}],
       "drop_frac": 0.5
     }}
   ]
@@ -248,6 +264,125 @@ User: "Discard all samples with loss > 5"
       "kind": "transform",
       "target_column": "discarded",
       "transform_code": "np.where(df['loss'] > 5, True, df['discarded'])"
+    }}
+  ]
+}}
+
+
+**Ex16: Remove Tag On Subset**
+User: "Remove tag 'goldset' from validation samples"
+{{
+  "reasoning": "Removing a tag means setting tag:goldset to False only for the targeted subset.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tag:goldset",
+      "transform_code": "np.where(df['origin'] == 'val', False, df.get('tag:goldset', False))"
+    }}
+  ]
+}}
+
+
+**Ex17: Untag Already Tagged Data**
+User: "Untag already tagged 'goldset' samples"
+{{
+  "reasoning": "Request targets rows already tagged as goldset, so set True flags back to False.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tag:goldset",
+      "transform_code": "np.where(df.get('tag:goldset', False) == True, False, df.get('tag:goldset', False))"
+    }}
+  ]
+}}
+
+
+**Ex18: Rename Tag A To B**
+User: "Change tag name from 'goldset' to 'priority'"
+{{
+  "reasoning": "No dedicated rename primitive. Transfer True flags from tag:goldset into tag:priority, then clear tag:goldset.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tag:priority",
+      "transform_code": "np.where(df.get('tag:goldset', False) == True, True, df.get('tag:priority', False))"
+    }},
+    {{
+      "kind": "transform",
+      "target_column": "tag:goldset",
+      "transform_code": "np.where(df.get('tag:goldset', False) == True, False, df.get('tag:goldset', False))"
+    }}
+  ]
+}}
+
+
+**Ex19: Filter Using Tag Column**
+User: "Keep only goldset samples"
+{{
+  "reasoning": "Tag filtering must use the boolean tag column directly.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "keep",
+      "conditions": [{{ "column": "tag:goldset", "op": "==", "value": true }}]
+    }}
+  ]
+}}
+
+
+**Ex20: Remove Tag Everywhere**
+User: "Remove tag 'priority' from all samples"
+{{
+  "reasoning": "Global tag removal means setting the entire tag:priority column to False.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tag:priority",
+      "transform_code": "False"
+    }}
+  ]
+}}
+
+
+**Ex21: Tag Only Currently Untagged Rows**
+User: "Tag as 'hard_example' train samples with loss > 2 that are not already hard_example"
+{{
+  "reasoning": "Set True only on matching rows that are not already tagged, while preserving existing values.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tag:hard_example",
+      "transform_code": "np.where((df['origin'] == 'train') & (df['loss'] > 2) & (df.get('tag:hard_example', False) == False), True, df.get('tag:hard_example', False))"
+    }}
+  ]
+}}
+
+
+**Ex22: Goldset 50% With 30/70 Hard-Easy Mix**
+User: "Can you add the tag 'goldset' to 50% of train samples, where 30% of that goldset are hard (high loss) and 70% are easy (low loss)?"
+{{
+  "reasoning": "Goldset is 50% of train. To enforce a 30/70 hard-easy composition inside that 50%, select hard from top 15% train-loss and easy from bottom 35% train-loss, then union them into tag:goldset.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "tag:goldset_hard",
+      "transform_code": "np.where((df['origin'] == 'train') & (df['train_loss'] >= df[df['origin'] == 'train']['train_loss'].quantile(0.85)), True, df.get('tag:goldset_hard', False))"
+    }},
+    {{
+      "kind": "transform",
+      "target_column": "tag:goldset_easy",
+      "transform_code": "np.where((df['origin'] == 'train') & (df['train_loss'] <= df[df['origin'] == 'train']['train_loss'].quantile(0.35)), True, df.get('tag:goldset_easy', False))"
+    }},
+    {{
+      "kind": "transform",
+      "target_column": "tag:goldset",
+      "transform_code": "np.where(df.get('tag:goldset_hard', False) | df.get('tag:goldset_easy', False), True, df.get('tag:goldset', False))"
     }}
   ]
 }}

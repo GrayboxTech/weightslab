@@ -14,12 +14,12 @@ def _make_per_sample_buf():
     - compact arrays: 12 bytes/entry (int32 + int32 + float32)
 
     Fields:
-        sample_ids: signed int32 – dataset sample index
-        steps:      signed int32 – global training step
-        values:     float32       – signal value at that step for that sample
+        sample_ids: list of str  - dataset sample index
+        steps:      signed int32 - global training step
+        values:     float32      - signal value at that step for that sample
     """
     return {
-        "sample_ids": _array('i'),  # int32, 4 bytes each
+        "sample_ids": [],  # str
         "steps":      _array('i'),  # int32, 4 bytes each
         "values":     _array('f'),  # float32, 4 bytes each
     }
@@ -309,7 +309,7 @@ class LoggerQueue:
                 buf = self._signal_history_per_sample[graph_name][eval_hash]
                 step_i = int(global_step)
                 for sid, value in signal_per_sample.items():
-                    buf["sample_ids"].append(int(sid))
+                    buf["sample_ids"].append(sid)
                     buf["steps"].append(step_i)
                     buf["values"].append(self._to_float(value))
 
@@ -334,7 +334,7 @@ class LoggerQueue:
             buf = self._signal_history_per_sample[graph_name][exp_hash]
             step_i = int(global_step)
             for sid, value in signal_per_sample.items():
-                buf["sample_ids"].append(int(sid))
+                buf["sample_ids"].append(sid)
                 buf["steps"].append(step_i)
                 buf["values"].append(self._to_float(value))
 
@@ -454,7 +454,7 @@ class LoggerQueue:
 
         exps = self._signal_history_per_sample[graph_name]
         hashes = [exp_hash] if exp_hash is not None else list(exps.keys())
-        sid_set = set(int(s) for s in sample_ids) if sample_ids is not None else None
+        sid_set = set(s for s in sample_ids) if sample_ids is not None else None
 
         results = []
         for h in hashes:
@@ -677,7 +677,7 @@ class LoggerQueue:
                         self._signal_history_per_sample[metric_name][null_key] = _make_per_sample_buf()
                     buf = self._signal_history_per_sample[metric_name][null_key]
                     try:
-                        sid = int(exp_hash) if isinstance(exp_hash, (int, float)) else -1
+                        sid = str(exp_hash) if isinstance(exp_hash, (int, float)) else -1
                         buf["sample_ids"].append(sid)
                         buf["steps"].append(int(entries.get("model_age", 0)))
                         buf["values"].append(float(entries.get("metric_value", 0.0)))

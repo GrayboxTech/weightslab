@@ -704,12 +704,26 @@ class DataManipulationAgent:
             # 4. Type Match & Value Resolution
             is_col_ref = False
             if isinstance(val, str):
-                possible_col = self._resolve_column(val)
-                if possible_col and possible_col in self.df_schema['columns']:
+                # Treat condition values as literals by default.
+                # Only convert to a column reference on exact schema-name match,
+                # never via fuzzy resolution, to avoid errors like "train" -> "train_loss".
+                raw_val = val.strip()
+                possible_col = None
+
+                if raw_val in self.df_schema['columns']:
+                    possible_col = raw_val
+                else:
+                    raw_val_lower = raw_val.lower()
+                    for schema_col in self.df_schema['columns']:
+                        if str(schema_col).lower() == raw_val_lower:
+                            possible_col = schema_col
+                            break
+
+                if possible_col:
                     if possible_col in self.df_schema['index_columns']:
-                         val = f"df.index.get_level_values('{possible_col}')"
+                        val = f"df.index.get_level_values('{possible_col}')"
                     else:
-                         val = f"df['{possible_col}']"
+                        val = f"df['{possible_col}']"
                     is_col_ref = True
 
             if not is_col_ref:

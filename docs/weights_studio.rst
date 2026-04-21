@@ -99,9 +99,15 @@ Backend:
 
   - ``GRPC_TLS_ENABLED=1``
   - ``GRPC_TLS_REQUIRE_CLIENT_AUTH=1``
+  - optional ``GRPC_TLS_CERT_DIR=~/certs`` to change the default certificate directory
   - ``GRPC_TLS_CERT_FILE`` / ``GRPC_TLS_KEY_FILE`` / ``GRPC_TLS_CA_FILE``
 - Optionally set ``GRPC_AUTH_TOKEN`` (or ``GRPC_AUTH_TOKENS``) to enforce
   metadata token authentication in addition to mTLS.
+
+If the per-file ``GRPC_TLS_*_FILE`` variables are not set, WeightsLab defaults to
+``~/certs/backend-server.crt``, ``~/certs/backend-server.key``, and ``~/certs/ca.crt``.
+If config/hyperparameters define TLS keys (``grpc_tls_*``), those values are used
+before environment variables.
 
 Envoy:
 
@@ -118,7 +124,7 @@ Frontend:
 
 Sanity checks:
 
-- Studio reachable at ``http://localhost:5173``.
+- Studio reachable at ``https://localhost:5173``.
 - Envoy endpoint reachable at ``https://localhost:8080``.
 - Envoy admin is private by default (loopback inside container).
 

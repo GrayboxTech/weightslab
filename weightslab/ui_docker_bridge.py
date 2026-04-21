@@ -61,7 +61,7 @@ def ui_launch(args):
         ["up", "-d", "--pull", "always"],
     )
     port = os.environ.get("VITE_PORT", "5173")
-    print(f"\nWeights Studio UI is running at: http://localhost:{port}")
+    print(f"\nWeights Studio UI is running at: https://localhost:{port}")
 
 
 def ui_stop(args):

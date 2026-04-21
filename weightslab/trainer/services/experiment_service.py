@@ -2,9 +2,10 @@ import time
 import types
 import logging
 import threading
-
 import grpc
+
 import weightslab.proto.experiment_service_pb2 as pb2
+
 from weightslab.components.global_monitoring import weightslab_rlock, try_acquire_rlock, _GRPC_LOCK_TIMEOUT_S
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
 from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name, get_hyperparams
@@ -12,6 +13,7 @@ from weightslab.backend import ledgers
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 from weightslab.trainer.services.agent_service import AgentService
+from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.components.evaluation_controller import eval_controller
 
 
@@ -120,7 +122,7 @@ class ExperimentService:
                     # Filter by tags: samples should have ALL specified tags
                     mask = None
                     for tag in tags:
-                        tag_col = f"tag:{tag}"
+                        tag_col = f"{SampleStatsEx.TAG.value}:{tag}"
                         if tag_col in df.columns:
                             if mask is None:
                                 mask = df[tag_col] == True
@@ -148,7 +150,7 @@ class ExperimentService:
                 for sid in sample_ids:
                     for _, signals in sample_data_by_hash.items():
                         for data in signals:
-                            if data["sample_id"] == str(sid):
+                            if str(data["sample_id"]) == sid:
                                 points.append(
                                     pb2.LoggerDataPoint(
                                         metric_name=graph_name,
@@ -156,7 +158,7 @@ class ExperimentService:
                                         metric_value=data.get("metric_value", 0.0),
                                         experiment_hash=data.get("experiment_hash", "N.A."),
                                         timestamp=int(data.get("timestamp", time.time())),
-                                        sample_id=str(sid)
+                                        sample_id=sid
                                     )
                                 )
 

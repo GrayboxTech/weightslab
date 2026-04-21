@@ -68,7 +68,7 @@ class TestUiLaunch(unittest.TestCase):
             "/fake/envoy.yaml",
             ["up", "-d", "--pull", "always"],
         )
-        self.assertIn("http://localhost:5173", mock_stdout.getvalue())
+        self.assertIn("https://localhost:5173", mock_stdout.getvalue())
 
     @patch("weightslab.ui_docker_bridge._compose_cmd")
     @patch("weightslab.ui_docker_bridge._check_docker")
@@ -79,7 +79,7 @@ class TestUiLaunch(unittest.TestCase):
             from io import StringIO
             with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
                 ui_launch(argparse.Namespace())
-        self.assertIn("http://localhost:3000", mock_stdout.getvalue())
+        self.assertIn("https://localhost:3000", mock_stdout.getvalue())
 
 
 class TestUiStop(unittest.TestCase):

@@ -9,6 +9,7 @@ from threading import Thread
 from concurrent import futures
 
 from weightslab.trainer.trainer_tools import *
+from weightslab.backend.ledgers import get_hyperparams
 
 from weightslab.trainer.experiment_context import ExperimentContext
 from weightslab.trainer.services.experiment_service import ExperimentService
@@ -24,6 +25,7 @@ from weightslab.components.global_monitoring import weightslab_rlock
 
 # Global logger
 logger = logging.getLogger(__name__)
+DEFAULT_GRPC_TLS_CERT_DIR = os.path.join("~", "certs")
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -40,6 +42,81 @@ def _load_auth_tokens() -> set[str]:
     if many:
         raw_values.extend(many.split(","))
     return {v.strip() for v in raw_values if v and v.strip()}
+
+
+def _mapping_get(mapping_obj, key: str, default=None):
+    """Read mapping-like values from dicts or ledger Proxy objects."""
+    if mapping_obj is None:
+        return default
+    try:
+        return mapping_obj.get(key, default, proxy=False)
+    except TypeError:
+        try:
+            return mapping_obj.get(key, default)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        return mapping_obj[key]
+    except Exception:
+        return default
+
+
+def _resolve_bool_setting(config: dict | None, config_key: str, env_var_name: str, default: str) -> bool:
+    """Resolve bool with config-first precedence, then env var, then default."""
+    config_value = _mapping_get(config, config_key)
+    if config_value is not None:
+        return _is_truthy(str(config_value))
+    return _is_truthy(os.getenv(env_var_name, default))
+
+
+def _resolve_tls_client_auth_setting(config: dict | None, grpc_tls_enabled: bool) -> bool:
+    """Resolve mTLS client-auth with config/env precedence and TLS-aware fallback.
+
+    If not defined in config or env, it inherits grpc_tls_enabled.
+    """
+    config_value = _mapping_get(config, "grpc_tls_require_client_auth", None)
+    if config_value is not None:
+        return _is_truthy(str(config_value))
+
+    env_value = str(os.getenv("GRPC_TLS_REQUIRE_CLIENT_AUTH", "")).strip()
+    if env_value:
+        return _is_truthy(env_value)
+
+    return bool(grpc_tls_enabled)
+
+
+def _resolve_grpc_tls_path(
+    config: dict | None,
+    config_file_key: str,
+    env_var_name: str,
+    default_filename: str,
+) -> str:
+    """Resolve a TLS file path from env vars or the default user cert dir.
+
+    Precedence:
+    1. Config file path key, e.g. grpc_tls_cert_file
+    2. Specific file env var, e.g. GRPC_TLS_CERT_FILE
+    3. Config directory key grpc_tls_cert_dir
+    4. Shared directory env var GRPC_TLS_CERT_DIR
+    5. Default directory ~/certs
+    """
+    config_explicit_path = str(_mapping_get(config, config_file_key, "") or "").strip()
+    if config_explicit_path:
+        return os.path.expanduser(config_explicit_path)
+
+    explicit_path = str(os.getenv(env_var_name, "")).strip()
+    if explicit_path:
+        return os.path.expanduser(explicit_path)
+
+    config_dir = str(_mapping_get(config, "grpc_tls_cert_dir", "") or "").strip()
+    if config_dir:
+        return os.path.join(os.path.expanduser(config_dir), default_filename)
+
+    cert_dir = str(os.getenv("GRPC_TLS_CERT_DIR", DEFAULT_GRPC_TLS_CERT_DIR)).strip()
+    cert_dir = os.path.expanduser(cert_dir or DEFAULT_GRPC_TLS_CERT_DIR)
+    return os.path.join(cert_dir, default_filename)
 
 
 def _validate_file_exists(path: str, label: str) -> None:
@@ -358,11 +435,27 @@ def grpc_serve(
     watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks
     watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
     watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "0")).strip().lower() in {"1", "true", "yes", "on"}
-    grpc_tls_enabled = _is_truthy(os.getenv("GRPC_TLS_ENABLED", "1"))
-    grpc_tls_key_file = os.getenv("GRPC_TLS_KEY_FILE", "certs/backend-server.key")
-    grpc_tls_cert_file = os.getenv("GRPC_TLS_CERT_FILE", "certs/backend-server.crt")
-    grpc_tls_ca_file = os.getenv("GRPC_TLS_CA_FILE", "certs/ca.crt")
-    grpc_tls_require_client_auth = _is_truthy(os.getenv("GRPC_TLS_REQUIRE_CLIENT_AUTH", "1"))
+    config = get_hyperparams()
+    grpc_tls_enabled = _resolve_bool_setting(config, "grpc_tls_enabled", "GRPC_TLS_ENABLED", "0")
+    grpc_tls_key_file = _resolve_grpc_tls_path(
+        config,
+        "grpc_tls_key_file",
+        "GRPC_TLS_KEY_FILE",
+        "backend-server.key",
+    )
+    grpc_tls_cert_file = _resolve_grpc_tls_path(
+        config,
+        "grpc_tls_cert_file",
+        "GRPC_TLS_CERT_FILE",
+        "backend-server.crt",
+    )
+    grpc_tls_ca_file = _resolve_grpc_tls_path(
+        config,
+        "grpc_tls_ca_file",
+        "GRPC_TLS_CA_FILE",
+        "ca.crt",
+    )
+    grpc_tls_require_client_auth = _resolve_tls_client_auth_setting(config, grpc_tls_enabled)
     auth_tokens = _load_auth_tokens()
     max_concurrent_rpcs_env = os.getenv("GRPC_MAX_CONCURRENT_RPCS")
     if max_concurrent_rpcs_env is not None:
@@ -534,4 +627,3 @@ def grpc_serve(
 
 if __name__ == "__main__":
     grpc_serve()
-

@@ -123,7 +123,7 @@ cp .env .env.local   # or edit .env directly
 | Category | Key variables |
 |---|---|
 | **Logging** | `WEIGHTSLAB_LOG_LEVEL`, `WEIGHTSLAB_LOG_TO_FILE`, `WEIGHTSLAB_ROOT_LOG_DIR` |
-| **gRPC server** | `GRPC_BACKEND_HOST`, `GRPC_BACKEND_PORT`, `GRPC_MAX_MESSAGE_BYTES`, `GRPC_TLS_ENABLED`, `GRPC_TLS_CERT_FILE`, `GRPC_TLS_KEY_FILE`, `GRPC_TLS_CA_FILE`, `GRPC_TLS_REQUIRE_CLIENT_AUTH`, `GRPC_AUTH_TOKEN`, `GRPC_AUTH_TOKENS` |
+| **gRPC server** | `GRPC_BACKEND_HOST`, `GRPC_BACKEND_PORT`, `GRPC_MAX_MESSAGE_BYTES`, `GRPC_TLS_ENABLED`, `GRPC_TLS_CERT_DIR`, `GRPC_TLS_CERT_FILE`, `GRPC_TLS_KEY_FILE`, `GRPC_TLS_CA_FILE`, `GRPC_TLS_REQUIRE_CLIENT_AUTH`, `GRPC_AUTH_TOKEN`, `GRPC_AUTH_TOKENS` |
 | **Watchdog** | `GRPC_WATCHDOG_STUCK_SECONDS`, `GRPC_WATCHDOG_INTERVAL_SECONDS`, `GRPC_WATCHDOG_RESTART_THRESHOLD`, `GRPC_WATCHDOG_EXIT_ON_STUCK` |
 | **Data / cache** | `WL_MAX_PREVIEW_CACHE_SIZE`, `WL_PREVIEW_CACHE_WARMUP_WAIT_MS`, `WL_DEFAULT_THUMBNAIL_SIZE`, `WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5` |
 | **AI keys** | `OPENROUTER_API_KEY` |
@@ -132,6 +132,21 @@ cp .env .env.local   # or edit .env directly
 
 `AGENT_CONFIG_PATH` lets you point the data agent to a custom directory that contains `agent_config.yaml`.
 If set, WeightsLab looks for `<AGENT_CONFIG_PATH>/agent_config.yaml` before fallback locations.
+
+WeightsLab also reads TLS settings from registered runtime config (hyperparameters),
+using config-first precedence over environment variables.
+
+If TLS is enabled (`grpc_tls_enabled` in config or `GRPC_TLS_ENABLED` in env),
+certificate path resolution is:
+1. config file paths (`grpc_tls_cert_file`, `grpc_tls_key_file`, `grpc_tls_ca_file`)
+2. env file paths (`GRPC_TLS_CERT_FILE`, `GRPC_TLS_KEY_FILE`, `GRPC_TLS_CA_FILE`)
+3. config directory (`grpc_tls_cert_dir`)
+4. env directory (`GRPC_TLS_CERT_DIR`)
+5. default `~/certs` (`backend-server.crt`, `backend-server.key`, `ca.crt`)
+
+TLS flags also follow config-first precedence:
+`grpc_tls_enabled` then `GRPC_TLS_ENABLED`, and
+`grpc_tls_require_client_auth` then `GRPC_TLS_REQUIRE_CLIENT_AUTH`.
 
 > Full documentation with all variables and their descriptions: [docs/configuration.rst](docs/configuration.rst)
 
