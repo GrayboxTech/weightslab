@@ -3,7 +3,7 @@
 # docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
 services:
   weights_studio:
-    image: graybx/weightslab:latest
+    image: weights_studio_frontend  # graybx/weightslab:latest
     # Override with local build if needed:
     # build:
     #   context: ..
@@ -11,8 +11,9 @@ services:
     #   args:
     #     - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
     #     - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-}
-    ports:
-      - "${VITE_PORT:-5173}:80"
+    # Access via Envoy proxy on port 8080 (HTTPS) - frontend runs internally only
+    # ports:
+    #   - "${VITE_PORT:-5173}:80"  # Not exposed; use Envoy proxy instead
     environment:
       - VITE_HOST=${VITE_HOST:-0.0.0.0}
       - VITE_PORT=${VITE_PORT:-5173}

@@ -25,11 +25,13 @@ services:
     restart: unless-stopped
 
   # Weights Studio frontend (production static server)
+  # Note: Frontend is accessed through Envoy proxy (HTTPS on 8080), not directly
   weights_studio:
     image: weights_studio_frontend  # graybx/weightslab:latest
     container_name: weights_studio_frontend
-    ports:
-      - "${VITE_PORT:-5173}:80"
+    # Access via Envoy proxy on port 8080 (HTTPS) instead of direct port
+    # ports:
+    #   - "${VITE_PORT:-5173}:80"  # Direct access (HTTP only) - use Envoy instead
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - WS_SERVER_HOST=${WS_SERVER_HOST:-localhost}
