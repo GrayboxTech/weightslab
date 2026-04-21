@@ -343,16 +343,21 @@ class DataManipulationAgent:
         self._build_column_index()
 
     def _load_config(self):
-        self.preferred_provider = "openrouter"
+        self.preferred_provider = os.environ.get("PREFERRED_PROVIDER", "openrouter")  # Default to OpenRouter if API key is provided, otherwise fallback to local Ollama. This can be overridden by config file or env variable.
+
+        # Cloud provider settings with sensible defaults. OpenRouter is the default cloud provider if API key is provided.
         self.openrouter_model = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
         self.openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", None)
         self.openrouter_request_timeout = float(os.environ.get("OPENROUTER_REQUEST_TIMEOUT", "15.0"))
-        self.fallback_to_local = True
+
+        # Local fallback if no cloud (OpenRouter) is available or if the user prefers it. Ollama is the default local provider.
+        self.fallback_to_local = True  # Default to allowing fallback to local Ollama if OpenRouter fails
         self.ollama_host = "localhost"
         self.ollama_port = "11435"
         self.ollama_model = "llama3.2:3b"
 
-        repo_root = Path(__file__).resolve().parents[4]
+        repo_root = Path(__file__).resolve().parents[4]  # weightslab/ root
         inner_pkg = Path(__file__).resolve().parents[3]
 
         env_paths = [repo_root / ".env", inner_pkg / ".env"]
@@ -363,6 +368,7 @@ class DataManipulationAgent:
                 break
 
         config_paths = [
+            Path(os.environ.get("AGENT_CONFIG_PATH", repo_root)),
             Path(os.environ.get("AGENT_CONFIG_PATH", repo_root)) / ".agent_config.yaml",
             Path(os.environ.get("AGENT_CONFIG_PATH", repo_root)) / "agent_config.yaml",
             inner_pkg / "agent_config.yaml",
@@ -379,11 +385,13 @@ class DataManipulationAgent:
                 # Agents settings
                 self.preferred_provider = a_cfg.get("provider", self.preferred_provider).lower()
                 self.fallback_to_local = a_cfg.get("fallback_to_local", self.fallback_to_local)
+
                 # OPENROUTER
                 self.openrouter_model = a_cfg.get("openrouter_model", self.openrouter_model)
                 self.openrouter_base_url = a_cfg.get("openrouter_base_url", self.openrouter_base_url)
-                self.openrouter_api_key = a_cfg.get("openrouter_api_key", os.environ.get("OPENROUTER_API_KEY"))
+                self.openrouter_api_key = a_cfg.get("openrouter_api_key", self.openrouter_api_key)
                 self.openrouter_request_timeout = float(a_cfg.get("openrouter_request_timeout", self.openrouter_request_timeout))
+
                 # OLLAMA
                 self.ollama_host = a_cfg.get("ollama_host", self.ollama_host)
                 self.ollama_port = a_cfg.get("ollama_port", self.ollama_port)
@@ -394,6 +402,20 @@ class DataManipulationAgent:
                 break
             except Exception as e:
                 _LOGGER.warning(f"Error loading config from {path}: {e}")
+
+        # Log the final configuration for transparency
+        _LOGGER.info(
+            "" + "\n" +
+            "\n# #######################################" + "\n" +
+            "# #######################################" + "\n" +
+            f"Agent initialized from configuration {path}: " + "\n" +
+            f"\tFinal Agent Configuration: Preferred Provider={self.preferred_provider}, " + "\n" +
+            f"\tFallback to Local={self.fallback_to_local}, " + "\n" +
+            f"\tOpenRouter Model={self.openrouter_model}, with API Key={f'{self.openrouter_api_key[:4]}****{self.openrouter_api_key[-4:]}' if self.openrouter_api_key else 'None'} and openrouter_base_url={self.openrouter_base_url}, " + "\n" +
+            f"\tOllama Model={self.ollama_model}" + "\n" +
+            "# #######################################" + "\n" +
+            "# #######################################"
+        )
 
     @staticmethod
     def _effective_http_port(parsed_url, explicit_port: Optional[str]) -> int:

@@ -1,13 +1,21 @@
 # Agent Configuration
+# ###################
+# Variables can be defined from env. variables
+# or directly in the config file.
+# Config file values will override env. variables if both are set.
+# If cloned, env. variables can be defined in a .env file at the root of the repository.
 agent:
   # Select the model provider.
   # Local: 'ollama'
   # Remote: 'openrouter'
-  provider: openrouter
+  # provider: openrouter  # Default to OpenRouter if API key is provided, otherwise fallback to local Ollama. This can be overridden by env variable PREFERRED_PROVIDER.
 
   # Local Settings
-  ollama_model: llama3.2:3b
   fallback_to_local: false
+  ollama_model: llama3.2:3b
 
-  # Remote Model Selection
-  openrouter_model: meta-llama/llama-3.3-70b-instruct
+  # # Remote Model Selection
+  # openrouter_model: meta-llama/llama-3.3-70b-instruct  # Open router model name, e.g., 'meta-llama/llama-3.3-70b-instruct' (can also be set as env variable OPENROUTER_MODEL)
+  # openrouter_api_key: <your_openrouter_api_key>  # Open router API key (can also be set as env variable OPENROUTER_API_KEY)
+  # openrouter_base_url: https://openrouter.ai/api/v1  # Open router base URL (can also be set as env variable OPENROUTER_BASE_URL)
+  # openrouter_request_timeout: 15.0  # Timeout for OpenRouter API requests in seconds (can also be set as env variable OPENROUTER_REQUEST_TIMEOUT)

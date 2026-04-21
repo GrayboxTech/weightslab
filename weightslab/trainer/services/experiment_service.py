@@ -131,7 +131,8 @@ class ExperimentService:
 
                     if mask is not None:
                         filtered_df = df[mask]
-                        sample_ids = set(filtered_df.index.tolist())
+                        # Normalize to strings because logger sample_id is serialized as text.
+                        sample_ids = {str(sid) for sid in filtered_df.index.tolist()}
 
             # Get per-sample history from signal_logger
             history_per_sample = signal_logger.get_signal_history_per_sample()
@@ -150,7 +151,7 @@ class ExperimentService:
                 for sid in sample_ids:
                     for _, signals in sample_data_by_hash.items():
                         for data in signals:
-                            if str(data["sample_id"]) == sid:
+                            if str(data.get("sample_id", "")) == sid:
                                 points.append(
                                     pb2.LoggerDataPoint(
                                         metric_name=graph_name,
