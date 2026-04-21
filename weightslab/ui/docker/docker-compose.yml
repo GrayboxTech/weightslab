@@ -26,11 +26,12 @@ services:
 
   # Weights Studio frontend (production static server with HTTPS)
   weights_studio:
-    image: weights_studio_frontend  # graybx/weightslab:latest
+    image: graybx/weightslab:latest
     container_name: weights_studio_frontend
     ports:
       - "${VITE_PORT:-5173}:443"  # HTTPS port 5173
     volumes:
+      - ../nginx.conf:/etc/nginx/conf.d/default.conf  # Mount nginx config
       - ../envoy/certs:/etc/nginx/certs:ro  # Mount certificates for HTTPS
     environment:
       - NODE_ENV=${NODE_ENV:-production}
