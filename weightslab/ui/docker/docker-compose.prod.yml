@@ -11,9 +11,10 @@ services:
     #   args:
     #     - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
     #     - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-}
-    # Access via Envoy proxy on port 8080 (HTTPS) - frontend runs internally only
-    # ports:
-    #   - "${VITE_PORT:-5173}:80"  # Not exposed; use Envoy proxy instead
+    ports:
+      - "${VITE_PORT:-5173}:443"  # HTTPS port 5173
+    volumes:
+      - ../envoy/certs:/etc/nginx/certs:ro  # Mount certificates for HTTPS
     environment:
       - VITE_HOST=${VITE_HOST:-0.0.0.0}
       - VITE_PORT=${VITE_PORT:-5173}
