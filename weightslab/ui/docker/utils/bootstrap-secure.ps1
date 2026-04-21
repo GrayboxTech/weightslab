@@ -53,6 +53,11 @@ try {
     $env:VITE_DEV_SERVER_CERT_FILE = "/app/envoy/certs/envoy-server.crt"
     $env:VITE_DEV_SERVER_KEY_FILE = "/app/envoy/certs/envoy-server.key"
 
+    # Backend port configuration
+    if ([string]::IsNullOrWhiteSpace($env:GRPC_BACKEND_PORT)) {
+        $env:GRPC_BACKEND_PORT = "50051"
+    }
+
     # Set WL_ENABLE_GRPC_AUTH_TOKEN based on -no_auth_token flag (default enabled)
     if ($no_auth_token) {
         $env:WL_ENABLE_GRPC_AUTH_TOKEN = "0"
