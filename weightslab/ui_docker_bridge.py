@@ -251,9 +251,6 @@ def ui_docker_secure_environment(args):
         # Ensure certs directory exists
         manager.certs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Get or create auth token
-        token = manager.get_or_create_auth_token()
-
         # Set environment variables
         env_vars = manager.setup_tls_environment()
         env_vars.update(manager.setup_auth_environment())
