@@ -1769,6 +1769,7 @@ class DataService:
 
                 # 1. Evaluate the expression with safe context.
                 # Keep df as-is (no copy), but expose `origin` whether it is a column or an index level.
+                # Also provide a reset_index version for operations that need all data as columns.
                 origin_series = None
                 if SampleStatsEx.ORIGIN.value in df.columns:
                     origin_series = df[SampleStatsEx.ORIGIN.value]
@@ -1780,9 +1781,25 @@ class DataService:
                 elif df.index.name == SampleStatsEx.ORIGIN.value:
                     origin_series = pd.Series(df.index, index=df.index)
 
-                eval_globals = {"df": df, "np": np, "pd": pd}
+                # Provide both indexed and reset_index versions for flexibility
+                df_reset = df.reset_index()
+                eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
                 if origin_series is not None:
                     eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
+
+                # Also expose sample_id if it's in the index
+                sample_id_series = None
+                if SampleStatsEx.SAMPLE_ID.value in df.columns:
+                    sample_id_series = df[SampleStatsEx.SAMPLE_ID.value]
+                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.SAMPLE_ID.value in df.index.names:
+                    sample_id_series = pd.Series(
+                        df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value),
+                        index=df.index,
+                    )
+                elif df.index.name == SampleStatsEx.SAMPLE_ID.value:
+                    sample_id_series = pd.Series(df.index, index=df.index)
+                if sample_id_series is not None:
+                    eval_globals[SampleStatsEx.SAMPLE_ID.value] = sample_id_series
 
                 try:
                     new_values = eval(code, eval_globals)
@@ -2047,13 +2064,18 @@ class DataService:
 
         return "No operation applied"
 
-    def _slowUpdateInternals(self, force: bool = False):
+    def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
         """
-        This method is responsible for updating the internal dataframe view with the latest data from the manager.
-        It uses a dedicated update lock to ensure only one thread performs the expensive update at a time,
-        while allowing other threads to read the existing dataframe without blocking.
+            This method is responsible for updating the internal dataframe view with the latest data from the manager.
+            It uses a dedicated update lock to ensure only one thread performs the expensive update at a time,
+            while allowing other threads to read the existing dataframe without blocking.
+
+            Args:
+                force (bool): If True, bypass throttling and force an update. Use for critical updates.
+                reset_view (bool): If True, reset any user/agent-applied filters/sorts to show the full dataset. Use when we know the underlying data structure has changed significantly (e.g. new columns added) that could break the current view.
         """
         current_time = time.time()
+
         # Fast throttling check
         if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
@@ -2071,12 +2093,14 @@ class DataService:
 
             # Capture a consistent snapshot of the current state
             with self._lock:
+                self._is_filtered = not reset_view and self._is_filtered
                 is_filtered = self._is_filtered
                 current_all_df = self._all_datasets_df
 
             # Ensure default columns exist
             if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
                  updated_df["natural_sort_score"] = np.nan
+
             if SampleStatsEx.DISCARDED.value not in updated_df.columns:
                  updated_df[SampleStatsEx.DISCARDED.value] = False
 
@@ -2541,8 +2565,11 @@ class DataService:
 
         return tags
 
+
+    # ===================
     # RPC Implementations
     # ===================
+
     def ApplyDataQuery(self, request, context):
         """
         Apply a query on the in-memory dataframe.
@@ -2557,8 +2584,8 @@ class DataService:
           - number_of_discarded_samples: rows with discarded == True
         """
 
+        # Sync context components before processing the query to ensure we have the latest data and state from the ledger
         self._ctx.ensure_components()
-        components = self._ctx.components
 
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
@@ -2614,26 +2641,26 @@ class DataService:
                     message=final_message,
                     intent_type=pb2.INTENT_FILTER
                 )
+
             # Pandas instruction from the user, bypassing LLM agent - execute directly on the dataframe
             elif request.is_natural_language:
                 if request.query.lower().replace(" ", "").replace("'''", "\"\"\"").replace("\'\'\'", "\"\"\"").startswith("@\"\"\""):
                     operations = request.query
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
+
                     with self._lock:
-                        # Work on a copy to allow concurrent readers to see a consistent state
-                        working_df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
-                        df, message = execute_df_operation(working_df, request.query)  # in-place operation, or replace previous dataframe
+                        self._all_datasets_df, message = execute_df_operation(self._all_datasets_df, request.query)  # in-place operation, or replace previous dataframe
                         logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
+
                         if operations:
                             self._is_filtered = True
 
-                        # Atomic swap
-                        self._all_datasets_df = df
                     return self._build_success_response(
-                        df=df,
+                        df=self._all_datasets_df,
                         message=message,
                         intent_type=pb2.INTENT_FILTER
                     )
+
                 elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@reset") or request.query.lower().replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@clear"):
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset/clear operation: {request.query[:100]}...")
                     # Force view reset
@@ -2641,6 +2668,7 @@ class DataService:
                         self._is_filtered = False  # Unfreeze view first
                         self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data
                         logger.info(f"[ApplyDataQuery] Force view reset and unfrozen.")
+
                         return pb2.DataQueryResponse(
                             success=True,
                             message="View has been reset successfully.",
@@ -2655,6 +2683,7 @@ class DataService:
                             success=True,
                             message=f"Overview of the dataframe:\n{message}",
                         )
+
                 else:
                     # 3) Natural language path - go through agent
                     logger.debug(

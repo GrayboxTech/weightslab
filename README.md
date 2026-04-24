@@ -54,25 +54,12 @@ The granular statistics and interactive paradigm enable powerful workflows:
   * Iterative pruning or growing of the architectures (INCOMING feature)
 
 
-## Play our demo below:
+## Find our demos:
+The password is **graybx**. More demo to come in the future!
 
-<ul class="tabbed">
-  <li>
-      <a href="https://sandbox.graybx.com/mnist">
-      <p style="text-indent:20px;">MNIST</p>
-    </a>
-  </li>
-  <li>
-      <a href="https://sandbox.graybx.com/vla">
-      <p style="text-indent:20px;">VLA</p>
-    </a>
-  </li>
-  <li>
-      <a href="https://sandbox.graybx.com/bdd8k/clean">
-      <p style="text-indent:20px;">BDD</p>
-    </a>
-  </li>
-</ul>
+  <a href="https://preview.graybx.com/">
+    <p style="text-indent:20px;">DEMOS</p>
+  </a>
 
 
 ## Getting Started
@@ -97,7 +84,197 @@ docker compose up -d
 ```
 
 > [!IMPORTANT]
-> For a detailed installation guide, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+> For a detailed installation guide and more advanced features, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+
+
+## Quick Training Example
+
+Here's a complete example showing how to integrate WeightsLab into a basic PyTorch training script:
+
+```python
+#!/usr/bin/env python3
+"""
+Basic PyTorch training script with WeightsLab integration
+"""
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import weightslab as wl  # ← Import WeightsLab (auto-creates secure certs!)
+
+# Define a simple model
+class SimpleModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(10, 1)
+
+    def forward(self, x):
+        return self.linear(x)
+
+# Create synthetic data
+def create_data(n_samples=1000):
+    X = torch.randn(n_samples, 10)
+    y = X.sum(dim=1, keepdim=True) + 0.1 * torch.randn(n_samples, 1)
+    return TensorDataset(X, y)
+
+# Main training function
+def main():
+    # Initialize WeightsLab - this creates certificates automatically!
+    print("🚀 Initializing WeightsLab...")
+
+    # Wrap your model and optimizer with WeightsLab
+    model = wl.watch_or_edit(SimpleModel())  # ← WeightsLab tracks your model
+    optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=0.01))  # ← WeightsLab tracks optimizer
+
+    # Create data and dataloader
+    dataset = create_data()
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+    # Training loop
+    print("🏃 Starting training...")
+    for epoch in range(5):  # Train for 5 epochs
+        total_loss = 0
+
+        for batch_X, batch_y in dataloader:
+            # Forward pass
+            predictions = model(batch_X)
+            loss = nn.functional.mse_loss(predictions, batch_y)
+
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(dataloader)
+        print(f"Epoch {epoch+1}/5 - Loss: {avg_loss:.4f}")
+
+    print("✅ Training complete!")
+    print("💡 Launch the UI with: weightslab ui docker launch")
+    print("🌐 Open browser to: https://localhost:8080")
+
+if __name__ == "__main__":
+    main()
+```
+
+### Step-by-Step Integration
+
+1. **Add the import** at the top of your script:
+   ```python
+   import weightslab as wl  # ← This line creates certificates automatically!
+   ```
+
+2. **Wrap your model** with WeightsLab tracking:
+   ```python
+   model = wl.watch_or_edit(SimpleModel())  # ← Now WeightsLab monitors your model
+   ```
+
+3. **Wrap your optimizer** with WeightsLab tracking:
+   ```python
+   optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=0.01))  # ← Tracks optimizer state
+   ```
+
+4. **Run your training script** as usual:
+   ```bash
+   python train.py
+   ```
+
+5. **Launch the UI** in another terminal:
+   ```bash
+   weightslab ui docker launch
+   ```
+
+6. **Open your browser** to `https://localhost:8080` to see live training metrics!
+
+### What WeightsLab Does Automatically
+
+- 🔐 **Creates TLS certificates** in `~/.weightslab-certs/`
+- 🎫 **Generates secure auth tokens** for gRPC communication
+- 📊 **Tracks model parameters** and optimizer state in real-time
+- 📈 **Provides live metrics** and visualization in the web UI
+- 🔄 **Enables model editing** and hyperparameter tuning through the UI
+
+
+## Security
+
+By default, WeightsLab runs in **unsecured mode** (NO TLS, HTTP, no gRPC authentification). To enable TLS encryption and gRPC authentication:
+
+### Quick Setup + Launch
+Setup secure environment AND launch Docker in one command:
+```bash
+weightslab ui docker se
+export WEIGHTSLAB_CERTS_DIR='~/.weightslab-certs/'
+```
+
+This will:
+1. Generate TLS certificates and gRPC auth token in `~/.weightslab-certs/`
+2. Launch the Docker stack with security enabled
+3. If setup fails, Docker still launches (unsecured fallback)
+
+### Separate Steps (If Needed)
+Setup secure environment only:
+```bash
+weightslab se
+```
+
+Then launch Docker later:
+```bash
+weightslab ui docker launch
+```
+
+### Custom Certificates Directory
+Store certificates in a custom location using the `WEIGHTSLAB_CERTS_DIR` environment variable:
+```bash
+weightslab se "/path/to/my/certs"
+export WEIGHTSLAB_CERTS_DIR=/path/to/my/certs
+weightslab ui docker launch
+```
+
+### Options for Secure Environment Setup
+
+**For `weightslab se` or `weightslab ui docker se`:**
+
+| Flag | Effect |
+|---|---|
+| `--force-certs` | Regenerate certificates even if they already exist |
+| `--no-auth` | Skip gRPC auth token generation (TLS only) |
+
+**Examples:**
+```bash
+weightslab se --force-certs              # Regenerate certs only
+weightslab se --no-auth                  # TLS only, no gRPC token
+weightslab ui docker se                  # Setup + launch in one
+weightslab ui docker se --force-certs    # Setup (regenerate) + launch
+```
+
+### What Gets Created?
+After running `weightslab se` or `weightslab ui docker se`, your `~/.weightslab-certs/` directory contains:
+- `backend-server.crt` — Backend TLS certificate
+- `backend-server.key` — Backend TLS private key
+- `ca.crt` — CA certificate
+- `.grpc_auth_token` — gRPC authentication token (if not using `--no-auth`)
+
+### Running Without Security
+To explicitly run in unsecured mode, delete the certificates directory:
+```bash
+rm -r ~/.weightslab-certs
+weightslab ui docker launch  # Falls back to unsecured HTTP
+```
+
+### Testing the Setup
+**Secured environment:**
+```bash
+weightslab se                      # Setup certs and token
+weightslab ui docker launch        # Launch Docker
+python main.py                     # Backend finds certs, runs secured
+```
+
+**Unsecured environment:**
+```bash
+weightslab ui docker launch        # Launch Docker (no certs)
+python main.py                     # Backend runs unsecured
+```
 
 
 ## Cookbook

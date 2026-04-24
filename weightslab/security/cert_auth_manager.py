@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def _get_user_profile() -> str:
     """Get user profile directory."""
-    return os.environ.get('USERPROFILE') or os.path.expanduser('~')
+    return os.environ.get('HOME') or os.path.expanduser('~')
 
 
 def _generate_hex_token(byte_count: int = 32) -> str:
@@ -186,9 +186,30 @@ class CertAuthManager:
 
         return env_vars
 
-    def initialize(self, force_certs: bool = False) -> Tuple[bool, str]:
+    def check_and_apply(self) -> Tuple[bool, str]:
         """
-        Initialize certificates and auth tokens.
+        Check for existing certs/token and apply environment variables.
+        Does NOT generate certs — returns failure if not found.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        if not self.has_valid_certs():
+            return False, f"No certs found in {self.certs_dir}. Run: weightslab ui se"
+
+        env_vars = self.setup_tls_environment()
+        env_vars.update(self.setup_auth_environment())
+
+        for key, value in env_vars.items():
+            os.environ[key] = value
+
+        logger.info("Secure environment applied from existing certs")
+        return True, "Secure environment applied from existing certs"
+
+    def setup_secure_environment(self, force_certs: bool = False) -> Tuple[bool, str]:
+        """
+        Generate TLS certificates and auth token.
+        Called explicitly by 'weightslab ui se' command.
 
         Args:
             force_certs: Force regenerate certificates
@@ -199,7 +220,7 @@ class CertAuthManager:
         # Ensure certs directory exists
         self.certs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate certs if needed
+        # Generate certs
         success, msg = self.generate_certs(force=force_certs)
         if not success:
             return False, msg
@@ -214,8 +235,21 @@ class CertAuthManager:
         for key, value in env_vars.items():
             os.environ[key] = value
 
-        logger.info("TLS and auth environment initialized")
-        return True, "TLS and auth initialized successfully"
+        logger.info("Secure environment created successfully")
+        return True, "Secure environment created successfully"
+
+    def initialize(self, force_certs: bool = False) -> Tuple[bool, str]:
+        """
+        Backward compatibility: calls check_and_apply() for check-only behavior.
+        Use setup_secure_environment() to explicitly generate certs.
+
+        Args:
+            force_certs: Ignored (kept for backward compat)
+
+        Returns:
+            Tuple of (success, message)
+        """
+        return self.check_and_apply()
 
     @staticmethod
     def from_env_or_default(enable_auth: bool = True) -> 'CertAuthManager':

@@ -32,6 +32,16 @@ def _get_bootstrap_script() -> Path:
     return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'bootstrap-secure.ps1'
 
 
+def _get_cert_script() -> Path:
+    """Get the generate-certs-auth-token.sh script path."""
+    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.sh'
+
+
+def _get_cert_script_ps1() -> Path:
+    """Get the generate-certs-auth-token.ps1 script path."""
+    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'generate-certs-auth-token.ps1'
+
+
 def _is_windows() -> bool:
     """Check if running on Windows."""
     return sys.platform == 'win32'
@@ -107,6 +117,88 @@ def _run_powershell_script(script_path: str, args: list = None) -> int:
         return 1
 
 
+def _convert_to_git_bash_path(win_path: str) -> str:
+    """Convert Windows path to Git Bash compatible format."""
+    p = Path(win_path).as_posix()
+    # Convert C:/Users/... to /c/Users/... for Git Bash
+    if len(p) > 1 and p[1] == ':':
+        drive = p[0].lower()
+        rest = p[2:]
+        return f"/{drive}{rest}"
+    return p
+
+
+def _run_shell_script(script_path: str, args: list = None) -> int:
+    """Run a shell script using bash -c with inline execution."""
+    try:
+        # Fix line endings in the file before running
+        with open(script_path, 'rb') as f:
+            script_bytes = f.read()
+
+        # Ensure Unix line endings
+        fixed_bytes = script_bytes.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+
+        # Write back if needed
+        if fixed_bytes != script_bytes:
+            with open(script_path, 'wb') as f:
+                f.write(fixed_bytes)
+
+        # Convert back to string for piping
+        script_content = fixed_bytes.decode('utf-8')
+
+        # Use bash -c to run the script with arguments
+        # Build the command that sets up $1, $2, etc. before executing script
+        if args:
+            args_setup = ' '.join(f'"{arg}"' for arg in args)
+            bash_cmd = f'set -- {args_setup}; eval "{script_content}"'
+        else:
+            bash_cmd = script_content
+
+        result = subprocess.run(['bash', '-c', bash_cmd], env=os.environ.copy())
+        return result.returncode
+    except FileNotFoundError:
+        logger.error(f"Script file not found: {script_path}")
+        return 1
+    except Exception as e:
+        logger.error(f"Failed to run script: {e}")
+        return 1
+
+
+def _generate_certs_with_fallback(force_certs: bool = False) -> int:
+    """Try shell script first, fall back to PowerShell on Windows if it fails."""
+    cert_script = str(_get_cert_script())
+    if not Path(cert_script).exists():
+        logger.warning(f"Shell script not found: {cert_script}")
+    else:
+        script_args = []
+        if force_certs:
+            script_args.append('--force-create-certs')
+
+        logger.info("Attempting certificate generation with shell script...")
+        exit_code = _run_shell_script(cert_script, script_args)
+        if exit_code == 0:
+            return 0
+        logger.warning(f"Shell script failed (exit code {exit_code})")
+
+    # Fallback to PowerShell on Windows
+    if _is_windows():
+        logger.info("Falling back to PowerShell for certificate generation...")
+        cert_script_ps1 = str(_get_cert_script_ps1())
+        if not Path(cert_script_ps1).exists():
+            logger.error(f"PowerShell script not found: {cert_script_ps1}")
+            return 1
+
+        script_args = []
+        if force_certs:
+            script_args.append('-ForceCreateCerts')
+
+        exit_code = _run_powershell_script(cert_script_ps1, script_args)
+        return exit_code
+    else:
+        logger.error("Neither shell nor PowerShell script could generate certificates")
+        return 1
+
+
 def ui_launch(args):
     """Pull images and start UI containers."""
     _check_docker()
@@ -119,24 +211,91 @@ def ui_launch(args):
     logger.info(f"Weights Studio UI is running at: https://localhost:{port}")
 
 
-def ui_launch_secure(args):
-    """Launch with secured TLS and gRPC auth."""
-    logger.info("Launching Weights Studio with secured TLS...")
+def ui_secure_environment(args):
+    """Generate TLS certificates and gRPC auth token (one-time setup)."""
+    logger.info("Setting up secure environment...")
 
-    # Initialize certificates and auth
-    manager = CertAuthManager.from_env_or_default(enable_auth=not args.no_auth)
-
-    success, msg = manager.initialize(force_certs=args.force_certs)
-    if not success:
-        logger.error(f"Failed to initialize certificates: {msg}")
+    exit_code = _generate_certs_with_fallback(force_certs=args.force_certs)
+    if exit_code != 0:
+        logger.error("Certificate generation failed")
         sys.exit(1)
 
-    logger.info(msg)
+    manager = CertAuthManager(certs_dir=args.certs_dir, enable_auth=not args.no_auth)
+
+    # Ensure certs directory exists
+    manager.certs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get or create auth token
+    manager.get_or_create_auth_token()
+
+    # Set environment variables
+    env_vars = manager.setup_tls_environment()
+    env_vars.update(manager.setup_auth_environment())
+
+    for key, value in env_vars.items():
+        os.environ[key] = value
+
+    logger.info("✓ Certificates generated successfully")
+    logger.info("✓ gRPC auth token created")
+    logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
+
+
+def ui_docker_secure_environment(args):
+    """Setup secure environment AND launch Docker (both in one command)."""
+    logger.info("Setting up secure environment...")
+
+    exit_code = _generate_certs_with_fallback(force_certs=args.force_certs)
+    if exit_code == 0:
+        manager = CertAuthManager.from_env_or_default(enable_auth=not args.no_auth)
+
+        # Ensure certs directory exists
+        manager.certs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get or create auth token
+        token = manager.get_or_create_auth_token()
+
+        # Set environment variables
+        env_vars = manager.setup_tls_environment()
+        env_vars.update(manager.setup_auth_environment())
+
+        for key, value in env_vars.items():
+            os.environ[key] = value
+
+        logger.info("✓ Certificates and auth token generated successfully")
+        logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
+    else:
+        logger.warning("Certificate generation failed")
+        logger.warning("Launching Docker in unsecured mode...")
+
+    # Launch Docker regardless of secure setup success (non-blocking fallback)
+    logger.info("\nLaunching Docker stack...")
+    ui_launch_secure(args)
+
+
+def ui_launch_secure(args):
+    """Launch with secured TLS and gRPC auth (if certs exist)."""
+    logger.info("Launching Weights Studio...")
+
+    # Force unsecured mode if --unsecure flag is set
+    if hasattr(args, 'unsecure') and args.unsecure:
+        logger.info("⚠ Forcing unsecured mode (HTTP, no auth)")
+        ui_launch(args)
+        return
+
+    # Check for existing certificates (no generation)
+    manager = CertAuthManager.from_env_or_default(enable_auth=not args.no_auth)
+    success, msg = manager.check_and_apply()
+
+    if not success:
+        logger.warning(f"Secure certs not found — falling back to unsecured mode")
+        logger.warning("To set up security, run: weightslab ui se")
+        ui_launch(args)
+        return
+
+    logger.info("✓ Secure environment configured")
 
     # Prepare bootstrap script arguments
     script_args = []
-    if args.force_certs:
-        script_args.append('-force_create_certs')
     if args.no_auth:
         script_args.append('-no_auth_token')
     if args.dev:
@@ -220,28 +379,47 @@ def docker_info(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="weightslab docker",
+        prog="weightslab",
         description="WeightsLab Docker Management",
     )
     sub = parser.add_subparsers(dest="command")
 
-    # Legacy UI commands
-    ui_parser = sub.add_parser("ui", help="Manage the Weights Studio UI (legacy)")
+    # Top-level secure environment command (shortcut)
+    se_parser = sub.add_parser("se", aliases=["secured_environment"],
+                               help="Setup secure environment (TLS certs and gRPC auth token)")
+    se_parser.add_argument('certs_dir', nargs='?', default=None, help='Directory to store certificates (default: ~/.weightslab-certs)')
+    se_parser.add_argument('--no-auth', action='store_true', help='Skip gRPC auth token generation')
+    se_parser.add_argument('--force-certs', action='store_true', help='Regenerate certs even if they exist')
+
+    # UI commands
+    ui_parser = sub.add_parser("ui", help="Manage Weights Studio UI and Docker")
     ui_sub = ui_parser.add_subparsers(dest="action")
-    ui_sub.add_parser("launch", help="Pull images and start the UI")
-    ui_sub.add_parser("stop", help="Stop the UI containers")
-    ui_sub.add_parser("drop", help="Stop containers and remove images")
 
-    # Secure Docker commands
-    docker_parser = sub.add_parser("docker", help="Manage Docker with secure TLS")
-    docker_sub = docker_parser.add_subparsers(dest="action")
+    # Legacy UI-only commands
+    ui_sub.add_parser("launch", help="Pull images and start the UI (legacy)")
+    ui_sub.add_parser("stop", help="Stop the UI containers (legacy)")
+    ui_sub.add_parser("drop", help="Stop containers and remove images (legacy)")
 
-    launch_parser = docker_sub.add_parser("launch", help="Launch with secured TLS")
+    # Docker commands under UI
+    docker_parser = ui_sub.add_parser("docker", help="Manage Docker with UI")
+    docker_sub = docker_parser.add_subparsers(dest="docker_action")
+
+    # Docker secure environment + launch
+    docker_se_parser = docker_sub.add_parser("se", aliases=["secured_environment"],
+                                             help="Setup secure env + launch Docker (one command)")
+    docker_se_parser.add_argument('--no-auth', action='store_true', help='Skip gRPC auth token generation')
+    docker_se_parser.add_argument('--force-certs', action='store_true', help='Regenerate certs even if they exist')
+    docker_se_parser.add_argument('--dev', action='store_true', help='Use dev configuration')
+    docker_se_parser.add_argument('--test', action='store_true', help='Test backend connection')
+
+    # Docker launch only
+    launch_parser = docker_sub.add_parser("launch", help="Launch Docker (use existing certs or unsecured)")
     launch_parser.add_argument('--dev', action='store_true', help='Use dev configuration')
-    launch_parser.add_argument('--force-certs', action='store_true', help='Regenerate certs')
     launch_parser.add_argument('--no-auth', action='store_true', help='Disable auth token')
+    launch_parser.add_argument('--unsecure', action='store_true', help='Force HTTP mode without certs/auth')
     launch_parser.add_argument('--test', action='store_true', help='Test backend connection')
 
+    # Docker info
     docker_sub.add_parser("stop", help="Stop Docker containers")
     docker_sub.add_parser("info", help="Show configuration")
 
@@ -259,18 +437,24 @@ def main():
         "launch": docker_launch_secure,
         "stop": docker_stop,
         "info": docker_info,
+        "se": ui_docker_secure_environment,
+        "secured_environment": ui_docker_secure_environment,
     }
 
     if args.command == "help" or args.command is None:
         parser.print_help()
-    elif args.command == "ui" and args.action in ui_actions:
-        ui_actions[args.action](args)
+    elif args.command in ("se", "secured_environment"):
+        ui_secure_environment(args)
     elif args.command == "ui":
-        ui_parser.print_help()
-    elif args.command == "docker" and args.action in docker_actions:
-        docker_actions[args.action](args)
-    elif args.command == "docker":
-        docker_parser.print_help()
+        if args.action == "docker":
+            if hasattr(args, 'docker_action') and args.docker_action in docker_actions:
+                docker_actions[args.docker_action](args)
+            else:
+                docker_parser.print_help()
+        elif args.action in ui_actions:
+            ui_actions[args.action](args)
+        else:
+            ui_parser.print_help()
     else:
         parser.print_help()
 

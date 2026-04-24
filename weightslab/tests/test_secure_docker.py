@@ -32,7 +32,7 @@ class TestCertAuthManager:
         """Test manager initialization with default directory."""
         manager = CertAuthManager(enable_auth=True)
 
-        user_profile = os.environ.get('USERPROFILE') or os.path.expanduser('~')
+        user_profile = os.environ.get('HOME') or os.path.expanduser('~')
         expected_dir = Path(user_profile) / '.weightslab-certs'
 
         assert manager.certs_dir == expected_dir

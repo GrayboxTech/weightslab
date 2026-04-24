@@ -1,6 +1,6 @@
 param(
     [switch]$SkipTrust,
-    [switch]$force_create_certs
+    [switch]$ForceCreateCerts
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +12,7 @@ if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Use user's default certificate directory
-$userCertDir = Join-Path $env:USERPROFILE ".weightslab-certs"
+$userCertDir = Join-Path $env:HOME ".weightslab-certs"
 
 New-Item -ItemType Directory -Force -Path $userCertDir | Out-Null
 
@@ -22,13 +22,13 @@ $certsExist = (Test-Path (Join-Path $userCertDir "ca.crt")) -and `
               (Test-Path (Join-Path $userCertDir "backend-server.crt"))
 
 # If certs exist and not forcing recreation, skip generation
-if ($certsExist -and -not $force_create_certs) {
+if ($certsExist -and -not $ForceCreateCerts) {
     Write-Host "Using existing certificates from $userCertDir..."
     exit 0
 }
 
-if ($force_create_certs) {
-    Write-Host "Force creating new certificates (-force_create_certs)..."
+if ($ForceCreateCerts) {
+    Write-Host "Force creating new certificates (-ForceCreateCerts)..."
 }
 
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("weightslab-certs-" + [guid]::NewGuid().ToString("N"))

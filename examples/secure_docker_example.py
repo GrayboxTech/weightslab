@@ -139,8 +139,11 @@ def example_3_verify_cert_auth_manager():
         else:
             logger.info(f"  {key} = {value}")
 
-    logger.info("\nInitializing all settings...")
-    success, msg = manager.initialize()
+    logger.info("\nSetting up secure environment...")
+    success, msg = manager.setup_secure_environment()
+    if not success:
+        logger.error(f"✗ Failed to setup secure environment: {msg}")
+        return False
     logger.info(f"✓ {msg}")
 
     return True
@@ -223,9 +226,12 @@ def example_6_complete_workflow():
 
     from weightslab.security import CertAuthManager
 
-    logger.info("Step 1: Initialize security")
+    logger.info("Step 1: Setup secure environment")
     manager = CertAuthManager.from_env_or_default(enable_auth=True)
-    success, msg = manager.initialize(force_certs=False)
+    success, msg = manager.setup_secure_environment(force_certs=False)
+    if not success:
+        logger.error(f"  Failed: {msg}")
+        return False
     logger.info(f"  Result: {msg}")
 
     logger.info("\nStep 2: Verify certificates")

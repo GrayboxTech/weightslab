@@ -6,45 +6,93 @@ services:
     container_name: weights_studio_envoy
     ports:
       - "${ENVOY_PORT:-8080}:${ENVOY_PORT:-8080}"
+      - "9901:9901"
     volumes:
-      - ../envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
-      - ../envoy/certs:/etc/envoy/certs:ro
+      - ./../envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./../envoy/envoy.upstream_plaintext.yaml:/etc/envoy/envoy.upstream_plaintext.yaml:ro
+      - ./../envoy/envoy.downstream_plaintext.yaml:/etc/envoy/envoy.downstream_plaintext.yaml:ro
+      - ./../envoy/envoy.downstream_upstream_plaintext.yaml:/etc/envoy/envoy.downstream_upstream_plaintext.yaml:ro
+      - ${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}:/etc/envoy/certs:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "grpc-backend:host-gateway"
     environment:
       - GRPC_BACKEND_PORT=${GRPC_BACKEND_PORT:-50051}
+      - ENVOY_UPSTREAM_TLS=${ENVOY_UPSTREAM_TLS:-auto}
+      - ENVOY_DOWNSTREAM_TLS=${ENVOY_DOWNSTREAM_TLS:-auto}
     command:
       - /bin/sh
       - -c
       - |
-        PORT=$${GRPC_BACKEND_PORT:-50051}
-        sed "s/__GRPC_BACKEND_PORT__/$${PORT}/g" /etc/envoy/envoy.yaml > /tmp/envoy.generated.yaml && \
+        GRPC_BACKEND_PORT="$${GRPC_BACKEND_PORT:-50051}";
+        ENVOY_UPSTREAM_TLS="$${ENVOY_UPSTREAM_TLS:-auto}";
+        ENVOY_DOWNSTREAM_TLS="$${ENVOY_DOWNSTREAM_TLS:-auto}";
+        ENVOY_UPSTREAM_EFFECTIVE="$${ENVOY_UPSTREAM_TLS}";
+        ENVOY_DOWNSTREAM_EFFECTIVE="$${ENVOY_DOWNSTREAM_TLS}";
+        if [ "$${ENVOY_UPSTREAM_EFFECTIVE}" = "auto" ]; then
+          if [ -f /etc/envoy/certs/envoy-client.crt ] && [ -f /etc/envoy/certs/envoy-client.key ] && [ -f /etc/envoy/certs/ca.crt ]; then
+            ENVOY_UPSTREAM_EFFECTIVE="on";
+          else
+            ENVOY_UPSTREAM_EFFECTIVE="off";
+          fi;
+        fi;
+        if [ "$${ENVOY_DOWNSTREAM_EFFECTIVE}" = "auto" ]; then
+          if [ -f /etc/envoy/certs/envoy-server.crt ] && [ -f /etc/envoy/certs/envoy-server.key ]; then
+            ENVOY_DOWNSTREAM_EFFECTIVE="on";
+          else
+            ENVOY_DOWNSTREAM_EFFECTIVE="off";
+          fi;
+        fi;
+        if [ "$${ENVOY_DOWNSTREAM_EFFECTIVE}" = "on" ] && [ "$${ENVOY_UPSTREAM_EFFECTIVE}" = "on" ]; then
+          ENVOY_TEMPLATE="/etc/envoy/envoy.yaml";
+        elif [ "$${ENVOY_DOWNSTREAM_EFFECTIVE}" = "on" ] && [ "$${ENVOY_UPSTREAM_EFFECTIVE}" = "off" ]; then
+          ENVOY_TEMPLATE="/etc/envoy/envoy.upstream_plaintext.yaml";
+        elif [ "$${ENVOY_DOWNSTREAM_EFFECTIVE}" = "off" ] && [ "$${ENVOY_UPSTREAM_EFFECTIVE}" = "on" ]; then
+          ENVOY_TEMPLATE="/etc/envoy/envoy.downstream_plaintext.yaml";
+        else
+          ENVOY_TEMPLATE="/etc/envoy/envoy.downstream_upstream_plaintext.yaml";
+        fi;
+        echo "[envoy] downstream TLS=$${ENVOY_DOWNSTREAM_EFFECTIVE} upstream TLS=$${ENVOY_UPSTREAM_EFFECTIVE}";
+        echo "[envoy] using template $${ENVOY_TEMPLATE}";
+        sed "s/__GRPC_BACKEND_PORT__/$${GRPC_BACKEND_PORT}/g" "$${ENVOY_TEMPLATE}" > /tmp/envoy.generated.yaml;
         exec /usr/local/bin/envoy -c /tmp/envoy.generated.yaml
+    healthcheck:
+      test: ["CMD", "sh", "-c", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     networks:
       - weights_studio_network
     restart: unless-stopped
 
-  # Weights Studio frontend (production static server with HTTP/HTTPS)
+  # Weights Studio frontend (production static server)
   weights_studio:
-    image: graybx/weightslab:latest
+    image: weights_studio_frontend  # graybx/weights-studio-frontend:latest
     container_name: weights_studio_frontend
-    ports:
-      - "${VITE_HTTP_PORT:-5172}:80"  # HTTP port 5172
-      - "${VITE_HTTPS_PORT:-5173}:443"  # HTTPS port 5173
-    volumes:
-      - ../nginx.conf:/etc/nginx/conf.d/default.conf  # Mount nginx config
-      - ../envoy/certs:/etc/nginx/certs:ro  # Mount certificates for HTTPS
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        VITE_IS_A_SANDBOX: ${IS_A_SANDBOX:-0}
+        VITE_HISTOGRAM_MAX_BINS: ${VITE_HISTOGRAM_MAX_BINS:-512}
+        # Token is injected at runtime, not at build time
+        VITE_WL_ENABLE_GRPC_AUTH_TOKEN: 0
+        VITE_SERVER_PROTOCOL: ${VITE_SERVER_PROTOCOL:-https}
+        VITE_DEV_SERVER_HTTPS: ${VITE_DEV_SERVER_HTTPS:-0}
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - WS_SERVER_HOST=${WS_SERVER_HOST:-localhost}
       - WS_SERVER_PORT=${WS_SERVER_PORT:-8080}
       - WS_SERVER_PROTOCOL=${WS_SERVER_PROTOCOL:-https}
-      - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN:-${GRPC_AUTH_TOKEN:-}}
-      - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-}
+      # Runtime token injection
+      - WL_ENABLE_GRPC_AUTH_TOKEN=${WL_ENABLE_GRPC_AUTH_TOKEN:-0}
+      - GRPC_AUTH_TOKEN=${GRPC_AUTH_TOKEN:-}
+    volumes:
+      # Mount certs directory if available
+      - ${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}:/etc/nginx/certs:ro
     depends_on:
       - envoy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     networks:
       - weights_studio_network
     restart: unless-stopped
