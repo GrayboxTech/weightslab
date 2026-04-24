@@ -12,8 +12,15 @@ from typing import Optional, List, Union, Literal, Callable, Dict, Any
 from dotenv import load_dotenv
 from pathlib import Path
 
-from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
+try:
+    from langchain_ollama import ChatOllama
+except ImportError:
+    ChatOllama = None
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = None
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
@@ -455,33 +462,39 @@ class DataManipulationAgent:
         if "openrouter" in active_providers and self.openrouter_api_key:
             _LOGGER.info(f"Setting up OpenRouter with model {self.openrouter_model}")
             try:
-                explicit_openrouter_port = os.environ.get("OPENROUTER_PORT", "").strip()
-                openrouter_base_url = self._normalize_openrouter_base_url(self.openrouter_base_url, explicit_openrouter_port)
-                parsed = urlparse(openrouter_base_url)
-                effective_port = self._effective_http_port(parsed, explicit_openrouter_port)
-                llm = ChatOpenAI(
-                    model=self.openrouter_model, temperature=0,
-                    api_key=self.openrouter_api_key,
-                    base_url=openrouter_base_url,
-                    streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
-                )
-                self.chain_openrouter = llm
-                initialized = True
-                _LOGGER.info(
-                    f"[Agent] OpenRouter enabled: {self.openrouter_model} via {parsed.hostname}:{effective_port}"
-                )
+                if ChatOpenAI is None:
+                    _LOGGER.warning("langchain_openai is not installed, skipping OpenRouter provider")
+                else:
+                    explicit_openrouter_port = os.environ.get("OPENROUTER_PORT", "").strip()
+                    openrouter_base_url = self._normalize_openrouter_base_url(self.openrouter_base_url, explicit_openrouter_port)
+                    parsed = urlparse(openrouter_base_url)
+                    effective_port = self._effective_http_port(parsed, explicit_openrouter_port)
+                    llm = ChatOpenAI(
+                        model=self.openrouter_model, temperature=0,
+                        api_key=self.openrouter_api_key,
+                        base_url=openrouter_base_url,
+                        streaming=False, max_retries=1, request_timeout=self.openrouter_request_timeout,
+                    )
+                    self.chain_openrouter = llm
+                    initialized = True
+                    _LOGGER.info(
+                        f"[Agent] OpenRouter enabled: {self.openrouter_model} via {parsed.hostname}:{effective_port}"
+                    )
             except Exception as e: _LOGGER.error(f"OpenRouter error: {e}")
 
         # LOCAL
         if "ollama" in active_providers:
             try:
-                _LOGGER.info(f"Setting up Ollama with model {self.ollama_model}")
-                host = self.ollama_host.split(':')[0]
-                port = self.ollama_port
-                llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
-                self.chain_ollama = llm
-                initialized = True
-                _LOGGER.info(f"[Agent] Ollama enabled: {self.ollama_model}")
+                if ChatOllama is None:
+                    _LOGGER.warning("langchain_ollama is not installed, skipping Ollama provider")
+                else:
+                    _LOGGER.info(f"Setting up Ollama with model {self.ollama_model}")
+                    host = self.ollama_host.split(':')[0]
+                    port = self.ollama_port
+                    llm = ChatOllama(base_url=f"http://{host}:{port}", model=self.ollama_model, temperature=0, timeout=15)
+                    self.chain_ollama = llm
+                    initialized = True
+                    _LOGGER.info(f"[Agent] Ollama enabled: {self.ollama_model}")
             except Exception as e: _LOGGER.error(f"Ollama error: {e}")
 
         return initialized
