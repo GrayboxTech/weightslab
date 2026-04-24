@@ -68,7 +68,7 @@ services:
 
   # Weights Studio frontend (production static server)
   weights_studio:
-    image: weights_studio_frontend  # graybx/weights-studio-frontend:latest
+    image: graybx/weights-studio-frontend:latest
     container_name: weights_studio_frontend
     build:
       context: ..

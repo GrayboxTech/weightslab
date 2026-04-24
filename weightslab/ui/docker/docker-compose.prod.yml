@@ -3,7 +3,7 @@
 # docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
 services:
   weights_studio:
-    image: weights_studio_frontend  # graybx/weights-studio-frontend:latest
+    image: graybx/weights-studio-frontend:latest
     ports:
       - "${VITE_HTTP_PORT:-5172}:80"
       - "${VITE_HTTPS_PORT:-5173}:443"
