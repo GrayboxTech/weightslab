@@ -2,7 +2,6 @@ import io
 import time
 import logging
 import os
-import struct
 import traceback
 import threading
 import json
@@ -1976,7 +1975,8 @@ class DataService:
                                 df.pop('index')
                             df['sample_id'] = df['sample_id'].astype(int)
                             df.sort_values(inplace=True, **params)
-                            df.set_index(['sample_id', 'origin'], inplace=True)
+                            df['sample_id'] = df['sample_id'].astype(str)
+                            df.set_index(['origin', 'sample_id'], inplace=True)
                         except:
                             pass
                     except (TypeError, ValueError, KeyError) as e:

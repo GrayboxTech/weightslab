@@ -206,6 +206,20 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         """Test adding tags to samples using EDIT_ACCUMULATE"""
         print("\n[TEST 1] Testing tag addition (EDIT_ACCUMULATE)")
 
+        # Ensure the dataframe is populated with sample data
+        # by calling _slowUpdateInternals which loads data from the dataloader
+        self.data_service._slowUpdateInternals(force=True)
+
+        # Get the actual sample IDs from the dataframe
+        df = self.data_service._all_datasets_df
+        if df is not None and not df.empty:
+            # Get first 10 sample IDs from the dataframe
+            sample_ids = [str(idx[1]) for idx in df.index[:10].tolist()]
+            origins = [idx[0] for idx in df.index[:10].tolist()]
+        else:
+            sample_ids = [str(i) for i in range(10)]
+            origins = ["test"] * 10
+
         # Create request to add tag "test_tag" to first 10 samples
         request = pb2.DataEditsRequest(
             stat_name="tags",
@@ -213,8 +227,8 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             string_value="test_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=[str(i) for i in range(10)],
-            sample_origins=["test"] * 10
+            samples_ids=sample_ids,
+            sample_origins=origins
         )
 
         response = self.data_service.EditDataSample(request, self.mock_context)
@@ -361,6 +375,19 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         """Test discarded (discard/restore) operations"""
         print("\n[TEST 5] Testing discarded operations")
 
+        # Ensure the dataframe is populated with sample data
+        self.data_service._slowUpdateInternals(force=True)
+
+        # Get the actual sample IDs from the dataframe
+        df = self.data_service._all_datasets_df
+        if df is not None and not df.empty and len(df) > 14:
+            # Get samples 10-14 from the dataframe
+            sample_ids = [str(idx[1]) for idx in df.index[10:15].tolist()]
+            origins = [idx[0] for idx in df.index[10:15].tolist()]
+        else:
+            sample_ids = [str(i) for i in range(10, 15)]
+            origins = ["test"] * 5
+
         # Mark samples 10-14 as discarded (discarded)
         request_discard = pb2.DataEditsRequest(
             stat_name=SampleStatsEx.DISCARDED.value,
@@ -368,8 +395,8 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             string_value="",
             bool_value=True,  # True = discarded
             type=SampleEditType.EDIT_OVERRIDE,
-            samples_ids=[str(i) for i in range(10, 15)],
-            sample_origins=["test"] * 5
+            samples_ids=sample_ids,
+            sample_origins=origins
         )
 
         response = self.data_service.EditDataSample(request_discard, self.mock_context)
@@ -440,6 +467,20 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         """Test batch operations on many samples at once"""
         print("\n[TEST 6] Testing batch tag operations")
 
+        # Ensure the dataframe is populated with sample data
+        self.data_service._slowUpdateInternals(force=True)
+
+        # Get the actual sample IDs from the dataframe
+        df = self.data_service._all_datasets_df
+        if df is not None and not df.empty:
+            # Get first 50 sample IDs from the dataframe
+            sample_count = min(50, len(df))
+            sample_ids = [str(idx[1]) for idx in df.index[:sample_count].tolist()]
+            origins = [idx[0] for idx in df.index[:sample_count].tolist()]
+        else:
+            sample_ids = [str(i) for i in range(50)]
+            origins = ["test"] * 50
+
         # Add "batch_tag" to 50 samples at once
         request = pb2.DataEditsRequest(
             stat_name=f"{SampleStatsEx.TAG.value}:batch_tag",
@@ -447,8 +488,8 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             string_value="batch_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=[str(i) for i in range(50)],
-            sample_origins=["test"] * 50
+            samples_ids=sample_ids,
+            sample_origins=origins
         )
 
         response = self.data_service.EditDataSample(request, self.mock_context)

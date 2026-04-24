@@ -1,0 +1,1 @@
+C:\Users\GuillaumePELLUET\Documents\Codes\weightslab\.venv-1\Scripts\python.exe: No module named pytest

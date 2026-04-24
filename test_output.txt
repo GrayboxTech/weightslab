@@ -1,0 +1,79 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.0, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\GuillaumePELLUET\AppData\Local\Programs\Python\Python311\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\GuillaumePELLUET\Documents\Codes\weightslab
+configfile: pyproject.toml
+plugins: anyio-4.12.1, langsmith-0.7.14
+collecting ... collected 13 items
+
+weightslab/tests/backend/test_ui_docker_bridge.py::TestCheckDocker::test_exits_when_daemon_not_running PASSED [  7%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestCheckDocker::test_exits_when_docker_not_found PASSED [ 15%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestCheckDocker::test_passes_when_docker_available PASSED [ 23%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestComposeCmd::test_runs_docker_compose_with_env PASSED [ 30%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestUiLaunch::test_launch_prints_url_default_port FAILED [ 38%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestUiLaunch::test_launch_respects_custom_port FAILED [ 46%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestUiStop::test_stop_prints_message FAILED [ 53%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestUiDrop::test_drop_prints_message FAILED [ 61%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestMainCLI::test_main_dispatches_ui_drop PASSED [ 69%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestMainCLI::test_main_dispatches_ui_launch PASSED [ 76%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestMainCLI::test_main_dispatches_ui_stop PASSED [ 84%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestMainCLI::test_main_help_does_not_crash PASSED [ 92%]
+weightslab/tests/backend/test_ui_docker_bridge.py::TestMainCLI::test_main_no_args_does_not_crash PASSED [100%]
+
+================================== FAILURES ===================================
+______________ TestUiLaunch.test_launch_prints_url_default_port _______________
+weightslab\tests\backend\test_ui_docker_bridge.py:71: in test_launch_prints_url_default_port
+    self.assertIn("https://localhost:5173", mock_stdout.getvalue())
+E   AssertionError: 'https://localhost:5173' not found in ''
+---------------------------- Captured stdout call -----------------------------
+24/04/2026-19:13:19.881 INFO:weightslab.ui_docker_bridge:ui_launch: Weights Studio UI is running at: https://localhost:5173
+------------------------------ Captured log call ------------------------------
+INFO     weightslab.ui_docker_bridge:ui_docker_bridge.py:211 Weights Studio UI is running at: https://localhost:5173
+________________ TestUiLaunch.test_launch_respects_custom_port ________________
+weightslab\tests\backend\test_ui_docker_bridge.py:82: in test_launch_respects_custom_port
+    self.assertIn("https://localhost:3000", mock_stdout.getvalue())
+E   AssertionError: 'https://localhost:3000' not found in ''
+---------------------------- Captured stdout call -----------------------------
+24/04/2026-19:13:20.535 INFO:weightslab.ui_docker_bridge:ui_launch: Weights Studio UI is running at: https://localhost:3000
+------------------------------ Captured log call ------------------------------
+INFO     weightslab.ui_docker_bridge:ui_docker_bridge.py:211 Weights Studio UI is running at: https://localhost:3000
+_____________________ TestUiStop.test_stop_prints_message _____________________
+weightslab\tests\backend\test_ui_docker_bridge.py:99: in test_stop_prints_message
+    self.assertIn("Weights Studio UI stopped", mock_stdout.getvalue())
+E   AssertionError: 'Weights Studio UI stopped' not found in ''
+---------------------------- Captured stdout call -----------------------------
+24/04/2026-19:13:20.542 INFO:weightslab.ui_docker_bridge:ui_stop: Weights Studio UI stopped.
+------------------------------ Captured log call ------------------------------
+INFO     weightslab.ui_docker_bridge:ui_docker_bridge.py:336 Weights Studio UI stopped.
+_____________________ TestUiDrop.test_drop_prints_message _____________________
+weightslab\tests\backend\test_ui_docker_bridge.py:116: in test_drop_prints_message
+    self.assertIn("containers and images removed", mock_stdout.getvalue())
+E   AssertionError: 'containers and images removed' not found in ''
+---------------------------- Captured stdout call -----------------------------
+24/04/2026-19:13:20.560 INFO:weightslab.ui_docker_bridge:ui_drop: Weights Studio UI containers and images removed.
+------------------------------ Captured log call ------------------------------
+INFO     weightslab.ui_docker_bridge:ui_docker_bridge.py:347 Weights Studio UI containers and images removed.
+============================== warnings summary ===============================
+weightslab\art.py:42
+  C:\Users\GuillaumePELLUET\Documents\Codes\weightslab\weightslab\art.py:42: DeprecationWarning: invalid escape sequence '\ '
+    _BANNER = f"""
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED weightslab/tests/backend/test_ui_docker_bridge.py::TestUiLaunch::test_launch_prints_url_default_port
+FAILED weightslab/tests/backend/test_ui_docker_bridge.py::TestUiLaunch::test_launch_respects_custom_port
+FAILED weightslab/tests/backend/test_ui_docker_bridge.py::TestUiStop::test_stop_prints_message
+FAILED weightslab/tests/backend/test_ui_docker_bridge.py::TestUiDrop::test_drop_prints_message
+=================== 4 failed, 9 passed, 1 warning in 12.31s ===================
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\GuillaumePELLUET\AppData\Local\Programs\Python\Python311\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\GuillaumePELLUET\Documents\Codes\weightslab\weightslab\utils\logs.py", line 62, in _print_log_location
+    print(f"\n{'='*60}\nWeightsLab session log saved to:\n{_LOG_FILE_PATH}\n{'='*60}", flush=True)
+  File "C:\Users\GuillaumePELLUET\Documents\Codes\weightslab\weightslab\utils\logs.py", line 218, in print
+    logging.info(log_message)
+Message: '\n============================================================\nWeightsLab session log saved to:\nC:\\Users\\GUILLA~1\\AppData\\Local\\Temp\\tmp55taykph\\weightslab_logs\\weightslab_20260424_191319.log\n============================================================'
+Arguments: ()
