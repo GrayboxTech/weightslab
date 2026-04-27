@@ -11,3 +11,4 @@
 
 ### Bug Fixes
 - Sorting numeric uids was interpreted as sorting string values
+- Fix discard and tag features with numeric uids
