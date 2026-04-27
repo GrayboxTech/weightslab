@@ -89,7 +89,8 @@ docker compose up -d
 
 ## Quick Training Example
 
-Here's a complete example showing how to integrate WeightsLab into a basic PyTorch training script:
+<details>
+<summary><b>Here's a complete example showing how to integrate WeightsLab into a basic PyTorch training script:</b></summary>
 
 ```python
 #!/usr/bin/env python3
@@ -102,14 +103,16 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import weightslab as wl  # ← Import WeightsLab (auto-creates secure certs!)
 
+
 # Define a simple model
 class SimpleModel(nn.Module):
     def __init__(self):
-        super().__init__()
-        self.linear = nn.Linear(10, 1)
+        super().__init__(input_shape=12, output_shape=2)
+        self.linear = nn.Linear(input_shape, 1)
 
     def forward(self, x):
         return self.linear(x)
+
 
 # Create synthetic data
 def create_data(n_samples=1000):
@@ -117,28 +120,74 @@ def create_data(n_samples=1000):
     y = X.sum(dim=1, keepdim=True) + 0.1 * torch.randn(n_samples, 1)
     return TensorDataset(X, y)
 
+
 # Main training function
 def main():
     # Initialize WeightsLab - this creates certificates automatically!
     print("🚀 Initializing WeightsLab...")
 
+    # Load hyperparameters (from YAML if present)
+    parameters = {}
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+    if os.path.exists(config_path):
+        with open(config_path, "r") as fh:
+            parameters = yaml.safe_load(fh) or {}
+    parameters = wl.watch_or_edit(
+        parameters,
+        flag="hyperparameters",
+        defaults=parameters,
+        poll_interval=1.0,
+    ) or {}  # Wrap the hyperparameters
+
     # Wrap your model and optimizer with WeightsLab
-    model = wl.watch_or_edit(SimpleModel())  # ← WeightsLab tracks your model
-    optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=0.01))  # ← WeightsLab tracks optimizer
+    model = wl.watch_or_edit(
+      SimpleModel(
+        input_shape=parameters.get('model', {}).get('input_shape', 10),
+        output_shape=parameters.get('model', {}).get('output_shape', 1)
+      )
+    )  # ← WeightsLab tracks your model
+    optimizer = wl.watch_or_edit(
+      optim.Adam(model.parameters(), lr=parameters.get('model', {}).get('optimizer', {}).get('lr', 0.01)),
+      flag='optimizer'
+    )  # ← WeightsLab tracks optimizer
+
+    # Create and wrap criterion
+    criterion = wl.watch_or_edit(
+        nn.CrossEntropyLoss(reduction="none"),
+        flag="loss",
+        signal_name="train-loss-CE",
+        log=True  # If log is False, only save per sample value, not plot criterion
+    )
 
     # Create data and dataloader
     dataset = create_data()
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    train_loader = wl.watch_or_edit(
+        dataset,
+        flag="data",
+        loader_name="loader",
+        batch_size=parameters.get('data', {}).get('train_loader', {}).get('batch_size', 8),
+        shuffle=parameters.get('data', {}).get('train_loader', {}).get('shuffle', False),
+        is_training=True,  # Is it the training dataloader ?
+        compute_hash=parameters.get('data', {}).get('train_loader', {}).get('compute_hash', True),  # Compute hash for train loader to allow dynamic augmentations and dataset sanity check
+        preload_labels=parameters.get('data', {}).get('train_loader', {}).get('preload_labels', True),
+        preload_metadata=parameters.get('data', {}).get('train_loader', {}).get('preload_metadata', True),
+        enable_h5_persistence=parameters.get('data', {}).get('train_loader', {}).get('enable_h5_persistence', True),
+        num_workers=parameters.get('data', {}).get('train_loader', {}).get('num_workers', 4)
+    )
 
     # Training loop
     print("🏃 Starting training...")
-    for epoch in range(5):  # Train for 5 epochs
+    print("💡 Launch the UI with: weightslab ui docker launch")
+    print("🌐 Open browser to: https://localhost:5173")
+    n_epochs = parameters.get('n_epochs')
+    pbar = tqdm.tqdm(range(n_epochs), desc='Training..') if parameters.get('tqdm_display', False) else range(n_epochs)
+    for epoch in pbar:  # Train for 5 epochs
         total_loss = 0
 
         for batch_X, batch_y in dataloader:
             # Forward pass
             predictions = model(batch_X)
-            loss = nn.functional.mse_loss(predictions, batch_y)
+            loss = criterion(predictions, batch_y)
 
             # Backward pass
             optimizer.zero_grad()
@@ -151,41 +200,57 @@ def main():
         print(f"Epoch {epoch+1}/5 - Loss: {avg_loss:.4f}")
 
     print("✅ Training complete!")
-    print("💡 Launch the UI with: weightslab ui docker launch")
-    print("🌐 Open browser to: https://localhost:8080")
+
 
 if __name__ == "__main__":
     main()
-```
+</details> ```
+
 
 ### Step-by-Step Integration
 
 1. **Add the import** at the top of your script:
    ```python
-   import weightslab as wl  # ← This line creates certificates automatically!
+   import weightslab as wl  # ← Include our SDK into your experiment
    ```
 
-2. **Wrap your model** with WeightsLab tracking:
+2. **Wrap your parameters** with WeightsLab tracking:
    ```python
-   model = wl.watch_or_edit(SimpleModel())  # ← Now WeightsLab monitors your model
+   model = wl.watch_or_edit(parameters, ...)  # ← Now WeightsLab monitors your parameters and allow you to update them from your UI
    ```
 
-3. **Wrap your optimizer** with WeightsLab tracking:
+3. **Wrap your model** with WeightsLab tracking:
    ```python
-   optimizer = wl.watch_or_edit(optim.Adam(model.parameters(), lr=0.01))  # ← Tracks optimizer state
+   model = wl.watch_or_edit(SimpleModel(...), ...)  # ← Now WeightsLab monitors your model state
    ```
 
-4. **Run your training script** as usual:
+4. **Wrap your optimizer** with WeightsLab tracking:
+   ```python
+   optimizer = wl.watch_or_edit(optim.Adam(...), ...)  # ← Tracks optimizer state and update optimizer learning rate from your UI
+   ```
+
+5. **Wrap your signal** with WeightsLab tracking:
+   ```python
+    criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), ...)  # ← Tracks this signal and others (metrics, ..etc) from your UI
+   ```
+
+6. **Wrap your dataset** with WeightsLab tracking:
+   ```python
+    train_loader = wl.watch_or_edit(dataset, ...)  # ← Tracks this dataset and others (validation, test) from your UI
+   ```
+
+7. **Run your training script** as usual:
    ```bash
    python train.py
    ```
 
-5. **Launch the UI** in another terminal:
+8. **Launch the UI** in another terminal:
    ```bash
    weightslab ui docker launch
    ```
 
-6. **Open your browser** to `https://localhost:8080` to see live training metrics!
+9. **Open your browser** to `https://localhost:5173` to track experiment evoluation and results!
+
 
 ### What WeightsLab Does Automatically
 
@@ -193,7 +258,7 @@ if __name__ == "__main__":
 - 🎫 **Generates secure auth tokens** for gRPC communication
 - 📊 **Tracks model parameters** and optimizer state in real-time
 - 📈 **Provides live metrics** and visualization in the web UI
-- 🔄 **Enables model editing** and hyperparameter tuning through the UI
+- 🔄 **Enables model editing (incoming feature)** and hyperparameter tuning through the UI
 
 
 ## Security
@@ -204,7 +269,7 @@ By default, WeightsLab runs in **unsecured mode** (NO TLS, HTTP, no gRPC authent
 Setup secure environment AND launch Docker in one command:
 ```bash
 weightslab ui docker se
-export WEIGHTSLAB_CERTS_DIR='~/.weightslab-certs/'
+export WEIGHTSLAB_CERTS_DIR='~/.weightslab-certs/'  # Windows commands is
 ```
 
 This will:
@@ -216,6 +281,13 @@ This will:
 Setup secure environment only:
 ```bash
 weightslab se
+
+# Ubuntu command
+echo 'export WEIGHTSLAB_CERTS_DIR="~/.weightslab-certs/"' >> ~/.bashrc
+source ~/.bashrc
+
+# Windows command
+# setx WEIGHTSLAB_CERTS_DIR '~/.weightslab-certs/' /M
 ```
 
 Then launch Docker later:
@@ -226,8 +298,18 @@ weightslab ui docker launch
 ### Custom Certificates Directory
 Store certificates in a custom location using the `WEIGHTSLAB_CERTS_DIR` environment variable:
 ```bash
+# Generate the certs
 weightslab se "/path/to/my/certs"
-export WEIGHTSLAB_CERTS_DIR=/path/to/my/certs
+
+# Export path to env.
+# Ubuntu command
+echo 'export WEIGHTSLAB_CERTS_DIR=/path/to/my/certs' >> ~/.bashrc
+source ~/.bashrc
+
+# Windows command
+# setx WEIGHTSLAB_CERTS_DIR /path/to/my/certs /M
+
+# Start UI
 weightslab ui docker launch
 ```
 
@@ -335,33 +417,12 @@ WeightsLab can run its data agent in two modes:
 - Local provider with Ollama
 - Cloud provider with OpenRouter
 
-Use local Ollama when you want a fully local setup and do not need cloud-hosted models.
+Use local Ollama when you want a fully local setup and do not need cloud-hosted models (see more details installation from the documentation).
 Use OpenRouter when you want larger hosted models and model selection directly from Weightslab UI.
 
-### Option A: Local Ollama
 
-Start Ollama on the same machine as the WeightsLab backend and pull the model first with Docker:
-
-```bash
-ollama pull llama3.2:3b
-ollama serve
-```
-
-Then configure the agent provider in `agent_config.yaml`:
-
-```yaml
-agent:
-  provider: ollama
-  ollama_model: llama3.2:3b
-  ollama_host: localhost
-  ollama_port: 11435
-  fallback_to_local: false
-```
-
-In this mode, the agent is ready when the backend starts. You can open Weightslab UI and query the agent directly from the chat bar.
-
-### Option B: Cloud OpenRouter
-
+### Cloud OpenRouter
+#### SDK Configuration
 You can either preconfigure OpenRouter in `agent_config.yaml` / `.env`, or initialize it interactively from Weightslab UI.
 
 Example static configuration:
@@ -380,8 +441,9 @@ Environment variable:
 export OPENROUTER_API_KEY=your_key_here
 ```
 
-Interactive setup from Weightslab UI:
+#### Interactive setup from Weightslab UI
 
+OpenRouter models can be initialized and set directly from the UI:
 1. Click in the agent bar or double-click to expand the agent window.
 2. Type `/init`.
 3. Choose either:
@@ -400,47 +462,6 @@ The agent input supports these commands:
 - `/reset` clears the current runtime agent connection and status
 
 The agent history also records setup and model-change events as log-style entries, separate from normal agent responses.
-
-### Agent Commands in the Backend CLI
-
-The local WeightsLab CLI also exposes agent control and querying commands.
-
-Available commands:
-
-- `agent status` checks whether the agent is attached and ready.
-- `agent init --api-key KEY [--model MODEL] [--timeout SEC]` initializes OpenRouter from the CLI.
-- `agent models` lists models available for the configured OpenRouter key.
-- `agent model MODEL_NAME` switches the active OpenRouter model.
-- `agent reset` clears the current agent connection.
-- `agent query <prompt>` sends a natural-language request through the agent.
-- `query <prompt>` and `ask <prompt>` are shortcuts for `agent query`.
-
-Examples:
-
-```bash
-agent status
-agent init --api-key sk-or-... --model openai/gpt-4o-mini --timeout 20
-agent models
-agent model meta-llama/llama-3.3-70b-instruct
-agent query discard all samples with loss > 5 and tag them as hard_examples
-ask tag validation samples as goldset
-```
-
-### CLI Sample-ID Commands
-
-The backend CLI supports editing data directly from `sample_id` values.
-
-- `discard <sample_id> [sample_id2 ...]` marks samples as discarded.
-- `undiscard <sample_id> [sample_id2 ...]` restores samples.
-- `add_tag <sample_id> <tag> [sample_id2 ...]` applies the same tag to one or more samples.
-
-Examples:
-
-```bash
-discard sample_001 sample_002 sample_003
-undiscard sample_002
-add_tag sample_001 goldset sample_002 sample_003
-```
 
 ### Typical Usage Flow
 
