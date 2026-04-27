@@ -13,10 +13,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-WEIGHTSLAB_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-DOCKER_DIR="$WEIGHTSLAB_DIR/docker"
+CURRENT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+DOCKER_DIR="$CURRENT_DIR/docker"
 UTILS_DIR="$DOCKER_DIR/utils"
-EXAMPLE_DIR="$WEIGHTSLAB_DIR/examples/PyTorch/ws-classification"
+EXAMPLE_DIR="$CURRENT_DIR/tests/playwright/examples/ws-segmentation"
 GRPC_PORT=50051
 ENVOY_PORT=8080
 FRONTEND_PORT=5173
@@ -202,17 +202,16 @@ run_backend_example() {
 hide_certs() {
     local certs_dir=$1
     if [ -d "$certs_dir" ]; then
-        # Remove the directory entirely instead of just hiding files
-        rm -rf "$certs_dir"
+        mv "$certs_dir" "${certs_dir}.bak"
+        mkdir -p "$certs_dir"
     fi
 }
 
 restore_certs() {
     local certs_dir=$1
-    local certs_src="$DOCKER_DIR/.weightslab-certs-test"
-    if [ -d "$certs_src" ] && [ ! -d "$certs_dir" ]; then
-        # Restore from test certs directory
-        cp -r "$certs_src" "$certs_dir"
+    if [ -d "${certs_dir}.bak" ]; then
+        rm -rf "$certs_dir"
+        mv "${certs_dir}.bak" "$certs_dir"
     fi
 }
 
@@ -247,6 +246,7 @@ run_test_scenario() {
 
     # Setup certs and tokens for this scenario
     local certs_dir="$DOCKER_DIR/.weightslab-certs-test"
+    log_info "certs_dir: $certs_dir"
     local token_file="$certs_dir/.grpc_auth_token"
     local certs_hidden=false
     local token_hidden=false
@@ -308,9 +308,6 @@ run_test_scenario() {
     local frontend_port=$FRONTEND_PORT
     if [ "$secure" = "true" ] && [ "$use_certs" = "true" ]; then
         protocol="https"
-    else
-        # HTTP mode uses port 5172 instead of 5173
-        frontend_port=5172
     fi
 
     # Check frontend (don't check envoy since it depends on upstream backend)
@@ -352,7 +349,7 @@ main() {
     print_section "WEIGHTS STUDIO FRONTEND-BACKEND DEPLOYMENT TEST"
 
     log_info "Test Configuration:"
-    log_info "  Weights Studio Dir: $WEIGHTSLAB_DIR"
+    log_info "  Weights Studio Dir: $CURRENT_DIR"
     log_info "  Docker Dir: $DOCKER_DIR"
     log_info "  Example Dir: $EXAMPLE_DIR"
     log_info "  Envoy Port: $ENVOY_PORT"
@@ -372,8 +369,8 @@ main() {
 
     # Test B: Secured Environment (HTTPS with TLS + gRPC Auth)
     # Note: This requires TLS certificates AND gRPC auth token to be present
-    if [ -d "$HOME/.weightslab-certs" ] && [ -f "$HOME/.weightslab-certs/envoy-server.crt" ]; then
-        if [ -f "$HOME/.weightslab-certs/.grpc_auth_token" ]; then
+    if [ -d "$DOCKER_DIR/.weightslab-certs-test" ] && [ -f "$DOCKER_DIR/.weightslab-certs-test/envoy-server.crt" ]; then
+        if [ -f "$DOCKER_DIR/.weightslab-certs-test/.grpc_auth_token" ]; then
             if run_test_scenario "TEST B: SECURED ENVIRONMENT (HTTPS + TLS + gRPC AUTH)" "true" "true" "true"; then
                 log_success "TEST B PASSED: Frontend and backend communicate over HTTPS with full security"
             else
@@ -381,7 +378,7 @@ main() {
             fi
         else
             log_warn "TEST B SKIPPED: gRPC auth token not found"
-            log_warn "  Token should be at $HOME/.weightslab-certs/.grpc_auth_token"
+            log_warn "  Token should be at $DOCKER_DIR/.weightslab-certs-test/.grpc_auth_token"
         fi
 
         # Cleanup between tests
@@ -400,7 +397,7 @@ main() {
         sleep 5
 
         # Test D: gRPC Auth Only (no TLS certificates)
-        if [ -f "$HOME/.weightslab-certs/.grpc_auth_token" ]; then
+        if [ -f "$DOCKER_DIR/.weightslab-certs-test/.grpc_auth_token" ]; then
             if run_test_scenario "TEST D: SECURED ENVIRONMENT (HTTP + gRPC AUTH ONLY, NO TLS)" "true" "false" "true"; then
                 log_success "TEST D PASSED: Frontend and backend communicate over HTTP with gRPC auth only"
             else
@@ -408,7 +405,7 @@ main() {
             fi
         else
             log_warn "TEST D SKIPPED: gRPC auth token not found"
-            log_warn "  Token should be at $HOME/.weightslab-certs/.grpc_auth_token"
+            log_warn "  Token should be at $DOCKER_DIR/.weightslab-certs-test/.grpc_auth_token"
         fi
     else
         log_warn "TESTS B, C, D SKIPPED: TLS certificates not found at $DOCKER_DIR/.weightslab-certs-test"

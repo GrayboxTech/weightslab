@@ -83,14 +83,8 @@ echo "4. Checking container configuration..."
 docker logs "$CONTAINER_NAME" | grep -E "✓|✗" | head -5
 
 echo ""
-echo "5. Testing HTTP endpoint..."
-test_health "5172" "http"
-
-if [ $HAVE_CERTS -eq 0 ]; then
-    echo ""
-    echo "6. Testing HTTPS endpoint..."
-    test_health "5173" "https"
-fi
+echo "5. Testing HTTP(s) endpoint..."
+test_health "5173" "http"
 
 echo ""
 echo "7. Checking Envoy status..."
@@ -106,10 +100,7 @@ echo "Deployment test completed!"
 echo "======================================"
 echo ""
 echo "Access points:"
-echo "  HTTP: http://localhost:5172"
-if [ $HAVE_CERTS -eq 0 ]; then
-    echo "  HTTPS: https://localhost:5173"
-fi
+echo "  HTTP(s): http://localhost:5173"
 echo ""
 echo "To stop:"
 echo "  $DOCKER_COMPOSE_CMD down"

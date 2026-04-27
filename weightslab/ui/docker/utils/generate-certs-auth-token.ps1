@@ -12,7 +12,7 @@ if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Use user's default certificate directory
-$userCertDir = Join-Path $env:HOME ".weightslab-certs"
+$userCertDir = Join-Path $env:USERPROFILE ".weightslab-certs"
 
 New-Item -ItemType Directory -Force -Path $userCertDir | Out-Null
 

@@ -5,7 +5,6 @@ services:
   weights_studio:
     image: graybx/weights-studio-frontend:latest
     ports:
-      - "${VITE_HTTP_PORT:-5172}:80"
       - "${VITE_HTTPS_PORT:-5173}:443"
     volumes:
       - ${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}:/etc/nginx/certs:ro
