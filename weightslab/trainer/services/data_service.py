@@ -613,21 +613,6 @@ class DataService:
                 if df.index.name == SampleStatsEx.SAMPLE_ID.value:
                     df = df.reset_index()
 
-                # Prefer integer sample_id index when every value is integer-like.
-                # If any value is non-numeric/non-integer, keep string ids for compatibility.
-                if SampleStatsEx.SAMPLE_ID.value in df.columns:
-                    sample_ids = df[SampleStatsEx.SAMPLE_ID.value]
-                    numeric_ids = pd.to_numeric(sample_ids, errors="coerce")
-                    can_use_int_ids = bool(
-                        numeric_ids.notna().all()
-                        and np.isfinite(numeric_ids.to_numpy()).all()
-                        and np.equal(np.mod(numeric_ids.to_numpy(), 1), 0).all()
-                    )
-                    if can_use_int_ids:
-                        df[SampleStatsEx.SAMPLE_ID.value] = numeric_ids.astype(np.int64)
-                    else:
-                        df[SampleStatsEx.SAMPLE_ID.value] = sample_ids.astype(str)
-
                 # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
                 # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
                 # exploding the dataframe size due to duplicate sample_id index labels.
@@ -1975,6 +1960,7 @@ class DataService:
                                 df.pop('index')
                             df['sample_id'] = df['sample_id'].astype(int)
                             df.sort_values(inplace=True, **params)
+                            df['sample_id'] = df['sample_id'].astype(str)
                             df.set_index(['origin', 'sample_id'], inplace=True)
                         except:
                             pass
@@ -2616,9 +2602,8 @@ class DataService:
                         self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
 
                     # Work on a copy to allow concurrent readers to see a consistent state
-                    df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
+                    df = self._all_datasets_df  # Remove copy because memory waste and slowdown
                     messages = []
-
 
                     for op in operations:
                         func = op.get("function")
