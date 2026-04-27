@@ -227,13 +227,15 @@ jobs:
           name: dist-${{ github.ref_name }}
           path: dist
 
-      - name: Build release header
+      - name: Build release body with header, changelog, and auto-generated notes
         env:
           WL_CHANNEL: ${{ needs.detect-release-channel.outputs.channel }}
           WL_COMMIT_SHORT: ${{ needs.detect-release-channel.outputs.tag_commit_short }}
         run: |
           DATE_UTC="$(date -u +'%Y-%m-%d')"
-          cat > release_header.md <<EOF
+
+          # Build header
+          cat > release_body.md <<EOF
           <div align="center">
             <img src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/GitHub_banner_WL.png" alt="WeightsLab banner" height="240" />
           </div>
@@ -246,6 +248,21 @@ jobs:
 
           EOF
 
+          # Add changelog if it exists
+          if [ -f "CHANGELOG.md" ]; then
+            echo "" >> release_body.md
+            echo "---" >> release_body.md
+            echo "" >> release_body.md
+            cat CHANGELOG.md >> release_body.md
+            echo "" >> release_body.md
+            echo "---" >> release_body.md
+          fi
+
+          # Add placeholder for auto-generated notes (will be appended by action)
+          echo "" >> release_body.md
+          echo "## Merged Pull Requests" >> release_body.md
+          echo "" >> release_body.md
+
       - name: Create GitHub Release
         id: create_release
         uses: softprops/action-gh-release@v2
@@ -253,7 +270,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}${{ needs.detect-release-channel.outputs.channel == 'dev' && ' (Dev/TestPyPI)' || '' }}
           prerelease: ${{ needs.detect-release-channel.outputs.is_prerelease == 'true' }}
-          body_path: release_header.md
+          body_path: release_body.md
           generate_release_notes: true
           append_body: true
         env:
