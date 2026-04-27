@@ -234,11 +234,22 @@ jobs:
         run: |
           DATE_UTC="$(date -u +'%Y-%m-%d')"
 
-          # Build header
-          cat > release_body.md <<EOF
-          <div align="center">
-            <img src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/GitHub_banner_WL.png" alt="WeightsLab banner" height="240" />
-          </div>
+          # Build header with ASCII banner
+          cat > release_body.md <<'EOF'
+          ```
+           /WW      /WW           /$$           /$$         /$$               /$$                 /$$
+          | WW  /W | WW          |__/          | $$        | $$              | $$                | $$
+          | WW /WWW| WW  /$$$$$$  /$$  /$$$$$$ | $$$$$$$  /$$$$$$    /$$$$$$$| $$        /$$$$$$ | $$$$$$$
+          | WW/WW WW WW /$$__  $$| $$ /$$__  $$| $$__  $$|_  $$_/   /$$_____/| $$       |____  $$| $$__  $$
+          | WWWW_  WWWW| $$$$$$$$| $$| $$  \ $$| $$  \ $$  | $$    |  $$$$$$ | $$        /$$$$$$$| $$  \ $$
+          | WWW/ \  WWW| $$_____/| $$| $$  | $$| $$  | $$  | $$ /$$ \____  $$| $$       /$$__  $$| $$  | $$
+          | WW/   \  WW|  $$$$$$$| $$|  $$$$$$$| $$  | $$  |  $$$$/ /$$$$$$$/| $$$$$$$$  $$$$$$$| $$$$$$$/
+          |__/     \__/ \_______/|__/ \____  $$|__/  |__/   \___/  |_______/ |________/ \_______/|_______/
+                                      /$$  \ $$
+                                     |  $$$$$$/
+                                      \______/
+          By GrayBx
+          ```
 
           ## WeightsLab Release
 
@@ -253,7 +264,14 @@ jobs:
             echo "" >> release_body.md
             echo "---" >> release_body.md
             echo "" >> release_body.md
-            cat CHANGELOG.md >> release_body.md
+
+            # For dev releases, replace [Unreleased] with [dev-release]
+            if [ "${WL_CHANNEL}" = "dev" ]; then
+              sed 's/\[Unreleased\]/[dev-release]/g' CHANGELOG.md >> release_body.md
+            else
+              cat CHANGELOG.md >> release_body.md
+            fi
+
             echo "" >> release_body.md
             echo "---" >> release_body.md
           fi
