@@ -87,7 +87,7 @@ utest = [
   "pytorch-lightning>=2.2,<3",
   "tensorboard>=2.14,<3",
   "graphviz>=0.20,<1",
-  "pytest">=9.0.2,
+  "pytest>=9.0.2",
 ]
 
 [project.scripts]
