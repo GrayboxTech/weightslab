@@ -47,6 +47,7 @@ class TestCheckDocker(unittest.TestCase):
 class TestComposeCmd(unittest.TestCase):
     @patch("weightslab.ui_docker_bridge.subprocess.run")
     def test_runs_docker_compose_with_env(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
         _compose_cmd("/path/to/compose.yml", "/path/to/envoy.yaml", ["up", "-d"])
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args
@@ -55,7 +56,8 @@ class TestComposeCmd(unittest.TestCase):
             ["docker", "compose", "-f", "/path/to/compose.yml", "up", "-d"],
         )
         self.assertEqual(kwargs["env"]["WS_ENVOY_CONFIG"], "/path/to/envoy.yaml")
-        self.assertTrue(kwargs["check"])
+        self.assertTrue(kwargs["stdout"])
+        self.assertTrue(kwargs["text"])
 
 
 class TestUiLaunch(unittest.TestCase):
@@ -214,13 +216,13 @@ class TestUiDockerSecureEnvironment(unittest.TestCase):
 
 
 class TestUiLaunchSecure(unittest.TestCase):
+    @patch("weightslab.ui_docker_bridge._run_shell_script", return_value=0)
     @patch("weightslab.ui_docker_bridge.Path")
-    @patch("weightslab.ui_docker_bridge._run_powershell_script", return_value=0)
     @patch("weightslab.ui_docker_bridge._get_bootstrap_script")
     @patch("weightslab.ui_docker_bridge.CertAuthManager")
     @patch("weightslab.ui_docker_bridge.ui_launch")
     def test_launch_secure_with_valid_certs(self, mock_ui_launch, mock_cert_manager,
-                                             mock_bootstrap_script, mock_ps_script, mock_path):
+                                             mock_bootstrap_script, mock_path, mock_run_shell):
         """Test launching with secure certs on Windows."""
         mock_manager_instance = MagicMock()
         mock_manager_instance.check_and_apply.return_value = (True, "Secure env ready")

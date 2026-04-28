@@ -32,6 +32,7 @@ import yaml
 import logging
 import time
 import re
+import hashlib
 import pandas as pd
 import torch as th
 import dill
@@ -1083,12 +1084,17 @@ class CheckpointManager:
             logger.error(f"Failed to save config: {e}")
             return None
 
-    def save_data_snapshot(self) -> Optional[Path]:
+    def save_data_snapshot(self, force_new_state: bool = False) -> Optional[Path]:
         """Save lightweight JSON snapshot of data state (sample_id, tags, discarded) + RNG state.
 
         H5 files (data.h5 and arrays.h5) are saved in parent directory (shared).
         Only checkpoint-specific metadata is saved here as JSON, including random state
         for reproducible data generation.
+
+        Args:
+            force_new_state: When True, always creates a new data state even if the data
+                content hasn't changed. This prevents overwriting an existing snapshot on
+                manual/forced saves.
         """
         if self.current_exp_hash is None:
             logger.warning("No experiment hash set. Call update_experiment_hash first.")
@@ -1125,9 +1131,49 @@ class CheckpointManager:
             # Capture current RNG states for reproducibility using tool function
             rng_state = capture_rng_state()
 
+            # Determine the data hash to use for the directory / filename.
+            # When force_new_state=True we derive a unique hash from the current hash
+            # plus a high-resolution timestamp so successive force-dumps never collide.
+            if force_new_state:
+                data_snapshot = self.get_dataframe_snapshot()
+                current_data_hash = self.hash_generator.get_component_hashes().get('data')
+                self.hash_generator.generate_hash(
+                    model=None,
+                    config=None,
+                    data_state=data_snapshot
+                )
+                forced_data_hash = self.hash_generator.get_hash(component='data')
+
+                hp_hash = self.current_exp_hash[0:8]
+                model_hash = self.current_exp_hash[8:16]
+                new_combined_hash = f"{hp_hash}{model_hash}{forced_data_hash}"
+
+                # Update manager's hash tracking
+                self.previous_exp_hash = self.current_exp_hash
+                self.current_exp_hash = new_combined_hash
+                self.hash_by_module[2] = forced_data_hash
+                self.hash_generator.restore_hashes(
+                    component_hashes={
+                        'hp': hp_hash,
+                        'model': model_hash,
+                        'data': forced_data_hash,
+                        'combined': new_combined_hash,
+                    }
+                )
+
+                active_data_hash = forced_data_hash
+                active_exp_hash = new_combined_hash
+                logger.info(
+                    f"Force new data state: {current_data_hash} → {forced_data_hash} "
+                    f"(combined hash: {new_combined_hash})"
+                )
+            else:
+                active_data_hash = self.current_exp_hash[-8:]
+                active_exp_hash = self.current_exp_hash
+
             # Convert to JSON-serializable format
             snapshot_data = {
-                'exp_hash': self.current_exp_hash,
+                'exp_hash': active_exp_hash,
                 'timestamp': datetime.now().isoformat(),
                 'data': snapshot_df.to_dict(orient='records'),
                 'rng_state': rng_state
@@ -1147,14 +1193,19 @@ class CheckpointManager:
                 logger.debug(f"Could not capture dataloader iteration state: {e}")
 
             # Save to hash-specific directory
-            data_hash_dir = self.data_checkpoint_dir / self.current_exp_hash[-8:]
+            data_hash_dir = self.data_checkpoint_dir / active_data_hash
             os.makedirs(data_hash_dir, exist_ok=True)
-            json_file = data_hash_dir / f"{self.current_exp_hash[-8:]}_data_snapshot.json"
+            json_file = data_hash_dir / f"{active_data_hash}_data_snapshot.json"
 
             with open(json_file, 'w') as f:
                 json.dump(snapshot_data, f, indent=2, default=str)
 
             logger.info(f"Saved data snapshot: {json_file.name} ({len(snapshot_df)} rows) with RNG state")
+
+            if force_new_state:
+                self._update_manifest(active_exp_hash)
+                self._save_manager_state()
+
             return json_file
 
         except Exception as e:

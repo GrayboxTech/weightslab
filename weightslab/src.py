@@ -2259,7 +2259,7 @@ def run_pending_evaluation(
 
     model_age = 0
     try:
-        model_age = _model.get_age() if _model is not None and hasattr(_model, "get_age") else 0
+        model_age = _model.get_age() - 1 if _model is not None and hasattr(_model, "get_age") else 0  # Model anticipates a step after eval, so subtract 1 to report the age corresponding to the just-evaluated checkpoint.
     except Exception:
         pass
 

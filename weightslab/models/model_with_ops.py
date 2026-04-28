@@ -35,6 +35,8 @@ class NetworkWithOps(nn.Module):
         return self.linearized_layers
 
     def __eq__(self, other: "NetworkWithOps") -> bool:
+        if not isinstance(other, NetworkWithOps):
+            return False
         return other is not None and \
             self.tracking_mode == other.tracking_mode and \
             self.layers == other.layers

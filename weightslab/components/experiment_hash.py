@@ -70,9 +70,18 @@ class ExperimentHashGenerator:
             str: A 24-character hexadecimal hash string (8 + 8 + 8)
         """
         # Generate individual 8-byte hashes
-        hp_hash = self._hash_config(config) if config is not None else "00000000"
-        model_hash = self._hash_model(model, model_init_step=model_init_step, _last_time_loaded=_last_time_loaded) if model is not None else "00000000"
-        data_hash = self._hash_data_state(data_state) if data_state is not None else "00000000"
+        if config != -1:
+            hp_hash = self._hash_config(config) if config is not None else "00000000"
+        else:
+            hp_hash = self._last_hp_hash or "00000000"  # If config is -1, keep previous HP hash to avoid marking as changed
+        if model != -1:
+            model_hash = self._hash_model(model, model_init_step=model_init_step, _last_time_loaded=_last_time_loaded) if model is not None else "00000000"
+        else:
+            model_hash = self._last_model_hash or "00000000"  # If model is -1, keep previous model hash to avoid marking as changed
+        if data_state != -1:
+            data_hash = self._hash_data_state(data_state) if data_state is not None else "00000000"
+        else:
+            data_hash = self._last_data_hash or "00000000"  # If data_state is -1, keep previous data hash to avoid marking as changed
 
         # Combine into 24-byte hash: HP (8) + MODEL (8) + DATA (8)
         final_hash = f"{hp_hash}{model_hash}{data_hash}"
@@ -89,6 +98,25 @@ class ExperimentHashGenerator:
         logger.debug(f"  Data hash: {data_hash}")
 
         return final_hash
+
+    def get_hash(self, component: str) -> Optional[str]:
+        """Get the most recently generated hash for a specific component.
+
+        Args:
+            component (str): The component for which to retrieve the hash ('hp', 'model', 'data')
+
+        Returns:
+            str or None: Last generated hash for the specified component (8 bytes), or None if no hash generated yet
+        """
+        if component == 'hp':
+            return self._last_hp_hash
+        elif component == 'model':
+            return self._last_model_hash
+        elif component == 'data':
+            return self._last_data_hash
+        else:
+            raise ValueError("Invalid component. Must be 'hp', 'model', or 'data'.")
+        return self._last_data_hash
 
     def has_changed(
         self,
@@ -243,7 +271,7 @@ class ExperimentHashGenerator:
                 val = discarded.get(uid, False)
                 # Handle potential NaN or None: treat as False
                 is_discarded = bool(val) if pd.notna(val) else False
-                
+
                 uid_tags = sorted(tags.get(uid, []))
                 data_info.append(f"{uid}:d{int(is_discarded)}:t{','.join(uid_tags)}")
 

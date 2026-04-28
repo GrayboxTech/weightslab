@@ -29,7 +29,7 @@ def _get_envoy_config():
 
 def _get_bootstrap_script() -> Path:
     """Get the bootstrap-secure.ps1 script path."""
-    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'bootstrap-secure.ps1'
+    return Path(__file__).parent / 'ui' / 'docker' / 'utils' / 'build-and-deploy.sh'
 
 
 def _get_cert_script() -> Path:
@@ -77,7 +77,14 @@ def _compose_cmd(compose_file, envoy_config, action):
     env["WS_ENVOY_CONFIG"] = str(envoy_config)
 
     cmd = ["docker", "compose", "-f", str(compose_file)] + action
-    subprocess.run(cmd, env=env, check=True)
+    result = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    if result.stdout:
+        for line in result.stdout.splitlines():
+            logger.info(line)
+
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd)
 
 
 def _test_backend_connection(host: str = '127.0.0.1', port: int = 50051, timeout: float = 5.0) -> bool:
@@ -93,7 +100,7 @@ def _test_backend_connection(host: str = '127.0.0.1', port: int = 50051, timeout
         return False
 
 
-def _run_powershell_script(script_path: str, args: list = None) -> int:
+def _run_powershell_script(script_path: str, args: list = None, env_vars: dict = None) -> int:
     """Run a PowerShell script and return exit code."""
     if not _is_windows():
         logger.error("Secure launch requires Windows with PowerShell")
@@ -110,7 +117,10 @@ def _run_powershell_script(script_path: str, args: list = None) -> int:
         cmd.extend(args)
 
     try:
-        result = subprocess.run(cmd, env=os.environ.copy())
+        env = os.environ.copy()
+        if env_vars:
+            env.update(env_vars)
+        result = subprocess.run(cmd, env=env)
         return result.returncode
     except Exception as e:
         logger.error(f"Failed to run script: {e}")
@@ -124,12 +134,13 @@ def _convert_to_git_bash_path(win_path: str) -> str:
     if len(p) > 1 and p[1] == ':':
         drive = p[0].lower()
         rest = p[2:]
-        return f"/{drive}{rest}"
+        return f"/mnt/{drive}{rest}"
     return p
 
 
-def _run_shell_script(script_path: str, args: list = None) -> int:
-    """Run a shell script using bash -c with inline execution."""
+def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None) -> int:
+    """Run a shell script using bash with proper environment variable passing."""
+
     try:
         # Fix line endings in the file before running
         with open(script_path, 'rb') as f:
@@ -143,18 +154,40 @@ def _run_shell_script(script_path: str, args: list = None) -> int:
             with open(script_path, 'wb') as f:
                 f.write(fixed_bytes)
 
-        # Convert back to string for piping
-        script_content = fixed_bytes.decode('utf-8')
+        env = os.environ.copy()
+        if env_vars:
+            env.update(env_vars)
+            # Debug: log all environment variables being passed
+            for key, value in env_vars.items():
+                logger.info(f"Passing env var: {key}={value}")
 
-        # Use bash -c to run the script with arguments
-        # Build the command that sets up $1, $2, etc. before executing script
-        if args:
-            args_setup = ' '.join(f'"{arg}"' for arg in args)
-            bash_cmd = f'set -- {args_setup}; eval "{script_content}"'
+        # Build bash command - pass Windows path directly, script will handle conversion
+        # # Process path to ensure it's compatible with bash, especially on Windows
+        if _is_windows() and '\\' in script_path:
+            script_path = script_path.replace("\\", "/")  # Ensure path is Unix-style for bash
+            script_path = _convert_to_git_bash_path(script_path)
+            logger.info(f"Converted script path for bash: {script_path}")
+        logger.info(f"Running shell script: {script_path} with args: {args} and env_vars: {env_vars}")
+
+        # Build environment variable assignments for bash command
+        env_assignments = ' '.join([f"{k}='{v}'" for k, v in env_vars.items()]) if env_vars else ""
+
+        if env_assignments:
+            # Pass env vars directly in bash command using -c flag
+            # This works on Windows (Git Bash), Linux, and macOS
+            bash_script_cmd = f"{env_assignments} '{script_path}'"
+            if args:
+                bash_script_cmd += " " + " ".join(f"'{arg}'" for arg in args)
+            bash_cmd = ['bash', '-c', bash_script_cmd]
         else:
-            bash_cmd = script_content
+            bash_cmd = ['bash', str(script_path)]
+            if args:
+                bash_cmd.extend(args)
 
-        result = subprocess.run(['bash', '-c', bash_cmd], env=os.environ.copy())
+        result = subprocess.run(bash_cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if result.stdout:
+            for line in result.stdout.splitlines():
+                logger.info(line)
         return result.returncode
     except FileNotFoundError:
         logger.error(f"Script file not found: {script_path}")
@@ -202,6 +235,28 @@ def _generate_certs_with_fallback(force_certs: bool = False) -> int:
 def ui_launch(args):
     """Pull images and start UI containers."""
     _check_docker()
+
+    # Run bootstrap script to setup environment
+    manager = CertAuthManager.from_env_or_default(enable_auth=True)
+    bootstrap_script = str(_get_bootstrap_script())
+    if Path(bootstrap_script).exists():
+        logger.info("Running bootstrap script...")
+        logger.info(f"Bootstrap script path: {bootstrap_script}")
+        # Convert Windows path to Unix-style for bash
+        certs_dir_str = str(manager.certs_dir)
+        if _is_windows() and '\\' in certs_dir_str:
+            certs_dir_str = _convert_to_git_bash_path(certs_dir_str)
+            logger.info(f"Converted path to Unix-style: {certs_dir_str}")
+        bootstrap_env_vars = {
+            'WEIGHTSLAB_CERTS_DIR': certs_dir_str
+        }
+        logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
+        exit_code = _run_shell_script(bootstrap_script, [], bootstrap_env_vars)
+        if exit_code != 0:
+            logger.warning(f"Bootstrap script exited with code {exit_code}, continuing anyway...")
+    else:
+        logger.warning(f"Bootstrap script not found: {bootstrap_script}")
+
     _compose_cmd(
         _get_compose_file(),
         _get_envoy_config(),
@@ -305,7 +360,18 @@ def ui_launch_secure(args):
         sys.exit(1)
 
     logger.info("Running bootstrap script...")
-    exit_code = _run_powershell_script(bootstrap_script, script_args)
+    logger.info(f"Bootstrap script path: {bootstrap_script}")
+    logger.info(f"Bootstrap script args: {script_args}")
+    # Convert Windows path to Unix-style for bash
+    certs_dir_str = str(manager.certs_dir)
+    if _is_windows() and '\\' in certs_dir_str:
+        certs_dir_str = _convert_to_git_bash_path(certs_dir_str)
+        logger.info(f"Converted path to Unix-style: {certs_dir_str}")
+    bootstrap_env_vars = {
+        'WEIGHTSLAB_CERTS_DIR': certs_dir_str
+    }
+    logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
+    exit_code = _run_shell_script(bootstrap_script, script_args, bootstrap_env_vars)
     if exit_code != 0:
         logger.error(f"Bootstrap script failed with exit code {exit_code}")
         sys.exit(exit_code)

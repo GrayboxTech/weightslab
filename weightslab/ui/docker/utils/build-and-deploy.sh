@@ -2,8 +2,16 @@
 # Auto-detect TLS and tokens, then build production image
 # set -e
 
-# Set default WEIGHTSLAB_CERTS_DIR (can be overridden by environment variable)
-WEIGHTSLAB_CERTS_DIR="${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}"
+# DEBUG: Print all environment variables to diagnose issues
+echo "===== Environment Variables Received ====="
+env | grep -E 'WEIGHTSLAB|VITE|ENVOY|HOME' || true
+echo "=========================================="
+
+# Ensure environment variables are available (important when called from Python subprocess)
+echo "Init: WEIGHTSLAB_CERTS_DIR='$WEIGHTSLAB_CERTS_DIR' (received from env)"
+WEIGHTSLAB_CERTS_DIR="${WEIGHTSLAB_CERTS_DIR:-$HOME/.weightslab-certs}"
+export WEIGHTSLAB_CERTS_DIR
+echo "After default: WEIGHTSLAB_CERTS_DIR='$WEIGHTSLAB_CERTS_DIR'"
 
 # Parse command line arguments
 DEV=false
@@ -29,9 +37,34 @@ if [ "$FORCE_UNSECURE" = "1" ]; then
 elif [ "${WEIGHTSLAB_CERTS_DIR+x}" ] && [ -z "$WEIGHTSLAB_CERTS_DIR" ]; then
     echo "⚠ WEIGHTSLAB_CERTS_DIR explicitly set to empty - forcing UNSECURE mode"
     FORCE_UNSECURE=1
-else
-    # Respect WEIGHTSLAB_CERTS_DIR from environment variable, with fallback to home directory
-    WEIGHTSLAB_CERTS_DIR="${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}"
+elif [ ! -d "$WEIGHTSLAB_CERTS_DIR" ]; then
+    # WEIGHTSLAB_CERTS_DIR doesn't exist, try converting Windows path to Unix-style
+    CONVERTED_PATH=""
+    if echo "$WEIGHTSLAB_CERTS_DIR" | grep -q '\\'; then
+        # Path contains backslashes - likely Windows path, convert to Unix-style (for Git Bash)
+        # Convert C:\path\to\dir -> /c/path/to/dir
+        CONVERTED_PATH=$(echo "$WEIGHTSLAB_CERTS_DIR" | sed 's/^\([A-Za-z]\):\\/\/\L\1\//; s/\\/\//g')
+        echo "Detected Windows path, converting to Unix-style: $CONVERTED_PATH"
+
+        if [ -d "$CONVERTED_PATH" ]; then
+            echo "✓ Found converted path at '$CONVERTED_PATH'"
+            WEIGHTSLAB_CERTS_DIR="$CONVERTED_PATH"
+        else
+            echo "✗ Converted path not found at '$CONVERTED_PATH'"
+            # Continue with next fallback
+            WEIGHTSLAB_CERTS_DIR=""
+        fi
+    else
+        # Not a Windows path, try default ~/.weightslab-certs
+        DEFAULT_CERTS_DIR="$HOME/.weightslab-certs"
+        if [ -d "$DEFAULT_CERTS_DIR" ]; then
+            echo "WEIGHTSLAB_CERTS_DIR not found at '$WEIGHTSLAB_CERTS_DIR', using default: $DEFAULT_CERTS_DIR"
+            WEIGHTSLAB_CERTS_DIR="$DEFAULT_CERTS_DIR"
+        else
+            echo "Default certs directory not found ($DEFAULT_CERTS_DIR), continuing without certs"
+            WEIGHTSLAB_CERTS_DIR=""
+        fi
+    fi
 fi
 
 TOKEN_FILE="${WEIGHTSLAB_CERTS_DIR}/.grpc_auth_token"
@@ -62,7 +95,7 @@ if [ "$FORCE_UNSECURE" = "1" ]; then
     ENVOY_DOWNSTREAM_TLS=off
 elif [ "$VITE_SERVER_PROTOCOL" != "unset" ]; then
     # Environment variables are already set, use them
-    echo "ℹ Using environment-provided protocol settings"
+    echo "Using environment-provided protocol settings"
     [ "$VITE_DEV_SERVER_HTTPS" = "unset" ] && VITE_DEV_SERVER_HTTPS=0
     [ "$ENVOY_UPSTREAM_TLS" = "unset" ] && ENVOY_UPSTREAM_TLS=off
     [ "$ENVOY_DOWNSTREAM_TLS" = "unset" ] && ENVOY_DOWNSTREAM_TLS=off
@@ -80,6 +113,12 @@ else
     ENVOY_DOWNSTREAM_TLS=off
 fi
 
+# Export all environment variables for docker compose
+export VITE_DEV_SERVER_HTTPS
+export VITE_SERVER_PROTOCOL
+export ENVOY_UPSTREAM_TLS
+export ENVOY_DOWNSTREAM_TLS
+
 # Detect gRPC token
 VITE_WL_ENABLE_GRPC_AUTH_TOKEN="${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-unset}"
 VITE_GRPC_AUTH_TOKEN="${VITE_GRPC_AUTH_TOKEN:-}"
@@ -90,7 +129,7 @@ if [ "$FORCE_UNSECURE" = "1" ]; then
     VITE_GRPC_AUTH_TOKEN=""
 elif [ "$VITE_WL_ENABLE_GRPC_AUTH_TOKEN" != "unset" ]; then
     # Environment variable is already set, use it
-    echo "ℹ Using environment-provided auth settings"
+    echo "Using environment-provided auth settings"
     true
 elif [ -f "$TOKEN_FILE" ]; then
     echo "✓ gRPC token found - enabling auth"
@@ -102,10 +141,17 @@ else
     VITE_GRPC_AUTH_TOKEN=""
 fi
 
+# Export auth variables for docker compose
+export VITE_WL_ENABLE_GRPC_AUTH_TOKEN
+export VITE_GRPC_AUTH_TOKEN
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
+ENV_FILE="$DOCKER_DIR/.env"
+
 # Write environment variables to .env file for docker compose
 echo "Writing environment variables to .env..."
 # Note: .env must be in the docker directory where docker-compose.yml is located
-ENV_FILE="../.env"
 
 # Convert WEIGHTSLAB_CERTS_DIR to absolute path for docker-compose compatibility
 if [ -n "$WEIGHTSLAB_CERTS_DIR" ] && [ ! -z "$WEIGHTSLAB_CERTS_DIR" ]; then
@@ -143,13 +189,19 @@ fi
 echo "✓ .env file written to $ENV_FILE"
 cat "$ENV_FILE"
 
+# Convert WEIGHTSLAB_CERTS_DIR to absolute path for docker-compose compatibility
+if [ -n "$WEIGHTSLAB_CERTS_DIR" ] && [ ! -z "$WEIGHTSLAB_CERTS_DIR" ]; then
+    # Resolve to absolute path
+    WEIGHTSLAB_CERTS_DIR_ABSOLUTE="$(cd "$WEIGHTSLAB_CERTS_DIR" 2>/dev/null && pwd)" || WEIGHTSLAB_CERTS_DIR_ABSOLUTE="$WEIGHTSLAB_CERTS_DIR"
+fi
+
 # Check if image already exists
-IMAGE_NAME="weights_studio_frontend"
+IMAGE_NAME="graybx/weightslab"
 if docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
-    echo "ℹ Image '$IMAGE_NAME' already exists - skipping build"
+    echo "Image '$IMAGE_NAME' already exists - skipping build"
     SKIP_BUILD=true
 else
-    echo "ℹ Image '$IMAGE_NAME' not found - will build"
+    echo "Image '$IMAGE_NAME' not found - will build"
     SKIP_BUILD=false
 fi
 
@@ -157,7 +209,7 @@ fi
 if [ "$DEV" = "true" ]; then
     if [ "$SKIP_BUILD" = "false" ]; then
         echo "Building development image (single image, configuration at runtime)..."
-        docker compose -f ../docker-compose.yml -f ../docker-compose.dev.yml build
+        docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml build
 
         echo "✓ Dev build complete!"
     else
@@ -166,15 +218,15 @@ if [ "$DEV" = "true" ]; then
 
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
-    docker compose -f ../docker-compose.yml -f ../docker-compose.dev.yml down
-    docker compose -f ../docker-compose.yml -f ../docker-compose.dev.yml up -d --force-recreate
+    docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml down
+    docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml up -d --force-recreate
 
     echo "✓ Deployment to development complete!"
 else
     if [ "$SKIP_BUILD" = "false" ]; then
         echo "Building production image (single image, configuration at runtime)..."
         # Build with defaults - configuration happens at runtime via .env
-        docker compose -f ../docker-compose.yml -f ../docker-compose.prod.yml build
+        docker compose -f $DOCKER_DIR/docker-compose.yml build
 
         BUILD_STATUS=$?
         if [ $BUILD_STATUS -ne 0 ]; then
@@ -189,21 +241,21 @@ else
 
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
-    echo "ℹ Stopping existing containers..."
-    docker compose -f ../docker-compose.yml -f ../docker-compose.prod.yml down
+    echo "Stopping existing containers..."
+    docker compose -f $DOCKER_DIR/docker-compose.yml down
 
-    echo "ℹ Starting containers..."
-    docker compose -f ../docker-compose.yml -f ../docker-compose.prod.yml up -d --force-recreate
+    echo "Starting containers..."
+    docker compose -f $DOCKER_DIR/docker-compose.yml up -d --force-recreate
 
     UP_STATUS=$?
     if [ $UP_STATUS -ne 0 ]; then
         echo "✗ Container startup failed with status $UP_STATUS"
-        echo "ℹ Checking container logs..."
-        docker compose -f ../docker-compose.yml -f ../docker-compose.prod.yml logs --tail=50 || true
+        echo "Checking container logs..."
+        docker compose -f $DOCKER_DIR/docker-compose.yml logs --tail=50 || true
         exit $UP_STATUS
     fi
 
     echo "✓ Deployment to production complete!"
-    echo "ℹ Running containers:"
-    docker compose -f ../docker-compose.yml -f ../docker-compose.prod.yml ps || true
+    echo "Running containers:"
+    docker compose -f $DOCKER_DIR/docker-compose.yml ps || true
 fi

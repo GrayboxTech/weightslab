@@ -68,7 +68,7 @@ services:
 
   # Weights Studio frontend (production static server)
   weights_studio:
-    image: graybx/weights-studio-frontend:latest
+    image: graybx/weightslab:latest
     container_name: weights_studio_frontend
     build:
       context: ..
@@ -80,14 +80,24 @@ services:
         VITE_WL_ENABLE_GRPC_AUTH_TOKEN: 0
         VITE_SERVER_PROTOCOL: ${VITE_SERVER_PROTOCOL:-https}
         VITE_DEV_SERVER_HTTPS: ${VITE_DEV_SERVER_HTTPS:-0}
+    ports:
+      - "${VITE_HTTPS_PORT:-5173}:443"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - WS_SERVER_HOST=${WS_SERVER_HOST:-localhost}
       - WS_SERVER_PORT=${WS_SERVER_PORT:-8080}
+
+      # TLS settings for frontend to communicate with Envoy
       - WS_SERVER_PROTOCOL=${WS_SERVER_PROTOCOL:-https}
-      # Runtime token injection
-      - WL_ENABLE_GRPC_AUTH_TOKEN=${WL_ENABLE_GRPC_AUTH_TOKEN:-0}
-      - GRPC_AUTH_TOKEN=${GRPC_AUTH_TOKEN:-}
+      - VITE_DEV_SERVER_HTTPS=${VITE_DEV_SERVER_HTTPS:-0}
+      - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
+      - VITE_SERVER_PROTOCOL=${VITE_SERVER_PROTOCOL:-https}
+      - VITE_WL_ENABLE_GRPC_AUTH_TOKEN=${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-0}
+      - VITE_GRPC_AUTH_TOKEN=${VITE_GRPC_AUTH_TOKEN}
+      - WEIGHTSLAB_CERTS_DIR=${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}
+      - ENVOY_UPSTREAM_TLS=${ENVOY_UPSTREAM_TLS:-auto}
+      - ENVOY_DOWNSTREAM_TLS=${ENVOY_DOWNSTREAM_TLS:-auto}
+      - GRPC_BACKEND_PORT=${GRPC_BACKEND_PORT:-50051}
     volumes:
       # Mount certs directory if available
       - ${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}:/etc/nginx/certs:ro
