@@ -234,20 +234,9 @@ jobs:
         run: |
           DATE_UTC="$(date -u +'%Y-%m-%d')"
 
-          # Build header with ASCII banner
+          # Build header with weightslab banner image
           cat > release_body.md <<EOF
-           /WW      /WW           /$$           /$$         /$$               /$$                 /$$
-          | WW  /W | WW          |__/          | $$        | $$              | $$                | $$
-          | WW /WWW| WW  /$$$$$$  /$$  /$$$$$$ | $$$$$$$  /$$$$$$    /$$$$$$$| $$        /$$$$$$ | $$$$$$$
-          | WW/WW WW WW /$$__  $$| $$ /$$__  $$| $$__  $$|_  $$_/   /$$_____/| $$       |____  $$| $$__  $$
-          | WWWW_  WWWW| $$$$$$$$| $$| $$  \ $$| $$  \ $$  | $$    |  $$$$$$ | $$        /$$$$$$$| $$  \ $$
-          | WWW/ \  WWW| $$_____/| $$| $$  | $$| $$  | $$  | $$ /$$ \____  $$| $$       /$$__  $$| $$  | $$
-          | WW/   \  WW|  $$$$$$$| $$|  $$$$$$$| $$  | $$  |  $$$$/ /$$$$$$$/| $$$$$$$$  $$$$$$$| $$$$$$$/
-          |__/     \__/ \_______/|__/ \____  $$|__/  |__/   \___/  |_______/ |________/ \_______/|_______/
-                                      /$$  \ $$
-                                     |  $$$$$$/
-                                      \______/
-          By GrayBx
+          ![WeightsLab](https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/GitHub_banner_WL.png)
 
           ## WeightsLab Release
 
