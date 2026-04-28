@@ -203,7 +203,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-</details> ```
+```
+</details>
 
 
 ### Step-by-Step Integration

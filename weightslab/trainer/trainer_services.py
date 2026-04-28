@@ -615,6 +615,7 @@ def grpc_serve(
 
         except Exception as e:
             logger.exception("[gRPC] Critical error in gRPC thread: %s", e)
+            logger.exception("[gRPC] Watchdog will attempt to restart the server if configured to do so. Otherwise check if the BACKEND PORT {%d} is accessible and not blocked by firewall or in use by another process.", grpc_port)
         except KeyboardInterrupt:
             force_kill_all_python_processes()
 

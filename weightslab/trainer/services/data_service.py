@@ -2831,12 +2831,39 @@ class DataService:
                 if not getattr(checkpoint_manager, "current_exp_hash", None):
                     if hasattr(checkpoint_manager, "update_experiment_hash"):
                         checkpoint_manager.update_experiment_hash()
-                snapshot_path = checkpoint_manager.save_data_snapshot()
+                snapshot_path = checkpoint_manager.save_data_snapshot(force_new_state=True)
                 snapshot_saved = snapshot_path is not None
             except Exception as snapshot_error:
                 logger.warning(f"[EditDataSample] Manual save snapshot failed: {snapshot_error}")
 
         self._slowUpdateInternals(force=True)
+
+        # Force sync of all registered signals AFTER data has been dumped
+        if force_enable_h5:
+            try:
+                from weightslab import _REGISTERED_SIGNALS
+                if _REGISTERED_SIGNALS and self._all_datasets_df is not None and not self._all_datasets_df.empty:
+                    logger.info(f"[Manual Save] Data dumped successfully. Force-syncing {len(_REGISTERED_SIGNALS)} registered signals...")
+                    from weightslab import compute_signals
+                    # Get unique origins/splits from the dataframe
+                    try:
+                        if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
+                            splits = self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist()
+                        elif isinstance(self._all_datasets_df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
+                            splits = self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist()
+                        else:
+                            splits = []
+
+                        for split_name in splits:
+                            try:
+                                compute_signals(dataset_or_loader=split_name, origin=split_name, signals=list(_REGISTERED_SIGNALS.keys()))
+                                logger.info(f"[Manual Save] Force-synced {len(_REGISTERED_SIGNALS)} signals for split: {split_name}")
+                            except Exception as sig_error:
+                                logger.warning(f"[Manual Save] Failed to sync signals for split '{split_name}': {sig_error}")
+                    except Exception as origin_error:
+                        logger.warning(f"[Manual Save] Could not extract splits from dataframe: {origin_error}")
+            except Exception as sync_error:
+                logger.warning(f"[Manual Save] Signal sync after dump failed: {sync_error}")
 
         if snapshot_saved:
             return pb2.DataEditsResponse(
