@@ -19,6 +19,8 @@ Public API surface
 - ``wl.get_samples_by_tag``
 - ``wl.get_discarded_samples``
 - ``wl.SignalContext``
+- ``wl.eval_fn``  *(decorator — optional)*
+- ``wl.run_pending_evaluation``  *(optional, for training-loop integration)*
 
 watch_or_edit
 -------------
@@ -245,6 +247,138 @@ Convenience properties:
 - ``ctx.image``: normalized image view when possible
 - ``ctx.points``: point cloud view when possible
 - ``ctx.is_static`` / ``ctx.is_dynamic``
+
+Evaluation mode
+---------------
+
+WeightsLab can run a full inference pass over any registered loader while
+training remains paused.  Triggers can come from Weights Studio (UI),
+the CLI, or directly from your training script.
+
+How it works
+~~~~~~~~~~~~
+
+1. A trigger arrives (UI, CLI ``evaluate``, or explicit code).
+2. Training is paused automatically.
+3. A background thread runs the evaluation pass through the specified
+   loader, collecting all watched signals via the logger's
+   evaluation-mode buffer.
+4. Results are published as evaluation markers in the signal history (hash
+   suffix ``_N``), printed to the terminal, and made visible in
+   Weights Studio.
+5. The training loop stays paused until you call ``resume``.
+
+Default evaluation function
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If no ``@wl.eval_fn`` decorator is applied, WeightsLab uses a built-in
+default.  For every batch it:
+
+1. Unpacks ``(inputs, targets, ids)`` using a heuristic (tuple/list/dict).
+2. Runs ``model(inputs)`` under ``torch.no_grad()`` → ``preds``.
+3. Calls **every signal registered in the ledger** as
+   ``signal(preds, targets, batch_ids=ids)``, so the wrapped
+   ``forward`` / ``compute`` methods fire and accumulate averages into
+   the evaluation-mode logger buffer.
+
+Batch unpacking heuristic (default only):
+
+- ``tuple`` / ``list``  → ``[0]=inputs``, ``[1]=targets``, ``[2]=ids``
+- ``dict``              → ``inputs``: first of ``image/input/x/data``;
+  ``targets``: first of ``label/target/y/mask``;
+  ``ids``: first of ``id/sample_id/idx/index``
+
+Custom evaluation function (``@wl.eval_fn``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Decorate any function with ``@wl.eval_fn`` to override the default.  The
+function receives one argument — a *managed loader* that handles
+cancellation, timeout, and progress reporting automatically.
+
+.. code-block:: python
+
+   import torch
+   import weightslab as wl
+
+   # Register all objects with the ledger as usual
+   model     = wl.watch_or_edit(MyModel(), flag='model')
+   criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction='none'), flag='loss',
+                                signal_name='eval_loss')
+   val_loader = wl.watch_or_edit(DataLoader(val_dataset, batch_size=64),
+                                 flag='data', loader_name='val_loader')
+
+   # Optional override — use the same logic as your test() function
+   @wl.eval_fn
+   def eval_pass(loader):
+       model.eval()
+       with torch.no_grad():
+           for inputs, targets, ids in loader:
+               preds = model(inputs)
+               criterion(preds, targets, batch_ids=ids)
+
+Without the decorator, WeightsLab evaluates the loader automatically using
+the registered model.
+
+Training-loop integration (optional)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you prefer to run evaluation from the training loop rather than the
+background gRPC thread, call ``wl.run_pending_evaluation()`` at the top of
+every iteration:
+
+.. code-block:: python
+
+   for step, batch in enumerate(train_loader):
+       if wl.run_pending_evaluation():   # executes eval if pending, then continues
+           continue
+       # normal training step ...
+
+When triggered from the CLI or UI the call above is unnecessary because
+the background worker handles it.  Both approaches are safe to use
+together.
+
+Result console output
+~~~~~~~~~~~~~~~~~~~~~
+
+After each evaluation, WeightsLab prints a summary line to stdout regardless
+of whether Weights Studio is connected::
+
+   [WeightsLab] Evaluation 'val_loader' @ step 1200 — eval_loss=0.2314, accuracy=0.9120
+
+eval_fn decorator
+-----------------
+
+**Signature**
+
+.. code-block:: python
+
+   @wl.eval_fn
+   def my_eval(loader):
+       ...
+
+**Purpose**
+
+Register a custom evaluation function that replaces the built-in default.
+Only one function can be registered at a time; re-decorating replaces the
+previous one.
+
+run_pending_evaluation
+----------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.run_pending_evaluation(loaders=None, model=None, eval_fn=None, device=None) -> bool
+
+**Purpose**
+
+Execute a pending evaluation request if one exists.  All arguments are
+optional when ``wl.watch_or_edit`` registrations are in place.
+
+**Returns** ``True`` when an evaluation ran (training-loop callers should
+``continue`` to skip the training step), ``False`` otherwise.
+
 
 **Where SignalContext is used**
 

@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 # held too long and raise _WatchdogInterrupt in the holder thread, causing
 # any finally/with block to release it cleanly.
 weightslab_rlock = MonitoredRLock()
-weightslab_lock = Lock()
 
 # Timeout for acquiring weightslab_rlock in gRPC handlers.
 # Mirrors GRPC_WATCHDOG_STUCK_SECONDS so an RPC that cannot grab the lock fails
 # cleanly before the watchdog would flag it as an infinite hang.
-_GRPC_LOCK_TIMEOUT_S: float = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "60"))
+# TODO (GP): Now set to -1 (no timeout) to avoid interrupting long-running RPCs that are doing heavy work while holding the lock. We should eventually remove this timeout and rely solely on the watchdog to detect and handle stuck locks, to avoid unintended interruptions.
+_GRPC_LOCK_TIMEOUT_S: float = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "-1"))
 
 
 def try_acquire_rlock(timeout_s: float = _GRPC_LOCK_TIMEOUT_S) -> bool:
@@ -92,12 +92,20 @@ class PauseController:
         # Get the proxy that wraps our dict
         self.hyperparams = get_hyperparams()
 
-    def wait_if_paused(self):
+    def wait_if_paused(self, skip_pause: bool = False):
         # Called from main thread / model forward. Blocks if paused.
-        # Use timeout to allow signal handlers (Ctrl+C, SIGTERM) to be processed
-        while not self._event.wait(timeout=1):
-            # Timeout occurred, loop back to check pause state and allow signals to be handled
-            pass
+        # Use timeout to allow signal handlers (Ctrl+C, SIGTERM) to be processed.
+        # Also wakes up early when an evaluation is pending/running so the
+        # training loop and dataloaders can service evaluation mode.
+        while not self._event.wait(timeout=0.5):
+            # Timeout occurred – check for evaluation request before looping
+            try:
+                if skip_pause:
+                    # An eval was requested while paused: unblock so the
+                    # training loop can reach run_pending_evaluation().
+                    return
+            except Exception:
+                pass
 
     def pause(self):
         self._event.clear()
@@ -117,7 +125,7 @@ class PauseController:
         if self.checkpoint_manager == None:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager != None:
-            self.checkpoint_manager.update_experiment_hash(firsttime=True)
+            self.checkpoint_manager.update_experiment_hash(first_time=True)
             self.checkpoint_manager.save_pending_changes()  # Write pending change to disk
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:
@@ -153,37 +161,6 @@ class PauseController:
 
 # Global pause controller instance
 pause_controller = PauseController()
-
-
-class OpContext:
-    """
-    The actual context manager class that handles __enter__ and __exit__.
-    It holds a reference to the outer WeightsLab instance.
-    """
-    def __init__(self):
-        self.op_guard = weightslab_lock
-        self.model = None
-
-    def __enter__(self):
-        """
-        Executed upon entering the 'with' block. Sets the model to training mode.
-        """
-
-        self.op_guard.__enter__()
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
-        """
-        Executed upon exiting the 'with' block (after user code runs).
-        Reverts the model state.
-        """
-
-        self.op_guard.__exit__(exc_type, exc_value, traceback)
-
-        # If exc_type is not None, an exception occurred in the block.
-        # Returning False (default) allows the exception to propagate.
-        return False
-
-op_context = OpContext()
 
 
 class GuardContext:
@@ -317,9 +294,15 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
                 continue
             if hp_is_training is not None:
                 controller_paused = pause_controller.is_paused()
-                controller_running = not controller_paused
+
+                # TODO (GP): The logic here is a bit tricky because we want to avoid race conditions where both the controller and the ledger are trying to update each other at the same time. The current approach is:
+                # - The controller is the source of truth for the paused state, since it's what actually blocks the training loop. The ledger's `is_training` is a reflection of that state for visibility in the UI and for external control.
+                # - On each loop, we check the ledger's `is_training` against the controller's state. If they are out of sync, we update the controller to match the ledger. This allows external changes to the ledger to take effect.
+                # - After potentially updating the controller, we check if the controller is paused and if this is not the first resume (to avoid overwriting the ledger state on startup). If the controller is paused but the ledger does
+                # not reflect that, we update the ledger to match the controller. This ensures that if the controller is paused externally (e.g. via pause_controller.pause()), the ledger state is updated accordingly.
 
                 # # Drive controller from ledger when ledger explicitly sets the flag
+                # controller_running = not controller_paused
                 # if isinstance(hp_is_training, bool):
                 #     if controller_paused and hp_is_training:
                 #         resumed = pause_controller.resume()

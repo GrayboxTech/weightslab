@@ -87,6 +87,45 @@ gRPC Server
      - *(gRPC default)*
      - Override the C-core gRPC log verbosity (``DEBUG``, ``INFO``, ``ERROR``).
        Leave unset for normal operation.
+   * - ``GRPC_TLS_ENABLED``
+     - ``1``
+     - Enables TLS on the backend gRPC socket.
+       Set to ``0`` only for isolated local debugging.
+   * - ``GRPC_TLS_CERT_DIR``
+     - ``~/certs``
+     - Base directory used for default TLS file lookup when the per-file
+       ``GRPC_TLS_*_FILE`` variables are not set.
+   * - ``GRPC_TLS_KEY_FILE``
+     - ``~/certs/backend-server.key``
+     - Path to backend private key file (PEM).
+   * - ``GRPC_TLS_CERT_FILE``
+     - ``~/certs/backend-server.crt``
+     - Path to backend server certificate file (PEM).
+   * - ``GRPC_TLS_CA_FILE``
+     - ``~/certs/ca.crt``
+     - Path to CA certificate used to validate mTLS client certificates.
+   * - ``GRPC_TLS_REQUIRE_CLIENT_AUTH``
+     - ``1``
+     - Requires client certificates (mTLS) when set.
+   * - ``GRPC_AUTH_TOKEN``
+     - *(unset)*
+     - Optional shared token accepted from gRPC metadata headers
+       (``authorization: Bearer ...``, ``x-api-key``, or ``x-grpc-auth-token``).
+   * - ``GRPC_AUTH_TOKENS``
+     - *(unset)*
+     - Comma-separated token list for rotation support.
+
+Backend startup validates these security inputs at boot time and fails fast with
+an explicit error when required TLS files are missing or invalid.
+
+When hyperparameters/config are registered, WeightsLab resolves gRPC TLS settings
+with config-first precedence:
+
+- TLS flags: ``grpc_tls_enabled`` then ``GRPC_TLS_ENABLED``;
+  ``grpc_tls_require_client_auth`` then ``GRPC_TLS_REQUIRE_CLIENT_AUTH``.
+- TLS paths (when TLS is enabled):
+  ``grpc_tls_*_file`` -> ``GRPC_TLS_*_FILE`` -> ``grpc_tls_cert_dir`` ->
+  ``GRPC_TLS_CERT_DIR`` -> default ``~/certs``.
 
 
 Watchdog
@@ -181,6 +220,31 @@ Data and Cache
        on demand via the CLI).
 
 
+Evaluation Mode
+~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Variable
+     - Default
+     - Description
+   * - ``WEIGHTSLAB_EVAL_TIMEOUT_MULTIPLIER``
+     - ``1.3``
+     - Dynamic timeout factor for user-triggered evaluation passes.
+       Timeout is computed as ``avg_batch_seconds * nb_batches * multiplier``.
+       Keep ``1.3`` for a 30%% safety margin, increase for slower/unstable
+       hardware, decrease for stricter timeout behavior.
+   * - ``WEIGHTSLAB_EVAL_TIMEOUT_MIN_SECONDS``
+     - ``5``
+     - Minimum timeout floor (seconds) applied to evaluation runs.
+   * - ``WEIGHTSLAB_EVAL_TIMEOUT_SECONDS``
+     - ``0``
+     - Optional absolute timeout override in seconds.
+       ``0`` disables the absolute override and uses the dynamic formula only.
+
+
 AI / LLM API Keys
 ~~~~~~~~~~~~~~~~~
 
@@ -193,21 +257,19 @@ These keys are required only when using the agentic data-query features.
    * - Variable
      - Default
      - Description
-   * - ``OPENAI_API_KEY``
-     - *(empty)*
-     - OpenAI API key ? required for GPT-based natural-language data queries.
-   * - ``GOOGLE_API_KEY``
-     - *(empty)*
-     - Google API key ? required for Gemini-based data queries.
    * - ``OPENROUTER_API_KEY``
      - *(empty)*
-     - OpenRouter API key ? alternative multi-model routing endpoint.
+     - OpenRouter API key ? required for cloud agent setup in Weights Studio.
 
 
 Agent Configuration
 ~~~~~~~~~~~~~~~~~~~
 
 These variables control how the data-query agent finds its YAML configuration.
+The agent supports two provider families:
+
+- ``ollama`` for local inference
+- ``openrouter`` for cloud-hosted models
 
 .. list-table::
    :header-rows: 1
@@ -238,6 +300,117 @@ Example
    export AGENT_CONFIG_PATH=/opt/weightslab/config
    # WeightsLab will look for:
    # /opt/weightslab/config/agent_config.yaml
+
+
+Agent Provider Setup
+~~~~~~~~~~~~~~~~~~~~
+
+The runtime agent is configured from ``agent_config.yaml`` plus optional
+environment variables such as ``OPENROUTER_API_KEY``.
+
+Supported YAML keys
+^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Key
+     - Example
+     - Description
+   * - ``agent.provider``
+     - ``ollama``
+     - Active provider. Common values: ``ollama`` or ``openrouter``.
+   * - ``agent.ollama_model``
+     - ``llama3.2:3b``
+     - Local Ollama model name.
+   * - ``agent.ollama_host``
+     - ``localhost``
+     - Ollama host.
+   * - ``agent.ollama_port``
+     - ``11435``
+     - Ollama HTTP port used by WeightsLab.
+   * - ``agent.openrouter_model``
+     - ``meta-llama/llama-3.3-70b-instruct``
+     - Default OpenRouter model.
+   * - ``agent.openrouter_base_url``
+     - ``https://openrouter.ai/api/v1``
+     - OpenRouter-compatible base URL.
+   * - ``agent.openrouter_request_timeout``
+     - ``15.0``
+     - Request timeout in seconds for OpenRouter calls.
+   * - ``agent.openrouter_api_key``
+     - *(secret)*
+     - Optional API key in YAML. Prefer environment variables or UI init when possible.
+   * - ``agent.fallback_to_local``
+     - ``false``
+     - If enabled, WeightsLab also tries the local Ollama provider as fallback.
+
+Local Ollama example
+^^^^^^^^^^^^^^^^^^^^
+
+Use this mode when you want the agent available immediately at backend startup.
+
+.. code-block:: yaml
+
+   agent:
+     provider: ollama
+     ollama_model: llama3.2:3b
+     ollama_host: localhost
+     ollama_port: 11435
+     fallback_to_local: false
+
+Operational steps:
+
+1. Install Ollama.
+2. Pull a model, for example ``ollama pull llama3.2:3b``.
+3. Start the Ollama server.
+4. Start WeightsLab.
+5. Open Weights Studio and query the agent directly.
+
+Cloud OpenRouter example
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use this mode when you want hosted models and interactive setup from Weights Studio.
+
+.. code-block:: yaml
+
+   agent:
+     provider: openrouter
+     openrouter_model: meta-llama/llama-3.3-70b-instruct
+     fallback_to_local: false
+
+Recommended secret handling:
+
+.. code-block:: bash
+
+   export OPENROUTER_API_KEY=your_openrouter_key
+
+Weights Studio commands
+^^^^^^^^^^^^^^^^^^^^^^^
+
+When using Weights Studio, the agent bar supports these runtime commands:
+
+1. ``/init``
+   Opens the OpenRouter onboarding flow.
+   Users can enter an API key manually or use the OAuth flow, then select a model.
+2. ``/model``
+   Opens the model browser and switches the active OpenRouter model without
+   requiring a full reinitialization.
+3. ``/reset``
+   Clears the current runtime connection state and returns the agent to the
+   uninitialized status.
+
+Notes
+^^^^^
+
+- The default OpenRouter model is ``meta-llama/llama-3.3-70b-instruct``.
+- The model browser fetches the available models from OpenRouter using the
+  configured API key.
+- Connection and model-change actions are recorded in the agent history as
+  log-style entries.
+- ``/reset`` clears the current runtime agent state. If your startup config is
+  local-only and you want that provider back immediately, restart the backend.
 
 
 Testing
@@ -280,10 +453,11 @@ Backend Connection
      - Hostname of the Envoy proxy the browser connects to.
    * - ``ENVOY_PORT``
      - ``8080``
-     - Port Envoy listens on for HTTP / gRPC-Web traffic.
+     - Port Envoy listens on for HTTPS / gRPC-Web traffic.
    * - ``ENVOY_ADMIN_PORT``
      - ``9901``
      - Envoy admin interface port (metrics, health checks).
+       Bound to loopback and not published by Docker Compose by default.
 
 
 Vite Dev Server
@@ -323,7 +497,7 @@ These variables are injected into the browser bundle at build / dev time.
      - ``8080``
      - Port the browser uses to reach the backend.
    * - ``VITE_SERVER_PROTOCOL``
-     - ``http``
+     - ``https``
      - Protocol (``http`` or ``https``) for browser-to-backend requests.
    * - ``VITE_IS_A_SANDBOX``
      - ``0``
@@ -346,6 +520,3 @@ These variables are injected into the browser bundle at build / dev time.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
-
-
-

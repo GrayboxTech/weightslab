@@ -20,9 +20,17 @@ service ExperimentService {
   rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
   rpc GetDataSplits (Empty) returns (DataSplitsResponse);
   rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
+  rpc InitializeAgent (InitializeAgentRequest) returns (InitializeAgentResponse);
+  rpc ChangeAgentModel (ChangeAgentModelRequest) returns (ChangeAgentModelResponse);
+  rpc GetAgentModels (GetAgentModelsRequest) returns (GetAgentModelsResponse);
+  rpc ResetAgent (Empty) returns (ResetAgentResponse);
 
   // Checkpoint restore
   rpc RestoreCheckpoint (RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
+
+  // Evaluation mode
+  rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
+  rpc GetEvaluationStatus (GetEvaluationStatusRequest) returns (GetEvaluationStatusResponse);
 }
 
 // --- Logger Data Sync ---
@@ -41,6 +49,10 @@ message LoggerDataPoint {
   string experiment_hash = 4;
   int64 timestamp = 5;
   string sample_id = 6;            // sample_id (used for break_by_slices mode)
+  bool is_evaluation_marker = 7;
+  string split_name = 8;
+  repeated string evaluation_tags = 9;
+  string point_note = 10;
 }
 
 message GetLatestLoggerDataResponse {
@@ -102,6 +114,8 @@ message HyperParameters {
   optional int32 train_batch_size = 10;
   optional int32 eval_batch_size = 11;
   optional int32 test_batch_size = 12;
+  optional bool evaluation_mode = 13;
+  optional string evaluation_config = 14;
 }
 
 message MetricsStatus {
@@ -136,6 +150,13 @@ message LoadCheckpointOperation {
   int32 checkpoint_id = 1;
 }
 
+message PlotNoteOperation {
+  string metric_name = 1;
+  string experiment_hash = 2;
+  int32 model_age = 3;
+  string note = 4;
+}
+
 message TrainerCommand {
   bool get_hyper_parameters = 4;
   bool get_interactive_layers = 5;
@@ -147,6 +168,7 @@ message TrainerCommand {
   optional LoadCheckpointOperation load_checkpoint_operation = 9;
   optional DenySamplesOperation remove_from_denylist_operation = 11;
   optional DenySamplesOperation remove_eval_from_denylist_operation = 12;
+  optional PlotNoteOperation plot_note_operation = 13;
 }
 
 message HyperParameterDesc {
@@ -376,6 +398,44 @@ message AgentHealthResponse {
   string message = 2;
 }
 
+// --- Agent Onboarding ---
+enum AgentProviderType {
+  PROVIDER_OPENROUTER = 0;
+}
+
+message InitializeAgentRequest {
+  string api_key = 1;
+  AgentProviderType provider = 2;
+  string model = 3;
+}
+
+message InitializeAgentResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ChangeAgentModelRequest {
+  string model = 1;
+}
+
+message ChangeAgentModelResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetAgentModelsRequest {}
+
+message GetAgentModelsResponse {
+  bool success = 1;
+  repeated string models = 2;
+  string message = 3;
+}
+
+message ResetAgentResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 // --- Checkpoint Restore ---
 message RestoreCheckpointRequest {
   string experiment_hash = 1;  // Hash code of checkpoint to restore
@@ -384,4 +444,27 @@ message RestoreCheckpointRequest {
 message RestoreCheckpointResponse {
   bool success = 1;            // Whether restore was successful
   string message = 2;          // Details/error message
+}
+
+// --- Evaluation Mode ---
+message TriggerEvaluationRequest {
+  string split_name = 1;
+  repeated string tags = 2;
+  bool use_full_set = 3;
+}
+
+message TriggerEvaluationResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetEvaluationStatusRequest {}
+
+message GetEvaluationStatusResponse {
+  string status = 1;
+  int32 current = 2;
+  int32 total = 3;
+  string message = 4;
+  string error = 5;
+  string split_name = 6;
 }

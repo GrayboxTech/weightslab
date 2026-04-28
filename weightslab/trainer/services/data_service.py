@@ -2,7 +2,6 @@ import io
 import time
 import logging
 import os
-import struct
 import traceback
 import threading
 import json
@@ -19,6 +18,11 @@ from typing import List
 from pathlib import Path
 from datetime import datetime
 from concurrent import futures
+
+try:
+    from omegaconf import DictConfig
+except ImportError:
+    DictConfig = dict # type: ignore
 
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
@@ -153,6 +157,12 @@ class DataService:
         self._all_datasets_df = self._pull_into_all_data_view_df()
         self._load_existing_tags()
         self._agent = DataManipulationAgent(self)
+        try:
+            import weightslab.backend.cli as cli_backend
+
+            cli_backend.set_cli_data_service(self)
+        except Exception:
+            logger.debug("[DataService] Could not attach agent to CLI", exc_info=True)
 
         self._last_internals_update_time = 0.0
 
@@ -224,7 +234,7 @@ class DataService:
                     • target    (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
                     • pred_mask (rle_mask) — RLE-encoded prediction mask resized to 64×64 or less or less
                     • origin, task_type, num_classes, class_names (metadata)
-        Respects ``_preview_cache_max`` to cap memory usage.
+            Respects ``_preview_cache_max`` to cap memory usage.
         """
         try:
             df = self._all_datasets_df
@@ -269,11 +279,6 @@ class DataService:
 
                 origin = str(origin) if origin is not None else 'unknown'
 
-                try:
-                    sample_id_int = int(sample_id)
-                except (TypeError, ValueError):
-                    logger.debug("[PreviewCache] Skipped row %s: invalid sample_id=%r", row_idx, sample_id)
-                    continue
                 dataset = self._get_dataset(origin)
                 if dataset is None:
                     continue
@@ -283,9 +288,9 @@ class DataService:
                     ds = getattr(dataset, "wrapped_dataset", dataset)
                     # --- Thumbnail image ---
                     if hasattr(dataset, "get_physical_location"):
-                        ds_idx, member_rank = dataset.get_physical_location(sample_id_int)
+                        ds_idx, member_rank = dataset.get_physical_location(sample_id)
                     else:
-                        ds_idx = dataset.get_index_from_sample_id(sample_id_int)
+                        ds_idx = dataset.get_index_from_sample_id(sample_id)
                         member_rank = 0
 
                     _, _, _, pil_img = load_raw_image_array(dataset, ds_idx, rank=member_rank)
@@ -313,7 +318,7 @@ class DataService:
                         del pil_thumb, pil_save, pil_img
 
                     # --- GT mask ---
-                    label = load_label(dataset, sample_id_int)
+                    label = load_label(dataset, sample_id)
                     if label is not None:
                         label_arr = to_numpy_safe(label)
                         if label_arr is None:
@@ -376,12 +381,12 @@ class DataService:
                     if nc_val:
                         stats.append(create_data_stat('num_classes', 'scalar', shape=[1], value=[float(nc_val)]))
 
-                    record = pb2.DataRecord(sample_id=str(sample_id_int), data_stats=stats)
-                    self._preview_cache[sample_id_int] = record
+                    record = pb2.DataRecord(sample_id=str(sample_id), data_stats=stats)
+                    self._preview_cache[sample_id] = record
                     built += 1
                 except Exception as exc:
                     # traceback.print_exc()
-                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id_int, exc)
+                    logger.debug("[PreviewCache] Skipped sample %s: %s", sample_id, exc)
                     continue
 
             elapsed = time.time() - t0
@@ -568,7 +573,7 @@ class DataService:
         if self._agent is None:
             return False
         try:
-            return self._agent.is_ollama_available()
+            return self._agent.is_available()
         except Exception as e:
             logger.debug(f"Error checking agent availability: {e}")
             return False
@@ -970,12 +975,13 @@ class DataService:
             dataset = self._get_dataset(origin) if needs_dataset else None
 
             # ====== Step 3: Determine task type ======
-
             label = row.get(SampleStatsEx.TARGET.value)
             is_label_empty = False
             if label is None:
                 is_label_empty = True
             elif isinstance(label, list) and not label:
+                is_label_empty = True
+            elif isinstance(label, str) and isinstance(label, str) and '.' in label and not label.endswith('.') and label.rsplit('.', 1)[-1] != '':
                 is_label_empty = True
             elif isinstance(label, float):
                 import math
@@ -1057,18 +1063,21 @@ class DataService:
                     value = int(value)
 
                 # Check if it s a tag column here and handle it as a string stat with the tag name as value
+                value_string = str(value)
                 if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
-                    if value == 1:
-                        tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
-                        if value:  # Only include if the tag is True for this sample
-                            data_stats.append(
-                                create_data_stat(f"{SampleStatsEx.TAG.value}:{tag_name}", "string", shape=[1], value_string="1", thumbnail=b"")
-                            )
-                    else:
-                        continue  # Skip false tags
+                    tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
+                    data_stats.append(
+                        create_data_stat(
+                            f"{SampleStatsEx.TAG.value}:{tag_name}",
+                            "string",
+                            shape=[1],
+                            value_string=value_string,
+                            thumbnail=b""
+                        )
+                    )
                 else:
                     data_stats.append(
-                        create_data_stat(stat_name, "string", shape=[1], value_string=str(value)[:512], thumbnail=b"")
+                        create_data_stat(stat_name, "string", shape=[1], value_string=value_string[:512], thumbnail=b"")
                     )
 
             # ====== Step 6: Add origin and task_type stats ======
@@ -1158,15 +1167,16 @@ class DataService:
                     try:
                         if isinstance(class_names, (list, tuple)):
                             val_str = json.dumps(list(class_names))
-                        elif isinstance(class_names, dict):
+                        elif isinstance(class_names, (dict, DictConfig)):
                             # Convert int keys to string for JSON if all keys are ints
                             if all(isinstance(k, int) for k in class_names.keys()):
                                 class_names = {str(k): v for k, v in class_names.items()}
                             val_str = json.dumps(class_names)
                         else:
+                            logger.warning(f"Unsupported class_names type: {type(class_names)}. Expected list, tuple, or dict.")
                             val_str = str(class_names)
                     except Exception:
-                        val_str = str(class_names)
+                        logger.error(f"Error serializing class_names: {class_names}")
 
                     data_stats.append(
                         create_data_stat(
@@ -1621,6 +1631,35 @@ class DataService:
         logger.debug(f"[_parse_direct_query] Parsed into {len(operations)} operations: {operations}")
         return operations
 
+    def _sort_includes_sample_id(self, by) -> bool:
+        by_list = [by] if isinstance(by, str) else list(by or [])
+        return SampleStatsEx.SAMPLE_ID.value in by_list
+
+    def _sample_id_sortable_series(self, values):
+        """Return numeric values for sorting when all sample_ids are integer-like, else string values."""
+        numeric = pd.to_numeric(values, errors="coerce")
+        arr = np.asarray(numeric)
+        if (
+            getattr(numeric, "notna", lambda: pd.Series(numeric).notna())().all()
+            and np.isfinite(arr).all()
+            and np.equal(np.mod(arr, 1), 0).all()
+        ):
+            return numeric
+        return values.astype(str)
+
+    def _sort_values_numeric_aware(self, df: pd.DataFrame, sort_params: dict) -> None:
+        """Sort dataframe while treating sample_id as numeric when possible."""
+        params = dict(sort_params)
+        if params.get("key") is None and self._sort_includes_sample_id(params.get("by")):
+            def _key(series: pd.Series):
+                if str(getattr(series, "name", "")) == SampleStatsEx.SAMPLE_ID.value:
+                    return self._sample_id_sortable_series(series)
+                return series
+
+            params["key"] = _key
+
+        df.sort_values(inplace=True, **params)
+
     def _apply_agent_operation(self, df, func: str, params: dict) -> str:
         """
         Apply an agent-described operation to df in-place.
@@ -1712,8 +1751,53 @@ class DataService:
                          # because heuristics fail on column names like 'signals//loss'
                          pass
 
-                # 1. Evaluate the expression with safe context
-                new_values = eval(code, {"df": df, "np": np, "pd": pd})
+                # 1. Evaluate the expression with safe context.
+                # Keep df as-is (no copy), but expose `origin` whether it is a column or an index level.
+                # Also provide a reset_index version for operations that need all data as columns.
+                origin_series = None
+                if SampleStatsEx.ORIGIN.value in df.columns:
+                    origin_series = df[SampleStatsEx.ORIGIN.value]
+                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in df.index.names:
+                    origin_series = pd.Series(
+                        df.index.get_level_values(SampleStatsEx.ORIGIN.value),
+                        index=df.index,
+                    )
+                elif df.index.name == SampleStatsEx.ORIGIN.value:
+                    origin_series = pd.Series(df.index, index=df.index)
+
+                # Provide both indexed and reset_index versions for flexibility
+                df_reset = df.reset_index()
+                eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
+                if origin_series is not None:
+                    eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
+
+                # Also expose sample_id if it's in the index
+                sample_id_series = None
+                if SampleStatsEx.SAMPLE_ID.value in df.columns:
+                    sample_id_series = df[SampleStatsEx.SAMPLE_ID.value]
+                elif isinstance(df.index, pd.MultiIndex) and SampleStatsEx.SAMPLE_ID.value in df.index.names:
+                    sample_id_series = pd.Series(
+                        df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value),
+                        index=df.index,
+                    )
+                elif df.index.name == SampleStatsEx.SAMPLE_ID.value:
+                    sample_id_series = pd.Series(df.index, index=df.index)
+                if sample_id_series is not None:
+                    eval_globals[SampleStatsEx.SAMPLE_ID.value] = sample_id_series
+
+                try:
+                    new_values = eval(code, eval_globals)
+                except KeyError as e:
+                    # Backward-compat: agent often emits df['origin'] even when origin is in index.
+                    if str(e).strip("'\"") == SampleStatsEx.ORIGIN.value and origin_series is not None:
+                        patched_code = re.sub(
+                            r"df\[\s*['\"]origin['\"]\s*\]",
+                            SampleStatsEx.ORIGIN.value,
+                            code,
+                        )
+                        new_values = eval(patched_code, eval_globals)
+                    else:
+                        raise
 
                 # 2. Check for scalar vs series compatibility
                 # (Pandas handles most of this, but we ensure robustness)
@@ -1736,7 +1820,7 @@ class DataService:
                 # We must split the updates by origin and upsert them to the manager
                 if self._df_manager is not None:
                     # Create a minimal update dataframe with just the modified column
-                    update_payload = df[[col]].copy()
+                    update_payload = df[[col]]  #  .copy()  # Remove copy because memory waste and slowdown
 
                     # Ensure origin is available for grouping
                     if isinstance(df.index, pd.MultiIndex) and "origin" in df.index.names:
@@ -1785,7 +1869,7 @@ class DataService:
                      if start < len(df):
                          logger.debug(f"[sort_view_slice] Sorting slice {start}:{end}")
                          # Extract and sort slice
-                         sub_df = df.iloc[start:end].copy()
+                         sub_df = df.iloc[start:end]  #  .copy()  # Remove copy because memory waste and slowdown
 
                          # Apply sort to slice
                          # Filter params for sort_values
@@ -1799,7 +1883,7 @@ class DataService:
                              sub_df.sort_index(inplace=True, ascending=ascending_val)
                          else:
                              try:
-                                 sub_df.sort_values(inplace=True, **sort_params)
+                                 self._sort_values_numeric_aware(sub_df, sort_params)
                              except (TypeError, ValueError, KeyError) as e:
                                  # Fallback for ambiguity or missing column (if it's in the index)
                                  # Most common case: 'origin' or 'sample_id' are in the index but not columns
@@ -1821,7 +1905,7 @@ class DataService:
 
                                               # Adjust 'by' if needed (e.g. if 'index' was used, it's now 'sample_id' etc)
                                               # but here columns usually match.
-                                              temp_df.sort_values(inplace=True, **sort_params)
+                                              self._sort_values_numeric_aware(temp_df, sort_params)
 
                                               # Restore index and update sub_df
                                               sub_df = temp_df.set_index(list(orig_index_names))
@@ -1845,12 +1929,12 @@ class DataService:
                          # otherwise Sample ID X will point to data from Sample ID Y (corruption).
                          try:
                              if isinstance(df.index, pd.MultiIndex):
-                                 new_index_values = df.index.to_numpy().copy()
+                                 new_index_values = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
                                  new_index_values[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.MultiIndex.from_tuples(new_index_values, names=df.index.names)
                              else:
                                  idx_name = df.index.name
-                                 new_index = df.index.to_numpy().copy()
+                                 new_index = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
                                  new_index[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.Index(new_index, name=idx_name)
                          except Exception as e:
@@ -1867,7 +1951,19 @@ class DataService:
                 if func_name == "sort_values":
                     # Params are already cleaned by the Agent's SortHandler
                     try:
-                        df.sort_values(inplace=True, **params)
+                        # tmp fix for sample_id index sorting when sample_id is not a column (legacy datasets). We want to sort by sample_id as numeric if possible, but it may be in the index.
+                        try:
+                            df.reset_index(inplace=True)
+                            if 'level_0' in df.columns:
+                                df.pop('level_0')
+                            if 'index' in df.columns:
+                                df.pop('index')
+                            df['sample_id'] = df['sample_id'].astype(int)
+                            df.sort_values(inplace=True, **params)
+                            df['sample_id'] = df['sample_id'].astype(str)
+                            df.set_index(['origin', 'sample_id'], inplace=True)
+                        except:
+                            pass
                     except (TypeError, ValueError, KeyError) as e:
                         # Fallback for ambiguity or missing column (if it's in the index)
                         if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
@@ -1875,7 +1971,15 @@ class DataService:
                              by = params.get("by")
                              if isinstance(by, str) and by in getattr(df.index, 'names', []):
                                  ascending = params.get("ascending", True)
-                                 df.sort_index(level=by, inplace=True, ascending=ascending)
+                                 if by == SampleStatsEx.SAMPLE_ID.value and params.get("key") is None:
+                                     df.sort_index(
+                                         level=by,
+                                         inplace=True,
+                                         ascending=ascending,
+                                         key=self._sample_id_sortable_series,
+                                     )
+                                 else:
+                                     df.sort_index(level=by, inplace=True, ascending=ascending)
                              elif isinstance(e, KeyError):
                                  # It's actually missing, raise the original error
                                  raise e
@@ -1945,13 +2049,18 @@ class DataService:
 
         return "No operation applied"
 
-    def _slowUpdateInternals(self, force: bool = False):
+    def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
         """
-        This method is responsible for updating the internal dataframe view with the latest data from the manager.
-        It uses a dedicated update lock to ensure only one thread performs the expensive update at a time,
-        while allowing other threads to read the existing dataframe without blocking.
+            This method is responsible for updating the internal dataframe view with the latest data from the manager.
+            It uses a dedicated update lock to ensure only one thread performs the expensive update at a time,
+            while allowing other threads to read the existing dataframe without blocking.
+
+            Args:
+                force (bool): If True, bypass throttling and force an update. Use for critical updates.
+                reset_view (bool): If True, reset any user/agent-applied filters/sorts to show the full dataset. Use when we know the underlying data structure has changed significantly (e.g. new columns added) that could break the current view.
         """
         current_time = time.time()
+
         # Fast throttling check
         if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
             return
@@ -1969,12 +2078,14 @@ class DataService:
 
             # Capture a consistent snapshot of the current state
             with self._lock:
+                self._is_filtered = not reset_view and self._is_filtered
                 is_filtered = self._is_filtered
                 current_all_df = self._all_datasets_df
 
             # Ensure default columns exist
             if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
                  updated_df["natural_sort_score"] = np.nan
+
             if SampleStatsEx.DISCARDED.value not in updated_df.columns:
                  updated_df[SampleStatsEx.DISCARDED.value] = False
 
@@ -2439,8 +2550,11 @@ class DataService:
 
         return tags
 
+
+    # ===================
     # RPC Implementations
     # ===================
+
     def ApplyDataQuery(self, request, context):
         """
         Apply a query on the in-memory dataframe.
@@ -2455,8 +2569,8 @@ class DataService:
           - number_of_discarded_samples: rows with discarded == True
         """
 
+        # Sync context components before processing the query to ensure we have the latest data and state from the ledger
         self._ctx.ensure_components()
-        components = self._ctx.components
 
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
@@ -2488,9 +2602,8 @@ class DataService:
                         self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
 
                     # Work on a copy to allow concurrent readers to see a consistent state
-                    df = self._all_datasets_df.copy()
+                    df = self._all_datasets_df  # Remove copy because memory waste and slowdown
                     messages = []
-
 
                     for op in operations:
                         func = op.get("function")
@@ -2512,26 +2625,26 @@ class DataService:
                     message=final_message,
                     intent_type=pb2.INTENT_FILTER
                 )
+
             # Pandas instruction from the user, bypassing LLM agent - execute directly on the dataframe
             elif request.is_natural_language:
                 if request.query.lower().replace(" ", "").replace("'''", "\"\"\"").replace("\'\'\'", "\"\"\"").startswith("@\"\"\""):
                     operations = request.query
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
+
                     with self._lock:
-                        # Work on a copy to allow concurrent readers to see a consistent state
-                        working_df = self._all_datasets_df.copy()
-                        df, message = execute_df_operation(working_df, request.query)  # in-place operation, or replace previous dataframe
+                        self._all_datasets_df, message = execute_df_operation(self._all_datasets_df, request.query)  # in-place operation, or replace previous dataframe
                         logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
+
                         if operations:
                             self._is_filtered = True
 
-                        # Atomic swap
-                        self._all_datasets_df = df
                     return self._build_success_response(
-                        df=df,
+                        df=self._all_datasets_df,
                         message=message,
                         intent_type=pb2.INTENT_FILTER
                     )
+
                 elif request.query.lower().replace("'''", "\"\"\"").replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@reset") or request.query.lower().replace('\"\"\"', "").replace('\'\'\'', "").replace(" ", "").startswith("@clear"):
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset/clear operation: {request.query[:100]}...")
                     # Force view reset
@@ -2539,6 +2652,7 @@ class DataService:
                         self._is_filtered = False  # Unfreeze view first
                         self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data
                         logger.info(f"[ApplyDataQuery] Force view reset and unfrozen.")
+
                         return pb2.DataQueryResponse(
                             success=True,
                             message="View has been reset successfully.",
@@ -2553,6 +2667,7 @@ class DataService:
                             success=True,
                             message=f"Overview of the dataframe:\n{message}",
                         )
+
                 else:
                     # 3) Natural language path - go through agent
                     logger.debug(
@@ -2585,7 +2700,7 @@ class DataService:
                         if self._all_datasets_df is None:
                             self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
 
-                        df = self._all_datasets_df.copy()
+                        df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
                         messages = []
                         intent_type = pb2.INTENT_FILTER
                         analysis_result = ""
@@ -3026,17 +3141,3 @@ class DataService:
                 success=False,
                 split_names=[]
             )
-
-    def CheckAgentHealth(self, request, context):
-        """
-        gRPC method to check if the agent is available for natural language queries.
-        Returns:
-            AgentHealthResponse { available: bool, message: str }
-        """
-
-        try:
-            available = self._is_agent_available()
-            msg = "Agent is available" if available else "Agent is not available"
-            return pb2.AgentHealthResponse(available=available, message=msg)
-        except Exception as e:
-            return pb2.AgentHealthResponse(available=False, message=f"Error: {e}")

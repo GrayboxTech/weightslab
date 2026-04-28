@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 
 from weightslab.utils.tools import (
-    _NoOpLock,
     extract_in_out_params,
     get_children,
     get_module_by_name,
@@ -24,13 +23,6 @@ class _AttrModule(nn.Module):
 
 
 class TestUtilsToolsUnit(unittest.TestCase):
-    def test_noop_lock_interface(self):
-        lock = _NoOpLock()
-        self.assertTrue(lock.acquire())
-        lock.release()
-        with lock:
-            self.assertTrue(True)
-
     def test_extract_in_out_params_linear_batchnorm_relu(self):
         linear = nn.Linear(4, 2)
         in_dim, out_dim, in_name, out_name = extract_in_out_params(linear)

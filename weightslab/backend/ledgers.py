@@ -320,7 +320,27 @@ class Proxy:
             v = self._resolve()
             if v is None:
                 raise AttributeError("ValueProxy target not set")
-            return getattr(v, item)
+            # Try attribute access first (works for DictConfig, objects, etc.)
+            try:
+                value = getattr(v, item)
+                # Wrap plain nested dicts in a new _ValueProxy so that further
+                # dot-chaining (e.g. proxy.dataset.train.shuffle) keeps working.
+                if isinstance(value, dict):
+                    return Proxy._ValueProxy(Proxy(v), item)
+                return value
+            except AttributeError:
+                pass
+            # Fallback: key-based access for plain dict-like resolved values
+            # (e.g. proxy.dataset.batch_size when dataset is a plain dict)
+            if hasattr(v, "__getitem__") and hasattr(v, "keys"):
+                try:
+                    value = v[item]
+                    if isinstance(value, dict):
+                        return Proxy._ValueProxy(Proxy(v), item)
+                    return value
+                except (KeyError, TypeError):
+                    pass
+            raise AttributeError(f"'{type(v).__name__}' object has no attribute '{item}'")
 
         def __len__(self) -> int:
             v = self._resolve()
@@ -351,10 +371,35 @@ class Proxy:
 
         if obj is None:
             raise AttributeError("Proxy target not set")
+
+        # Try attribute access first (works for DictConfig, regular objects, etc.)
         try:
-            return getattr(obj, item)
+            value = getattr(obj, item)
+            # Only wrap in _ValueProxy when the proxy wraps a dict-like object so
+            # that dot-chaining (proxy.dataset.batch_size) resolves correctly.
+            # For non-dict objects that happen to have dict-valued attributes
+            # (e.g. optimizer.state, model.state_dict()), return the value
+            # directly — wrapping them breaks callers like PyTorch Lightning that
+            # iterate optimizer.state.items() and get a dead _ValueProxy instead.
+            if isinstance(value, dict) and hasattr(obj, "__getitem__") and hasattr(obj, "keys"):
+                return Proxy._ValueProxy(self, item)
+            return value
         except AttributeError:
-            return None
+            pass
+
+        # Fallback: key-based access for plain dict / any mapping object.
+        # This makes proxy.seed work the same as proxy['seed'] when the
+        # wrapped object is a plain dict (e.g. after dict(hydra_config)).
+        if hasattr(obj, "__getitem__") and hasattr(obj, "keys"):
+            try:
+                value = obj[item]
+                if isinstance(value, dict):
+                    return Proxy._ValueProxy(self, item)
+                return value
+            except (KeyError, TypeError):
+                pass
+
+        return None
 
     def __delattr__(self, name: str) -> None:
         """Delete an attribute from the proxy or wrapped object safely.
@@ -395,8 +440,14 @@ class Proxy:
                 return self
 
             def __next__(self):
-                return next(self._it)
-
+                try:
+                    return next(self._it)
+                except KeyError:
+                    traceback.print_exc()
+                    logger.error(
+                        "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." + 
+                        "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
+                    )
         return _ProxyIterator(underlying_iter)
 
     def __len__(self):

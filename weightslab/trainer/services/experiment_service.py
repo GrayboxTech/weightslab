@@ -2,15 +2,19 @@ import time
 import types
 import logging
 import threading
-
 import grpc
+
 import weightslab.proto.experiment_service_pb2 as pb2
+
 from weightslab.components.global_monitoring import weightslab_rlock, try_acquire_rlock, _GRPC_LOCK_TIMEOUT_S
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
 from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name, get_hyperparams
 from weightslab.backend import ledgers
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
+from weightslab.trainer.services.agent_service import AgentService
+from weightslab.data.sample_stats import SampleStatsEx
+from weightslab.components.evaluation_controller import eval_controller
 
 
 # Logger
@@ -30,9 +34,18 @@ class ExperimentService:
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
+        self.agent_service = AgentService(self.data_service)
         # Per-instance in-flight counter for GetLatestLoggerData
         self._logger_data_in_flight = 0
         self._logger_data_counter_lock = threading.Lock()
+
+    def _kick_eval_worker(self) -> None:
+        """Best-effort trigger of backend-thread evaluation execution."""
+        try:
+            from weightslab import src as wl_src
+            wl_src.trigger_pending_evaluation_async()
+        except Exception as exc:
+            logger.debug("[ExperimentService] Failed to kick eval worker: %s", exc)
 
     # -------------------------------------------------------------------------
     # Logger queue sync for WeightsStudio
@@ -109,7 +122,7 @@ class ExperimentService:
                     # Filter by tags: samples should have ALL specified tags
                     mask = None
                     for tag in tags:
-                        tag_col = f"tag:{tag}"
+                        tag_col = f"{SampleStatsEx.TAG.value}:{tag}"
                         if tag_col in df.columns:
                             if mask is None:
                                 mask = df[tag_col] == True
@@ -118,10 +131,14 @@ class ExperimentService:
 
                     if mask is not None:
                         filtered_df = df[mask]
-                        sample_ids = set(filtered_df.index.tolist())
+                        # Normalize to strings because logger sample_id is serialized as text.
+                        sample_ids = {str(sid) for sid in filtered_df.index.tolist()}
 
             # Get per-sample history from signal_logger
             history_per_sample = signal_logger.get_signal_history_per_sample()
+
+            if history_per_sample is None:
+                return pb2.GetLatestLoggerDataResponse(points=[])  # No per-sample history available
 
             # Collect all points for matching samples, filtered by graph_name if specified
             if graph_name not in history_per_sample:
@@ -134,7 +151,7 @@ class ExperimentService:
                 for sid in sample_ids:
                     for _, signals in sample_data_by_hash.items():
                         for data in signals:
-                            if data["sample_id"] == str(sid):
+                            if str(data.get("sample_id", "")) == sid:
                                 points.append(
                                     pb2.LoggerDataPoint(
                                         metric_name=graph_name,
@@ -142,7 +159,7 @@ class ExperimentService:
                                         metric_value=data.get("metric_value", 0.0),
                                         experiment_hash=data.get("experiment_hash", "N.A."),
                                         timestamp=int(data.get("timestamp", time.time())),
-                                        sample_id=str(sid)
+                                        sample_id=sid
                                     )
                                 )
 
@@ -212,7 +229,11 @@ class ExperimentService:
                             metric_value=s.get("metric_value", 0.0),
                             experiment_hash=s.get("experiment_hash", "N.A."),
                             timestamp=int(s.get("timestamp", time.time())),
-                            sample_id=""  # No sample_id in aggregated mode
+                            sample_id="",  # No sample_id in aggregated mode
+                            is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
+                            split_name=str(s.get("split_name", "")),
+                            evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
+                            point_note=str(s.get("point_note", "")),
                         )
                     )
         else:
@@ -233,7 +254,11 @@ class ExperimentService:
                         metric_value=s.get("metric_value", 0.0),
                         experiment_hash=s.get("experiment_hash", "N.A."),
                         timestamp=int(s.get("timestamp", time.time())),
-                        sample_id=""  # No sample_id in queue mode
+                        sample_id="",  # No sample_id in queue mode
+                        is_evaluation_marker=bool(s.get("is_evaluation_marker", False)),
+                        split_name=str(s.get("split_name", "")),
+                        evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
+                        point_note=str(s.get("point_note", "")),
                     )
                 )
 
@@ -329,6 +354,60 @@ class ExperimentService:
                 message=f"Error: {str(e)}"
             )
 
+    # -------------------------------------------------------------------------
+    # Evaluation mode RPC handlers
+    # -------------------------------------------------------------------------
+    def TriggerEvaluation(self, request, context):
+        """Trigger an evaluation pass on the requested split.
+
+        This stores the evaluation request in the global eval_controller.
+        The actual pass runs in the training thread via ``run_pending_evaluation()``.
+        """
+        split_name = request.split_name or ""
+        tags = list(request.tags) if request.tags else []
+        use_full_set = bool(request.use_full_set)
+
+        if not split_name:
+            return pb2.TriggerEvaluationResponse(
+                success=False,
+                message="split_name is required",
+            )
+
+        accepted = eval_controller.request_evaluation(
+            split_name=split_name,
+            tags=tags,
+            use_full_set=use_full_set,
+        )
+
+        if accepted:
+            self._kick_eval_worker()
+            logger.info(
+                "[ExperimentService] TriggerEvaluation accepted: split=%s tags=%s full=%s",
+                split_name, tags, use_full_set,
+            )
+            return pb2.TriggerEvaluationResponse(
+                success=True,
+                message=f"Evaluation on '{split_name}' requested",
+            )
+        else:
+            return pb2.TriggerEvaluationResponse(
+                success=False,
+                message="Evaluation already in progress",
+            )
+
+    def GetEvaluationStatus(self, request, context):
+        """Return the current state of the evaluation controller."""
+        status = eval_controller.get_status()
+        progress = status.get("progress", {})
+        return pb2.GetEvaluationStatusResponse(
+            status=status.get("status", "idle"),
+            current=int(progress.get("current", 0)),
+            total=int(progress.get("total", 0)),
+            message=str(progress.get("message", "")),
+            error=str(status.get("error", "")),
+            split_name=str(status.get("split_name", "")),
+        )
+
     def _get_live_hyper_parameter_descs(self, components):
         hyper_parameter_descs = list(get_hyper_parameters_pb(self._ctx.hyper_parameters))
 
@@ -372,6 +451,53 @@ class ExperimentService:
         components = self._ctx.components
 
         # Write requests
+        if request.HasField("plot_note_operation"):
+            note_op = request.plot_note_operation
+            metric_name = str(note_op.metric_name or "")
+            experiment_hash = str(note_op.experiment_hash or "")
+            note_text = str(note_op.note or "")
+            try:
+                model_age = int(note_op.model_age)
+            except Exception:
+                model_age = 0
+
+            if not metric_name or not experiment_hash:
+                return pb2.CommandResponse(success=False, message="metric_name and experiment_hash are required for plot notes")
+
+            signal_logger = components.get("signal_logger") if isinstance(components, dict) else None
+            if signal_logger is None:
+                signal_logger = ledgers.get_logger()
+            if signal_logger is None or not hasattr(signal_logger, "set_point_note"):
+                return pb2.CommandResponse(success=False, message="Signal logger unavailable for plot notes")
+
+            updated = bool(signal_logger.set_point_note(metric_name, experiment_hash, model_age, note_text))
+            if not updated:
+                return pb2.CommandResponse(
+                    success=False,
+                    message=f"Signal point not found for note update: {metric_name}@{experiment_hash}:{model_age}",
+                )
+
+            checkpoint_manager = components.get("checkpoint_manager") if isinstance(components, dict) else None
+            if checkpoint_manager is None:
+                try:
+                    checkpoint_manager = ledgers.get_checkpoint_manager()
+                except Exception:
+                    checkpoint_manager = None
+            if checkpoint_manager is not None and hasattr(checkpoint_manager, "save_logger_snapshot"):
+                try:
+                    checkpoint_manager.save_logger_snapshot()
+                except Exception:
+                    logger.debug("Could not persist logger snapshot after note update", exc_info=True)
+
+            return pb2.CommandResponse(
+                success=True,
+                message=(
+                    f"Saved note for {metric_name} @ step {model_age}"
+                    if note_text.strip()
+                    else f"Cleared note for {metric_name} @ step {model_age}"
+                ),
+            )
+
         if request.HasField("hyper_parameter_change"):
             hyper_parameters = request.hyper_parameter_change.hyper_parameters
             hp_name = None
@@ -419,6 +545,57 @@ class ExperimentService:
                         value=hyper_parameters.checkpont_frequency
                     )
 
+                # Process evaluation_mode toggle (UI button switch)
+                try:
+                    if hyper_parameters.HasField("evaluation_mode"):
+                        incoming_eval = bool(hyper_parameters.evaluation_mode)
+                        set_hyperparam(
+                            name=hp_name,
+                            key_path="evaluation_mode",
+                            value=incoming_eval,
+                        )
+                        if incoming_eval:
+                            # Switching to eval mode implies pausing training
+                            trainer = components.get("trainer")
+                            if trainer:
+                                trainer.pause()
+                                set_hyperparam(name=hp_name, key_path="is_training", value=False)
+                            logger.info("[WeightsLab] UI Command: Switch to EVALUATION Mode")
+                        else:
+                            logger.info("[WeightsLab] UI Command: Exit EVALUATION Mode")
+                except ValueError:
+                    pass
+
+                # If evaluation_config JSON was sent, trigger evaluation immediately
+                try:
+                    if hyper_parameters.HasField("evaluation_config") and hyper_parameters.evaluation_config:
+                        import json as _json
+                        cfg = _json.loads(hyper_parameters.evaluation_config)
+                        if bool(cfg.get("cancel", False)):
+                            accepted = eval_controller.request_cancel(str(cfg.get("reason", "Canceled by user")))
+                            if not accepted:
+                                logger.info("[ExperimentService] Cancel requested but no active evaluation")
+                        else:
+                            raw_max_steps = cfg.get("max_steps", cfg.get("steps", None))
+                            max_steps = None
+                            try:
+                                if raw_max_steps is not None:
+                                    parsed_steps = int(raw_max_steps)
+                                    if parsed_steps > 0:
+                                        max_steps = parsed_steps
+                            except Exception:
+                                max_steps = None
+
+                            eval_controller.request_evaluation(
+                                split_name=cfg.get("split", ""),
+                                tags=cfg.get("tags", []),
+                                use_full_set=cfg.get("use_full_set", True),
+                                max_steps=max_steps,
+                            )
+                            self._kick_eval_worker()
+                except (ValueError, Exception) as _ec:
+                    logger.debug("evaluation_config parse error: %s", _ec)
+
                 # Process auditor_mode FIRST so mode is set before we resume
                 try:
                     if hyper_parameters.HasField("auditor_mode"):
@@ -452,6 +629,12 @@ class ExperimentService:
                 if hyper_parameters.HasField("is_training"):
                     trainer = components.get("trainer")
                     if trainer is not None:
+                        desired_is_training = bool(hyper_parameters.is_training)
+
+                        if desired_is_training and (eval_controller.is_pending() or eval_controller.is_running()):
+                            logger.info("\n[WeightsLab] Resume blocked: evaluation is pending/running")
+                            desired_is_training = False
+
                         # Set number of steps desired to run before next pause if provided, based on current model age + requested nb_steps
                         if hyper_parameters.HasField("nb_steps"):
                             m = components.get("model")  # Get model
@@ -465,7 +648,7 @@ class ExperimentService:
                                 )
 
                         # If is_training flag is set, pause or resume accordingly
-                        if hyper_parameters.is_training:
+                        if desired_is_training:
                             logger.info("\n[WeightsLab] UI Command: RESUME")
                             trainer.resume()
                         else:
@@ -476,7 +659,7 @@ class ExperimentService:
                         set_hyperparam(
                             name=hp_name,
                             key_path="is_training",
-                            value=hyper_parameters.is_training
+                            value=desired_is_training
                         )
 
             except Exception as e:

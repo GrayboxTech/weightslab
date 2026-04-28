@@ -150,7 +150,7 @@ class NetworkWithOps(nn.Module):
     def maybe_update_age(self):
         if self.tracking_mode != TrackingMode.TRAIN:
             return
-        
+
         # Increase model age at each forward pass during training
         self.increase_age()
 

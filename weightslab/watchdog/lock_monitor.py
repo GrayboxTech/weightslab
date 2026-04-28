@@ -16,6 +16,7 @@ the exception propagates further.
 import ctypes
 import threading
 import time
+
 from typing import Optional
 
 
@@ -81,6 +82,7 @@ class MonitoredRLock:
         self._holder_tid: Optional[int] = None
         self._acquired_at: Optional[float] = None
         self._count: int = 0
+        self._timeout: Optional[float] = None  # Optional per-lock timeout for watchdog (None to use global default)
 
     # ------------------------------------------------------------------
     # Core acquire / release
@@ -143,6 +145,16 @@ class MonitoredRLock:
         with self._meta:
             return self._count > 0
 
+    def set_timeout(self, timeout: Optional[float]) -> None:
+        """Set an optional per-lock timeout for the watchdog (None to use global default)."""
+        with self._meta:
+            self._timeout = timeout
+    
+    def get_timeout(self) -> Optional[float]:
+        """Get the optional per-lock timeout for the watchdog (None to use global default)."""
+        with self._meta:
+            return self._timeout
+        
     # ------------------------------------------------------------------
     # Repr
     # ------------------------------------------------------------------

@@ -1,0 +1,110 @@
+static_resources:
+  listeners:
+  - name: listener_0
+    per_connection_buffer_limit_bytes: 268435456  # 256 MB — matches GRPC_MAX_MESSAGE_BYTES
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 8080
+    filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificates:
+            - certificate_chain:
+                filename: /etc/envoy/certs/envoy-server.crt
+              private_key:
+                filename: /etc/envoy/certs/envoy-server.key
+      filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          codec_type: AUTO
+          stat_prefix: ingress_http
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: local_service
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: grpc_service
+                  timeout: 300s
+                  retry_policy:
+                    retry_on: connect-failure,refused-stream,reset
+                    num_retries: 1
+                    per_try_timeout: 60s
+                  max_stream_duration:
+                    grpc_timeout_header_max: 300s
+              cors:
+                allow_origin_string_match:
+                - exact: "http://localhost"
+                - exact: "http://127.0.0.1"
+                - exact: "http://localhost:5173"
+                - exact: "http://127.0.0.1:5173"
+                - exact: "https://localhost"
+                - exact: "https://127.0.0.1"
+                - exact: "https://localhost:5173"
+                - exact: "https://127.0.0.1:5173"
+                allow_methods: GET, PUT, DELETE, POST, OPTIONS
+                allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout,authorization,x-grpc-token
+                max_age: "1728000"
+                expose_headers: custom-header-1,grpc-status,grpc-message
+          http_filters:
+          - name: envoy.filters.http.grpc_web
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
+          - name: envoy.filters.http.cors
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: grpc_service
+    connect_timeout: 1s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    dns_lookup_family: V4_ONLY
+    http2_protocol_options: {}
+    circuit_breakers:
+      thresholds:
+      - priority: DEFAULT
+        max_connections: 100
+        max_pending_requests: 100
+        max_requests: 200
+        max_retries: 3
+    load_assignment:
+      cluster_name: grpc_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: host.docker.internal
+                port_value: __GRPC_BACKEND_PORT__
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        common_tls_context:
+          tls_certificates:
+          - certificate_chain:
+              filename: /etc/envoy/certs/envoy-client.crt
+            private_key:
+              filename: /etc/envoy/certs/envoy-client.key
+          validation_context:
+            trusted_ca:
+              filename: /etc/envoy/certs/ca.crt
+
+admin:
+  access_log_path: /tmp/admin_access.log
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: 9901

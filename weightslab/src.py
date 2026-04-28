@@ -9,7 +9,10 @@ import sys
 import ctypes
 import time
 import types
+import threading
+import traceback
 import logging
+import inspect
 import functools
 import numpy as np
 import torch as th
@@ -67,6 +70,11 @@ logger = logging.getLogger(__name__)
 DATAFRAME_M = None
 # Global registry for custom signals
 _REGISTERED_SIGNALS = {}
+
+# Evaluation function registered via the @wl.eval_fn decorator.
+_REGISTERED_EVAL_FN: Optional[Any] = None
+_EVAL_WORKER_LOCK = threading.Lock()
+_EVAL_WORKER_THREAD: Optional[threading.Thread] = None
 
 
 class SignalContext:
@@ -325,6 +333,7 @@ def _log_signal(scalar: float, signal_per_sample: dict, reg_name: str, step: int
                     aggregate_by_step=kwargs.get('per_sample', True)  # Aggregate per-sample signals by step for logging if per_sample is True,
                 )
         except Exception:
+            traceback.print_exc()
             pass
 
 
@@ -346,6 +355,17 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
+@functools.lru_cache(maxsize=128)
+def _fwd_params(fn):
+    """Return the frozenset of parameter names accepted by *fn*. Cached per function."""
+    try:
+        return frozenset(inspect.signature(fn).parameters)
+    except (ValueError, TypeError):
+        return frozenset()
+
+_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals')
+
+
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     """
         Wrapper for forward methods to log and save statistics.
@@ -357,12 +377,16 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             The output of the original forward method.
     """
 
-    # Remove parameters
-    _ = kw.pop('flag', None)
-    ids = kw.pop('batch_ids', None)
-    group_ids = kw.pop('group_id', None)
-    preds = kw.pop('preds', None)
-    batch_scalar = kw.pop('signals', None)
+    # Pop WL-specific kwargs only when original_forward doesn't accept them,
+    # so that forwards that declare e.g. batch_ids/preds receive them as usual.
+    fwd_params = _fwd_params(original_forward)
+    wl_kw = {k: kw.pop(k) for k in _WL_KWARGS if k in kw and k not in fwd_params}
+
+    _ = wl_kw.get('flag')
+    batch_ids = wl_kw.get('batch_ids')
+    group_ids = wl_kw.get('group_id')
+    preds = wl_kw.get('preds')
+    batch_scalar = wl_kw.get('signals')
     preds_raw = a[0] if len(a) > 0 else None
     targets = a[1] if len(a) > 1 else None
 
@@ -372,7 +396,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # discarded samples/tainted groups from the loss tensor.
     origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
 
-    if origin and ids is not None and hasattr(out, 'device') and out.ndim > 0:
+    if origin and batch_ids is not None and hasattr(out, 'device') and out.ndim > 0:
         try:
             # Multi-sample Group Masking
             if group_ids is not None:
@@ -382,7 +406,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
             # Per-sample Individual Masking
             else:
-                mask = get_active_sample_mask(ids, origin).to(out.device)
+                mask = get_active_sample_mask(batch_ids, origin).to(out.device)
                 if len(mask) == len(out):
                     out = out * mask
         except Exception as e:
@@ -393,7 +417,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
 
     # Extract scalar from tensor
-    scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, ids)
+    scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, batch_ids)
 
     # Log if requested
     step = _get_step(None)
@@ -403,15 +427,15 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Allows @wl.signal(subscribe_to="metric_name")
     dynamic_updates = {}
     ids_np = None
-    if ids is not None:
-        if hasattr(ids, 'detach'):
-            ids_np = ids.detach().cpu().numpy()
+    if batch_ids is not None:
+        if hasattr(batch_ids, 'detach'):
+            ids_np = batch_ids.detach().cpu().numpy()
         else:
             try:
                 # Handle list of tensors (common in Siamese/multi-output)
-                ids_np = np.array([i.detach().cpu().numpy() if hasattr(i, 'detach') else i for i in ids])
+                ids_np = np.array([i.detach().cpu().numpy() if hasattr(i, 'detach') else i for i in batch_ids])
             except Exception:
-                ids_np = np.asarray(ids)
+                ids_np = np.asarray(batch_ids)
 
     if ids_np is not None:
          # Identify Subscribers for this specific signal (reg_name)
@@ -492,14 +516,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          pass # User function error, skip
 
     # Save statistics if requested and applicable
-    if (batch_scalar is not None and ids is not None) or dynamic_updates:
+    if (batch_scalar is not None and batch_ids is not None) or dynamic_updates:
         signals = {
             reg_name: list(batch_scalar.values()) if isinstance(batch_scalar, dict) else batch_scalar.detach().cpu().tolist()
         } if batch_scalar is not None else {}
         signals.update(dynamic_updates) # Merge dynamic signals
 
         save_signals(
-            batch_ids=ids,
+            batch_ids=batch_ids,
             preds=preds,
             preds_raw=preds_raw,
             signals=signals,
@@ -747,7 +771,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             raise ValueError("Obj name should contains at least 'model', 'data', 'optimizer' or 'hp'.")
 
         fl = flag.lower()
-        if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters'):
+        if fl in ('hp', 'hyperparams', 'params', 'hyperparameters', 'parameters', 'config'):
             # If obj is a string, treat as a file path and start watcher
             try:
                 # Initialize CheckpointManager if we have a root dir (fallback to default root)
@@ -1445,11 +1469,11 @@ def save_signals(
             return
 
     # Convert tensors to numpy for lightweight buffering
-    # Convert tensors to numpy for lightweight buffering, forcing to strings for consistent ledger indexing
     if isinstance(batch_ids, th.Tensor):
-        batch_ids_np = batch_ids.detach().cpu().numpy().astype(str)
+        batch_ids_np = [str(i) for i in batch_ids.detach().cpu().tolist()]
     else:
-        batch_ids_np = np.asarray(batch_ids).astype(str)
+        batch_ids_np = [str(i) for i in batch_ids] if batch_ids is not None else None
+
     if preds is not None:
         pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
         if np.issubdtype(pred_np.dtype, np.floating):
@@ -1498,6 +1522,14 @@ def save_signals(
         pred_np = pred_np[:, np.newaxis]
     if pred_raw_np is not None and pred_raw_np.ndim == 1:
         pred_raw_np = pred_raw_np[:, np.newaxis]
+
+    # During evaluation mode we must not mutate dataframe state.
+    try:
+        from weightslab.components.evaluation_controller import eval_controller
+        if eval_controller.is_running():
+            return
+    except Exception:
+        pass
 
     # Enqueue to dataframe manager buffer for efficientcy
     DATAFRAME_M.enqueue_batch(
@@ -1659,6 +1691,14 @@ def save_group_signals(
         if log:
             _log_signal(float(val_to_log), None, k, step=step)
 
+    # During evaluation mode we must not mutate dataframe state.
+    try:
+        from weightslab.components.evaluation_controller import eval_controller
+        if eval_controller.is_running():
+            return
+    except Exception:
+        pass
+
     # --- Group-discard filtering ---
     # If any member of a group is discarded, skip the group loss for that group.
     # Per-sample losses (e.g. classification) are still computed since samples stay in the batch.
@@ -1697,6 +1737,826 @@ def save_group_signals(
 def clear_all():
     """Clear all WeightsLab registries (models, dataloaders, etc.)."""
     ledgers.clear_all()
+
+
+def _unpack_batch(batch, device=None):
+    """Heuristically unpack (inputs, targets, ids) from a batch.
+
+    Supports tuple/list of 1-3 elements and dict-style batches.
+    Returns ``(inputs, targets, ids, metadata)`` — targets, ids, and metadata may be ``None``.
+    """
+    inputs = targets = ids = metadata = None
+
+    if isinstance(batch, (list, tuple)):
+        n = len(batch)
+        if n >= 1:
+            inputs = batch[0]
+        if n >= 2:
+            ids = batch[1]
+        if n >= 3:
+            targets = batch[2]
+        if n >= 4:
+            metadata = batch[3]
+    elif isinstance(batch, dict):
+        for key in ("image", "input", "x", "data"):
+            if key in batch:
+                inputs = batch[key]
+                break
+        if inputs is None and batch:
+            inputs = next(iter(batch.values()))
+        for key in ("label", "target", "y", "mask"):
+            if key in batch:
+                targets = batch[key]
+                break
+        for key in ("id", "sample_id", "idx", "index"):
+            if key in batch:
+                ids = batch[key]
+                break
+        for key in ("metadata", "meta", "info"):
+            if key in batch:
+                metadata = batch[key]
+                break
+    else:
+        inputs = batch
+
+    if device is not None:
+        for obj in (inputs, targets):
+            if obj is not None and hasattr(obj, "to"):
+                try:
+                    obj = obj.to(device)
+                except Exception:
+                    pass
+        # re-assign after potential device move
+        if isinstance(batch, (list, tuple)):
+            inputs = inputs
+            targets = targets
+
+    return inputs, ids, targets, metadata
+
+
+def _make_default_eval_fn(model):
+    """Return a default evaluation callable that uses all registered ledger signals.
+
+    This is used when no ``@wl.eval_fn`` decorator was applied.  For every
+    batch it:
+
+    1. Unpacks ``(inputs, targets, ids)`` using a heuristic (tuple/list/dict).
+    2. Runs ``model(inputs)`` → ``preds`` under ``torch.no_grad()``.
+    3. Calls every signal registered in the ledger as
+       ``signal(preds, targets, batch_ids=ids)`` so the wrapped
+       ``forward`` / ``compute`` methods fire and log averages to the
+       evaluation-mode buffer.
+
+    Loss-style signals (wrapped ``forward``) and metric-style signals
+    (wrapped ``compute``) are both handled.  Per-signal errors are silently
+    skipped so a missing target or shape mismatch does not abort the whole
+    evaluation.
+    """
+    def _default_eval(loader):
+        from weightslab.backend.ledgers import list_signals, get_signal
+
+        try:
+            model.eval()
+        except Exception:
+            pass
+
+        try:
+            import torch as _th
+            no_grad_ctx = _th.no_grad()
+            no_grad_ctx.__enter__()
+        except Exception:
+            no_grad_ctx = None
+
+        try:
+            device = None
+            try:
+                device = next(model.parameters()).device
+            except (StopIteration, Exception):
+                pass
+
+            # Resolve registered signals once before the loop.
+            signal_names = []
+            try:
+                signal_names = list_signals() or []
+            except Exception:
+                pass
+
+            for batch in loader:
+                try:
+                    inputs, ids, targets, _ = _unpack_batch(batch, device)
+
+                    if inputs is None:
+                        continue
+
+                    if device is not None and hasattr(inputs, "to"):
+                        try:
+                            inputs = inputs.to(device)
+                        except Exception:
+                            pass
+                    if targets is not None and device is not None and hasattr(targets, "to"):
+                        try:
+                            targets = targets.to(device)
+                        except Exception:
+                            pass
+
+                    preds = model(inputs)  # infer predictions
+
+                    # Call each registered signal so its wrapped forward/compute
+                    # fires and feeds into the evaluation-mode logger buffer.
+                    for sig_name in signal_names:
+                        try:
+                            sig = get_signal(sig_name)
+                            if sig is None:
+                                continue
+                            # Signal wrappers are not uniform: some accept
+                            # batch_ids, some only (preds, targets), and a few
+                            # only predictions. Try the richest signature first
+                            # then fall back gracefully.
+                            attempted = False
+                            if targets is not None and ids is not None:
+                                try:
+                                    sig(preds, targets, batch_ids=ids)
+                                    attempted = True
+                                except TypeError:
+                                    pass
+
+                            if not attempted and targets is not None:
+                                try:
+                                    sig(preds, targets)
+                                    attempted = True
+                                except TypeError:
+                                    pass
+
+                            if not attempted and ids is not None:
+                                try:
+                                    sig(preds, batch_ids=ids)
+                                    attempted = True
+                                except TypeError:
+                                    pass
+
+                            if not attempted:
+                                sig(preds)
+                        except Exception as _se:
+                            logger.debug(
+                                "[wl.default_eval] signal '%s' failed: %s\nAre you sure signal {%s} is compatible with weightslab?", sig_name, _se, sig_name
+                            )
+
+                except Exception as _be:
+                    logger.debug("[wl.default_eval] batch forward failed: %s", _be)
+        finally:
+            if no_grad_ctx is not None:
+                try:
+                    no_grad_ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
+
+        try:
+            model.train()
+        except Exception:
+            pass
+
+    return _default_eval
+
+
+def eval_fn(func):
+    """Decorator that registers a function as the evaluation runner.
+
+    The decorated function receives a single *loader* argument — a
+    ``_EvalManagedLoader`` wrapping the requested split's
+    ``DataLoaderInterface``.  It should iterate that loader and compute
+    the watched criteria / metrics exactly as in a normal test pass.  All
+    ``add_scalars`` calls are intercepted by the logger's evaluation-mode
+    buffer.
+
+    Usage::
+
+        @wl.eval_fn
+        def eval_pass(loader):
+            model.eval()
+            with torch.no_grad():
+                for batch in loader:
+                    inputs, targets = batch[:2]
+                    preds = model(inputs)
+                    criterion(preds, targets)
+    """
+    global _REGISTERED_EVAL_FN
+    _REGISTERED_EVAL_FN = func
+    return func
+
+
+def trigger_pending_evaluation_async() -> bool:
+    """Start a background worker to execute the pending evaluation.
+
+    Model, loaders, and eval function are resolved automatically from the
+    ledger (registered via ``wl.watch_or_edit`` and ``@wl.eval_fn``).
+
+    Returns ``True`` when a worker is active or started, ``False`` when
+    there is no pending/running evaluation to service.
+    """
+    from weightslab.components.evaluation_controller import eval_controller
+
+    if not (eval_controller.is_pending() or eval_controller.is_running()):
+        return False
+
+    def _worker() -> None:
+        global _EVAL_WORKER_THREAD
+        try:
+            while True:
+                _ = run_pending_evaluation()
+
+                if not (eval_controller.is_pending() or eval_controller.is_running()):
+                    break
+
+                time.sleep(0.02)
+        except Exception as exc:
+            logger.exception("[wl.trigger_pending_evaluation_async] worker failed: %s", exc)
+        finally:
+            with _EVAL_WORKER_LOCK:
+                _EVAL_WORKER_THREAD = None
+            # Belt-and-suspenders: if the controller is somehow still in a live
+            # state after the worker exits (e.g. unhandled exception bypassed the
+            # mark_error call inside run_pending_evaluation), forcibly mark it as
+            # errored so the UI and watchdog both see a terminal state.
+            try:
+                from weightslab.components.evaluation_controller import eval_controller as _ec
+                if _ec.is_running() or _ec.is_pending():
+                    _ec.mark_error("Evaluation worker terminated unexpectedly")
+            except Exception:
+                pass
+
+    global _EVAL_WORKER_THREAD
+    with _EVAL_WORKER_LOCK:
+        if _EVAL_WORKER_THREAD is not None and _EVAL_WORKER_THREAD.is_alive():
+            return True
+
+        _EVAL_WORKER_THREAD = threading.Thread(
+            target=_worker,
+            name="WL-EvalWorker",
+            daemon=True,
+        )
+        _EVAL_WORKER_THREAD.start()
+
+    return True
+
+
+# ##############################################################################################################
+# EVALUATION MODE PUBLIC API
+# ##############################################################################################################
+
+def run_pending_evaluation(
+    loaders: dict = None,
+    model=None,
+    eval_fn=None,
+    device=None,
+) -> bool:
+    """Check for a pending evaluation request and execute it if one is present.
+
+    All parameters are optional — when omitted, each is resolved from the
+    ledger automatically (model registered via ``wl.watch_or_edit``,
+    loaders via ``wl.watch_or_edit(..., flag='data')``, eval function via
+    the ``@wl.eval_fn`` decorator).
+
+    Can still be called from the training loop with explicit arguments for
+    backwards-compatibility::
+
+        if wl.run_pending_evaluation():  # ledger mode — no args needed
+            continue
+
+    Args:
+        loaders:  Optional mapping of *loader_name* → ``DataLoaderInterface``.
+                  When ``None``, the loader is looked up by split name from
+                  the ledger.
+        model:    Optional tracked model instance (used to read ``get_age()``).
+                  When ``None``, resolved from the ledger.
+        eval_fn:  Optional callable with signature ``eval_fn(loader) -> None``.
+                  When ``None``, the function registered via ``@wl.eval_fn``
+                  is used.
+        device:   Unused; kept for API symmetry.
+
+    Returns:
+        ``True`` if an evaluation was executed (caller should ``continue``
+        the training loop), ``False`` otherwise.
+    """
+    from weightslab.components.evaluation_controller import eval_controller
+    from weightslab.components.global_monitoring import pause_controller
+    from weightslab.backend.ledgers import get_logger, get_checkpoint_manager
+
+    req = eval_controller.consume_request()
+    if req is None:
+        return False
+
+    split_name: str = req.get("split_name", "")
+    tags: list = req.get("tags", [])
+    use_full_set: bool = req.get("use_full_set", True)
+    was_paused: bool = req.get("was_paused", False)
+    max_steps = req.get("max_steps", None)
+
+    logger_obj = logging.getLogger(__name__)
+    logger_obj.info(
+        "[wl.run_pending_evaluation] split=%s tags=%s full_set=%s was_paused=%s max_steps=%s",
+        split_name, tags, use_full_set, was_paused, max_steps,
+    )
+
+    # Resolve model from ledger when not provided explicitly.
+    _model = model
+    if _model is None:
+        try:
+            _model = get_model()
+        except Exception:
+            _model = None
+
+    # Resolve eval_fn from decorator registry → fall back to built-in default.
+    _eval_fn = eval_fn if eval_fn is not None else _REGISTERED_EVAL_FN
+    if _eval_fn is None:
+        if _model is not None:
+            _eval_fn = _make_default_eval_fn(_model)
+        else:
+            eval_controller.mark_error(
+                "No evaluation function and no model available. Register a model with "
+                "wl.watch_or_edit(model, flag='model') or decorate your eval function with @wl.eval_fn."
+            )
+            if was_paused:
+                pause_controller.pause()
+            return True
+
+    # Get the target DataLoaderInterface from explicit loaders dict or ledger.
+    if loaders is not None:
+        loader_if = loaders.get(split_name)
+    else:
+        try:
+            loader_if = get_dataloader(split_name)
+        except Exception:
+            loader_if = None
+
+    if loader_if is None:
+        available = list(loaders.keys()) if loaders is not None else "(from ledger)"
+        eval_controller.mark_error(
+            f"Loader '{split_name}' not found. Available: {available}"
+        )
+        if was_paused:
+            pause_controller.pause()
+        return True
+
+    # ------------------------------------------------------------------
+    # 1. Save sampler state and force shuffle=False during evaluation
+    # ------------------------------------------------------------------
+    sampler = _resolve_eval_sampler(loader_if)
+    prev_shuffle = bool(getattr(sampler, "shuffle", False)) if sampler is not None else False
+    if sampler is not None and hasattr(sampler, "shuffle"):
+        sampler.shuffle = False
+
+    # ------------------------------------------------------------------
+    # 2. Apply tag filter via eval allow-list (similar to discard logic)
+    # ------------------------------------------------------------------
+    prev_eval_allow_list = None
+    filtered_count = None
+    if not use_full_set and tags and (sampler is None or not hasattr(sampler, "_eval_allow_list")):
+        eval_controller.mark_error(
+            f"Loader '{split_name}' does not support tag-filter evaluation"
+        )
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list)
+        if was_paused:
+            pause_controller.pause()
+        return True
+
+    if sampler is not None and hasattr(sampler, "_eval_allow_list"):
+        prev_eval_allow_list = getattr(sampler, "_eval_allow_list", None)
+        if not use_full_set and tags:
+            allow_list = _build_eval_allow_list(loader_if, tags, split_name)
+            sampler._eval_allow_list = allow_list
+        else:
+            sampler._eval_allow_list = None
+        # After setting allow-list, check if any samples remain
+        try:
+            filtered_count = len(loader_if)
+        except Exception:
+            filtered_count = None
+        if filtered_count == 0:
+            eval_controller.mark_error(f"Evaluation set is empty after filtering (tags={tags}, split={split_name})")
+            logger_obj.error(f"[wl.run_pending_evaluation] Evaluation set is empty after filtering (tags={tags}, split={split_name})")
+            # Restore sampler state
+            _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list)
+            if was_paused:
+                pause_controller.pause()
+            return True
+
+    # Reset dataloader iterator so we start from index 0
+    if hasattr(loader_if, "reset_iterator"):
+        try:
+            loader_if.reset_iterator()
+        except Exception:
+            if hasattr(loader_if, "_iterator"):
+                loader_if._iterator = None
+    elif hasattr(loader_if, "_iterator"):
+        loader_if._iterator = None
+
+    # ------------------------------------------------------------------
+    # 3. Compute eval hash and start logger evaluation mode
+    # ------------------------------------------------------------------
+    chkpt_mgr = get_checkpoint_manager()
+    base_hash = chkpt_mgr.get_current_experiment_hash() if chkpt_mgr else "unknown"
+    signal_logger = get_logger()
+
+    eval_count = 1
+    eval_hash = f"{base_hash}_{eval_count}"
+    if signal_logger is not None:
+        eval_count = signal_logger.get_next_evaluation_count(base_hash)
+        eval_hash = f"{base_hash}_{eval_count}"
+        signal_logger.start_evaluation_mode(split_name, eval_hash, evaluation_tags=tags)
+
+    # ------------------------------------------------------------------
+    # 4. Compute total samples for progress reporting
+    # ------------------------------------------------------------------
+    try:
+        total_batches = len(loader_if)
+    except Exception:
+        total_batches = 0
+
+    try:
+        if max_steps is not None:
+            max_steps = int(max_steps)
+            if max_steps > 0:
+                total_batches = min(total_batches, max_steps) if total_batches > 0 else max_steps
+        else:
+            max_steps = None
+    except Exception:
+        max_steps = None
+
+    eval_controller.report_progress(0, total_batches, f"Evaluating '{split_name}'…")
+
+    # ------------------------------------------------------------------
+    # 5. Run evaluation with bounded timeout + cancellation checks
+    # ------------------------------------------------------------------
+    # Freeze model age during evaluation by switching to EVAL tracking mode.
+    _prev_tracking_mode = None
+    if _model is not None and hasattr(_model, "set_tracking_mode"):
+        try:
+            from weightslab.components.tracking import TrackingMode as _TrackingMode
+            _prev_tracking_mode = getattr(_model, "tracking_mode", None)
+            _model.set_tracking_mode(_TrackingMode.EVAL)
+        except Exception:
+            pass
+
+    controlled_loader = _EvalManagedLoader(loader_if, split_name, total_batches, max_batches=max_steps)
+    try:
+        _eval_fn(controlled_loader)
+    except _EvalCanceled as exc:
+        logger_obj.warning("[wl.run_pending_evaluation] canceled: %s", exc)
+        eval_controller.mark_canceled(str(exc))
+        if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
+            signal_logger.abort_evaluation_mode()
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+        if was_paused:
+            pause_controller.pause()
+        return True
+    except _EvalTimeout as exc:
+        logger_obj.error("[wl.run_pending_evaluation] timeout: %s", exc)
+        eval_controller.mark_error(str(exc))
+        if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
+            signal_logger.abort_evaluation_mode()
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+        if was_paused:
+            pause_controller.pause()
+        return True
+    except Exception as exc:
+        import traceback
+        tb_str = traceback.format_exc()
+        logger_obj.error("[wl.run_pending_evaluation] eval_fn raised: %s\n%s", exc, tb_str)
+        eval_controller.mark_error(str(exc))
+        if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
+            signal_logger.abort_evaluation_mode()
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+        if was_paused:
+            pause_controller.pause()
+        return True
+
+    # A cancel request can arrive just as eval_fn returns. In that race window,
+    # honor cancellation before finalizing marker persistence.
+    if eval_controller.is_cancel_requested():
+        cancel_reason = f"Evaluation on '{split_name}' canceled by user"
+        logger_obj.warning("[wl.run_pending_evaluation] canceled after eval_fn return: %s", cancel_reason)
+        eval_controller.mark_canceled(cancel_reason)
+        if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
+            signal_logger.abort_evaluation_mode()
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+        if was_paused:
+            pause_controller.pause()
+        return True
+
+    # ------------------------------------------------------------------
+    # 6. Finalise: stop eval mode → creates average markers in logger
+    # ------------------------------------------------------------------
+    if eval_controller.is_cancel_requested():
+        cancel_reason = f"Evaluation on '{split_name}' canceled by user"
+        logger_obj.warning("[wl.run_pending_evaluation] canceled before marker finalization: %s", cancel_reason)
+        eval_controller.mark_canceled(cancel_reason)
+        if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
+            signal_logger.abort_evaluation_mode()
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+        if was_paused:
+            pause_controller.pause()
+        return True
+
+    model_age = 0
+    try:
+        model_age = _model.get_age() if _model is not None and hasattr(_model, "get_age") else 0
+    except Exception:
+        pass
+
+    # One more cancel check immediately before marker finalization - this catches
+    # cancel requests that arrived during the very end of eval_fn execution.
+    if eval_controller.is_cancel_requested():
+        cancel_reason = f"Evaluation on '{split_name}' canceled by user (final pre-marker check)"
+        logger_obj.warning("[wl.run_pending_evaluation] canceled before marker finalization (final): %s", cancel_reason)
+        eval_controller.mark_canceled(cancel_reason)
+        if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
+            signal_logger.abort_evaluation_mode()
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+        if was_paused:
+            pause_controller.pause()
+        return True
+
+    result: dict = {}
+    if signal_logger is not None:
+        result = signal_logger.stop_evaluation_mode(model_age)
+
+    # Another narrow race window exists between stop_evaluation_mode() and
+    # mark_done(); if cancel arrives here, purge that eval hash and report canceled.
+    if eval_controller.is_cancel_requested():
+        cancel_reason = f"Evaluation on '{split_name}' canceled by user"
+        logger_obj.warning("[wl.run_pending_evaluation] canceled after marker finalization: %s", cancel_reason)
+        if signal_logger is not None:
+            # Remove evaluation hash from history and pending queue
+            if hasattr(signal_logger, "remove_evaluation_hash"):
+                signal_logger.remove_evaluation_hash(eval_hash)
+            # Also abort any remaining evaluation mode state for extra safety
+            if hasattr(signal_logger, "abort_evaluation_mode"):
+                signal_logger.abort_evaluation_mode()
+        eval_controller.mark_canceled(cancel_reason)
+        _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+        if was_paused:
+            pause_controller.pause()
+        return True
+
+    eval_controller.report_progress(total_batches, total_batches, "Done")
+
+    # ------------------------------------------------------------------
+    # 7. Restore shuffle + allow-list + tracking mode
+    # ------------------------------------------------------------------
+    _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
+
+    # ------------------------------------------------------------------
+    # 8. Re-pause if training was paused before evaluation
+    # ------------------------------------------------------------------
+    if was_paused:
+        pause_controller.pause()
+
+    # Atomic completion: if cancel was requested in the final race window,
+    # convert to canceled and purge markers for this eval hash.
+    if hasattr(eval_controller, "mark_done_unless_canceled"):
+        marked_done = eval_controller.mark_done_unless_canceled(result)
+        if not marked_done:
+            if signal_logger is not None:
+                if hasattr(signal_logger, "remove_evaluation_hash"):
+                    signal_logger.remove_evaluation_hash(eval_hash)
+                if hasattr(signal_logger, "abort_evaluation_mode"):
+                    signal_logger.abort_evaluation_mode()
+            return True
+    else:
+        eval_controller.mark_done(result)
+
+    # Console output — visible even without Weights Studio connected.
+    print(f"\n{'='*70}", flush=True)
+    print(f"[WeightsLab] Evaluation Results", flush=True)
+    print(f"{'='*70}", flush=True)
+    print(f"  Split:        {split_name}", flush=True)
+    print(f"  Model Step:   {model_age}", flush=True)
+
+    if result:
+        print(f"  Metrics:\n", flush=True)
+        for k, v in result.items():
+            if isinstance(v, float):
+                print(f"    {k:30s} = {v:.6f}", flush=True)
+            else:
+                print(f"    {k:30s} = {v}", flush=True)
+    else:
+        print(f"  Status:       No metrics recorded", flush=True)
+
+    print(f"{'='*70}\n", flush=True)
+
+    logger_obj.info(
+        "[wl.run_pending_evaluation] Evaluation complete on '%s' @ step %d: %s",
+        split_name, model_age, result,
+    )
+    return True
+
+
+def _build_eval_allow_list(loader_if, tags: list, split_name: str) -> set:
+    """Build a set of sample UIDs that have ALL the requested tags.
+
+    Uses the DataFrameManager associated with the loader's tracked dataset
+    to filter by tag columns (same logic as Break-By-Slice).
+    """
+    from weightslab.data.sample_stats import SampleStatsEx
+    from weightslab.backend.ledgers import get_dataframe
+
+    allow_set: set = set()
+    try:
+        df_manager = get_dataframe()
+        if df_manager is None:
+            # No dataframe → return all UIDs (effectively no filter)
+            tracked = getattr(loader_if, "tracked_dataset", None)
+            if tracked is not None:
+                uids = getattr(tracked, "unique_ids", None) or getattr(tracked, "physical_uids", None)
+                if uids is not None:
+                    return {str(u) for u in uids}
+            return allow_set
+
+        df = df_manager.get_df_view()
+
+        # Build compound mask: sample must have ALL tags set to True
+        mask = None
+        for tag in tags:
+            col = f"{SampleStatsEx.TAG.value}:{tag}"
+            if col in df.columns:
+                col_mask = df[col] == True  # noqa: E712
+                mask = col_mask if mask is None else (mask & col_mask)
+
+        if mask is None:
+            # Tags not found → return all (no filter)
+            allow_set = {str(idx) for idx in df.index}
+            return allow_set
+
+        # Filter by origin if the split name appears in index
+        filtered = df[mask]
+
+        # Support both MultiIndex (origin, sample_id) and flat index
+        if isinstance(filtered.index, type(None)):
+            return allow_set
+
+        import pandas as pd
+        if isinstance(filtered.index, pd.MultiIndex):
+            # Try to filter by origin matching split_name (either exact or prefix match)
+            origin_level = filtered.index.get_level_values(SampleStatsEx.ORIGIN.value) \
+                if SampleStatsEx.ORIGIN.value in filtered.index.names else \
+                filtered.index.get_level_values(0)
+            origin_mask = origin_level == split_name
+            if not origin_mask.any():
+                # Try prefix: "train" matches "train_loader"
+                origin_mask = pd.Series(origin_level).str.startswith(split_name.replace("_loader", "")).values
+            sub = filtered[origin_mask]
+            # Extract sample_id level
+            sid_level_name = SampleStatsEx.SAMPLE_ID.value \
+                if SampleStatsEx.SAMPLE_ID.value in sub.index.names else None
+            if sid_level_name:
+                allow_set = {str(v) for v in sub.index.get_level_values(sid_level_name)}
+            else:
+                allow_set = {str(v) for v in sub.index.get_level_values(1)}
+        else:
+            allow_set = {str(idx) for idx in filtered.index}
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "[_build_eval_allow_list] Could not build allow list: %s", exc
+        )
+        # Fallback: no filter (evaluate all)
+        tracked = getattr(loader_if, "tracked_dataset", None)
+        if tracked is not None:
+            uids = getattr(tracked, "unique_ids", None) or getattr(tracked, "physical_uids", None)
+            if uids is not None:
+                return {str(u) for u in uids}
+    return allow_set
+
+
+def _restore_eval_state(sampler, prev_shuffle: bool, prev_eval_allow_list, model=None, prev_tracking_mode=None) -> None:
+    """Restore sampler shuffle, allow-list, and model tracking mode to pre-evaluation values."""
+    if model is not None and prev_tracking_mode is not None and hasattr(model, "set_tracking_mode"):
+        try:
+            model.set_tracking_mode(prev_tracking_mode)
+        except Exception:
+            pass
+    if sampler is None:
+        return
+    if hasattr(sampler, "shuffle"):
+        sampler.shuffle = prev_shuffle
+    if hasattr(sampler, "_eval_allow_list"):
+        sampler._eval_allow_list = prev_eval_allow_list
+
+
+def _resolve_eval_sampler(loader_if):
+    """Best-effort resolution of the sampler used by the evaluation loader."""
+    sampler = getattr(loader_if, "_mutable_batch_sampler", None)
+    if sampler is not None:
+        return sampler
+
+    dataloader = getattr(loader_if, "dataloader", None)
+    if dataloader is None:
+        dataloader = loader_if
+
+    batch_sampler = getattr(dataloader, "batch_sampler", None)
+    if batch_sampler is not None:
+        return batch_sampler
+
+    return getattr(dataloader, "sampler", None)
+
+
+def _get_eval_timeout_config() -> tuple[float, float, float]:
+    """Return (multiplier, min_seconds, absolute_seconds_override)."""
+    multiplier = 1.3
+    min_seconds = 5.0
+    absolute_timeout = 0.0
+
+    try:
+        multiplier = max(1.0, float(os.getenv("WEIGHTSLAB_EVAL_TIMEOUT_MULTIPLIER", "1.3")))
+    except Exception:
+        multiplier = 1.3
+
+    try:
+        min_seconds = max(0.0, float(os.getenv("WEIGHTSLAB_EVAL_TIMEOUT_MIN_SECONDS", "5")))
+    except Exception:
+        min_seconds = 5.0
+
+    try:
+        absolute_timeout = max(0.0, float(os.getenv("WEIGHTSLAB_EVAL_TIMEOUT_SECONDS", "0")))
+    except Exception:
+        absolute_timeout = 0.0
+
+    return multiplier, min_seconds, absolute_timeout
+
+
+class _EvalCanceled(RuntimeError):
+    pass
+
+
+class _EvalTimeout(RuntimeError):
+    pass
+
+
+class _EvalManagedLoader:
+    """Iterator wrapper adding progress, cancel checks, and timeout enforcement."""
+
+    def __init__(self, loader, split_name: str, total_batches: int, max_batches: Optional[int] = None) -> None:
+        from weightslab.components.evaluation_controller import eval_controller
+
+        self._loader = loader
+        self._split_name = split_name
+        self._total_batches = max(0, int(total_batches))
+        self._max_batches = int(max_batches) if isinstance(max_batches, int) and max_batches > 0 else None
+        self._controller = eval_controller
+
+        self._start_time = time.monotonic()
+        self._processed_batches = 0
+        self._avg_batch_seconds = 0.0
+        self._multiplier, self._min_seconds, self._absolute_timeout = _get_eval_timeout_config()
+
+    def _check_cancel_or_timeout(self) -> None:
+        if self._controller.is_cancel_requested():
+            raise _EvalCanceled(f"Evaluation on '{self._split_name}' canceled by user")
+
+        elapsed = time.monotonic() - self._start_time
+        if self._absolute_timeout > 0 and elapsed > self._absolute_timeout:
+            raise _EvalTimeout(
+                f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s (configured {self._absolute_timeout:.1f}s)"
+            )
+
+        if self._total_batches <= 0 or self._processed_batches <= 0 or self._avg_batch_seconds <= 0:
+            return
+
+        projected = self._avg_batch_seconds * self._total_batches
+        timeout_seconds = max(self._min_seconds, projected * self._multiplier)
+        if elapsed > timeout_seconds:
+            raise _EvalTimeout(
+                f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s "
+                f"(projected={projected:.1f}s, limit={timeout_seconds:.1f}s, multiplier={self._multiplier:.2f})"
+            )
+
+    def __iter__(self):
+        it = iter(self._loader)
+        while True:
+            if self._max_batches is not None and self._processed_batches >= self._max_batches:
+                return
+
+            self._check_cancel_or_timeout()
+            try:
+                batch = next(it)
+            except StopIteration:
+                return
+
+            batch_started = time.monotonic()
+            yield batch
+
+            batch_seconds = max(1e-6, time.monotonic() - batch_started)
+            self._processed_batches += 1
+            self._avg_batch_seconds = (
+                (self._avg_batch_seconds * (self._processed_batches - 1)) + batch_seconds
+            ) / self._processed_batches
+
+            progress_total = self._total_batches
+            progress_current = min(self._processed_batches, progress_total) if progress_total > 0 else self._processed_batches
+            self._controller.report_progress(
+                progress_current,
+                progress_total,
+                f"Evaluating '{self._split_name}'…",
+            )
 
 
 # ##############################################################################################################

@@ -2,12 +2,14 @@ import os
 import time
 import grpc
 import logging
+from typing import Iterable
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
 from threading import Thread
 from concurrent import futures
 
 from weightslab.trainer.trainer_tools import *
+from weightslab.backend.ledgers import get_hyperparams
 
 from weightslab.trainer.experiment_context import ExperimentContext
 from weightslab.trainer.services.experiment_service import ExperimentService
@@ -23,6 +25,249 @@ from weightslab.components.global_monitoring import weightslab_rlock
 
 # Global logger
 logger = logging.getLogger(__name__)
+DEFAULT_GRPC_TLS_CERT_DIR = os.path.join("~", "certs")
+
+
+def _is_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_auth_tokens() -> set[str]:
+    """Load accepted bearer/API-key tokens from env vars."""
+    raw_values: list[str] = []
+    single = os.getenv("GRPC_AUTH_TOKEN")
+    many = os.getenv("GRPC_AUTH_TOKENS")
+    if single:
+        raw_values.append(single)
+    if many:
+        raw_values.extend(many.split(","))
+    return {v.strip() for v in raw_values if v and v.strip()}
+
+
+def _mapping_get(mapping_obj, key: str, default=None):
+    """Read mapping-like values from dicts or ledger Proxy objects."""
+    if mapping_obj is None:
+        return default
+    try:
+        return mapping_obj.get(key, default, proxy=False)
+    except TypeError:
+        try:
+            return mapping_obj.get(key, default)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        return mapping_obj[key]
+    except Exception:
+        return default
+
+
+def _resolve_bool_setting(config: dict | None, config_key: str, env_var_name: str, default: str) -> bool:
+    """Resolve bool with config-first precedence, then env var, then default."""
+    config_value = _mapping_get(config, config_key)
+    if config_value is not None:
+        return _is_truthy(str(config_value))
+    return _is_truthy(os.getenv(env_var_name, default))
+
+
+def _resolve_tls_client_auth_setting(config: dict | None, grpc_tls_enabled: bool) -> bool:
+    """Resolve mTLS client-auth with config/env precedence and TLS-aware fallback.
+
+    If not defined in config or env, it inherits grpc_tls_enabled.
+    """
+    config_value = _mapping_get(config, "grpc_tls_require_client_auth", None)
+    if config_value is not None:
+        return _is_truthy(str(config_value))
+
+    env_value = str(os.getenv("GRPC_TLS_REQUIRE_CLIENT_AUTH", "")).strip()
+    if env_value:
+        return _is_truthy(env_value)
+
+    return bool(grpc_tls_enabled)
+
+
+def _resolve_grpc_tls_path(
+    config: dict | None,
+    config_file_key: str,
+    env_var_name: str,
+    default_filename: str,
+) -> str:
+    """Resolve a TLS file path from env vars or the default user cert dir.
+
+    Precedence:
+    1. Config file path key, e.g. grpc_tls_cert_file
+    2. Specific file env var, e.g. GRPC_TLS_CERT_FILE
+    3. Config directory key grpc_tls_cert_dir
+    4. Shared directory env var GRPC_TLS_CERT_DIR
+    5. Default directory ~/certs
+    """
+    config_explicit_path = str(_mapping_get(config, config_file_key, "") or "").strip()
+    if config_explicit_path:
+        return os.path.expanduser(config_explicit_path)
+
+    explicit_path = str(os.getenv(env_var_name, "")).strip()
+    if explicit_path:
+        return os.path.expanduser(explicit_path)
+
+    config_dir = str(_mapping_get(config, "grpc_tls_cert_dir", "") or "").strip()
+    if config_dir:
+        return os.path.join(os.path.expanduser(config_dir), default_filename)
+
+    cert_dir = str(os.getenv("GRPC_TLS_CERT_DIR", DEFAULT_GRPC_TLS_CERT_DIR)).strip()
+    cert_dir = os.path.expanduser(cert_dir or DEFAULT_GRPC_TLS_CERT_DIR)
+    return os.path.join(cert_dir, default_filename)
+
+
+def _validate_file_exists(path: str, label: str) -> None:
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            f"{label} not found at '{path}'. "
+            "Generate local certificates with 'weights_studio/docker/generate-dev-certs.ps1' "
+            "(PowerShell) or 'weights_studio/docker/generate-dev-certs.sh' (bash), "
+            "or set GRPC_TLS_* env vars to valid paths."
+        )
+
+
+def _run_security_preflight(
+    *,
+    grpc_tls_enabled: bool,
+    grpc_tls_key_file: str,
+    grpc_tls_cert_file: str,
+    grpc_tls_ca_file: str,
+    grpc_tls_require_client_auth: bool,
+    auth_tokens: set[str],
+) -> None:
+    """Validate security-critical configuration before spawning gRPC threads."""
+    logger.info(
+        "" + "\n" +
+        "\n# #######################################" + "\n" +
+        "# #######################################"
+    )
+    logger.info("[gRPC] Running security preflight checks...")
+
+    if not grpc_tls_enabled:
+        # Log a strong warning if TLS is disabled, since this is a common misconfiguration with severe security implications.
+        logger.warning(
+            "[gRPC] GRPC_TLS_ENABLED=0. Traffic will be unencrypted. Use only for development."
+        )
+    else:
+        _validate_file_exists(grpc_tls_key_file, "gRPC TLS private key (GRPC_TLS_KEY_FILE)")
+        _validate_file_exists(grpc_tls_cert_file, "gRPC TLS certificate (GRPC_TLS_CERT_FILE)")
+        if grpc_tls_require_client_auth:
+            _validate_file_exists(grpc_tls_ca_file, "gRPC TLS CA file (GRPC_TLS_CA_FILE)")
+
+        # Log TLS/mTLS configuration with sensitive values redacted.
+        logger.info(
+            "" + "\n" +
+            f"TLS preflight initiated." + "\n" +
+            f"[gRPC] TLS preflight OK with:" + "\n" +
+            f"\tmTLS={grpc_tls_require_client_auth}, " + "\n" +
+            f"\tcert={grpc_tls_cert_file}, " + "\n" +
+            f"\tkey={grpc_tls_key_file}, " + "\n" +
+            f"\tca={(grpc_tls_ca_file if grpc_tls_require_client_auth else '<unused>')}"
+        )
+
+    if auth_tokens:
+        logger.info(
+            f"[gRPC] Auth token preflight OK ({len(auth_tokens)} token(s) loaded):" + "\n" +
+            "\n".join(f"\t- {auth_token[:4]}***{auth_token[-4:]}" for auth_token in auth_tokens)
+        )
+    else:
+        logger.warning(
+            "[gRPC] No GRPC_AUTH_TOKEN/GRPC_AUTH_TOKENS configured. "
+            "Only transport-level trust (TLS/mTLS) will protect RPC access."
+        )
+    logger.info("\n" + "# #######################################" + "\n" + "# #######################################" + "\n" + "")
+
+def _iter_possible_tokens(invocation_metadata: Iterable[tuple[str, str]] | None):
+    if not invocation_metadata:
+        return
+
+    for key, value in invocation_metadata:
+        if not value:
+            continue
+        norm_key = str(key).strip().lower()
+        norm_value = str(value).strip()
+
+        if norm_key == "authorization":
+            if norm_value.lower().startswith("bearer "):
+                token = norm_value[7:].strip()
+                if token:
+                    yield token
+            else:
+                yield norm_value
+        elif norm_key in {"x-api-key", "x-grpc-auth-token"}:
+            yield norm_value
+
+
+class AuthTokenInterceptor(grpc.ServerInterceptor):
+    """Validates a token from gRPC metadata for every incoming RPC."""
+
+    def __init__(self, accepted_tokens: set[str]):
+        self._accepted_tokens = accepted_tokens
+
+    def _is_authorized(self, handler_call_details: grpc.HandlerCallDetails) -> bool:
+        for token in _iter_possible_tokens(handler_call_details.invocation_metadata):
+            if token in self._accepted_tokens:
+                return True
+        return False
+
+    @staticmethod
+    def _abort_unary_unary(_, context):
+        context.abort(grpc.StatusCode.UNAUTHENTICATED, "Missing or invalid gRPC auth token")
+
+    @staticmethod
+    def _abort_unary_stream(_, context):
+        context.abort(grpc.StatusCode.UNAUTHENTICATED, "Missing or invalid gRPC auth token")
+        yield from ()
+
+    @staticmethod
+    def _abort_stream_unary(request_iterator, context):
+        del request_iterator
+        context.abort(grpc.StatusCode.UNAUTHENTICATED, "Missing or invalid gRPC auth token")
+
+    @staticmethod
+    def _abort_stream_stream(request_iterator, context):
+        del request_iterator
+        context.abort(grpc.StatusCode.UNAUTHENTICATED, "Missing or invalid gRPC auth token")
+        yield from ()
+
+    def intercept_service(self, continuation, handler_call_details):
+        handler = continuation(handler_call_details)
+        if handler is None:
+            return None
+
+        if self._is_authorized(handler_call_details):
+            return handler
+
+        logger.warning("[gRPC] Unauthorized request denied for method=%s", handler_call_details.method)
+
+        if handler.unary_unary:
+            return grpc.unary_unary_rpc_method_handler(
+                self._abort_unary_unary,
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.unary_stream:
+            return grpc.unary_stream_rpc_method_handler(
+                self._abort_unary_stream,
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.stream_unary:
+            return grpc.stream_unary_rpc_method_handler(
+                self._abort_stream_unary,
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.stream_stream:
+            return grpc.stream_stream_rpc_method_handler(
+                self._abort_stream_stream,
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        return handler
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +335,52 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
 
     def CheckAgentHealth(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.CheckAgentHealth({request})")
-        return self._exp_service.data_service.CheckAgentHealth(request, context)
+        # Prefer explicit AgentService when present (new wiring).
+        # Use vars(...) to avoid MagicMock auto-creating attributes that can
+        # hide the real fallback path in unit/integration tests.
+        agent_service = vars(self._exp_service).get("agent_service")
+        if agent_service is not None and hasattr(agent_service, "CheckAgentHealth"):
+            return agent_service.CheckAgentHealth(request, context)
+
+        data_service = vars(self._exp_service).get("data_service")
+        if data_service is not None:
+            # Backward-compatible delegation expected by older tests/mocks.
+            if hasattr(data_service, "CheckAgentHealth"):
+                return data_service.CheckAgentHealth(request, context)
+
+            # Real DataService fallback when no dedicated RPC method exists.
+            if hasattr(data_service, "_is_agent_available"):
+                import weightslab.proto.experiment_service_pb2 as pb2
+
+                try:
+                    available = bool(data_service._is_agent_available())
+                except Exception:
+                    available = False
+
+                message = (
+                    "Agent available. Ready to help you. Type /model to test another model or /reset to clear your API key and start over."
+                    if available
+                    else "Agent not configured. Type /init to set up."
+                )
+                return pb2.AgentHealthResponse(available=available, message=message)
+
+        raise RuntimeError("ExperimentServiceServicer has no agent health provider configured")
+
+    def InitializeAgent(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.InitializeAgent({request})")
+        return self._exp_service.agent_service.InitializeAgent(request, context)
+
+    def ChangeAgentModel(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ChangeAgentModel({request})")
+        return self._exp_service.agent_service.ChangeAgentModel(request, context)
+
+    def GetAgentModels(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetAgentModels({request})")
+        return self._exp_service.agent_service.GetAgentModels(request, context)
+
+    def ResetAgent(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.ResetAgent({request})")
+        return self._exp_service.agent_service.ResetAgent(request, context)
 
     # -------------------------------------------------------------------------
     # Logger data sync for WeightsStudio
@@ -120,6 +410,17 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.RestoreCheckpoint({request})")
         return self._exp_service.RestoreCheckpoint(request, context)
 
+    # -------------------------------------------------------------------------
+    # Evaluation mode
+    # -------------------------------------------------------------------------
+    def TriggerEvaluation(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.TriggerEvaluation({request})")
+        return self._exp_service.TriggerEvaluation(request, context)
+
+    def GetEvaluationStatus(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetEvaluationStatus({request})")
+        return self._exp_service.GetEvaluationStatus(request, context)
+
 
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
@@ -148,11 +449,42 @@ def grpc_serve(
     watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks
     watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
     watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    config = get_hyperparams()
+    grpc_tls_enabled = _resolve_bool_setting(config, "grpc_tls_enabled", "GRPC_TLS_ENABLED", "0")
+    grpc_tls_key_file = _resolve_grpc_tls_path(
+        config,
+        "grpc_tls_key_file",
+        "GRPC_TLS_KEY_FILE",
+        "backend-server.key",
+    )
+    grpc_tls_cert_file = _resolve_grpc_tls_path(
+        config,
+        "grpc_tls_cert_file",
+        "GRPC_TLS_CERT_FILE",
+        "backend-server.crt",
+    )
+    grpc_tls_ca_file = _resolve_grpc_tls_path(
+        config,
+        "grpc_tls_ca_file",
+        "GRPC_TLS_CA_FILE",
+        "ca.crt",
+    )
+    grpc_tls_require_client_auth = _resolve_tls_client_auth_setting(config, grpc_tls_enabled)
+    auth_tokens = _load_auth_tokens()
     max_concurrent_rpcs_env = os.getenv("GRPC_MAX_CONCURRENT_RPCS")
     if max_concurrent_rpcs_env is not None:
         max_concurrent_rpcs = int(max_concurrent_rpcs_env)
     elif max_concurrent_rpcs is None and n_workers_grpc is not None:
         max_concurrent_rpcs = int(n_workers_grpc)
+
+    _run_security_preflight(
+        grpc_tls_enabled=grpc_tls_enabled,
+        grpc_tls_key_file=grpc_tls_key_file,
+        grpc_tls_cert_file=grpc_tls_cert_file,
+        grpc_tls_ca_file=grpc_tls_ca_file,
+        grpc_tls_require_client_auth=grpc_tls_require_client_auth,
+        auth_tokens=auth_tokens,
+    )
 
     # Build watchdog components. In debug sessions, watchdogs can be disabled
     # to avoid lock/RPC timeout interruptions while paused on breakpoints.
@@ -170,6 +502,21 @@ def grpc_serve(
             details_limit=watchdog_details_limit,
         )
         watchdog.register_lock("weightslab_rlock", weightslab_rlock)
+
+        # Eval thread monitor — no timeout, just liveness.  Lazy imports avoid
+        # circular dependencies since weightslab.src imports trainer code.
+        def _get_eval_controller():
+            from weightslab.components.evaluation_controller import eval_controller as _ec
+            return _ec
+
+        def _get_eval_thread():
+            import weightslab.src as _src
+            return _src._EVAL_WORKER_THREAD
+
+        watchdog.register_eval_monitor(
+            get_controller=_get_eval_controller,
+            get_thread=_get_eval_thread,
+        )
         watchdog_state = watchdog.rpc_state       # shared with RpcTimingAndWatchdogInterceptor
         server_manager = watchdog.server_manager  # shared with serving_thread_callback
     logger.debug(
@@ -193,7 +540,10 @@ def grpc_serve(
                         thread_name_prefix="WL-gRPC-Worker",
                         max_workers=_effective_workers,
                     ),
-                    interceptors=[RpcTimingAndWatchdogInterceptor(watchdog_state)],
+                    interceptors=[
+                        RpcTimingAndWatchdogInterceptor(watchdog_state),
+                        *( [AuthTokenInterceptor(auth_tokens)] if auth_tokens else [] ),
+                    ],
                     options=[
                         ("grpc.max_send_message_length", _max_msg),
                         ("grpc.max_receive_message_length", _max_msg),
@@ -208,7 +558,35 @@ def grpc_serve(
 
                 bind_addr = f"{grpc_host}:{grpc_port}"
                 logger.info("[gRPC] Attempting to bind to %s", bind_addr)
-                bound_port = server.add_insecure_port(bind_addr)
+
+                if grpc_tls_enabled:
+                    with open(grpc_tls_key_file, "rb") as f:
+                        private_key = f.read()
+                    with open(grpc_tls_cert_file, "rb") as f:
+                        certificate_chain = f.read()
+
+                    root_certificates = None
+                    if grpc_tls_require_client_auth:
+                        with open(grpc_tls_ca_file, "rb") as f:
+                            root_certificates = f.read()
+
+                    credentials = grpc.ssl_server_credentials(
+                        private_key_certificate_chain_pairs=[(private_key, certificate_chain)],
+                        root_certificates=root_certificates,
+                        require_client_auth=grpc_tls_require_client_auth,
+                    )
+                    bound_port = server.add_secure_port(bind_addr, credentials)
+                    logger.info(
+                        "[gRPC] TLS enabled (mTLS=%s, cert=%s, key=%s, ca=%s)",
+                        grpc_tls_require_client_auth,
+                        grpc_tls_cert_file,
+                        grpc_tls_key_file,
+                        grpc_tls_ca_file if grpc_tls_require_client_auth else "<unused>",
+                    )
+                else:
+                    bound_port = server.add_insecure_port(bind_addr)
+                    logger.warning("[gRPC] TLS disabled; using insecure transport on %s", bind_addr)
+
                 if bound_port == 0:
                     logger.error("[gRPC] Failed to bind to %s. Port might be in use.", bind_addr)
                     return
@@ -263,8 +641,3 @@ def grpc_serve(
 
 if __name__ == "__main__":
     grpc_serve()
-
-
-
-
-

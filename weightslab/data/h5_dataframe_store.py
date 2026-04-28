@@ -348,7 +348,7 @@ class H5DataFrameStore:
                                         df = store.select(key, columns=list(columns) if columns else None)
                                         df = self._normalize_for_read(df, origin)
                                         frames.append(df)
-                                    except (TypeError, KeyError) as exc:
+                                    except (TypeError, KeyError, AttributeError) as exc:
                                         # Mark corrupted key for removal
                                         logger.warning(f"[H5DataFrameStore] Detected corrupted key {key}: {exc}")
                                         corrupted_keys.append(key)

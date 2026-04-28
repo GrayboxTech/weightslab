@@ -16,6 +16,7 @@ It also supports:
 - checkpoint-based data loading and reproducible iterator restoration
 """
 import os
+import threading
 import torch
 import logging
 from typing import Any, Iterator, Optional
@@ -131,6 +132,9 @@ class WeightsLabDataSampler(Sampler):
         self.drop_last = drop_last
         self._deny_listed_uids_cache: set[str] = set()
         self._deny_list_revision: Optional[tuple[str, int]] = None
+        # Evaluation-mode allow-list: when set, only samples whose uid is in
+        # this set are yielded.  None = no filter (normal behaviour).
+        self._eval_allow_list: Optional[set] = None
 
     def _get_deny_listed_uids(self) -> set:
         """Get set of deny-listed UIDs from tracked dataset."""
@@ -234,10 +238,18 @@ class WeightsLabDataSampler(Sampler):
                     polled_since_refresh = 0
 
                 try:
-                    if str(uid_source[idx]) in deny_listed_uids:
+                    uid_str = str(uid_source[idx])
+                    if uid_str in deny_listed_uids:
+                        continue
+                    # Evaluation allow-list: skip samples not in the set
+                    if self._eval_allow_list is not None and uid_str not in self._eval_allow_list:
                         continue
                 except Exception:
                     pass
+            elif self._eval_allow_list is not None:
+                # No uid_source but eval allow-list is set: use str(idx) as UID fallback
+                if str(idx) not in self._eval_allow_list:
+                    continue
 
             if skipped < self.offset:
                 skipped += 1
@@ -265,6 +277,19 @@ class WeightsLabDataSampler(Sampler):
 
     def __len__(self):
         """Return the number of samples or batches."""
+        # In evaluation mode with an allow-list, compute the exact filtered
+        # cardinality so progress/timeout logic uses the real bounded set size.
+        if self._eval_allow_list is not None:
+            total = sum(1 for _ in self._iter_filtered_indices(list(range(len(self.data_source)))))
+
+            if self.batch_size is not None:
+                b = max(1, int(self.batch_size))
+                if self.drop_last:
+                    return total // b
+                return (total + b - 1) // b
+
+            return total
+
         # Start with total dataset size
         total = len(self.data_source)
 
@@ -373,6 +398,7 @@ class DataLoaderInterface:
                 "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !! "
                 "Otherwise, prefer passing a Dataset and let the interface build the DataLoader."
                 )
+            
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
             self.tracked_dataset = DataSampleTrackingWrapper(
@@ -384,6 +410,10 @@ class DataLoaderInterface:
                 loader_name=loader_name,
                 **kwargs
             )
+
+            # Then, load checkpoint data early (before dataloader is used)
+            self._load_checkpoint_data()
+
             self.tracked_dataset._map_updates_hook_fns.append(
                 (
                     self._reset_iterator,
@@ -504,7 +534,13 @@ class DataLoaderInterface:
                     pass
 
             if _skip:
-                logger.info(f"Skipping data checkpoint auto-load for {self._ledger_name or 'unnamed loader'} as requested.")
+                loader_label = self._ledger_name or 'unnamed loader'
+                attention_message = (
+                    f"[ATTENTION] Checkpoint data auto-load is disabled for {loader_label}. "
+                    "Hyperparameters requested skip_checkpoint_load=True, so previous checkpoint data will not be restored."
+                )
+                logger.warning(attention_message)
+                print(f"\n{'!' * 90}\n{attention_message}\n{'!' * 90}\n", flush=True)
                 return
 
             # Get latest experiment hash
@@ -739,6 +775,12 @@ class DataLoaderInterface:
     def _wait_if_paused(self) -> None:
         """If the global pause controller is paused, wait until resumed."""
         try:
+            # Only the evaluation worker thread itself bypasses pause — this way
+            # training threads still respect the pause state even while eval runs,
+            # and only the batches fetched by the eval thread are unblocked.
+            if threading.current_thread().name == "WL-EvalWorker":
+                return
+
             pause_controller.wait_if_paused()
             if self.model != None:
                 m_age = self.model.get_age()

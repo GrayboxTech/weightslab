@@ -11,9 +11,11 @@ import os
 import logging
 import threading
 
-from .src import watch_or_edit, serve, keep_serving, save_signals, save_group_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, compute_signals, SignalContext, clear_all
+from .src import watch_or_edit, serve, keep_serving, save_signals, save_group_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, eval_fn, compute_signals, SignalContext, clear_all, run_pending_evaluation, trigger_pending_evaluation_async
 from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory
+from .utils.tools import seed_everything
+from .components.global_monitoring import guard_training_context, guard_testing_context
 
 # If you already have other top-level exports, keep them.
 # This snippet ensures __version__ is available even when setuptools_scm hasn't written the file yet.
@@ -45,6 +47,24 @@ if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
 	logger = logging.getLogger(__name__)
 	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
 	logger.info(_BANNER)
+
+	# Apply secure environment if certs exist (check-only, no generation at import time)
+	grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
+	if grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
+		try:
+			from weightslab.security import CertAuthManager
+
+			enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
+			manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
+
+			success, msg = manager.check_and_apply()
+			if success:
+				logger.debug(f"Secure environment applied: {msg}")
+			else:
+				logger.debug(f"Running in unsecured mode — no certs found. To set up: weightslab ui se")
+		except Exception as e:
+			logger.debug(f"Secure environment check skipped: {e}")
+
 	os.environ['WEIGHTSLAB_initialized'] = 'true'  # Ensure WL init once
 
 # Get Package Metadata
@@ -68,12 +88,18 @@ __all__ = [
     "signal",
     "compute_signals",
     "set_log_directory",
-	"tag_samples",
-	"discard_samples",
-	"get_samples_by_tag",
+	  "tag_samples",
+  	"discard_samples",
+  	"get_samples_by_tag",
     "get_discarded_samples",
     "SignalContext",
     "clear_all",
+  	"seed_everything",
+    "run_pending_evaluation",
+	  "eval_fn",
+	  "trigger_pending_evaluation_async",
+  	"guard_training_context",
+    "guard_testing_context",
 
     "_BANNER",
     "__version__",

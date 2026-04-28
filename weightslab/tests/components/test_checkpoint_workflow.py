@@ -314,6 +314,8 @@ class CheckpointSystemTests(unittest.TestCase):
             'experiment_name': EXP_NAME,
             'device': DEVICE,
             'root_log_dir': cls.log_dir,
+            'experiment_dump_to_train_steps_ratio': 5,
+            'skip_checkpoint_load': False,
 
             # Data parameters
             'data': {
@@ -323,8 +325,10 @@ class CheckpointSystemTests(unittest.TestCase):
                 },
             },
 
-            'experiment_dump_to_train_steps_ratio': 5,
-            'skip_checkpoint_load': False,
+            # Checkpoint manager parameters
+            'checkpoint_manager': {
+                'dump_model_architecture': True,
+            },
 
             # Configure global dataframe storage
             'ledger_enable_flushing_threads': True,
@@ -440,7 +444,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print(f"{'='*80}\n")
 
         # Initialize hyperparameters with model_age
-        exp_hash_a, _, changed = self.chkpt_manager.update_experiment_hash(firsttime=True)
+        exp_hash_a, _, changed = self.chkpt_manager.update_experiment_hash(first_time=True)
 
         print(f"\n[OK] Experiment hash A: {exp_hash_a}")
         print(f"[OK] Changed components: {changed}")
@@ -1261,6 +1265,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print(f"[OK] Checkpoint loaded to reach target state {target_hash[:16]}")
         print("\nTraining for 11 epochs to verify reproducibility...")
         pause_controller.resume()
+        model_restarted = ledgers.get_model()  # Get model after loading state
         _, _ = self.train_epochs(model_restarted, dataloader, optimizer_restarted, criterion, num_epochs=self.config['training']['num_epochs'],
             criterion_bin=criterion_bin)
         pause_controller.pause()

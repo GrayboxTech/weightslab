@@ -1,0 +1,20 @@
+# Docker
+node_modules/
+npm-debug.log*
+.npm
+.env
+.env.local
+docker-artifact/
+
+# IDE
+.vscode/
+.idea/
+
+# Build outputs
+dist/
+build/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

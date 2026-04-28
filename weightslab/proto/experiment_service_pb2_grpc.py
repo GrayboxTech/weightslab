@@ -5,7 +5,7 @@ import warnings
 
 from weightslab.proto import experiment_service_pb2 as weightslab_dot_proto_dot_experiment__service__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -89,10 +89,40 @@ class ExperimentServiceStub(object):
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.AgentHealthResponse.FromString,
                 _registered_method=True)
+        self.InitializeAgent = channel.unary_unary(
+                '/ExperimentService/InitializeAgent',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.InitializeAgentRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.InitializeAgentResponse.FromString,
+                _registered_method=True)
+        self.ChangeAgentModel = channel.unary_unary(
+                '/ExperimentService/ChangeAgentModel',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ChangeAgentModelRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ChangeAgentModelResponse.FromString,
+                _registered_method=True)
+        self.GetAgentModels = channel.unary_unary(
+                '/ExperimentService/GetAgentModels',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetAgentModelsRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetAgentModelsResponse.FromString,
+                _registered_method=True)
+        self.ResetAgent = channel.unary_unary(
+                '/ExperimentService/ResetAgent',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.FromString,
+                _registered_method=True)
         self.RestoreCheckpoint = channel.unary_unary(
                 '/ExperimentService/RestoreCheckpoint',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.FromString,
+                _registered_method=True)
+        self.TriggerEvaluation = channel.unary_unary(
+                '/ExperimentService/TriggerEvaluation',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationResponse.FromString,
+                _registered_method=True)
+        self.GetEvaluationStatus = channel.unary_unary(
+                '/ExperimentService/GetEvaluationStatus',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetEvaluationStatusRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetEvaluationStatusResponse.FromString,
                 _registered_method=True)
 
 
@@ -166,9 +196,46 @@ class ExperimentServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def InitializeAgent(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ChangeAgentModel(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAgentModels(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ResetAgent(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def RestoreCheckpoint(self, request, context):
         """Checkpoint restore
         """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def TriggerEvaluation(self, request, context):
+        """Evaluation mode
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetEvaluationStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -231,10 +298,40 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.AgentHealthResponse.SerializeToString,
             ),
+            'InitializeAgent': grpc.unary_unary_rpc_method_handler(
+                    servicer.InitializeAgent,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.InitializeAgentRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.InitializeAgentResponse.SerializeToString,
+            ),
+            'ChangeAgentModel': grpc.unary_unary_rpc_method_handler(
+                    servicer.ChangeAgentModel,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.ChangeAgentModelRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ChangeAgentModelResponse.SerializeToString,
+            ),
+            'GetAgentModels': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAgentModels,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetAgentModelsRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetAgentModelsResponse.SerializeToString,
+            ),
+            'ResetAgent': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResetAgent,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.Empty.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.SerializeToString,
+            ),
             'RestoreCheckpoint': grpc.unary_unary_rpc_method_handler(
                     servicer.RestoreCheckpoint,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.SerializeToString,
+            ),
+            'TriggerEvaluation': grpc.unary_unary_rpc_method_handler(
+                    servicer.TriggerEvaluation,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationResponse.SerializeToString,
+            ),
+            'GetEvaluationStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetEvaluationStatus,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.GetEvaluationStatusRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.GetEvaluationStatusResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -545,6 +642,114 @@ class ExperimentService(object):
             _registered_method=True)
 
     @staticmethod
+    def InitializeAgent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/InitializeAgent',
+            weightslab_dot_proto_dot_experiment__service__pb2.InitializeAgentRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.InitializeAgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ChangeAgentModel(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/ChangeAgentModel',
+            weightslab_dot_proto_dot_experiment__service__pb2.ChangeAgentModelRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ChangeAgentModelResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAgentModels(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetAgentModels',
+            weightslab_dot_proto_dot_experiment__service__pb2.GetAgentModelsRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GetAgentModelsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResetAgent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/ResetAgent',
+            weightslab_dot_proto_dot_experiment__service__pb2.Empty.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.ResetAgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def RestoreCheckpoint(request,
             target,
             options=(),
@@ -561,6 +766,60 @@ class ExperimentService(object):
             '/ExperimentService/RestoreCheckpoint',
             weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.RestoreCheckpointResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def TriggerEvaluation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/TriggerEvaluation',
+            weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.TriggerEvaluationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetEvaluationStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetEvaluationStatus',
+            weightslab_dot_proto_dot_experiment__service__pb2.GetEvaluationStatusRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.GetEvaluationStatusResponse.FromString,
             options,
             channel_credentials,
             insecure,

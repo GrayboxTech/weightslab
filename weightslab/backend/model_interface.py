@@ -215,7 +215,11 @@ class ModelInterface(NetworkWithOps):
             logger.info("Using checkpoint manager from ledger")
 
             if _skip_checkpoint_load:
-                logger.info("Skipping model checkpoint auto-load as requested.")
+                attention_message = (
+                    f"[ATTENTION] Checkpoint data auto-load is disabled for model. "
+                    "Hyperparameters requested skip_checkpoint_load=True, so previous model checkpoint will not be restored."
+                )
+                logger.warning(attention_message)
             else:
                 # Early auto-load latest model architecture and weights if checkpoints exist
                 try:
@@ -289,8 +293,15 @@ class ModelInterface(NetworkWithOps):
         Returns:
             None: This method does not return any value; it modifies the
             state of the wrapped model in-place.
+
+        Note: `assign=False` is explicitly passed so that parameter tensors
+        are updated **in-place** (data copy) rather than replaced with new
+        objects.  Replacing parameter objects (assign=True, the NetworkWithOps
+        default) would silently invalidate any optimizer that was created
+        before this load_state_dict call, because the optimizer holds
+        references to the old Parameter objects.
         """
-        super().load_state_dict(state_dict, strict=strict)
+        super().load_state_dict(state_dict, strict=strict, assign=False)
 
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import threading
 
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
@@ -312,7 +312,11 @@ class DataSampleTrackingWrapper(Dataset):
             # We use physical index here since we are building the map
             # We bypass the wrapper and call wrapped_dataset directly to avoid recursion
             try:
-                raw_item = wrapped_dataset[p_idx]
+                if hasattr(wrapped_dataset, 'get_items'):
+                    raw_item = wrapped_dataset.get_items(p_idx, include_metadata=preload_metadata, include_labels=preload_labels, include_images=False)  # Try to get metadata if supported
+                else:
+                    # logger.warning(f"Wrapped dataset for split '{split}' does not have get_items method. Falling back to __getitem__, which may cause issues if the dataset is not designed for it. Consider implementing get_items for better performance and compatibility.")
+                    raw_item = wrapped_dataset[p_idx]  # By default load everything
             except Exception as e:
                 logger.error(f"Failed to load physical index {p_idx} during initialization: {e}")
                 continue
@@ -326,11 +330,17 @@ class DataSampleTrackingWrapper(Dataset):
                         metadata.update(m)
 
             # Detect UIDs from metadata or generate them
-            uids = metadata.get('uids')
+            default_uid = f"{split}_{p_idx}"
+            uids = self.unique_ids[p_idx] if len(self.unique_ids) else metadata.get(
+                'uids',
+                raw_item[1] if isinstance(raw_item, tuple) and len(raw_item) > 2 else None
+            )
             if uids is None:
                 # Fallback to the single UID that would have been generated
                 # (We use the one already generated in _generate_uids for this physical index)
-                uids = [str(self.unique_ids[p_idx])]
+                uids = [str(self.unique_ids[p_idx]) if len(self.unique_ids) else default_uid]
+            elif not isinstance(uids, list) and isinstance(uids, (str, float, int)):
+                uids = [str(uids)]
 
             # Detect Group ID
             group_id = metadata.get('group_id')
@@ -366,7 +376,7 @@ class DataSampleTrackingWrapper(Dataset):
                         row[SampleStatsEx.TARGET.value] = target_payload
 
                 # Apply metadata flattening
-                if metadata:
+                if preload_metadata and metadata:
                     # Do not overwrite standard managed keys with raw un-casted metadata payload
                     safe_meta = {k: v for k, v in metadata.items() if k not in {SampleStatsEx.GROUP_ID.value, SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.ORIGIN.value}}
                     row.update(safe_meta)
@@ -652,7 +662,7 @@ class DataSampleTrackingWrapper(Dataset):
             """Compute unique ID for a single sample."""
             try:
                 # Get the data from the dataset
-                data = dataset[idx]
+                data = dataset[idx] if not hasattr(dataset, 'get_items') else dataset.get_items(idx, include_metadata=False, include_labels=False, include_images=True)
 
                 # Extract the actual data array (first element of tuple typically)
                 if isinstance(data, tuple):
@@ -673,13 +683,13 @@ class DataSampleTrackingWrapper(Dataset):
                 logger.warning(f"Failed to generate ID for sample {idx}: {e}")
                 return idx, idx  # Fallback to index as ID
 
-        # Use ThreadPoolExecubased on your system (typically CPU count)
+        # Use ThreadPoolExecutor; track progress on completed tasks.
         with ThreadPoolExecutor(thread_name_prefix="unique_id_generator") as executor:
             # Submit all tasks
-            futures = {executor.submit(compute_id, idx): idx for idx in trange(n_samples, desc="Generating unique IDs", unit="sample")}
+            futures = {executor.submit(compute_id, idx): idx for idx in range(n_samples)}
 
             # Collect results as they complete
-            for future in as_completed(futures):
+            for future in tqdm(as_completed(futures), total=n_samples, desc="Generating unique IDs", unit="sample"):
                 idx, uid = future.result()
                 uid = str(uid)  # Ensure UID is a string for consistent handling
                 unique_ids[idx] = uid
@@ -1060,7 +1070,7 @@ class DataSampleTrackingWrapper(Dataset):
             logger.debug(f"[DataSampleTrackingWrapper] num_classes inference failed: {e}")
 
         # 5) Fallback
-        self._num_classes_cache = 1
+        self._num_classes_cache = None
         return self._num_classes_cache
 
     def get_prediction_mask(self, sample_id):

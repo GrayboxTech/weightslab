@@ -45,7 +45,7 @@ dependencies = [
   "torchvision>=0.24,<1; python_version >= '3.13'",
 
   # Serving / schema
-  "grpcio>=1.62,<2",
+  "grpcio>=1.80,<2",
   "protobuf>=4.25,<7",
   "pydantic>=2.7,<3",
 
@@ -87,6 +87,7 @@ utest = [
   "pytorch-lightning>=2.2,<3",
   "tensorboard>=2.14,<3",
   "graphviz>=0.20,<1",
+  "pytest>=9.0.2",
 ]
 
 [project.scripts]

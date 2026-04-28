@@ -188,6 +188,37 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         print(f"========== Setup complete ==========\n")
 
     @classmethod
+    def _extract_sample_ids_and_origins(cls, df, indices):
+        """Helper to extract sample IDs and origins from dataframe regardless of index structure"""
+        if df is None or df.empty or not indices:
+            return [str(i) for i in indices], ["test"] * len(indices)
+
+        sample_ids = []
+        origins = []
+
+        if isinstance(df.index, pd.MultiIndex) and "origin" in df.index.names:
+            # MultiIndex case: (origin, sample_id)
+            for idx in df.index[indices].tolist():
+                origins.append(idx[0])
+                sample_ids.append(str(idx[1]))
+        else:
+            # Simple index case: either origin is a column or use default
+            for i in indices:
+                if "origin" in df.columns:
+                    origins.append(df.iloc[i]["origin"])
+                else:
+                    origins.append("test")
+                # Get sample_id from index or column
+                if df.index.name == "sample_id":
+                    sample_ids.append(str(df.index[i]))
+                elif "sample_id" in df.columns:
+                    sample_ids.append(str(df.iloc[i]["sample_id"]))
+                else:
+                    sample_ids.append(str(i))
+
+        return sample_ids, origins
+
+    @classmethod
     def tearDownClass(cls):
         """Clean up after all tests"""
         print(f"\n========== Cleaning up test environment ==========")
@@ -206,6 +237,19 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         """Test adding tags to samples using EDIT_ACCUMULATE"""
         print("\n[TEST 1] Testing tag addition (EDIT_ACCUMULATE)")
 
+        # Ensure the dataframe is populated with sample data
+        # by calling _slowUpdateInternals which loads data from the dataloader
+        self.data_service._slowUpdateInternals(force=True)
+
+        # Get the actual sample IDs from the dataframe
+        df = self.data_service._all_datasets_df
+        if df is not None and not df.empty and len(df) >= 10:
+            # Get first 10 sample IDs from the dataframe
+            sample_ids, origins = self._extract_sample_ids_and_origins(df, list(range(10)))
+        else:
+            sample_ids = [str(i) for i in range(10)]
+            origins = ["test"] * 10
+
         # Create request to add tag "test_tag" to first 10 samples
         request = pb2.DataEditsRequest(
             stat_name="tags",
@@ -213,8 +257,8 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             string_value="test_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=[str(i) for i in range(10)],
-            sample_origins=["test"] * 10
+            samples_ids=sample_ids,
+            sample_origins=origins
         )
 
         response = self.data_service.EditDataSample(request, self.mock_context)
@@ -230,14 +274,24 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
             # Check first 10 samples have the tag
             for sample_id in range(10):
+                value = False
                 if isinstance(df.index, pd.MultiIndex):
-                    value = df.loc[("test", str(sample_id)), tag_col]
+                    # Try both string and integer formats for sample_id
+                    try:
+                        value = df.loc[("test", str(sample_id)), tag_col]
+                    except KeyError:
+                        try:
+                            value = df.loc[("test", sample_id), tag_col]
+                        except KeyError:
+                            pass
                 else:
                     mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                     if mask.any():
                         value = df.loc[mask, tag_col].iloc[0]
                     else:
-                        value = False
+                        mask = (df.index == sample_id) & (df["origin"] == "test")
+                        if mask.any():
+                            value = df.loc[mask, tag_col].iloc[0]
 
                 self.assertTrue(value, f"Sample {sample_id} should have tag 'test_tag'")
 
@@ -307,27 +361,45 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         tag_col = "tag:test_tag"
 
         for sample_id in range(5):
+            value = False
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", str(sample_id)), tag_col]
+                try:
+                    value = df.loc[("test", str(sample_id)), tag_col]
+                except KeyError:
+                    try:
+                        value = df.loc[("test", sample_id), tag_col]
+                    except KeyError:
+                        pass
             else:
                 mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                 else:
-                    value = False
+                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    if mask.any():
+                        value = df.loc[mask, tag_col].iloc[0]
 
             self.assertFalse(value, f"Sample {sample_id} should NOT have tag 'test_tag'")
 
         # But samples 5-9 should still have it
         for sample_id in range(5, 10):
+            value = False
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", str(sample_id)), tag_col]
+                try:
+                    value = df.loc[("test", str(sample_id)), tag_col]
+                except KeyError:
+                    try:
+                        value = df.loc[("test", sample_id), tag_col]
+                    except KeyError:
+                        pass
             else:
                 mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
                 else:
-                    value = False
+                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    if mask.any():
+                        value = df.loc[mask, tag_col].iloc[0]
 
             self.assertTrue(value, f"Sample {sample_id} should still have tag 'test_tag'")
 
@@ -361,6 +433,18 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         """Test discarded (discard/restore) operations"""
         print("\n[TEST 5] Testing discarded operations")
 
+        # Ensure the dataframe is populated with sample data
+        self.data_service._slowUpdateInternals(force=True)
+
+        # Get the actual sample IDs from the dataframe
+        df = self.data_service._all_datasets_df
+        if df is not None and not df.empty and len(df) > 14:
+            # Get samples 10-14 from the dataframe
+            sample_ids, origins = self._extract_sample_ids_and_origins(df, list(range(10, 15)))
+        else:
+            sample_ids = [str(i) for i in range(10, 15)]
+            origins = ["test"] * 5
+
         # Mark samples 10-14 as discarded (discarded)
         request_discard = pb2.DataEditsRequest(
             stat_name=SampleStatsEx.DISCARDED.value,
@@ -368,8 +452,8 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             string_value="",
             bool_value=True,  # True = discarded
             type=SampleEditType.EDIT_OVERRIDE,
-            samples_ids=[str(i) for i in range(10, 15)],
-            sample_origins=["test"] * 5
+            samples_ids=sample_ids,
+            sample_origins=origins
         )
 
         response = self.data_service.EditDataSample(request_discard, self.mock_context)
@@ -379,14 +463,23 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         # Verify samples are marked as discarded
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 15):
+            value = False
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
+                try:
+                    value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
+                except KeyError:
+                    try:
+                        value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                    except KeyError:
+                        pass
             else:
                 mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
-                    value = False
+                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    if mask.any():
+                        value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
 
             self.assertTrue(value, f"Sample {sample_id} should be discarded")
 
@@ -410,27 +503,45 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         # Verify restoration
         df = self.data_service._all_datasets_df
         for sample_id in range(10, 13):
+            value = False
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
+                try:
+                    value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
+                except KeyError:
+                    try:
+                        value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                    except KeyError:
+                        pass
             else:
                 mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
-                    value = False
+                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    if mask.any():
+                        value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
 
             self.assertFalse(value, f"Sample {sample_id} should be restored")
 
         # But 13-14 should still be discarded
         for sample_id in range(13, 15):
+            value = False
             if isinstance(df.index, pd.MultiIndex):
-                value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
+                try:
+                    value = df.loc[("test", str(sample_id)), SampleStatsEx.DISCARDED.value]
+                except KeyError:
+                    try:
+                        value = df.loc[("test", sample_id), SampleStatsEx.DISCARDED.value]
+                    except KeyError:
+                        pass
             else:
                 mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
                 else:
-                    value = False
+                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    if mask.any():
+                        value = df.loc[mask, SampleStatsEx.DISCARDED.value].iloc[0]
 
             self.assertTrue(value, f"Sample {sample_id} should still be discarded")
 
@@ -440,6 +551,20 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         """Test batch operations on many samples at once"""
         print("\n[TEST 6] Testing batch tag operations")
 
+        # Ensure the dataframe is populated with sample data
+        self.data_service._slowUpdateInternals(force=True)
+
+        # Get the actual sample IDs from the dataframe
+        df = self.data_service._all_datasets_df
+        if df is not None and not df.empty:
+            # Get first 50 sample IDs from the dataframe
+            sample_count = min(50, len(df))
+            sample_ids = [str(idx[1]) for idx in df.index[:sample_count].tolist()]
+            origins = [idx[0] for idx in df.index[:sample_count].tolist()]
+        else:
+            sample_ids = [str(i) for i in range(50)]
+            origins = ["test"] * 50
+
         # Add "batch_tag" to 50 samples at once
         request = pb2.DataEditsRequest(
             stat_name=f"{SampleStatsEx.TAG.value}:batch_tag",
@@ -447,8 +572,8 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             string_value="batch_tag",
             bool_value=False,
             type=SampleEditType.EDIT_ACCUMULATE,
-            samples_ids=[str(i) for i in range(50)],
-            sample_origins=["test"] * 50
+            samples_ids=sample_ids,
+            sample_origins=origins
         )
 
         response = self.data_service.EditDataSample(request, self.mock_context)
@@ -462,19 +587,26 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         success_count = 0
         for sample_id in range(50):
+            value = False
             if isinstance(df.index, pd.MultiIndex):
                 try:
                     value = df.loc[("test", str(sample_id)), tag_col]
-                    if value:
-                        success_count += 1
                 except KeyError:
-                    pass
+                    try:
+                        value = df.loc[("test", sample_id), tag_col]
+                    except KeyError:
+                        pass
             else:
                 mask = (df.index == str(sample_id)) & (df["origin"] == "test")
                 if mask.any():
                     value = df.loc[mask, tag_col].iloc[0]
-                    if value:
-                        success_count += 1
+                else:
+                    mask = (df.index == sample_id) & (df["origin"] == "test")
+                    if mask.any():
+                        value = df.loc[mask, tag_col].iloc[0]
+
+            if value:
+                success_count += 1
 
         self.assertGreaterEqual(success_count, 45, f"Expected at least 45 samples to have batch_tag, got {success_count}")
         print(f"✓ Verified {success_count}/50 samples have the batch tag")
