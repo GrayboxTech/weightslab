@@ -126,13 +126,13 @@ class TestUiSecureEnvironment(unittest.TestCase):
         """Test successful secure environment setup."""
         from pathlib import Path
         from unittest.mock import MagicMock
-        
+
         mock_manager_instance = MagicMock()
         # Make certs_dir a proper MagicMock that acts like a Path
         mock_certs_dir = MagicMock()
         mock_certs_dir.mkdir = MagicMock()
         mock_manager_instance.certs_dir = mock_certs_dir
-        
+
         mock_manager_instance.get_or_create_auth_token.return_value = "fake_token"
         mock_manager_instance.setup_tls_environment.return_value = {"TLS_KEY": "/fake/key"}
         mock_manager_instance.setup_auth_environment.return_value = {"AUTH_TOKEN": "token123"}

@@ -65,7 +65,7 @@ The password is **graybx**. More demo to come in the future!
 ## Getting Started
 ### Installation
 
-Define a Python environment (Python >= 3.10, <3.15)
+Define a Python environment (Python >=3.10, <3.15)
 ```bash
 python -m venv weightslab_venv
 ./weightslab_venv/Scripts/activate
@@ -74,13 +74,12 @@ Or install directly on your machine.
 
 Install our framework:
 ```bash
-python -m pip install weightslab
+pip install weightslab
 ```
 
 Deploy our interface with Docker:
 ```bash
-cd ./ui
-docker compose up -d
+weightslab ui launch
 ```
 
 > [!IMPORTANT]
