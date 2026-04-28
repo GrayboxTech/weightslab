@@ -225,9 +225,6 @@ class CertAuthManager:
         if not success:
             return False, msg
 
-        # Get or create auth token
-        token = self.get_or_create_auth_token()
-
         # Set environment variables
         env_vars = self.setup_tls_environment()
         env_vars.update(self.setup_auth_environment())
