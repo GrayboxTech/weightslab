@@ -232,6 +232,125 @@ def _generate_certs_with_fallback(force_certs: bool = False) -> int:
         return 1
 
 
+def _test_backend_connection(host: str = '127.0.0.1', port: int = 50051, timeout: float = 5.0) -> bool:
+    """Test if backend gRPC server is reachable."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception as e:
+        logger.debug(f"Backend connection test failed: {e}")
+        return False
+
+
+def _run_powershell_script(script_path: str, args: list = None) -> int:
+    """Run a PowerShell script and return exit code."""
+    if not _is_windows():
+        logger.error("Secure launch requires Windows with PowerShell")
+        return 1
+
+    cmd = [
+        'powershell',
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', script_path
+    ]
+
+    if args:
+        cmd.extend(args)
+
+    try:
+        result = subprocess.run(cmd, env=os.environ.copy())
+        return result.returncode
+    except Exception as e:
+        logger.error(f"Failed to run script: {e}")
+        return 1
+
+
+def _convert_to_git_bash_path(win_path: str) -> str:
+    """Convert Windows path to Git Bash compatible format."""
+    p = Path(win_path).as_posix()
+    # Convert C:/Users/... to /c/Users/... for Git Bash
+    if len(p) > 1 and p[1] == ':':
+        drive = p[0].lower()
+        rest = p[2:]
+        return f"/{drive}{rest}"
+    return p
+
+
+def _run_shell_script(script_path: str, args: list = None) -> int:
+    """Run a shell script using bash -c with inline execution."""
+    try:
+        # Fix line endings in the file before running
+        with open(script_path, 'rb') as f:
+            script_bytes = f.read()
+
+        # Ensure Unix line endings
+        fixed_bytes = script_bytes.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+
+        # Write back if needed
+        if fixed_bytes != script_bytes:
+            with open(script_path, 'wb') as f:
+                f.write(fixed_bytes)
+
+        # Convert back to string for piping
+        script_content = fixed_bytes.decode('utf-8')
+
+        # Use bash -c to run the script with arguments
+        # Build the command that sets up $1, $2, etc. before executing script
+        if args:
+            args_setup = ' '.join(f'"{arg}"' for arg in args)
+            bash_cmd = f'set -- {args_setup}; eval "{script_content}"'
+        else:
+            bash_cmd = script_content
+
+        result = subprocess.run(['bash', '-c', bash_cmd], env=os.environ.copy())
+        return result.returncode
+    except FileNotFoundError:
+        logger.error(f"Script file not found: {script_path}")
+        return 1
+    except Exception as e:
+        logger.error(f"Failed to run script: {e}")
+        return 1
+
+
+def _generate_certs_with_fallback(force_certs: bool = False) -> int:
+    """Try shell script first, fall back to PowerShell on Windows if it fails."""
+    cert_script = str(_get_cert_script())
+    if not Path(cert_script).exists():
+        logger.warning(f"Shell script not found: {cert_script}")
+    else:
+        script_args = []
+        if force_certs:
+            script_args.append('--force-create-certs')
+
+        logger.info("Attempting certificate generation with shell script...")
+        exit_code = _run_shell_script(cert_script, script_args)
+        if exit_code == 0:
+            return 0
+        logger.warning(f"Shell script failed (exit code {exit_code})")
+
+    # Fallback to PowerShell on Windows
+    if _is_windows():
+        logger.info("Falling back to PowerShell for certificate generation...")
+        cert_script_ps1 = str(_get_cert_script_ps1())
+        if not Path(cert_script_ps1).exists():
+            logger.error(f"PowerShell script not found: {cert_script_ps1}")
+            return 1
+
+        script_args = []
+        if force_certs:
+            script_args.append('-ForceCreateCerts')
+
+        exit_code = _run_powershell_script(cert_script_ps1, script_args)
+        return exit_code
+    else:
+        logger.error("Neither shell nor PowerShell script could generate certificates")
+        return 1
+
+
 def ui_launch(args):
     """Pull images and start UI containers."""
     _check_docker()

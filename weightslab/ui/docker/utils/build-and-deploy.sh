@@ -207,15 +207,7 @@ fi
 
 # Build and deploy
 if [ "$DEV" = "true" ]; then
-    if [ "$SKIP_BUILD" = "false" ]; then
-        echo "Building development image (single image, configuration at runtime)..."
-        docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml build
-
-        echo "✓ Dev build complete!"
-    else
-        echo "✓ Skipped dev build (image already exists)"
-    fi
-
+    echo "✓ Skipped dev build (image already exists)"
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
     docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml down

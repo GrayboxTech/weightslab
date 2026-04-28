@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch' }}
     outputs:
       channel: ${{ steps.detect.outputs.channel }}
       is_prerelease: ${{ steps.detect.outputs.is_prerelease }}
