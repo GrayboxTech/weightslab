@@ -145,9 +145,21 @@ fi
 export VITE_WL_ENABLE_GRPC_AUTH_TOKEN
 export VITE_GRPC_AUTH_TOKEN
 
+# Get weightslab root from environment variable or derive from script location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
+
+if [ -n "$WEIGHTSLAB_ROOT" ]; then
+    # WEIGHTSLAB_ROOT is explicitly set - use it
+    echo "Using WEIGHTSLAB_ROOT from environment: $WEIGHTSLAB_ROOT"
+    DOCKER_DIR="$WEIGHTSLAB_ROOT/weightslab/ui/docker"
+else
+    # Default: derive from script location (script is at weightslab/ui/docker/utils/)
+    DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
+fi
+
 ENV_FILE="$DOCKER_DIR/.env"
+echo "SCRIPT_DIR: $SCRIPT_DIR"
+echo "DOCKER_DIR: $DOCKER_DIR"
 
 # Write environment variables to .env file for docker compose
 echo "Writing environment variables to .env..."

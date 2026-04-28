@@ -232,64 +232,6 @@ def _generate_certs_with_fallback(force_certs: bool = False) -> int:
         return 1
 
 
-def _test_backend_connection(host: str = '127.0.0.1', port: int = 50051, timeout: float = 5.0) -> bool:
-    """Test if backend gRPC server is reachable."""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
-    except Exception as e:
-        logger.debug(f"Backend connection test failed: {e}")
-        return False
-
-def _convert_to_git_bash_path(win_path: str) -> str:
-    """Convert Windows path to Git Bash compatible format."""
-    p = Path(win_path).as_posix()
-    # Convert C:/Users/... to /c/Users/... for Git Bash
-    if len(p) > 1 and p[1] == ':':
-        drive = p[0].lower()
-        rest = p[2:]
-        return f"/{drive}{rest}"
-    return p
-
-
-def _generate_certs_with_fallback(force_certs: bool = False) -> int:
-    """Try shell script first, fall back to PowerShell on Windows if it fails."""
-    cert_script = str(_get_cert_script())
-    if not Path(cert_script).exists():
-        logger.warning(f"Shell script not found: {cert_script}")
-    else:
-        script_args = []
-        if force_certs:
-            script_args.append('--force-create-certs')
-
-        logger.info("Attempting certificate generation with shell script...")
-        exit_code = _run_shell_script(cert_script, script_args)
-        if exit_code == 0:
-            return 0
-        logger.warning(f"Shell script failed (exit code {exit_code})")
-
-    # Fallback to PowerShell on Windows
-    if _is_windows():
-        logger.info("Falling back to PowerShell for certificate generation...")
-        cert_script_ps1 = str(_get_cert_script_ps1())
-        if not Path(cert_script_ps1).exists():
-            logger.error(f"PowerShell script not found: {cert_script_ps1}")
-            return 1
-
-        script_args = []
-        if force_certs:
-            script_args.append('-ForceCreateCerts')
-
-        exit_code = _run_powershell_script(cert_script_ps1, script_args)
-        return exit_code
-    else:
-        logger.error("Neither shell nor PowerShell script could generate certificates")
-        return 1
-
-
 def ui_launch(args):
     """Pull images and start UI containers."""
     _check_docker()
@@ -305,10 +247,18 @@ def ui_launch(args):
         if _is_windows() and '\\' in certs_dir_str:
             certs_dir_str = _convert_to_git_bash_path(certs_dir_str)
             logger.info(f"Converted path to Unix-style: {certs_dir_str}")
+
+        # Calculate WEIGHTSLAB_ROOT (parent of weightslab package)
+        weightslab_root = str(Path(__file__).parent.parent)
+        if _is_windows() and '\\' in weightslab_root:
+            weightslab_root = _convert_to_git_bash_path(weightslab_root)
+
         bootstrap_env_vars = {
-            'WEIGHTSLAB_CERTS_DIR': certs_dir_str
+            'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
+            'WEIGHTSLAB_ROOT': weightslab_root
         }
         logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
+        logger.info(f"WEIGHTSLAB_ROOT={bootstrap_env_vars['WEIGHTSLAB_ROOT']}")
         exit_code = _run_shell_script(bootstrap_script, [], bootstrap_env_vars)
         if exit_code != 0:
             logger.warning(f"Bootstrap script exited with code {exit_code}, continuing anyway...")
@@ -425,10 +375,18 @@ def ui_launch_secure(args):
     if _is_windows() and '\\' in certs_dir_str:
         certs_dir_str = _convert_to_git_bash_path(certs_dir_str)
         logger.info(f"Converted path to Unix-style: {certs_dir_str}")
+
+    # Calculate WEIGHTSLAB_ROOT (parent of weightslab package)
+    weightslab_root = str(Path(__file__).parent.parent)
+    if _is_windows() and '\\' in weightslab_root:
+        weightslab_root = _convert_to_git_bash_path(weightslab_root)
+
     bootstrap_env_vars = {
-        'WEIGHTSLAB_CERTS_DIR': certs_dir_str
+        'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
+        'WEIGHTSLAB_ROOT': weightslab_root
     }
     logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
+    logger.info(f"WEIGHTSLAB_ROOT={bootstrap_env_vars['WEIGHTSLAB_ROOT']}")
     exit_code = _run_shell_script(bootstrap_script, script_args, bootstrap_env_vars)
     if exit_code != 0:
         logger.error(f"Bootstrap script failed with exit code {exit_code}")
