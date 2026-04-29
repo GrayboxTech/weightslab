@@ -535,9 +535,22 @@ class LayerWiseOperations(NeuronWiseOperations):
         self,
         activation_map: th.Tensor,
         data: th.Tensor,
-        skip_register: bool = False,
+        skip_register: bool = True,
         intermediary: dict | None = None
     ) -> th.Tensor:
+        """
+        Perform the layer operation on the activation map.
+    
+        Args:
+            activation_map (th.Tensor): The activation map for the layer.
+            data (th.Tensor): The input data to the layer.
+            skip_register (bool): Whether to skip registering the activation map.
+            intermediary (dict | None): A dictionary to store intermediary outputs for debugging.
+
+        Returns:
+            th.Tensor: The output activation map after performing the layer operation.
+        """
+
         # Update tensor information
         copy_forward_tracked_attrs(activation_map, data)
 
