@@ -13,6 +13,7 @@ import logging
 import threading
 import hashlib
 import shutil
+import uuid
 from pathlib import Path
 from typing import Dict, Optional, Union, Any, Tuple
 from collections import OrderedDict
@@ -509,7 +510,13 @@ class H5ArrayStore:
         preserve_original: bool = False
     ) -> Dict[int, Dict[str, str]]:
         """
-        Save multiple arrays in batch.
+        Save multiple arrays in batch using a two-phase write to prevent corruption.
+
+        Phase 1 (outside lock): prepare and write to a temp file.
+        Phase 2 (under lock): backup main file, merge temp into it, delete temp.
+
+        If the process is killed during phase 1, the main file is untouched.
+        If killed during phase 2, the backup is restored on the next recover() call.
 
         Args:
             arrays_dict: Nested dict {sample_id: {key_name: array}}
@@ -518,64 +525,112 @@ class H5ArrayStore:
         Returns:
             Dict of path references {sample_id: {key_name: path_ref}}
         """
-        path_refs = {}
-
         self._ensure_parent()
 
+        # --- Phase 1: prepare arrays and write to temp file (no lock held) ---
+        prepared: Dict[str, Dict[str, tuple]] = {}
+        for sample_id, key_arrays in arrays_dict.items():
+            sample_group_name = str(sample_id)
+            for key_name, array in key_arrays.items():
+                if array is None or array.size == 0:
+                    continue
+                if not isinstance(array, np.ndarray):
+                    try:
+                        array = np.asarray(array)
+                    except Exception:
+                        continue
+                if np.issubdtype(array.dtype, np.floating):
+                    if np.any(np.isnan(array)) or np.any(np.isinf(array)):
+                        array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+                should_normalize = self._auto_normalize and not preserve_original
+                if should_normalize:
+                    array, metadata = normalize_array_to_uint(array, preserve_original=False, uint=UINT_DEFAULT)
+                else:
+                    _, metadata = normalize_array_to_uint(array, preserve_original=True, uint=UINT_DEFAULT)
+                prepared.setdefault(sample_group_name, {})[key_name] = (array, metadata)
+
+        if not prepared:
+            return {}
+
+        tmp_path = self._path.with_suffix(f".h5.writing_{uuid.uuid4().hex[:8]}")
+        try:
+            with h5py.File(str(tmp_path), 'w') as f_tmp:
+                for sample_group_name, key_data in prepared.items():
+                    sample_group = f_tmp.create_group(sample_group_name)
+                    for key_name, (array, metadata) in key_data.items():
+                        key_group = sample_group.create_group(key_name)
+                        if self._use_compression:
+                            key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
+                        else:
+                            key_group.create_dataset('data', data=array)
+                        for k, v in metadata.items():
+                            key_group.attrs[k] = v
+        except Exception as exc:
+            logger.error(f"[H5ArrayStore] Failed to write temp batch file: {exc}")
+            tmp_path.unlink(missing_ok=True)
+            return {}
+
+        # --- Phase 2: merge temp into main file under lock ---
         with self._local_lock:
             with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                backup_path = self._create_backup()
                 try:
-                    with h5py.File(str(self._path), 'a') as f:
-                        for sample_id, key_arrays in arrays_dict.items():
-                            sample_refs = {}
-                            sample_group_name = str(sample_id)
+                    with h5py.File(str(self._path), 'a') as f_main:
+                        with h5py.File(str(tmp_path), 'r') as f_tmp:
+                            for sample_group_name in f_tmp:
+                                if sample_group_name in f_main:
+                                    del f_main[sample_group_name]
+                                f_tmp.copy(sample_group_name, f_main)
 
-                            if sample_group_name not in f:
-                                sample_group = f.create_group(sample_group_name)
-                            else:
-                                sample_group = f[sample_group_name]
+                    path_refs: Dict[int, Dict[str, str]] = {}
+                    for sample_group_name, key_data in prepared.items():
+                        sample_id = int(sample_group_name)
+                        path_refs[sample_id] = {
+                            key_name: self._build_path_reference(sample_id, key_name)
+                            for key_name in key_data
+                        }
 
-                            for key_name, array in key_arrays.items():
-                                if array is None or array.size == 0:
-                                    continue
+                    # Merge succeeded — remove backup so recover() doesn't restore it
+                    if backup_path:
+                        backup_path.unlink(missing_ok=True)
 
-                                # Convert and normalize
-                                if not isinstance(array, np.ndarray):
-                                    try:
-                                        array = np.asarray(array)
-                                    except Exception:
-                                        continue
-
-                                should_normalize = self._auto_normalize and not preserve_original
-                                if should_normalize:
-                                    array, metadata = normalize_array_to_uint(array, preserve_original=False, uint=UINT_DEFAULT)
-                                else:
-                                    _, metadata = normalize_array_to_uint(array, preserve_original=True, uint=UINT_DEFAULT)
-
-                                # Remove existing
-                                if key_name in sample_group:
-                                    del sample_group[key_name]
-
-                                # Create and save
-                                key_group = sample_group.create_group(key_name)
-                                if self._use_compression:
-                                    key_group.create_dataset('data', data=array, compression='gzip', compression_opts=4)
-                                else:
-                                    key_group.create_dataset('data', data=array)
-
-                                for k, v in metadata.items():
-                                    key_group.attrs[k] = v
-
-                                sample_refs[key_name] = self._build_path_reference(sample_id, key_name)
-
-                            if sample_refs:
-                                path_refs[sample_id] = sample_refs
-
+                    logger.debug(
+                        f"[H5ArrayStore] Successfully upserted "
+                        f"{sum(len(v) for v in path_refs.values())} arrays for "
+                        f"{len(path_refs)} samples"
+                    )
                     return path_refs
 
                 except Exception as exc:
-                    logger.error(f"[H5ArrayStore] Failed to save arrays in batch: {exc}")
+                    logger.error(f"[H5ArrayStore] Failed to merge temp batch file: {exc}")
+                    if backup_path:
+                        self._restore_backup(backup_path)
                     return {}
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+
+    def recover(self) -> None:
+        """
+        Recover from a crash during save_arrays_batch.
+
+        Call this once at startup. It handles two cases:
+        - Leftover *.writing_* temp files: safe to delete (phase 1 never completed).
+        - Existing backup file: main file may be half-written; restore from backup.
+        """
+        # Clean up incomplete temp files from phase 1
+        for tmp_file in self._path.parent.glob(f"{self._path.stem}.h5.writing_*"):
+            logger.warning(f"[H5ArrayStore] Removing incomplete temp file from previous crash: {tmp_file}")
+            tmp_file.unlink(missing_ok=True)
+
+        # Restore from backup if it exists (means phase 2 was interrupted)
+        backup_path = self._path.with_suffix(".h5.backup")
+        if backup_path.exists():
+            logger.warning(
+                f"[H5ArrayStore] Backup file found at {backup_path}. "
+                "Previous write may have been interrupted — restoring."
+            )
+            if self._restore_backup(backup_path):
+                backup_path.unlink(missing_ok=True)
 
     def load_array(self, path_ref: str) -> Optional[np.ndarray]:
         """
@@ -609,7 +664,7 @@ class H5ArrayStore:
         # self._rw_lock.acquire_read()
         try:
             try:
-                with h5py.File(str(self._path), 'r') as f:
+                with h5py.File(str(self._path), 'r', locking=False) as f:
                     sample_group_name = str(sample_id)
 
                     # if not in, return None
@@ -664,7 +719,7 @@ class H5ArrayStore:
         self._rw_lock.acquire_read()
         try:
             try:
-                with h5py.File(str(self._path), 'r') as f:
+                with h5py.File(str(self._path), 'r', locking=False) as f:
                     for sample_id, key_refs in path_refs.items():
                         sample_arrays = {}
                         sample_group_name = str(sample_id)

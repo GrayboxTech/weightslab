@@ -213,7 +213,7 @@ class DataSampleTrackingWrapper(Dataset):
             )
 
         # First, generate UIDs and detect duplicates before wrapping
-        logger.debug(f"Generating unique IDs for {len(wrapped_dataset)} samples...")
+        logger.debug(f"Generating unique IDs for {len(wrapped_dataset)} samples...") if not compute_hash else None
 
         # Generate str unique IDs
         if preload_uids and compute_hash:

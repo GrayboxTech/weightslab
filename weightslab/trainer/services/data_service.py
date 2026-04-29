@@ -1102,6 +1102,8 @@ class DataService:
             if not skip_label_for_request and task_type != "classification":
                 t0_gt_conv = time.time()
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
+                if label_raw is None and dataset is not None:
+                    label_raw = load_label(dataset, sample_id)
                 label_arr = to_numpy_safe(label_raw)
                 if label_arr is None:
                     try:

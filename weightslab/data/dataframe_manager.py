@@ -75,6 +75,7 @@ class LedgeredDataFrameManager:
                     # data.h5 is already in checkpoints/data/, so arrays.h5 goes there too
                     array_path = store.get_path().parent / "arrays.h5"
                     self._array_store = H5ArrayStore(array_path)
+                    self._array_store.recover()
 
     def _normalize_sample_id(self, sample_id: Any) -> Any:
         """Normalize incoming sample IDs while preserving numeric IDs when possible."""
@@ -1149,12 +1150,12 @@ class LedgeredDataFrameManager:
             buffered = list(self._buffer.values())
             self._buffer = {}
 
-        # Apply records outside buffer lock to avoid deadlock
-        if buffered:
-            self._apply_buffer_records_nonblocking(buffered)
+            # Apply records outside buffer lock to avoid deadlock
+            if buffered:
+                self._apply_buffer_records_nonblocking(buffered)
 
-        # Flush to H5 if needed outside buffer lock
-        self._flush_to_h5_if_needed(force=force)
+            # Flush to H5 if needed outside buffer lock
+            self._flush_to_h5_if_needed(force=force)
 
     def flush(self):
         """Blocking flush to ensure all data is persisted to H5 immediately."""
