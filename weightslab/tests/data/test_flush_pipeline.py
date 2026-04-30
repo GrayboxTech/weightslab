@@ -219,7 +219,6 @@ class TestBufferMemoryBound(unittest.TestCase):
         mgr = _make_mgr(flush_max_rows=FLUSH_MAX, enable_flushing_threads=True)
 
         max_buffer_seen = {"n": 0}
-        original_enqueue = mgr._buffer.__setitem__
 
         # Track high-water mark inside the buffer lock.
         observation_lock = threading.Lock()

@@ -1,8 +1,7 @@
 #!/bin/sh
 # Auto-detect TLS and tokens, then build production image
-# set -e
 
-# DEBUG: Print all environment variables to diagnose issues
+# Print all environment variables to diagnose issues
 echo "===== Environment Variables Received ====="
 env | grep -E 'WEIGHTSLAB|VITE|ENVOY|HOME' || true
 echo "=========================================="
@@ -23,7 +22,7 @@ for arg in "$@"; do
       DEV=true
       ;;
     --unsecure|--unsecured)
-      echo "⚠ Forcing UNSECURE mode (HTTP, no auth)"
+      echo "Forcing UNSECURE mode (HTTP, no auth)"
       FORCE_UNSECURE=1
       ;;
   esac
@@ -32,10 +31,10 @@ done
 # Check if WEIGHTSLAB_CERTS_DIR was explicitly set to empty string (before applying defaults)
 # This is how the E2E tests disable certs: WEIGHTSLAB_CERTS_DIR=""
 if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "⚠ --unsecured flag provided: disabling certs and auth"
+    echo "--unsecured flag provided: disabling certs and auth"
     WEIGHTSLAB_CERTS_DIR=""
 elif [ "${WEIGHTSLAB_CERTS_DIR+x}" ] && [ -z "$WEIGHTSLAB_CERTS_DIR" ]; then
-    echo "⚠ WEIGHTSLAB_CERTS_DIR explicitly set to empty - forcing UNSECURE mode"
+    echo "WEIGHTSLAB_CERTS_DIR explicitly set to empty - forcing UNSECURE mode"
     FORCE_UNSECURE=1
 elif [ ! -d "$WEIGHTSLAB_CERTS_DIR" ]; then
     # WEIGHTSLAB_CERTS_DIR doesn't exist, try converting Windows path to Unix-style
@@ -47,10 +46,10 @@ elif [ ! -d "$WEIGHTSLAB_CERTS_DIR" ]; then
         echo "Detected Windows path, converting to Unix-style: $CONVERTED_PATH"
 
         if [ -d "$CONVERTED_PATH" ]; then
-            echo "✓ Found converted path at '$CONVERTED_PATH'"
+            echo "Found converted path at '$CONVERTED_PATH'"
             WEIGHTSLAB_CERTS_DIR="$CONVERTED_PATH"
         else
-            echo "✗ Converted path not found at '$CONVERTED_PATH'"
+            echo "Converted path not found at '$CONVERTED_PATH'"
             # Continue with next fallback
             WEIGHTSLAB_CERTS_DIR=""
         fi
@@ -68,16 +67,10 @@ elif [ ! -d "$WEIGHTSLAB_CERTS_DIR" ]; then
 fi
 
 TOKEN_FILE="${WEIGHTSLAB_CERTS_DIR}/.grpc_auth_token"
-
-echo "DEBUG: HOME=$HOME"
-echo "DEBUG: WEIGHTSLAB_CERTS_DIR='$WEIGHTSLAB_CERTS_DIR' (empty: $([ -z "$WEIGHTSLAB_CERTS_DIR" ] && echo "yes" || echo "no"))"
-echo "DEBUG: FORCE_UNSECURE=$FORCE_UNSECURE"
-echo "DEBUG: WEIGHTSLAB_CERTS_DIR env var was set: $([ "${WEIGHTSLAB_CERTS_DIR+x}" ] && echo "yes" || echo "no")"
 if [ -n "$WEIGHTSLAB_CERTS_DIR" ]; then
-    echo "DEBUG: Checking for certs..."
-    ls -la "$WEIGHTSLAB_CERTS_DIR" 2>/dev/null || echo "DEBUG: WEIGHTSLAB_CERTS_DIR path does not exist or is empty"
+    ls -la "$WEIGHTSLAB_CERTS_DIR" 2>/dev/null || echo "WEIGHTSLAB_CERTS_DIR path does not exist or is empty"
 else
-    echo "DEBUG: WEIGHTSLAB_CERTS_DIR is empty, skipping cert check"
+    echo "WEIGHTSLAB_CERTS_DIR is empty, skipping cert check"
 fi
 
 # Respect environment variables if explicitly set (for E2E tests)
@@ -88,7 +81,7 @@ ENVOY_DOWNSTREAM_TLS="${ENVOY_DOWNSTREAM_TLS:-unset}"
 
 # Detect TLS (unless overridden by environment)
 if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "✗ UNSECURE mode: HTTP (no TLS)"
+    echo "UNSECURE mode: HTTP (no TLS)"
     VITE_DEV_SERVER_HTTPS=0
     VITE_SERVER_PROTOCOL=http
     ENVOY_UPSTREAM_TLS=off
@@ -100,13 +93,13 @@ elif [ "$VITE_SERVER_PROTOCOL" != "unset" ]; then
     [ "$ENVOY_UPSTREAM_TLS" = "unset" ] && ENVOY_UPSTREAM_TLS=off
     [ "$ENVOY_DOWNSTREAM_TLS" = "unset" ] && ENVOY_DOWNSTREAM_TLS=off
 elif [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.crt" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.key" ]; then
-    echo "✓ TLS certificates found - building with HTTPS support"
+    echo "TLS certificates found - building with HTTPS support"
     VITE_DEV_SERVER_HTTPS=1
     VITE_SERVER_PROTOCOL=https
     ENVOY_UPSTREAM_TLS=on
     ENVOY_DOWNSTREAM_TLS=on
 else
-    echo "✗ TLS certificates not found - building for HTTP mode"
+    echo "TLS certificates not found - building for HTTP mode"
     VITE_DEV_SERVER_HTTPS=0
     VITE_SERVER_PROTOCOL=http
     ENVOY_UPSTREAM_TLS=off
@@ -124,7 +117,7 @@ VITE_WL_ENABLE_GRPC_AUTH_TOKEN="${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-unset}"
 VITE_GRPC_AUTH_TOKEN="${VITE_GRPC_AUTH_TOKEN:-}"
 
 if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "✗ UNSECURE mode: auth disabled"
+    echo "UNSECURE mode: auth disabled"
     VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
     VITE_GRPC_AUTH_TOKEN=""
 elif [ "$VITE_WL_ENABLE_GRPC_AUTH_TOKEN" != "unset" ]; then
@@ -132,11 +125,11 @@ elif [ "$VITE_WL_ENABLE_GRPC_AUTH_TOKEN" != "unset" ]; then
     echo "Using environment-provided auth settings"
     true
 elif [ -f "$TOKEN_FILE" ]; then
-    echo "✓ gRPC token found - enabling auth"
+    echo "gRPC token found - enabling auth"
     VITE_WL_ENABLE_GRPC_AUTH_TOKEN=1
     VITE_GRPC_AUTH_TOKEN=$(cat "$TOKEN_FILE")
 else
-    echo "✗ gRPC token not found - auth disabled"
+    echo "gRPC token not found - auth disabled"
     VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
     VITE_GRPC_AUTH_TOKEN=""
 fi
@@ -198,7 +191,7 @@ WS_SERVER_PROTOCOL=$VITE_SERVER_PROTOCOL
 GRPC_BACKEND_PORT=${GRPC_BACKEND_PORT:-50051}
 EOF
 fi
-echo "✓ .env file written to $ENV_FILE"
+echo ".env file written to $ENV_FILE"
 cat "$ENV_FILE"
 
 # Convert WEIGHTSLAB_CERTS_DIR to absolute path for docker-compose compatibility
@@ -219,13 +212,13 @@ fi
 
 # Build and deploy
 if [ "$DEV" = "true" ]; then
-    echo "✓ Skipped dev build (image already exists)"
+    echo "Skipped dev build (image already exists)"
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
     docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml down
     docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml up -d --force-recreate
 
-    echo "✓ Deployment to development complete!"
+    echo "Deployment to development complete!"
 else
     if [ "$SKIP_BUILD" = "false" ]; then
         echo "Building production image (single image, configuration at runtime)..."
@@ -234,13 +227,13 @@ else
 
         BUILD_STATUS=$?
         if [ $BUILD_STATUS -ne 0 ]; then
-            echo "✗ Production build failed with status $BUILD_STATUS"
+            echo "Production build failed with status $BUILD_STATUS"
             exit $BUILD_STATUS
         fi
 
-        echo "✓ Production build complete!"
+        echo "Production build complete!"
     else
-        echo "✓ Skipped production build (image already exists)"
+        echo "Skipped production build (image already exists)"
     fi
 
     # Deploy (docker compose automatically reads .env)
@@ -253,13 +246,13 @@ else
 
     UP_STATUS=$?
     if [ $UP_STATUS -ne 0 ]; then
-        echo "✗ Container startup failed with status $UP_STATUS"
+        echo "Container startup failed with status $UP_STATUS"
         echo "Checking container logs..."
         docker compose -f $DOCKER_DIR/docker-compose.yml logs --tail=50 || true
         exit $UP_STATUS
     fi
 
-    echo "✓ Deployment to production complete!"
+    echo "Deployment to production complete!"
     echo "Running containers:"
     docker compose -f $DOCKER_DIR/docker-compose.yml ps || true
 fi
