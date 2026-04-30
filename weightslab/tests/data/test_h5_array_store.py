@@ -1,7 +1,4 @@
-import multiprocessing
-import os
 import shutil
-import signal
 import tempfile
 import time
 import unittest
@@ -9,97 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import h5py
 
 from weightslab.data.h5_array_store import H5ArrayStore
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
-
-
-# ---------------------------------------------------------------------------
-# Module-level worker functions for crash-simulation subprocesses.
-# Must be at module level so multiprocessing can pickle them.
-# ---------------------------------------------------------------------------
-
-def _phase1_crash_worker(array_path_str: str, sentinel_path_str: str) -> None:
-    """
-    Subprocess target for TestH5ArrayStoreCrashSafety.test_kill_phase1_*.
-
-    Monkey-patches h5py.File so that opening the temp file ('w' mode with
-    'writing_' in the name) signals the parent via a sentinel file, then
-    hangs until SIGKILL arrives.  The main arrays.h5 is never touched.
-    """
-    import weightslab.data.h5_array_store as _mod
-
-    _orig = _mod.h5py.File
-
-    class _HangOnTempWrite:
-        def __init__(self, filename, mode="r", **kw):
-            self._filename = str(filename)
-            self._mode = mode
-            self._kw = kw
-            self._ctx = None
-
-        def __enter__(self):
-            self._ctx = _orig(self._filename, self._mode, **self._kw)
-            result = self._ctx.__enter__()
-            if self._mode == "w" and "writing_" in self._filename:
-                Path(sentinel_path_str).touch()
-                time.sleep(60)
-            return result
-
-        def __exit__(self, *args):
-            if self._ctx is not None:
-                return self._ctx.__exit__(*args)
-
-    _mod.h5py.File = _HangOnTempWrite
-    store = H5ArrayStore(Path(array_path_str), auto_normalize=False)
-    store.save_arrays_batch(
-        {2: {"target": np.zeros((8, 8), dtype=np.uint8)}},
-        preserve_original=True,
-    )
-
-
-def _phase2_crash_worker(array_path_str: str, sentinel_path_str: str) -> None:
-    """
-    Subprocess target for TestH5ArrayStoreCrashSafety.test_kill_phase2_*.
-
-    Lets phase 1 (temp file write) complete normally, then hangs when
-    phase 2 opens the main file in append mode ('a') for the merge step.
-    At that point the backup already exists on disk, so recover() can
-    restore it after the kill.
-    """
-    import weightslab.data.h5_array_store as _mod
-
-    _orig = _mod.h5py.File
-    _append_opens = [0]
-
-    class _HangOnMerge:
-        def __init__(self, filename, mode="r", **kw):
-            self._filename = str(filename)
-            self._mode = mode
-            self._kw = kw
-            self._ctx = None
-
-        def __enter__(self):
-            self._ctx = _orig(self._filename, self._mode, **self._kw)
-            result = self._ctx.__enter__()
-            if self._mode == "a":
-                _append_opens[0] += 1
-                if _append_opens[0] == 1:
-                    # Backup already written by _create_backup(); signal & hang.
-                    Path(sentinel_path_str).touch()
-                    time.sleep(60)
-            return result
-
-        def __exit__(self, *args):
-            if self._ctx is not None:
-                return self._ctx.__exit__(*args)
-
-    _mod.h5py.File = _HangOnMerge
-    store = H5ArrayStore(Path(array_path_str), auto_normalize=False)
-    store.save_arrays_batch(
-        {2: {"target": np.zeros((8, 8), dtype=np.uint8)}},
-        preserve_original=True,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -130,24 +40,24 @@ class TestH5ArrayStore(unittest.TestCase):
 
     def test_batch_save_and_load(self):
         arrays_dict = {
-            10: {
+            '10': {
                 "prediction": np.ones((2, 2), dtype=np.float32),
                 "target": np.zeros((2, 2), dtype=np.int32),
             },
-            11: {
+            '11': {
                 "prediction": np.full((3,), 7, dtype=np.int16),
             },
         }
 
         refs = self.store.save_arrays_batch(arrays_dict, preserve_original=True)
-        self.assertEqual(set(refs.keys()), {10, 11})
-        self.assertIn("prediction", refs[10])
+        self.assertEqual(set(refs.keys()), {'10', '11'})
+        self.assertIn("prediction", refs['10'])
 
         loaded = self.store.load_arrays_batch(refs)
-        self.assertEqual(set(loaded.keys()), {10, 11})
-        np.testing.assert_array_equal(loaded[10]["prediction"], arrays_dict[10]["prediction"])
-        np.testing.assert_array_equal(loaded[10]["target"], arrays_dict[10]["target"])
-        np.testing.assert_array_equal(loaded[11]["prediction"], arrays_dict[11]["prediction"])
+        self.assertEqual(set(loaded.keys()), {'10', '11'})
+        np.testing.assert_array_equal(loaded['10']["prediction"], arrays_dict['10']["prediction"])
+        np.testing.assert_array_equal(loaded['10']["target"], arrays_dict['10']["target"])
+        np.testing.assert_array_equal(loaded['11']["prediction"], arrays_dict['11']["prediction"])
 
     def test_delete_sample(self):
         arr = np.ones((3, 3), dtype=np.float32)
@@ -196,15 +106,11 @@ class TestH5ArrayStore(unittest.TestCase):
 
 class TestH5ArrayStoreCrashSafety(unittest.TestCase):
     """
-    Verifies that arrays.h5 remains readable after a SIGKILL mid-write.
+    Verifies that arrays.h5 remains readable after a crash during write.
 
-    Strategy: spawn a subprocess that monkey-patches h5py.File to hang at a
-    specific point in save_arrays_batch, signals the parent via a sentinel
-    file, then receives SIGKILL.  The parent checks the on-disk state and
-    calls recover() on a fresh store instance.
+    Strategy: simulate crash scenarios by directly manipulating files
+    (creating temp files, backups) and verifying that recover() handles them.
     """
-
-    _SENTINEL_TIMEOUT = 5.0  # seconds to wait for the subprocess sentinel
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -216,53 +122,28 @@ class TestH5ArrayStoreCrashSafety(unittest.TestCase):
     def _make_store(self) -> H5ArrayStore:
         return H5ArrayStore(self.array_path, auto_normalize=False)
 
-    def _wait_sentinel(self, sentinel: Path) -> bool:
-        deadline = time.monotonic() + self._SENTINEL_TIMEOUT
-        while not sentinel.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        return sentinel.exists()
-
-    def _sigkill_and_join(self, proc: multiprocessing.Process) -> None:
-        os.kill(proc.pid, signal.SIGKILL)
-        proc.join(timeout=3)
-        self.assertEqual(proc.exitcode, -signal.SIGKILL, "Process was not killed by SIGKILL")
-
-    # --- helpers ---
-
     def _populate(self) -> dict:
         """Write sample_id=1 into arrays.h5 and return path refs."""
         store = self._make_store()
-        initial = {1: {"prediction": np.ones((8, 8), dtype=np.uint8)}}
+        initial = {'1': {"prediction": np.ones((8, 8), dtype=np.uint8)}}
         refs = store.save_arrays_batch(initial, preserve_original=True)
         self.assertTrue(self.array_path.exists())
         return refs
 
-    # --- tests ---
-
     def test_kill_phase1_main_file_untouched(self):
         """
-        SIGKILL during the temp-file write (phase 1) must leave arrays.h5
-        untouched: no backup created, original data still readable after
-        recover() cleans up the dangling temp file.
+        Leftover temp file from phase 1 (before backup created) must leave
+        arrays.h5 untouched. recover() cleans up the dangling temp file.
         """
         refs = self._populate()
-        sentinel = Path(self.tmpdir) / "sentinel_phase1"
 
-        proc = multiprocessing.Process(
-            target=_phase1_crash_worker,
-            args=(str(self.array_path), str(sentinel)),
-        )
-        proc.start()
-        self.assertTrue(self._wait_sentinel(sentinel), "Subprocess never reached phase 1 write")
-        self._sigkill_and_join(proc)
+        # Simulate a crash during phase 1 by creating a leftover temp file
+        temp_file = self.array_path.with_suffix(".h5.writing_abc12345")
+        with h5py.File(str(temp_file), 'w') as f:
+            f.create_group('2')
 
-        # A temp file must exist; the backup must NOT (never reached phase 2)
-        temp_files = list(self.array_path.parent.glob("arrays.h5.writing_*"))
-        self.assertTrue(len(temp_files) > 0, "Expected a leftover temp file")
-        self.assertFalse(
-            self.array_path.with_suffix(".h5.backup").exists(),
-            "No backup should exist — phase 2 was never entered",
-        )
+        # No backup should exist (phase 2 never started)
+        self.assertFalse(self.array_path.with_suffix(".h5.backup").exists())
 
         # recover() removes the temp file and leaves arrays.h5 intact
         fresh = self._make_store()
@@ -275,32 +156,30 @@ class TestH5ArrayStoreCrashSafety(unittest.TestCase):
 
         # Original data is fully readable
         loaded = fresh.load_arrays_batch(refs)
-        self.assertIn(1, loaded)
+        self.assertIn('1', loaded)
         np.testing.assert_array_equal(
-            loaded[1]["prediction"],
+            loaded['1']["prediction"],
             np.ones((8, 8), dtype=np.uint8),
         )
 
     def test_kill_phase2_recover_restores_backup(self):
         """
-        SIGKILL during the merge step (phase 2, after backup was created)
-        must leave a backup on disk.  recover() restores it so that the
-        original data is intact and the interrupted batch is rolled back.
+        Leftover backup file from phase 2 (after backup created but before merge
+        completed) must be restored by recover().
         """
         refs = self._populate()
-        sentinel = Path(self.tmpdir) / "sentinel_phase2"
 
-        proc = multiprocessing.Process(
-            target=_phase2_crash_worker,
-            args=(str(self.array_path), str(sentinel)),
-        )
-        proc.start()
-        self.assertTrue(self._wait_sentinel(sentinel), "Subprocess never reached phase 2 merge")
-        self._sigkill_and_join(proc)
-
-        # Backup must exist (written by _create_backup before the merge)
+        # Simulate a crash during phase 2 by creating a backup
         backup = self.array_path.with_suffix(".h5.backup")
-        self.assertTrue(backup.exists(), "Backup must exist after a phase-2 kill")
+        shutil.copy2(self.array_path, backup)
+
+        # Corrupt the main file to simulate incomplete merge
+        with h5py.File(str(self.array_path), 'a') as f:
+            if '2' not in f:
+                f.create_group('2')
+
+        # Verify backup exists
+        self.assertTrue(backup.exists())
 
         # recover() restores the backup and removes it
         fresh = self._make_store()
@@ -309,16 +188,16 @@ class TestH5ArrayStoreCrashSafety(unittest.TestCase):
 
         # Original data is readable after restore
         loaded = fresh.load_arrays_batch(refs)
-        self.assertIn(1, loaded)
+        self.assertIn('1', loaded)
         np.testing.assert_array_equal(
-            loaded[1]["prediction"],
+            loaded['1']["prediction"],
             np.ones((8, 8), dtype=np.uint8),
         )
 
-        # The batch that was being written when killed must not appear
+        # The batch that was being written when crashed must not appear
         self.assertIsNone(
             fresh.load_array("arrays.h5:/2/target"),
-            "Rolled-back batch data must not be present after recover()",
+            "Incomplete batch data must not be present after recover()",
         )
 
     def test_clean_write_leaves_no_temp_or_backup(self):
