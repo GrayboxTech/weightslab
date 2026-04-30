@@ -584,7 +584,7 @@ class H5ArrayStore:
 
                     path_refs: Dict[int, Dict[str, str]] = {}
                     for sample_group_name, key_data in prepared.items():
-                        sample_id = int(sample_group_name)
+                        sample_id = sample_group_name
                         path_refs[sample_id] = {
                             key_name: self._build_path_reference(sample_id, key_name)
                             for key_name in key_data

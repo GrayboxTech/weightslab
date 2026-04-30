@@ -230,7 +230,7 @@ class GuardContext:
         if self.model is not None and hasattr(self, '_prev_training_mode'):
             self.model.train(self._prev_training_mode)
 
-        # Reset context to unknown
+        # Reset contxt to unknown
         if self._context_token is not None:
             _current_context.reset(self._context_token)
             self._context_token = None

@@ -470,7 +470,7 @@ class LedgeredDataFrameManager:
             # Merge nested dicts: update existing sample_id records, add new ones
             for sample_id, record in records_to_add.items():
                 self._buffer.setdefault(sample_id, {}).update(record)
-            logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
+            logger.info(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
             should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
 
         # Trigger flush outside lock
@@ -978,9 +978,10 @@ class LedgeredDataFrameManager:
                             self._flush_queue_count -= 1
                             force_requested = True
 
+                    # Forced when buffer is full
                     if force_requested:
                         self._flush_event.clear()  # Clear before flush
-                        self.flush_if_needed_nonblocking(force=True)
+                        self.flush()
 
                     # Wait for flush event (force) or timeout (periodic)
                     # self._flush_event.wait(timeout=self._flush_interval)
@@ -1136,44 +1137,68 @@ class LedgeredDataFrameManager:
             return len(self._pending) >= self._flush_max_rows or self._force_flush
 
     def flush_async(self):
+        """Signal flush thread. Returns once buffer has been drained (not after H5 write).
+
+        Training is only blocked for the brief buffer-drain window (~1ms), not for the
+        full DF→H5 write.  If the buffer refills before the flush thread loops back, the
+        next call will wait again — bounding in-memory usage to 2×flush_max_rows records.
+        """
         with self._queue_lock:
             self._flush_queue_count += 1
-        self._flush_event.set()  # Wake thread immediately
+        self._flush_event.set()
+        # Wait only until the flush thread has drained the buffer (fast path).
+        # Do NOT wait on _should_flush() / _pending — that would block until H5 write
+        # is complete, stalling the training thread for seconds.
+        deadline = time.time() + 60.0
+        logger.debug(f"[LedgeredDataFrameManager] Waiting for buffer to drain. Buffer size: {len(self._buffer)}.")
+        while time.time() < deadline:
+            with self._buffer_lock:
+                logger.debug(f"[LedgeredDataFrameManager] Acquiring buffer lock for flush_async check. Buffer size: {len(self._buffer)}.")
+                if len(self._buffer) < self._flush_max_rows:
+                    logger.debug(f"[LedgeredDataFrameManager] Buffer drained, proceeding. Buffer size: {len(self._buffer)}.")
+                    return
+            time.sleep(0.1)
+        logger.warning("[LedgeredDataFrameManager] flush_async timed out waiting for buffer drain after 60s")
 
     def flush_if_needed_nonblocking(self, force: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
-        # Acquire buffer lock to flush data to DF or h5
+        # Drain buffer quickly, then release lock before any DF/H5 work.
         with self._buffer_lock:
-            if not self._buffer:
-                return
-            # Drain buffer quickly
             buffered = list(self._buffer.values())
             self._buffer = {}
 
-            # Apply records outside buffer lock to avoid deadlock
-            if buffered:
-                self._apply_buffer_records_nonblocking(buffered)
+        if buffered:
+            logger.info(f"Flushing {len(buffered)} buffered records to DataFrame (non-blocking).")
+            self._apply_buffer_records_nonblocking(buffered)
+            logger.info(f"Applied {len(buffered)} buffered records to DataFrame (non-blocking).")
 
-            # Flush to H5 if needed outside buffer lock
-            self._flush_to_h5_if_needed(force=force)
+        # Always check H5 flush even when buffer was empty (pending rows must drain too).
+        logger.info(f"Checking if flush to H5 is needed (non-blocking). Pending count: {len(self._pending)}.")
+        self._flush_to_h5_if_needed(force=force)
+        logger.info(f"Completed non-blocking flush check. Pending count after flush: {len(self._pending)}.")
 
     def flush(self):
-        """Blocking flush to ensure all data is persisted to H5 immediately."""
-        # 1. Drain buffer fully (blocking)
+        """Blocking flush: buffer → DF → H5.
+
+        The buffer lock is released immediately after draining so that the training
+        thread can enqueue new records while the (slower) DF and H5 writes proceed.
+        """
+        # Step 1: drain buffer atomically — fast, minimal lock hold.
         with self._buffer_lock:
-            if not self._buffer:
-                buffered = []
-            else:
-                buffered = list(self._buffer.values())
-                self._buffer = {}
+            buffered = list(self._buffer.values())
+            self._buffer = {}
+        # _buffer_lock released here; training can enqueue again.
 
-        # 2. Apply records (blocking)
+        # Step 2: apply to DF (blocking _lock acquisition; outside buffer lock).
         if buffered:
+            logger.info(f"Flushing {len(buffered)} buffered records to DataFrame.")
             self._apply_buffer_records(buffered)
+            logger.info(f"Applied {len(buffered)} buffered records to DataFrame.")
 
-        # 3. Force flush to H5 (blocking)
+        # Step 3: flush DF → H5 (outside buffer lock).
+        logger.info(f"Checking if flush to H5 is needed. Pending count: {len(self._pending)}.")
         self._flush_to_h5_if_needed(force=True, blocking=True)
-
+        logger.info(f"Completed flush. Pending count after flush: {len(self._pending)}.")
 
 # Create global instance with config-driven parameters
 def create_ledger_manager():
