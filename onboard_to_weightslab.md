@@ -1,11 +1,4 @@
-# From wandb to weightslab
-
-Drop the logging dependency, get a live dashboard, editable hyperparameters, and per-sample custom signals — all with one wrapper.
-
-| | | | |
-|---|---|---|---|
-| **deps** | **loop** | **hparams** | **ui** |
-| −wandb | +1 line | live | +dashboard |
+# Onboarding on weightslab
 
 ```diff
 --- train_baseline.py
