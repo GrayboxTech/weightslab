@@ -551,6 +551,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             ``hp``/``hyperparams``/``parameters``.
         **kwargs: Additional options forwarded to the corresponding wrapper.
 
+    Custom wrapping parameters:
+        forced_model_wrapping: Optional, force to load current model and not from a checkpoint.
+
+
     Returns:
         A ledger proxy when available, otherwise the wrapped/registered object.
 
@@ -586,9 +590,10 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Keep backward-compatible behavior by enabling dependency computation
         # unless the caller explicitly disables it.
         kwargs.setdefault('compute_dependencies', True)
+        forced_model_wrapping = kwargs.pop('forced_model_wrapping', False)
 
         # Now construct the wrapper and let it register into the ledger.
-        wrapper = ModelInterface(obj, **kwargs)
+        wrapper = ModelInterface(obj, **kwargs)  if forced_model_wrapping or _model == None else _model
 
         # Register logger in backend for model training
         LoggerQueue()
