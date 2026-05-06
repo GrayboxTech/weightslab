@@ -1025,13 +1025,8 @@ class DataSampleTrackingWrapper(Dataset):
         try:
             max_id = -1
             uniq_labels: Set[int] = set()
-<<<<<<< Updated upstream
-            n = min(len(self.wrapped_dataset), str(sample_limit))
-            for i in range(n):
-=======
             n = min(len(self.wrapped_dataset), int(sample_limit))
             for i in trange(n, desc='Inference num of classes from data..'):
->>>>>>> Stashed changes
                 data = self.wrapped_dataset[i]
                 if not isinstance(data, tuple) or len(data) < 2:
                     continue
