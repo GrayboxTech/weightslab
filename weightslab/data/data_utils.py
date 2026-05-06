@@ -287,7 +287,7 @@ def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
             # Generate segmentation map from bboxes
             raw = raw[0] if raw.ndim == 3 else raw  # Handle batch dimension if present
             for bbox_data in raw:
-                x1, y1, x2, y2 = bbox_data[:4].astype(int)
+                x1, y1, x2, y2 = bbox_data[:4].astype(int) if bbox_data.max() > 1 else (bbox_data[:4] * [width, height, width, height]).astype(int)
                 # Extract class id if available, otherwise use 1
                 class_id = int(bbox_data[4]) if len(bbox_data) > 4 else 1
 
@@ -299,6 +299,13 @@ def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
 
                 # Fill the bounding box region
                 if x2 > x1 and y2 > y1:
+                    segmentation_map[y1:y2, x1:x2] = class_id
+                else:
+                    # BB Baselines are coords + length
+                    x1 = max(0, min(x1, width - 1))
+                    y1 = max(0, min(y1, height - 1))
+                    x2 = x1+x2 # max(0, min(x2, width))
+                    y2 = y1 + y2
                     segmentation_map[y1:y2, x1:x2] = class_id
 
             return segmentation_map
@@ -354,7 +361,7 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
         - original_shape: tuple of original shape AFTER any channel-first transposition
     """
     np_img = wrapped.get_items(index, include_metadata=False, include_labels=False, include_images=True) if hasattr(wrapped, 'get_items') else wrapped[index]
-    if isinstance(np_img, (list, tuple)) and len(np_img) > 0:
+    if isinstance(np_img, (dict, list, tuple)) and len(np_img) > 0:
         pixels = np_img[0]
         if isinstance(pixels, (list, tuple)):
             # Case A: WeightsLab RAW container OR custom raw group list.
@@ -376,8 +383,7 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
                 np_img = np_img[0]
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
-
-    is_volumetric = np_img.ndim == 4
+        is_volumetric = np_img.ndim == 4
 
     # For 4D volumetric data, detect and transpose channel-first formats:
     # 1. (C, Z, H, W) → (Z, H, W, C) - channels first in all dimensions
@@ -463,7 +469,6 @@ def load_label(dataset, sample_id):
             elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
                 if len(data) == 4:
                     label = to_numpy_safe(data[2])  # Third element is typically the label
-                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                     metadata = data[3]
                     classes = to_numpy_safe(metadata['classes']) if isinstance(metadata, dict) and 'classes' in metadata else None
                     if classes is not None:
@@ -472,6 +477,7 @@ def load_label(dataset, sample_id):
                         label = np.concatenate([label, classes[..., None]], axis=1)
                     else:
                         label = to_numpy_safe(data[2])  # Second element is typically the label
+                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                 else:
                     label = to_numpy_safe(data[2])  # Third element is typically the label
                     label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
