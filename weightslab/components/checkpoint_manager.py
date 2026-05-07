@@ -56,7 +56,7 @@ from weightslab.backend.ledgers import (
 from weightslab.backend import ledgers
 from weightslab.utils.logger import LoggerQueue
 from weightslab.data.sample_stats import SampleStatsEx
-from weightslab.utils.tools import capture_rng_state, restore_rng_state, recursive_update
+from weightslab.utils.tools import capture_rng_state, restore_rng_state, recursive_update, normalize_config
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl
 
 # Init logger
@@ -94,12 +94,7 @@ class CheckpointManager:
         self.config = ledgers.get_hyperparams() or {}
 
         # Create main subdirectories
-        self.data_dir = self.root_log_dir / "data"
-        self.logs_dir = self.root_log_dir / "logs"
         self.checkpoints_dir = self.root_log_dir / "checkpoints"
-
-        self.data_dir.mkdir(exist_ok=True)
-        self.logs_dir.mkdir(exist_ok=True)
         self.checkpoints_dir.mkdir(exist_ok=True)
 
         # Create checkpoint subdirectories for different components
@@ -285,9 +280,9 @@ class CheckpointManager:
         Args:
             exp_hash: 24-byte experiment hash (HP_MODEL_DATA)
         """
-        model_hash_dir = self.models_dir / exp_hash[:8]
-        hp_hash_dir = self.hp_dir / exp_hash[8:16]
-        data_hash_dir = self.data_checkpoint_dir / exp_hash[16:24]
+        hp_hash_dir = self.hp_dir / exp_hash[:8]
+        model_hash_dir = self.models_dir / exp_hash[8:-8]
+        data_hash_dir = self.data_checkpoint_dir / exp_hash[-8:]
 
         if create_model_dir:
             model_hash_dir.mkdir(exist_ok=True)
@@ -976,7 +971,7 @@ class CheckpointManager:
                 self._update_manifest_weight_checkpoint(self.current_exp_hash, checkpoint_file.name, self._step_counter)
 
             # If model architecture doesn't exist in this hash directory, save a reference to where it is
-            if self.config.get('checkpoint_manager', {}).get('dump_model_architecture', True):
+            if self.config.get('checkpoint_manager', {}).get('dump_model_architecture', False):
                 self._save_architecture_reference_if_needed()  # TODO (GP): Disable for now because it adds complexity for big models, and we want to ensure architecture is always saved with weights for simplicity
 
             # Persist logger queues alongside weight checkpoints
@@ -1076,7 +1071,7 @@ class CheckpointManager:
             }
 
             with open(config_file, 'w') as f:
-                yaml.dump(config_with_meta, f, default_flow_style=False)
+                yaml.dump(normalize_config(config_with_meta), f, default_flow_style=False)
 
             logger.info(f"Saved config: {config_file.name if hasattr(config_file, 'name') else config_file} with exp_hash prefix: {self.current_exp_hash[:8]}")
             return config_file
@@ -1863,6 +1858,12 @@ class CheckpointManager:
             try:
                 model = checkpoint_data['model']  # Include model architecture, weights, and optimizer state at this level
                 model.update_optimizer()  # Update optimizer with new model parameters if needed
+
+                # Remove existing locks
+                if hasattr(model, 'guard_testing_context'):
+                    del model.guard_testing_context
+                if hasattr(model, 'guard_training_context'):
+                    del model.guard_training_context
 
                 # Register in ledger
                 ledgers.register_model(model)

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import threading
 
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
@@ -1026,11 +1026,11 @@ class DataSampleTrackingWrapper(Dataset):
             max_id = -1
             uniq_labels: Set[int] = set()
             n = min(len(self.wrapped_dataset), int(sample_limit))
-            for i in range(n):
+            for i in trange(n, desc='Inference num of classes from data..'):
                 data = self.wrapped_dataset[i]
                 if not isinstance(data, tuple) or len(data) < 2:
                     continue
-                target = data[1]
+                target = data[2]
 
                 # Convert to numpy
                 if isinstance(target, th.Tensor):
@@ -1048,6 +1048,12 @@ class DataSampleTrackingWrapper(Dataset):
                     continue
 
                 if tnp.ndim >= 2:
+                    # Test if not an mask array but bboxes for instances
+                    if tnp.shape[0] <= 28 and tnp.shape[1] <= 28:
+                        # BBoxes format detected
+                        max_id = 0
+                        break
+
                     # Segmentation mask: infer from max id
                     try:
                         max_id = max(max_id, int(tnp.max()))
@@ -1070,7 +1076,7 @@ class DataSampleTrackingWrapper(Dataset):
             logger.debug(f"[DataSampleTrackingWrapper] num_classes inference failed: {e}")
 
         # 5) Fallback
-        self._num_classes_cache = None
+        self._num_classes_cache = 1
         return self._num_classes_cache
 
     def get_prediction_mask(self, sample_id):

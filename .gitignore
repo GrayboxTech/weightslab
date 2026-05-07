@@ -23,7 +23,7 @@ venv
 .venv*
 
 # Ignore hidden files
-!.env
+.env
 .DS_Store
 
 # Ignore specific files
