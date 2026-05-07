@@ -363,7 +363,7 @@ def _fwd_params(fn):
     except (ValueError, TypeError):
         return frozenset()
 
-_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals')
+_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals', 'targets')
 
 
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
@@ -383,12 +383,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     wl_kw = {k: kw.pop(k) for k in _WL_KWARGS if k in kw and k not in fwd_params}
 
     _ = wl_kw.get('flag')
+    preds_raw = a[0] if len(a) > 0 else None
     batch_ids = wl_kw.get('batch_ids')
     group_ids = wl_kw.get('group_id')
-    preds = wl_kw.get('preds')
     batch_scalar = wl_kw.get('signals')
-    preds_raw = a[0] if len(a) > 0 else None
-    targets = a[1] if len(a) > 1 else None
+    preds = wl_kw.get('preds')
+    targets = wl_kw.get('targets') if 'targets' in wl_kw else None
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
@@ -420,7 +420,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, batch_ids)
 
     # Log if requested
-    step = _get_step(None)
+    step = _get_step()
     _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
 
     # CHECK FOR SUBSCRIBERS (Dynamic Signals)
@@ -513,7 +513,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          dynamic_updates[name] = np.array(batch_res)
                      except Exception as e:
                          logger.debug(f"Dynamic signal {name} failed: {e}")
-                         pass # User function error, skip
+                         pass  # User function error, skip
 
     # Save statistics if requested and applicable
     if (batch_scalar is not None and batch_ids is not None) or dynamic_updates:
@@ -523,10 +523,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         signals.update(dynamic_updates) # Merge dynamic signals
 
         save_signals(
-            batch_ids=batch_ids,
-            preds=preds,
-            preds_raw=preds_raw,
             signals=signals,
+            batch_ids=batch_ids,
+            preds_raw=preds_raw,
+            preds=preds,
             targets=targets,
             log=False  # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
@@ -1417,10 +1417,10 @@ def get_discarded_samples(
 
 def save_signals(
     signals: dict,
-    batch_ids: th.Tensor,
-    preds_raw: th.Tensor = None,
-    targets: th.Tensor = None,
-    preds: th.Tensor = None,
+    batch_ids: th.Tensor | np.ndarray | list ,
+    preds_raw: th.Tensor | np.ndarray | dict = None,
+    targets: th.Tensor | np.ndarray | dict = None,
+    preds: th.Tensor | np.ndarray | dict = None,
     step: int | None = None,
     log: bool = True
 ):
@@ -1429,8 +1429,8 @@ def save_signals(
 
         Args:
             signals (th.Tensor): The batch losses.
-            preds_raw (th.Tensor, optional): The raw batch predictions. Defaults to None.
-            targets (th.Tensor, optional): The batch targets. Defaults to None.
+            preds_raw (th.Tensor, ...etc, optional): The raw batch predictions. Defaults to None.
+            targets (th.Tensor, ...etc, optional): The batch targets. Defaults to None.
             batch_ids (th.Tensor, optional): The batch ids. Defaults to None.
             preds (th.Tensor, optional): The batch predictions. Defaults to None.
             step (int, optional): The current training step. Defaults to 0.
@@ -1479,34 +1479,37 @@ def save_signals(
     else:
         batch_ids_np = [str(i) for i in batch_ids] if batch_ids is not None else None
 
-    if preds is not None:
-        pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
-        if np.issubdtype(pred_np.dtype, np.floating):
-             pred_np = pred_np.astype(np.float32)
-        else:
-             pred_np = pred_np.astype(np.uint16)
-    else:
-        pred_np = None
+    # Normalize to np arrays
+    def to_numpy(t):
+        arr = t.detach().cpu().numpy() if isinstance(t, th.Tensor) else np.asarray(t)
+        if np.issubdtype(arr.dtype, np.floating):
+            return arr.astype(np.float32)
+        return arr.astype(np.uint16)
 
-    if preds_raw is not None:
-        pred_raw_np = preds_raw.detach().cpu().numpy() if isinstance(preds_raw, th.Tensor) else np.asarray(preds_raw)
-    else:
-        pred_raw_np = None
+    def normalize(x):
+        if x is None:
+            return None
+        if isinstance(x, list):
+            return [to_numpy(t) for t in x]
+        if isinstance(x, th.Tensor):
+            return to_numpy(x)
+        return None
 
-    if targets is not None:
-        target_np = targets.detach().cpu().numpy() if isinstance(targets, th.Tensor) else np.asarray(targets)
-        if np.issubdtype(target_np.dtype, np.floating):
-             target_np = target_np.astype(np.float32)
-        else:
-             target_np = target_np.astype(np.uint16)
-    else:
-        target_np = None
+    def expand_dim(x):
+        """Add axis if 1D — skip for lists (inhomogeneous shapes)."""
+        if x is None or isinstance(x, list):
+            return x
+        if x.ndim == 1:
+            return x[:, np.newaxis]
+        return x
 
-    # Processing
-    # # Process signals
+    preds_np     = normalize(preds)
+    preds_raw_np = normalize(preds_raw)
+    target_np    = normalize(targets)
+
+    # Processing signals
     if isinstance(signals, dict):
-        losses_data = {\
-            # Convert losses map of shape (B, ...) to (B,) by averaging all axes except batch (axis 0)
+        losses_data = {
             'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
                 v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v)
             )
@@ -1520,13 +1523,11 @@ def save_signals(
         }
     else:
         losses_data = None
-    # # Process targets
-    if target_np is not None and target_np.ndim == 1:
-        target_np = target_np[:, np.newaxis]
-    if pred_np is not None and pred_np.ndim == 1:
-        pred_np = pred_np[:, np.newaxis]
-    if pred_raw_np is not None and pred_raw_np.ndim == 1:
-        pred_raw_np = pred_raw_np[:, np.newaxis]
+
+    # Expand dims for 1D arrays (skipped for lists)
+    target_np    = expand_dim(target_np)
+    preds_np     = expand_dim(preds_np)
+    preds_raw_np = expand_dim(preds_raw_np)
 
     # During evaluation mode we must not mutate dataframe state.
     try:
@@ -1536,12 +1537,12 @@ def save_signals(
     except Exception:
         pass
 
-    # Enqueue to dataframe manager buffer for efficientcy
+    # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(
         sample_ids=batch_ids_np,
-        preds_raw=pred_raw_np,
-        preds=pred_np,
-        targets=target_np,
+        preds_raw=preds_raw_np if preds_raw_np is not None else preds_raw,
+        preds=preds_np if preds_np is not None else preds,
+        targets=target_np if target_np is not None else targets,
         losses=losses_data,
         step=step
     )

@@ -4,6 +4,7 @@ import logging
 import traceback
 import numpy as np
 import pandas as pd
+import torch
 
 from datetime import datetime
 from typing import Dict, Sequence, Any, List
@@ -395,6 +396,8 @@ class LedgeredDataFrameManager:
         Expected shape: (B, C, H, W). Normalization is performed per (B, C)
         across spatial dimensions (H, W), then scaled to [0, 65535].
         """
+        if not isinstance(preds_raw, np.ndarray):
+            return preds_raw
         try:
             arr = np.asanyarray(preds_raw)
             if arr.ndim != 4:
@@ -415,10 +418,10 @@ class LedgeredDataFrameManager:
     def enqueue_batch(
         self,
         sample_ids: Sequence[int],
-        preds_raw: np.ndarray | None,
-        preds: np.ndarray | None,
+        preds_raw: np.ndarray | dict | None,
+        preds: np.ndarray | dict | None,
         losses: Dict[str, Any] | None,
-        targets: np.ndarray | None = None,
+        targets: np.ndarray |  dict | None = None,
         step: int | None = None
     ):
         """
@@ -429,7 +432,7 @@ class LedgeredDataFrameManager:
 
         self._ensure_flush_thread()
 
-        # Helper to check if value is meaningful (not None/NaN)
+        # Helper to check if value is meaningful (not None/NaN) - otherwise pass
         def is_meaningful(v):
             if v is None:
                 return False
@@ -438,29 +441,50 @@ class LedgeredDataFrameManager:
             except (TypeError, ValueError):
                 return True
 
+        def index_batch(obj, batch_index, rec=False):
+            if isinstance(obj, dict):
+                return {k: index_batch(v, batch_index, rec=True) for k, v in obj.items()}
+            if isinstance(obj, list) and rec:
+                return [index_batch(v, batch_index, rec=True) for v in obj]
+            if rec:
+                return obj
+            if isinstance(obj, (torch.Tensor, np.ndarray)) and obj.shape[0] == 0:
+                return obj[batch_index]
+            return obj[batch_index]
+
         # Build all records BEFORE acquiring lock (faster)
         records_to_add = {}
-        normalized_preds_raw = self._normalize_preds_raw_uint16(preds_raw) if preds_raw is not None else None
-        for i, sid in enumerate(sample_ids):
+        for batch_index, sid in enumerate(sample_ids):
             sample_id = sid if not isinstance(sid, (np.ndarray, list)) else sid[0]
 
             # Build record incrementally - keep numpy arrays as-is for speed
-            rec: Dict[str, Any] = {
-                "sample_id": sample_id,
-            }
+            rec: Dict[str, Any] = {"sample_id": sample_id}
 
-            # Store arrays directly without conversion (FAST)
-            if targets is not None and is_meaningful(targets[i]):
-                rec[SampleStats.Ex.TARGET.value] = targets[i]
-            if preds_raw is not None and is_meaningful(preds_raw[i]):
-                rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i]
-            if preds is not None and is_meaningful(preds[i]):
-                rec[SampleStats.Ex.PREDICTION.value] = preds[i]
+            # Process data to store
+            ## Prediction raw
+            if preds_raw is not None:
+                pred_raw = index_batch(preds_raw, batch_index)
+                pred_raw = pred_raw if is_meaningful(pred_raw) else None  # Replace nan by None
+                if pred_raw is not None:
+                    rec[SampleStats.Ex.PREDICTION_RAW.value] = self._normalize_preds_raw_uint16(pred_raw)
+            ## Prediction
+            if preds is not None:
+                pred = index_batch(preds, batch_index)
+                pred = pred if is_meaningful(pred) else None  # Replace nan by None
+                if pred is not None:
+                    rec[SampleStats.Ex.PREDICTION.value] = self._normalize_preds_raw_uint16(pred)  # Not normalized as already integer
+            ## Target
+            if targets is not None:
+                target = index_batch(targets, batch_index)
+                target = target if is_meaningful(target) else None  # Replace nan by None
+                if target is not None:
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
+            ## Step
             if step is not None and is_meaningful(step):
                 rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
 
             # Save losses with safe conversion (handles scalars, arrays, NaNs)
-            loss_dict = self._safe_loss_dict(losses, i)
+            loss_dict = self._safe_loss_dict(losses, batch_index)
             if loss_dict is not None:
                 rec.update(loss_dict)
             records_to_add[sample_id] = rec
@@ -541,7 +565,7 @@ class LedgeredDataFrameManager:
             all_new_cols = set()
             for up in updates_list:
                 all_new_cols.update(up.keys())
-            
+
             if not all_new_cols.issubset(self._df.columns):
                 self._df = self._df.reindex(columns=self._df.columns.union(all_new_cols))
 
@@ -569,7 +593,7 @@ class LedgeredDataFrameManager:
                             indices = gid_to_indices.get(coerced_gid)
                         except Exception:
                             pass
-                            
+
                 if indices:
                     for col, val in updates.items():
                         self._df.loc[indices, col] = val
@@ -577,7 +601,7 @@ class LedgeredDataFrameManager:
                 else:
                     if not affected_ids:  # Only print once to avoid log spam
                         print(f"[DEBUG] Could not find gid {repr(gid)} in gid_to_indices keys. Sample key: {repr(list(gid_to_indices.keys())[0]) if gid_to_indices else 'None'}")
-            
+
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
 
@@ -647,19 +671,19 @@ class LedgeredDataFrameManager:
 
             # Convert all sample_ids to strings for lookup
             s_ids = [str(sid) for sid in sample_ids]
-            
+
             # Efficient lookup: only check samples existing in index
             existing_mask = self._df.index.isin(s_ids)
             if not existing_mask.any():
                 return discarded_ids
-                
+
             slice_df = self._df[existing_mask]
-            
+
             # Narrow by origin if present
             if origin_col in slice_df.columns:
                 origin_mask = slice_df[origin_col] == origin
                 slice_df = slice_df[origin_mask]
-                
+
             if slice_df.empty:
                 return discarded_ids
 

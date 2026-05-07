@@ -1013,7 +1013,7 @@ class DataService:
                 task_type = "classification"  # Default fallback
                 if label is not None:
                     if isinstance(label, dict):
-                        if 'boxes' in label or 'bboxes' in label:
+                        if ('boxes' in label or 'bboxes' in label):
                             task_type = 'detection'
                     else:
                         l_arr = to_numpy_safe(label)

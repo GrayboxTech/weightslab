@@ -462,10 +462,8 @@ def load_label(dataset, sample_id):
                 return None  # Only data, no label
             elif len(data) == 2:  # Commonly (data, label) in standard PyTorch datasets
                 label = to_numpy_safe(data[1])
-                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
             elif len(data) == 3:  # if len==3, data, uids, label, no extra info
                 label = to_numpy_safe(data[2])  # Third element is typically the label
-                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
             elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
                 if len(data) == 4:
                     label = to_numpy_safe(data[2])  # Third element is typically the label
@@ -477,10 +475,8 @@ def load_label(dataset, sample_id):
                         label = np.concatenate([label, classes[..., None]], axis=1)
                     else:
                         label = to_numpy_safe(data[2])  # Second element is typically the label
-                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                 else:
                     label = to_numpy_safe(data[2])  # Third element is typically the label
-                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                     metadata = data[3:]
             if label is not None:
                 return label[0] if label.ndim == 1 and label.shape[0] == 1 else label
