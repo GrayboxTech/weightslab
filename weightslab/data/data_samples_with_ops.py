@@ -1023,7 +1023,7 @@ class DataSampleTrackingWrapper(Dataset):
             max_id = -1
             uniq_labels: Set[int] = set()
             n = min(len(self.wrapped_dataset), int(sample_limit))
-            for i in trange(n, desc='Inference num of classes from data..'):
+            for i in range(n):
                 data = self.wrapped_dataset.get_items(i, include_labels=True, include_images=False, include_metadata=True) if hasattr(self.wrapped_dataset, 'get_items') else self.wrapped_dataset[i]
                 if not isinstance(data, tuple) or len(data) < 2:
                     continue

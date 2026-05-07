@@ -357,9 +357,6 @@ def main():
     max_steps = parameters["training_steps_to_do"]
     eval_every = parameters["eval_full_to_train_steps_ratio"]
 
-    # Class names mapping
-    class_names = parameters.get("class_names", [])
-
     # Data loader configs
     train_cfg = parameters.get("data", {}).get("train_loader", {})
     test_cfg = parameters.get("data", {}).get("test_loader", {})
@@ -486,8 +483,7 @@ def main():
     print(f"📈 Training steps: {max_steps if max_steps else 'infinite'}")
     print(f"📊 Evaluation every {eval_every} steps")
     print(f"📊 Batch size: {batch_size}")
-    print(f"🖼️  Image size: {image_size}")
-    print(f"📂 Classes ({num_classes}): {', '.join(class_names)}")
+    print(f"🖼️ Image size: {image_size}")
     print(f"💾 Logs will be saved to: {log_dir}")
     print(f"📂 Data: {data_root}")
     print("=" * 60 + "\n")
