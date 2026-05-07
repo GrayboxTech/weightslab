@@ -8,6 +8,7 @@ logs
 root_log_dir
 __pycache__
 venv
+runs
 
 # Ignore hidden directories
 .history
