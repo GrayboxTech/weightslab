@@ -138,8 +138,8 @@ class ModelInterface(NetworkWithOps):
             self.print_graph_filename = print_graph_filename
             self.traced_model = symbolic_trace(self.model)
             self.traced_model.name = "N.A."
-        self.guard_training_context = guard_training_context
-        self.guard_testing_context = guard_testing_context
+        # self.guard_training_context = guard_training_context
+        # self.guard_testing_context = guard_testing_context
 
         # Init attributes from super object (i.e., self.model)
         self.init_attributes(self.model)
@@ -178,23 +178,23 @@ class ModelInterface(NetworkWithOps):
             lambda model: self._update_optimizer(model)
         )
 
-        # Set Model Training Guard
-        self.guard_training_context.model = self
-        self.guard_testing_context.model = self
+        # # Set Model Training Guard
+        guard_training_context.model = self
+        guard_testing_context.model = self
 
-        # Set global self.hp
-        self.hp = get_hyperparams()
+        # Set global self.hp_config
+        self.hp_config = get_hyperparams()
 
         # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
         _checkpoint_auto_every_steps = 0
         _root_log_dir = None
         _skip_checkpoint_load = self.skip_previous_auto_load
         try:
-            if isinstance(self.hp, dict):
-                _root_log_dir = self.hp.get('root_log_dir') or self.hp.get('root-log-dir') or self.hp.get('root')
-                _checkpoint_auto_every_steps = self.hp.get('experiment_dump_to_train_steps_ratio') or self.hp.get('experiment-dump-to-train-steps-ratio') or 100
+            if isinstance(self.hp_config, dict):
+                _root_log_dir = self.hp_config.get('root_log_dir') or self.hp_config.get('root-log-dir') or self.hp_config.get('root')
+                _checkpoint_auto_every_steps = self.hp_config.get('experiment_dump_to_train_steps_ratio') or self.hp_config.get('experiment-dump-to-train-steps-ratio') or 100
                 if not _skip_checkpoint_load:
-                    _skip_checkpoint_load = self.hp.get('skip_checkpoint_load', False)
+                    _skip_checkpoint_load = self.hp_config.get('skip_checkpoint_load', False)
         except Exception:
             _root_log_dir = None
             _checkpoint_auto_every_steps = 0
@@ -236,7 +236,7 @@ class ModelInterface(NetworkWithOps):
                         checkpoint_data = existing_manager.load_checkpoint(
                             exp_hash=latest_hash,
                             load_model=False,
-                            load_weights=self.hp.get('checkpoint_manager', {}).get('load_weights', True),
+                            load_weights=self.hp_config.get('checkpoint_manager', {}).get('load_weights', True),
                             load_config=False,
                             load_data=False,
                             force=True
@@ -272,6 +272,80 @@ class ModelInterface(NetworkWithOps):
             except Exception:
                 pass
 
+    def __getattr__(self, name):
+        # 1. Try nn.Module's attribute store (parameters, buffers, submodules)
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            pass
+        # 2. Return None for anything else (ultralytics compat)
+        return None
+
+    def __setattr__(self, name, value):
+        # Check if it's a read-only property on ModelInterface
+        for cls in type(self).__mro__:
+            if name in cls.__dict__ and isinstance(cls.__dict__[name], property):
+                # Store in instance __dict__ directly, bypassing the property
+                self.__dict__[name] = value
+                return
+        # Normal setattr for everything else
+        object.__setattr__(self, name, value)
+
+    def __enter__(self):
+        """
+        Executed when entering the 'with' block.
+
+        This method is part of the context manager protocol. It is called
+        when the 'with' statement is entered, allowing for setup operations
+        or resource acquisition.
+
+        Returns:
+            WatcherEditor: The instance of the WatcherEditor itself, which
+            will be bound to the variable after 'as' in the 'with' statement.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Executed when exiting the 'with' block (whether by success or error).
+
+        This method is part of the context manager protocol. It is called
+        when the 'with' statement is exited, allowing for cleanup operations
+        or resource release. It resets the `visited_nodes` set and handles
+        any exceptions that might have occurred within the 'with' block.
+
+        Args:
+            exc_type (Optional[Type[BaseException]]): The type of the exception
+                that caused the 'with' block to be exited. None if no exception occurred.
+
+        Returns:
+            bool: False if an exception occurred and it should be re-raised,
+            or if no exception occurred and the context manager handled its exit.
+            True if an exception occurred and it was successfully handled by
+            this method, preventing it from being re-raised.
+        """
+        self.visited_nodes = set()  # Reset NetworkWithOps nodes visited
+        if exc_type is not None:
+            logger.error(
+                f"[{self.__class__.__name__}]: An exception occurred: \
+                    {exc_type.__name__} with {exc_val} and {exc_tb}.")
+            return False
+        return False
+
+    def __getattr__(self, name):
+        """Delegate attribute access to the underlying model if not found on wrapper.
+
+        This allows the ModelInterface to properly expose nn.Module methods like
+        parameters(), state_dict(), eval(), train(), etc. when they're not already
+        bound to the wrapper instance.
+        """
+        try:
+            return object.__getattribute__(self, name)
+        except AttributeError:
+            # Try to get the attribute from the wrapped model
+            model = object.__getattribute__(self, 'model')
+            return getattr(model, name)
+
     def _registration(self, weak: bool = False):
         register_model(self, weak=weak)
 
@@ -302,6 +376,9 @@ class ModelInterface(NetworkWithOps):
         references to the old Parameter objects.
         """
         super().load_state_dict(state_dict, strict=strict, assign=False)
+
+    def parameters(self, recurse = True):
+        return self.model.parameters(recurse)
 
     def init_attributes(self, obj):
         """Expose attributes and methods from the wrapped `obj`.
@@ -363,47 +440,6 @@ class ModelInterface(NetworkWithOps):
                     # If we cannot bind, skip gracefully
                     continue
 
-    def __enter__(self):
-        """
-        Executed when entering the 'with' block.
-
-        This method is part of the context manager protocol. It is called
-        when the 'with' statement is entered, allowing for setup operations
-        or resource acquisition.
-
-        Returns:
-            WatcherEditor: The instance of the WatcherEditor itself, which
-            will be bound to the variable after 'as' in the 'with' statement.
-        """
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        Executed when exiting the 'with' block (whether by success or error).
-
-        This method is part of the context manager protocol. It is called
-        when the 'with' statement is exited, allowing for cleanup operations
-        or resource release. It resets the `visited_nodes` set and handles
-        any exceptions that might have occurred within the 'with' block.
-
-        Args:
-            exc_type (Optional[Type[BaseException]]): The type of the exception
-                that caused the 'with' block to be exited. None if no exception occurred.
-
-        Returns:
-            bool: False if an exception occurred and it should be re-raised,
-            or if no exception occurred and the context manager handled its exit.
-            True if an exception occurred and it was successfully handled by
-            this method, preventing it from being re-raised.
-        """
-        self.visited_nodes = set()  # Reset NetworkWithOps nodes visited
-        if exc_type is not None:
-            logger.error(
-                f"[{self.__class__.__name__}]: An exception occurred: \
-                    {exc_type.__name__} with {exc_val} and {exc_tb}.")
-            return False
-        return False
-
     def _update_optimizer(self, model=None):
         if model is None:
             model = self.model
@@ -438,15 +474,15 @@ class ModelInterface(NetworkWithOps):
         is_audit = False
         try:
             # Check for Audit Mode override to completely prevent checkpointing
-            if self.hp and (bool(self.hp.get('auditorMode')) or bool(self.hp.get('auditor_mode'))):
+            if self.hp_config and (bool(self.hp_config.get('auditorMode')) or bool(self.hp_config.get('auditor_mode'))):
                 is_audit = True
         except Exception:
             pass
 
         # Sync checkpoint auto-dump steps ratio if specified
-        if self.hp and not is_audit:
+        if self.hp_config and not is_audit:
             # Resolve the value from the proxy if it is one
-            new_ratio = self.hp.get('experiment_dump_to_train_steps_ratio') or self.hp.get('experiment-dump-to-train-steps-ratio')
+            new_ratio = self.hp_config.get('experiment_dump_to_train_steps_ratio') or self.hp_config.get('experiment-dump-to-train-steps-ratio')
             val = new_ratio._resolve() if hasattr(new_ratio, '_resolve') else new_ratio
 
             if val is not None:
