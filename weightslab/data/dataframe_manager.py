@@ -444,10 +444,8 @@ class LedgeredDataFrameManager:
         def index_batch(obj, batch_index, rec=False):
             if isinstance(obj, dict):
                 return {k: index_batch(v, batch_index, rec=True) for k, v in obj.items()}
-            if isinstance(obj, list) and rec:
-                return [index_batch(v, batch_index, rec=True) for v in obj]
             if rec:
-                return obj
+                return obj[batch_index]
             if isinstance(obj, (torch.Tensor, np.ndarray)) and obj.shape[0] == 0:
                 return obj[batch_index]
             return obj[batch_index]
@@ -462,11 +460,7 @@ class LedgeredDataFrameManager:
 
             # Process data to store
             ## Prediction raw
-            if preds_raw is not None:
-                pred_raw = index_batch(preds_raw, batch_index)
-                pred_raw = pred_raw if is_meaningful(pred_raw) else None  # Replace nan by None
-                if pred_raw is not None:
-                    rec[SampleStats.Ex.PREDICTION_RAW.value] = self._normalize_preds_raw_uint16(pred_raw)
+            preds_raw = None
             ## Prediction
             if preds is not None:
                 pred = index_batch(preds, batch_index)

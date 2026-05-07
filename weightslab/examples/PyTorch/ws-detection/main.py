@@ -1,418 +1,307 @@
+"""Full WL integration with Ultralytics YOLO detection training.
+
+Includes:
+- WL parameter watching and UI editing
+- Data loader tracking with UIDs and deny-list support
+- Training/valing guards for signal logging
+- Per-sample loss and metrics tracking
+- Model, optimizer, and loss function wrapping
+"""
 import os
 import time
-import tempfile
 import logging
+import tempfile
+from xml.parsers.expat import model
+
 import torch
 import yaml
+import numpy as np
 
 import weightslab as wl
 
-from torch import nn
-from torchvision import ops, transforms
-from torch.utils.data import Dataset
-from PIL import Image
-from pathlib import Path
-from pycocotools.coco import COCO
+from weightslab.utils.logger import LoggerQueue
+from ultralytics import YOLO
+from ultralytics.data.dataset import YOLODataset
+from ultralytics.models.yolo.detect import DetectionTrainer
 
-from weightslab.utils.logger import LoggerQueue as Logger
-from weightslab.components.global_monitoring import (
-    guard_training_context,
-    guard_testing_context
-)
-from weightslab.baseline_models.pytorch.models import Yolov11
+from ultralytics.cfg import get_cfg
+from ultralytics.data.utils import check_det_dataset
+# from ultralytics.utils.loss import v8DetectionLoss as DetectionLoss
+
+from utils.data import YOLODatasetWL, _wl_yolo_collate
+from utils.criterions import PerSampleDetectionLoss, PerSampleIoU, _decode_predictions
 
 
-SUBSET = 50  # Use n images for quick testing
-
-
-class GIoULoss(nn.Module):
-    """Generalized IoU loss with box assignment and batching support.
-
-    Handles mismatched numbers of predicted vs ground truth boxes by:
-    1. Computing pairwise IoU between all predicted and ground truth boxes
-    2. Greedily matching boxes with highest IoU
-    3. Computing GIoU loss only on matched pairs
-
-    Supports both single-image and batched inputs:
-    - Single image: pred_boxes [M, 4], target_boxes [N, 4] -> scalar loss
-    - Batched: pred_boxes [B, M, 4], target_boxes [B, N, 4] -> per-batch losses [B]
-
-    Forward signature:
-        forward(pred_boxes: Tensor[M, 4] or [B, M, 4],
-                target_boxes: Tensor[N, 4] or [B, N, 4]) -> scalar or [B] loss
-    """
-
-    def __init__(self, reduction: str = "mean", iou_threshold: float = 0.1):
-        super().__init__()
-        self.reduction = reduction
-        self.reduction = 'none' if reduction not in ['none', 'mean', 'sum'] else reduction
-        self.iou_threshold = iou_threshold
-
-    def _match_boxes_greedy(self, pred_boxes: torch.Tensor, target_boxes: torch.Tensor):
-        """Greedy box matching using pairwise IoU (single image).
-
-        Returns:
-            matched_pred: [K, 4] matched predicted boxes
-            matched_target: [K, 4] matched ground truth boxes
-        """
-        if pred_boxes.numel() == 0 or target_boxes.numel() == 0:
-            return pred_boxes, target_boxes
-
-        # Compute pairwise IoU [M, N]
-        iou_matrix = ops.box_iou(pred_boxes, target_boxes)
-
-        matched_pred = []
-        matched_target = []
-        used_targets = set()
-
-        # Greedy matching: for each prediction, find best unmatched ground truth
-        for m_idx in range(pred_boxes.size(0)):
-            iou_row = iou_matrix[m_idx]  # [N]
-
-            # Find best match among unused ground truths
-            for n_idx in torch.argsort(iou_row, descending=True):
-                n_idx = n_idx.item()
-                if n_idx not in used_targets and iou_row[n_idx] > self.iou_threshold:
-                    matched_pred.append(pred_boxes[m_idx])
-                    matched_target.append(target_boxes[n_idx])
-                    used_targets.add(n_idx)
-                    break
-
-        if not matched_pred:
-            # No matches found, return empty tensors
-            return pred_boxes[:0], target_boxes[:0]
-
-        return torch.stack(matched_pred), torch.stack(matched_target)
-
-    def _compute_single_batch_loss(self, pred_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
-        """Compute GIoU loss for a single image [M, 4] and [N, 4]."""
-        if target_boxes.numel() == 0 or pred_boxes.numel() == 0:
-            return pred_boxes.new_tensor(0.0)
-
-        # Match boxes if dimensions don't align
-        if pred_boxes.size(0) != target_boxes.size(0):
-            pred_boxes, target_boxes = self._match_boxes_greedy(pred_boxes, target_boxes)
-
-        if pred_boxes.numel() == 0 or target_boxes.numel() == 0:
-            return pred_boxes.new_tensor(0.0)
-
-        return ops.generalized_box_iou_loss(pred_boxes, target_boxes, reduction=self.reduction)
-
-    def forward(self, pred_boxes: torch.Tensor, target_boxes: torch.Tensor, **kwargs) -> torch.Tensor:
-        """
-        Compute GIoU loss for single or batched inputs.
-
-        Args:
-            pred_boxes: [M, 4] or [B, M, 4] in xyxy format
-            target_boxes: [N, 4] or [B, N, 4] in xyxy format
-
-        Returns:
-            scalar loss or [B] per-batch losses
-        """
-        # Handle batched inputs [B, M, 4] and [B, N, 4]
-        if pred_boxes.dim() == 3 and target_boxes.dim() == 3:
-            batch_size = pred_boxes.size(0)
-            batch_losses = []
-
-            for b in range(batch_size):
-                loss_b = self._compute_single_batch_loss(
-                    pred_boxes[b],
-                    target_boxes[b]
-                )
-                batch_losses.append(loss_b.mean())
-
-            # Stack batch losses and apply reduction
-            batch_losses = torch.stack(batch_losses)
-            if self.reduction == "mean":
-                return batch_losses.mean()
-            elif self.reduction == "sum":
-                return batch_losses.sum()
-
-            return batch_losses
-
-        # Handle single image inputs [M, 4] and [N, 4]
-        elif pred_boxes.dim() == 2 and target_boxes.dim() == 2:
-            loss = self._compute_single_batch_loss(pred_boxes, target_boxes).mean()[None]
-            return loss
-        else:
-            raise ValueError(
-                f"pred_boxes and target_boxes must have dims 2 (single) or 3 (batched). "
-                f"Got pred_boxes.dim()={pred_boxes.dim()}, target_boxes.dim()={target_boxes.dim()}"
-            )
-
-    def compute(self):
-        """Placeholder for compatibility."""
-        pass
-
-
-class COCOBBoxSegmentationDataset(Dataset):
-    """COCO test dataset that turns bounding boxes into segmentation masks.
-
-    Returns ``(image_tensor, mask_tensor, target_dict)`` where ``mask_tensor`` is
-    an HxW class map built by rasterizing each bbox as a filled rectangle using
-    its class id (optionally remapped via ``class_map``).
-
-    Intended for evaluation/inference-only workflows where models predict masks
-    from box-derived ground truth.
-
-    Args:
-        images_dir: Directory containing images.
-        annotations_file: COCO annotations JSON (use the *val/test* split).
-        image_transform: Optional transform applied to the PIL image.
-        mask_transform: Optional transform applied to the mask (e.g., Resize
-                        with nearest interpolation). If None, mask is converted
-                        to a LongTensor via ``ToTensor``.
-        class_map: Optional dict mapping category_id -> contiguous class id.
-    """
-
-    def __init__(
-        self,
-        images_dir,
-        annotations_file,
-        image_transform=None,
-        mask_transform=None,
-        class_map=None,
-        max_samples=None,
-    ):
-        super().__init__()
-        try:
-            from pycocotools.coco import COCO  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dep
-            raise ImportError(
-                "pycocotools is required for COCOBBoxSegmentationDataset. Install with: pip install pycocotools"
-            ) from exc
-
-        self.images_dir = Path(images_dir)
-        self.coco = COCO(annotations_file)
-        self.image_transform = image_transform
-        self.mask_transform = mask_transform
-        self.class_map = class_map or {}
-        subset_limit = max_samples if max_samples is not None else SUBSET
-        self.image_ids = list(self.coco.imgs.keys())[:subset_limit]
-
-    def __len__(self):
-        return len(self.image_ids)
-
-    def _build_mask(self, anns, height, width):
-        mask = torch.zeros((height, width), dtype=torch.int64)
-        for ann in anns:
-            x, y, w, h = ann["bbox"]
-            cls = self.class_map.get(ann["category_id"], ann["category_id"])
-            x1 = max(0, int(round(x)))
-            y1 = max(0, int(round(y)))
-            x2 = min(width, int(round(x + w)))
-            y2 = min(height, int(round(y + h)))
-            if x2 > x1 and y2 > y1:
-                mask[y1:y2, x1:x2] = cls + 1
-        return mask
-
-    def __getitem__(self, idx):
-        image_id = self.image_ids[idx]
-        img_info = self.coco.loadImgs(image_id)[0]
-        img_path = self.images_dir / img_info["file_name"]
-
-        # Load image
-        image = Image.open(img_path).convert("RGB")
-        if self.image_transform:
-            image_t = self.image_transform(image)
-        else:
-            image_t = transforms.ToTensor()(image)
-
-        # Load annotations
-        ann_ids = self.coco.getAnnIds(imgIds=[image_id], iscrowd=False)
-        anns = self.coco.loadAnns(ann_ids)
-
-        # Build mask from bboxes
-        h, w = img_info["height"], img_info["width"]
-        mask = self._build_mask(anns, h, w)[None, ...]  # Add channel dim
-
-        if self.mask_transform:
-            transformed_gt = self.mask_transform(mask)
-        else:
-            # ToTensor would cast to float; keep long for class ids
-            transformed_gt = mask
-
-        # Scale boxes to match the transformed mask/image size
-        out_h, out_w = transformed_gt.shape[-2:]
-        scale_x = out_w / float(w)
-        scale_y = out_h / float(h)
-        boxes = torch.tensor([
-                [ann["bbox"][0], ann["bbox"][1], ann["bbox"][0] + ann["bbox"][2], ann["bbox"][1] + ann["bbox"][3]]
-                for ann in anns
-        ], dtype=torch.float32) if anns else torch.zeros((0, 4), dtype=torch.float32)
-        if boxes.numel():
-            scales = torch.tensor([scale_x, scale_y, scale_x, scale_y], dtype=boxes.dtype)
-            boxes = boxes * scales
-        labels = torch.tensor([
-                self.class_map.get(ann["category_id"], ann["category_id"]) + 1
-                for ann in anns
-        ], dtype=torch.int64) if anns else torch.zeros((0,), dtype=torch.int64)
-        image_id_t = torch.tensor([image_id], dtype=torch.int64)
-
-        # DEBUG: Verify we have variety in target classes
-        unique_classes = torch.unique(transformed_gt)
-        if idx % 100 == 0:
-             print(f"DEBUG: Sample {idx} (ID {image_id}) unique classes in GT: {unique_classes.tolist()}")
-
-        # WeightsLab expected order for multi-item datasets: (data, uid, label, boxes, ...)
-        return image_t, image_id_t, transformed_gt, boxes, labels
-
-
-# Set up logging
 logging.basicConfig(level=logging.ERROR)
-os.environ["GRPC_VERBOSITY"] = "debug"
-
-# Suppress PIL warnings and set to INFO level
-logging.getLogger("PIL").setLevel(logging.INFO)
 
 
-def pseudo_train(loader, model, criterion_mlt=None, device='cpu', train_loader_len=1, idx=0):
-    """Iterate over the train loader to compute a detection loss on trainset.
+class WLCompatileDetTrainer(DetectionTrainer):
+    """DetectionTrainer with WL integration for signals, parameters, and guards."""
 
-    Note: This loop uses the model's high-level predict API (non-differentiable)
-    to obtain boxes and compute a GIoU-based loss for monitoring. It does not
-    perform optimization and serves primarily to iterate over the trainset.
-    """
-    losses = 0.0
+    def __init__(self, *a, **kw):
+        # Loaders
+        self.data_train_loader = kw.pop("train_loader", None)
+        self.data_val_loader = kw.pop("val_loader", None)
 
-    print(f"DEBUG: Entering pseudo_train with {train_loader_len} batches expected.", flush=True)
-    with guard_training_context:
-        data = next(loader)
-        inputs = data[0].to(device)
-        ids = data[1]
-        tseg = data[2].to(device)
-        tbbxs = data[3].to(device)
+        # Custom criterion
+        self.train_criterion = kw.pop("train_criterion", None)
+        self.val_criterion = kw.pop("val_criterion", None)
 
-        if idx % 5 == 0:
-            print(f"DEBUG: [Batch {idx}/{train_loader_len}] Starting prediction...", flush=True)
+        # Metrics
+        self.train_metric = kw.pop("train_metric", None)
+        self.val_metric = kw.pop("val_metric", None)
 
-        outputs = model.predict(inputs)[0]
-        pbbxs = torch.cat(
-            [
-                outputs.boxes.cls[..., None],
-                outputs.boxes.xyxy
-            ],
-            dim=1
-        )[None]
+        # Experiment parameters
+        self.val_every = kw.pop("val_every", 1)
+        self.device = kw.get("device", torch.device("cpu"))
 
-        # ========== Build segmentation from boxes ==========
-        H, W = tseg.shape[-2:]  # target mask spatial size
-        class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
-        boxes_xyxy = outputs.boxes.xyxy
-        classes = outputs.boxes.cls.int()
+        # Init after removing parameters
+        super().__init__(*a, **kw)
 
-        # Optional: filter by confidence if we had conf values
-        conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
+        # Init experiment modules (model, criterions)
+        self._init_experiment_modules()
 
-        if idx % 5 == 0:
-            maxconf = conf.max().item() if conf is not None and conf.numel() > 0 else 0
-            print(f"DEBUG: [Batch {idx}] Prediction count: {len(outputs.boxes)} | Max conf: {maxconf:.2f}", flush=True)
+    def _init_experiment_modules(self):
+        """
+            Initialize experiment modules (i.e., model and criterion, optimizer already include in model).
+        """
+        # WL-wrapped model will be set in setup_model
+        super().setup_model()
+        self.model = self.model.to(self.device)
 
-        keep = (conf >= 0.05) if conf is not None else torch.ones_like(classes, dtype=torch.bool)
-        boxes_xyxy = boxes_xyxy[keep]
-        classes = classes[keep]
+        # Init criterions (need to be done before model wrapping for DetectionLoss module from ultralytics)
+        self._init_training_loss()
 
-        for box, cls in zip(boxes_xyxy, classes):
-            x1, y1, x2, y2 = box.round().int().tolist()
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(W, x2), min(H, y2)
-            if x2 > x1 and y2 > y1:
-                class_map[y1:y2, x1:x2] = cls + 1
+        # Finally wrap the model
+        self.model = wl.watch_or_edit(
+            self.model,
+            flag="model",
+            device=self.device,
+            compute_dependencies=False
+        )
+        self._setup_train()  # init model, optimizer, scheduler in Ultralytics env.
 
-        pseg = class_map[None, ...] # channel dim
-
-        if criterion_mlt is not None:
-            loss_batch = criterion_mlt(
-                pbbxs[..., 1:],  # Remove class (index 0) to get boxes [x1, y1, x2, y2]
-                tbbxs,
-                batch_ids=ids,
-                preds=pseg,  # Save segmentation mask as overlay
-                # targets=tseg,  # Save full GT mask - not necessary as preloaded
+    def _init_training_loss(self):
+        """
+            Initialize exp. criterions.
+        """
+        # Use the model's built-in criterion if not provided
+        if self.train_criterion is None:
+            if not hasattr(self.model, 'args'):
+                self.model.args = get_cfg()  # Fallback if model doesn't have args
+            # # Wrap loss criterion
+            self.train_criterion_boxes = wl.watch_or_edit(
+                PerSampleDetectionLoss(self.model, loss_type=0),
+                flag="loss",
+                name="train_detection_loss/bboxes",
+                per_sample=True,
+                log=True,
             )
-            if isinstance(loss_batch, torch.Tensor):
-                losses += torch.mean(loss_batch).item()
-            else:
-                losses += loss_batch
-        model.increase_age()  # Manually increment step for monitoring purposes as pseudo training
-
-    loss = float(losses / max(1, train_loader_len)) if criterion_mlt is not None else None
-    return loss
-
-
-def test(loader, model, criterion_mlt=None, metric_mlt=None, device='cpu', test_loader_len=1, idx=0):
-    """Full evaluation pass over the val loader."""
-    losses = 0.0
-    metric_mlt.reset() if metric_mlt is not None else None
-
-    print(f"DEBUG: Entering test loop with {test_loader_len} batches expected.", flush=True)
-    with guard_testing_context:
-        data = next(loader)
-        if idx % 5 == 0:
-            print(f"DEBUG: [Eval {idx}/{test_loader_len}] Processing...", flush=True)
-        inputs = data[0].to(device)
-        ids = data[1]
-        tseg = data[2].to(device)
-        tbbxs = data[3].to(device)
-
-        # Predict boxes
-        outputs = model.predict(inputs)[0]
-        model.increase_age()  # Manually increment step for monitoring purposes as pseudo training
-        pbbxs = torch.cat([outputs.boxes.cls[..., None], outputs.boxes.xyxy], dim=1)[None]
-        # ========== Build segmentation from boxes ==========
-        # ===================================================
-        # Build a class map from detected boxes (0 = background)
-        H, W = tseg.shape[-2:]  # target mask spatial size
-        class_map = torch.zeros((H, W), dtype=torch.int64, device=inputs.device)
-
-        # Unpack detections; outputs.boxes.xyxy is [N,4], outputs.boxes.cls is [N]
-        boxes_xyxy = outputs.boxes.xyxy
-        classes = outputs.boxes.cls.int()
-        conf = outputs.boxes.conf if hasattr(outputs.boxes, "conf") else None
-
-        # Optional: filter by confidence
-        if idx % 5 == 0:
-            max_conf = conf.max().item() if conf is not None and conf.numel() > 0 else 0
-            print(f"DEBUG: EVAL Sample {idx} | Max conf: {max_conf:.2f}")
-
-        keep = (conf >= 0.05) if conf is not None else torch.ones_like(classes, dtype=torch.bool)
-        boxes_xyxy = boxes_xyxy[keep]
-        classes = classes[keep]
-
-        # Rasterize boxes into the class map
-        for box, cls in zip(boxes_xyxy, classes):
-            x1, y1, x2, y2 = box.round().int().tolist()
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(W, x2), min(H, y2)
-            if x2 > x1 and y2 > y1:
-                class_map[y1:y2, x1:x2] = cls + 1  # Offset by 1 to make 0 = Background
-
-        pseg = class_map[None, ...]  # add channel if your metric expects [1, H, W]
-
-        if criterion_mlt is not None:
-            loss_batch = criterion_mlt(
-                pbbxs[..., 1:],  # Remove class (index 0) to get boxes [x1, y1, x2, y2]
-                tbbxs,
-                batch_ids=ids,
-                preds=pseg,  # Pass rasterized mask
-                # targets=tseg,  # Save full GT mask - not necessary as preloaded
+            self.train_criterion_cls = wl.watch_or_edit(
+                PerSampleDetectionLoss(self.model, loss_type=1),
+                flag="loss",
+                name="train_detection_loss/cls",
+                per_sample=True,
+                log=True,
             )
-            if isinstance(loss_batch, torch.Tensor):
-                losses += torch.mean(loss_batch).item()
-            else:
-                losses += loss_batch
+            self.train_criterion_dfl = wl.watch_or_edit(
+                PerSampleDetectionLoss(self.model, loss_type=2),
+                flag="loss",
+                name="train_detection_loss/dfl",
+                per_sample=True,
+                log=True,
+            )
+        if self.train_metric is None:
+            # # Wrap IoU metric
+            self.train_metric = wl.watch_or_edit(
+                PerSampleIoU(conf=0.25, iou_thres=0.5),
+                flag="metric",
+                name="train_per_sample_iou",
+                per_sample=True,
+                log=True,
+            )
+        if self.val_criterion is None:
+            # # Wrap loss criterion
+            self.val_criterion_boxes = wl.watch_or_edit(
+                PerSampleDetectionLoss(self.model, loss_type=0),
+                flag="loss",
+                name="val_detection_loss/bboxes",
+                per_sample=True,
+                log=True,
+            )
+            self.val_criterion_cls = wl.watch_or_edit(
+                PerSampleDetectionLoss(self.model, loss_type=1),
+                flag="loss",
+                name="val_detection_loss/cls",
+                per_sample=True,
+                log=True,
+            )
+            self.val_criterion_dfl = wl.watch_or_edit(
+                PerSampleDetectionLoss(self.model, loss_type=2),
+                flag="loss",
+                name="val_detection_loss/dfl",
+                per_sample=True,
+                log=True,
+            )
+        if self.val_metric is None:
+            # # Wrap IoU metric
+            self.val_metric = wl.watch_or_edit(
+                PerSampleIoU(conf=0.25, iou_thres=0.5),
+                flag="metric",
+                name="val_per_sample_iou",
+                per_sample=True,
+                log=True,
+            )
 
-        # Now class_map is your predicted segmentation; compare/log against tseg
-        metric_mlt.update(pseg, tseg) if metric_mlt is not None else None
+    def process_predictions(self, pred_raw, image, cls_thresh=0.5):
+        img_h, img_w = image[0].shape[-2:]
+        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)  # Convert to raw model predictions format [batch, 64+nc, 8400]
+        preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=0.25, iou_thres=cls_thresh)
+        return preds_nms
 
-    loss = float(losses / test_loader_len) if criterion_mlt is not None else None
-    metric = float(metric_mlt.compute().detach().cpu().item() * 100.0) if metric_mlt is not None else None
-    return loss, metric
+    def train(self):
+        """
+            Override the default step loop to add WL guards and per-sample IoU tracking.
+            This is a simplified loop for demonstration.
+        """
+        loss = 0.0
+
+        while True:
+            with wl.guard_training_context:
+                self.optimizer.zero_grad()  # Zero gradients at the start of the step
+
+                # --- One training batch ---
+                inputs = next(iter(self.data_train_loader))
+
+                # Process inputs
+                image = inputs[0].float()
+                batch_ids = inputs[1]  # uids
+
+                # Process dataset labels (already in ultralytics flat format)
+                batch = inputs[3]['batch']
+                targets = batch['bboxes']  # (N, 4)
+
+                # Inference
+                raw_preds = self.model(image.to(self.device))
+
+                # Process outputs to generate predictions as BB (bs, x, 5 | 6)
+                preds = self.process_predictions(raw_preds, image, cls_thresh=0.5)
+
+                # Split preds and targets by batch index
+                batch_size = image.shape[0]
+                preds_by_batch = []
+                targets_by_batch = []
+                for i in range(batch_size):
+                    mask = batch['batch_idx'].view(-1) == i
+                    p = preds[mask] if isinstance(preds, torch.Tensor) and preds.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
+                    t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
+                    preds_by_batch.append(p)
+                    targets_by_batch.append(t)
+
+                # Compute training loss with per-sample tracking
+                # # Bboxes
+                per_sample_losses_bboxes = self.train_criterion_boxes(
+                    raw_preds,
+                    batch,
+                    batch_ids=batch_ids,
+                    preds={'bboxes': preds_by_batch},
+                    targets={'bboxes': targets_by_batch}
+                )
+                per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes)) if per_sample_losses_bboxes else torch.zeros(batch_size, device=self.device)
+
+                # # Cls
+                per_sample_losses_cls = self.train_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
+                per_sample_losses_cls = torch.stack(list(per_sample_losses_cls)) if per_sample_losses_cls else torch.zeros(batch_size, device=self.device)
+
+                # # Dfl
+                per_sample_losses_dfl = self.train_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
+                per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl)) if per_sample_losses_dfl else torch.zeros(batch_size, device=self.device)
+
+                # # Compute final loss
+                loss = (per_sample_losses_bboxes + per_sample_losses_cls + per_sample_losses_dfl).mean()
+
+                # Compute training metric
+                ious = self.train_metric(raw_preds, batch, batch_ids=batch_ids)
+                iou_mean = ious.mean().item() if ious is not None and ious.numel() > 0 else 0.0
+
+                # Verbose
+                step = self.model.get_age()
+                print(f"Step {step} — loss: {loss.item():.4f} (bboxes: {per_sample_losses_bboxes.mean().item():.4f}; cls: {per_sample_losses_cls.mean().item():.4f}; dfl: {per_sample_losses_dfl.mean().item():.4f}) - iou: {iou_mean:.4f}")
+
+                # Learning
+                loss.backward()
+                self.optimizer.step()
+                self.scheduler.step()
+
+            # --- Validate on full val set ---
+            step = self.model.get_age()
+            if step % self.val_every == 0:
+                with wl.guard_testing_context:
+                    self.validate()
+
+    def validate(self):
+        # --- One training batch ---
+        inputs = next(iter(self.data_val_loader))
+
+        # Process inputs
+        image = inputs[0].float()
+        batch_ids = inputs[1]  # uids
+
+        # Process dataset labels (already in ultralytics flat format)
+        batch = inputs[3]['batch']
+        targets = batch['bboxes']  # (N, 4)
+
+        # Inference
+        raw_preds = self.model(image.to(self.device))[1]
+
+        # Process outputs to generate predictions as BB (bs, x, 5 | 6)
+        preds = self.process_predictions(raw_preds, image, cls_thresh=0.5)
+
+        # Split preds and targets by batch index
+        batch_size = image.shape[0]
+        preds_by_batch = []
+        targets_by_batch = []
+        for i in range(batch_size):
+            mask = batch['batch_idx'].view(-1) == i
+            p = preds[mask] if isinstance(preds, torch.Tensor) and preds.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
+            t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
+            preds_by_batch.append(p)
+            targets_by_batch.append(t)
+
+        # Compute valing loss with per-sample tracking
+        # # Bboxes
+        per_sample_losses_bboxes = self.val_criterion_boxes(
+            raw_preds,
+            batch,
+            batch_ids=batch_ids,
+            preds={'bboxes': preds_by_batch},
+            targets={'bboxes': targets_by_batch}
+        )
+        per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes)) if per_sample_losses_bboxes else torch.zeros(batch_size, device=self.device)
+
+        # # Cls
+        per_sample_losses_cls = self.val_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
+        per_sample_losses_cls = torch.stack(list(per_sample_losses_cls)) if per_sample_losses_cls else torch.zeros(batch_size, device=self.device)
+
+        # # Dfl
+        per_sample_losses_dfl = self.val_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
+        per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl)) if per_sample_losses_dfl else torch.zeros(batch_size, device=self.device)
+
+        # # Compute final loss
+        loss = (per_sample_losses_bboxes + per_sample_losses_cls + per_sample_losses_dfl).mean()
+
+        # Compute valing metric
+        ious = self.val_metric(raw_preds, batch, batch_ids=batch_ids)
+        iou_mean = ious.mean().item() if ious is not None and ious.numel() > 0 else 0.0
+
+        # Verbose
+        step = self.model.get_age()
+        print(f"Validation step {step} — loss: {loss.item():.4f} (bboxes: {per_sample_losses_bboxes.item()}; cls: {per_sample_losses_cls.item()}; dfl: {per_sample_losses_dfl.item()}) - iou: {ious.mean().item():.4f}")
 
 
-# =============================================================================
-# Main
-# =============================================================================
-if __name__ == "__main__":
+def main():
+    start_time = time.time()
+
     # --- 1) Load hyperparameters from YAML (if present) ---
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
@@ -422,18 +311,71 @@ if __name__ == "__main__":
         parameters = {}
 
     # Defaults
-    parameters.setdefault("experiment_name", "coco_detection")
+    parameters.setdefault("experiment_name", "det_YOLO_usecase")
     parameters.setdefault("device", "auto")
-    parameters.setdefault("number_of_workers", 4)
+    parameters.setdefault("training_steps_to_do", None)  # None = infinite
+    parameters.setdefault("eval_full_to_train_steps_ratio", 5)
+    parameters.setdefault("experiment_dump_to_train_steps_ratio", 5)
+    parameters.setdefault("num_classes", 2)
+    parameters.setdefault("image_size", None)
+    parameters.setdefault("data_root", "./data/data.yaml")
+    parameters.setdefault("class_names", ["class_0", "class_1"])  # Default class names
+    parameters.setdefault("compute_natural_sort", True)
+    parameters.setdefault("is_training", False)
+    parameters.setdefault("serving_grpc", True)
+    parameters.setdefault("serving_cli", False)
+    parameters.setdefault("tqdm_display", True)
 
-    # Parameters
-    exp_name = parameters.get("experiment_name", "coco_detection")
+    # Nested data and model configs with defaults
+    if "data" not in parameters:
+        parameters["data"] = {}
+    parameters["data"].setdefault("train_loader", {})
+    parameters["data"].setdefault("test_loader", {})
+    parameters["data"]["train_loader"].setdefault("batch_size", 4)
+    parameters["data"]["train_loader"].setdefault("shuffle", True)
+    parameters["data"]["test_loader"].setdefault("batch_size", 4)
+    parameters["data"]["test_loader"].setdefault("shuffle", False)
+
+    if "model" not in parameters:
+        parameters["model"] = {}
+    if isinstance(parameters["model"], str):
+        # If model is just a string (name), convert to dict
+        parameters["model"] = {"name": parameters["model"]}
+    parameters["model"].setdefault("name", "yolo11s.pt")
+    parameters["model"].setdefault("lr", 0.01)
+    parameters["model"].setdefault("momentum", 0.9)
+
+    parameters.setdefault("checkpoint_manager", {})
+    parameters["checkpoint_manager"].setdefault("load_config", True)
+    parameters["checkpoint_manager"].setdefault("load_data", True)
+    parameters["checkpoint_manager"].setdefault("load_model", True)
+
+    # Extract key parameters
+    exp_name = parameters["experiment_name"]
+    num_classes = int(parameters["num_classes"])
+    image_size = parameters["image_size"]
+    max_steps = parameters["training_steps_to_do"]
+    eval_every = parameters["eval_full_to_train_steps_ratio"]
+
+    # Class names mapping
+    class_names = parameters.get("class_names", [])
+
+    # Data loader configs
+    train_cfg = parameters.get("data", {}).get("train_loader", {})
+    test_cfg = parameters.get("data", {}).get("test_loader", {})
+    batch_size = train_cfg.get("batch_size", 4)
+
+    # Model config
+    model_name = parameters["model"]["name"]
+    model_lr = float(parameters["model"]["lr"])
+    model_momentum = float(parameters["model"]["momentum"])
+
+    # Data root
+    data_root = parameters.get("data_root", "./data/data.yaml")
 
     # --- 2) Device selection ---
     if parameters.get("device", "auto") == "auto":
-        parameters["device"] = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        parameters["device"] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = parameters["device"]
 
     # --- 3) Logging directory ---
@@ -442,186 +384,143 @@ if __name__ == "__main__":
         parameters["root_log_dir"] = tmp_dir
         print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
-    print(f"Using root_log_dir: {parameters['root_log_dir']}")
-
     log_dir = parameters["root_log_dir"]
-    verbose = parameters.get("verbose", True)
-    tqdm_display = parameters.get("tqdm_display", False)
 
     # --- 4) Register logger + hyperparameters ---
-    logger = Logger()
-    wl.watch_or_edit(logger, flag="logger", log_dir=log_dir)
-
+    logger = LoggerQueue()
+    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
+        name=exp_name,
         defaults=parameters,
         poll_interval=1.0,
     )
 
-    # --- 5) Data ---
-    img_size = parameters.get("image_size", 128)
+    # --- 5) Build YOLO config with augmentation disabled for consistency ---
+    cfg = get_cfg()
+    if image_size is not None:
+        cfg.imgsz = image_size
+    for k in ("mosaic", "mixup", "copy_paste",
+              "hsv_h", "hsv_s", "hsv_v",
+              "degrees", "translate", "scale", "shear", "perspective",
+              "flipud", "fliplr", "erasing"):
+        setattr(cfg, k, 0.0)
+    cfg.auto_augment = None
 
-    # Create transforms to resize images and masks to match model input shape
-    image_transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-    ])
-
-    mask_transform = transforms.Compose([
-        transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.NEAREST),
-    ])
-
-    # Configure dataset and dataloader for COCO detection
-    data_cfg = parameters.get("data", {})
-
-    # # Train
-    set_cfg = data_cfg.get("coco_train_final_v1", {})
-    images_dir = set_cfg.get("images_dir", "")
-    annotations_file = set_cfg.get("annotations_file", "")
-    temp_coco = COCO(annotations_file)  # Create COCO object briefly to get the full list of categories
-    cat_ids = sorted(temp_coco.getCatIds())
-    class_map = {cat_id: i for i, cat_id in enumerate(cat_ids)}
-    num_classes = len(cat_ids) + 1
-    print(f"DEBUG: Found {len(cat_ids)} categories in COCO. Mapping to {num_classes} total classes (including Background).")
-    _train_dataset = COCOBBoxSegmentationDataset(
-        images_dir,
-        annotations_file,
-        image_transform=image_transform,
-        mask_transform=mask_transform,
-        class_map=class_map,
-        max_samples=SUBSET // 2,
+    # --- 6) Build YOLO datasets ---
+    checked_data = check_det_dataset(data_root)
+    train_yolo_dataset = YOLODataset(
+            img_path=checked_data["train"],
+            imgsz=cfg.imgsz,
+            batch_size=batch_size,
+            augment=True,  # augmentation
+            hyp=cfg,
+            rect=cfg.rect,  # rectangular batches
+            cache=False,
+            single_cls=cfg.single_cls or False,
+            stride=32,
+            pad=0.0,
+            task=cfg.task,
+            classes=cfg.classes,
+            data=checked_data,
+            fraction=cfg.fraction,
     )
-    # Set the desired number of classes as an attribute on the dataset for potential use in model/metric initialization
-    # If not, based on class_ids, the dataset will have classes in the range [0, num_classes-1], where 0 is Background and the rest are mapped from COCO category ids.
-    _train_dataset.num_classes = num_classes
-    try:
-        import json
-        categories = _train_dataset.coco.loadCats(cat_ids)
-        names = ["Background"] + [c["name"] for c in categories]
-        _train_dataset.class_names = json.dumps(names)
-        print(f"DEBUG: First 5 class names: {names[:5]}")
-    except Exception as e:
-        print(f"DEBUG: Failed to load class names: {e}")
-        _train_dataset.class_names = json.dumps(["Background"] + [f"Class_{i}" for i in range(num_classes - 1)])
-    train_loader_registered = wl.watch_or_edit(
-        _train_dataset,
+    train_yolo_dataset.__class__ = YOLODatasetWL  # Monkey-patch to our WL-compatible dataset for loader tracking
+    val_yolo_dataset = YOLODataset(
+            img_path=checked_data["val"],
+            imgsz=cfg.imgsz,
+            batch_size=batch_size,
+            augment=False,  # No augmentation for validation
+            hyp=cfg,
+            rect=cfg.rect ,  # rectangular batches
+            cache=False,
+            single_cls=cfg.single_cls or False,
+            stride=32,
+            pad=0.5,
+            task=cfg.task,
+            classes=cfg.classes,
+            data=checked_data,
+            fraction=1.0,
+    )
+    val_yolo_dataset.__class__ = YOLODatasetWL  # Monkey-patch to our WL-compatible dataset for loader tracking
+
+    # --- 7) Create WL-watched loaders (num_workers=0 to avoid fork issues after wl.serve()) ---
+    train_loader = wl.watch_or_edit(
+        train_yolo_dataset,
         flag="data",
-        loader_name="coco_train_final_v1",
-        batch_size=1,
-        shuffle=set_cfg.get("shuffle", False),
+        loader_name="train_loader",
+        batch_size=train_cfg.get("batch_size", batch_size),
+        shuffle=train_cfg.get("shuffle", True),
+        num_workers=0,
+        drop_last=False,
+        compute_hash=False,
+        is_training=True,
+        collate_fn=_wl_yolo_collate,
+        preload_labels=False,
+        preload_metadata=False
+    )
+    val_loader = wl.watch_or_edit(
+        val_yolo_dataset,
+        flag="data",
+        loader_name="val_loader",
+        batch_size=test_cfg.get("batch_size", batch_size),
+        shuffle=test_cfg.get("shuffle", False),
+        num_workers=0,
+        drop_last=False,
         compute_hash=False,
         is_training=False,
-        array_use_cache=True,
+        collate_fn=_wl_yolo_collate,
+        preload_labels=False,
+        preload_metadata=False,
     )
 
-    # # Val
-    set_cfg = data_cfg.get("coco_val_final_v1", {})
-    images_dir = set_cfg.get("images_dir", "")
-    annotations_file = set_cfg.get("annotations_file", "")
-    temp_coco = COCO(annotations_file)  # Create COCO object briefly to get the full list of categories
-    cat_ids = sorted(temp_coco.getCatIds())
-    class_map = {cat_id: i for i, cat_id in enumerate(cat_ids)}
-    num_classes = len(cat_ids) + 1
-    print(f"DEBUG: Found {len(cat_ids)} categories in COCO. Mapping to {num_classes} total classes (including Background).")
-    _test_dataset = COCOBBoxSegmentationDataset(
-        images_dir,
-        annotations_file,
-        image_transform=image_transform,
-        mask_transform=mask_transform,
-        class_map=class_map,
-        max_samples=SUBSET // 2,
-    )
-    # Set the desired number of classes as an attribute on the dataset for potential use in model/metric initialization
-    # If not, based on class_ids, the dataset will have classes in the range [0, num_classes-1], where 0 is Background and the rest are mapped from COCO category ids.
-    _test_dataset.num_classes = num_classes
-    try:
-        import json
-        categories = _test_dataset.coco.loadCats(cat_ids)
-        names = ["Background"] + [c["name"] for c in categories]
-        _test_dataset.class_names = json.dumps(names)
-        print(f"DEBUG: First 5 class names: {names[:5]}")
-    except Exception as e:
-        print(f"DEBUG: Failed to load class names: {e}")
-        _test_dataset.class_names = json.dumps(["Background"] + [f"Class_{i}" for i in range(num_classes - 1)])
-    test_loader_registered = wl.watch_or_edit(
-        _test_dataset,
-        flag="data",
-        loader_name="coco_val_final_v1",
-        batch_size=1,
-        shuffle=set_cfg.get("shuffle", False),
-        compute_hash=False,
-        is_training=False,
-        array_use_cache=True,
-    )
-
-    # --- Define criterion and metric ---
-    train_criterion = wl.watch_or_edit(
-        GIoULoss(reduction=None),
-        flag="criterion",
-        signal_name="train_metric/GIoULoss",
-    )
-    test_criterion = wl.watch_or_edit(
-        GIoULoss(reduction=None),
-        flag="criterion",
-        signal_name="test_metric/GIoULoss",
-    )
-
-    # --- 6) Model, optimizer, losses, metric ---
-    model = Yolov11(img_size=parameters.get("image_size", 128)).to(device)
-    model = wl.watch_or_edit(
-        model,
-        flag="model",
-        device=device,
-        use_onnx=True,
-        compute_dependencies=False, # Don't compute dependencies for the whole model (can be large); focus on data analysis and metrics in this example
-    )
-
-    # --- Compute class weights to handle class imbalance ---
-    print("\n" + "=" * 60)
-    print("Computing class weights to address class imbalance...")
-    print("=" * 60)
-
-    # --- 7) Start WeightsLab services ---
+    # --- 8) Initialize WL's gRPC server ---
     wl.serve(
         serving_grpc=parameters.get("serving_grpc", True),
-        serving_cli=parameters.get("serving_cli", True),
+        serving_cli=parameters.get("serving_cli", False),
     )
 
     print("=" * 60)
-    print("🚀 STARTING COCO DETECTION TRAIN/TEST")
+    print("🚀 STARTING YOLO DETECTION TRAINING")
+    print(f"📈 Training steps: {max_steps if max_steps else 'infinite'}")
+    print(f"📊 Evaluation every {eval_every} steps")
+    print(f"📊 Batch size: {batch_size}")
+    print(f"🖼️  Image size: {image_size}")
+    print(f"📂 Classes ({num_classes}): {', '.join(class_names)}")
     print(f"💾 Logs will be saved to: {log_dir}")
+    print(f"📂 Data: {data_root}")
     print("=" * 60 + "\n")
 
-    # ==============================
-    # 7. Optional Trainset iteration
-    train_loss = .0
-    train_loader_len = len(train_loader_registered)
-    for idx in range(train_loader_len):
-        if idx % 5 == 0:
-            print(f"DEBUG: Starting pseudo_train batch {idx}/{train_loader_len}...", flush=True)
-
-        train_loss += pseudo_train(
-            train_loader_registered, # Use the raw DataLoader for the manual pass
-            model,
-            criterion_mlt=train_criterion,
+    # --- 9) Train with WL-compatible trainer ---
+    trainer = WLCompatileDetTrainer(
+        overrides=dict(
+            model=model_name,
+            data=str(data_root),
+            epochs=1000 if max_steps is None else max(1, max_steps // len(train_loader)),  # Convert steps to epochs
+            imgsz=image_size,
+            batch=batch_size,
+            resume=False,
             device=device,
-            train_loader_len=train_loader_len,
-            idx=idx,
-        )
-        if train_loss is not None:
-            print(f"Train loss (GIoU-based, no backprop): {train_loss:.4f}")
+            workers=0,  # Single process
+            cache=False,
+        ),
+        train_loader=train_loader,
+        val_loader=val_loader,
+        val_every=eval_every,
+    )
 
-        # ===============
-        # 8. Testing Loop
-        test_loader_len = len(test_loader_registered)
-        test_loss, test_metric = None, None
-        start_time = time.time()
-        test_loss, test_metric = test(test_loader_registered, model, test_criterion, device=device, test_loader_len=test_loader_len, idx=idx)
-        print("\n" + "=" * 60)
-        print(f"✅ Testing completed in {time.time() - start_time:.2f} seconds")
-        print(f"💾 Logs saved to: {log_dir}")
-        print("=" * 60)
+    # Train
+    trainer.train()
 
-    # Keep the main thread alive to allow background serving threads to run
+    print("\n" + "=" * 60)
+    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
+    print(f"💾 Logs saved to: {log_dir}")
+    print("=" * 60)
+
+    # Keep the main thread alive for WL UI exploration
     wl.keep_serving()
+
+
+if __name__ == "__main__":
+    main()

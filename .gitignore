@@ -26,6 +26,7 @@ runs
 # Ignore hidden files
 .env
 .DS_Store
+.cache
 
 # Ignore specific files
 experiment_service_pb2.py

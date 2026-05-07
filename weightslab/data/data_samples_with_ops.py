@@ -434,7 +434,7 @@ class DataSampleTrackingWrapper(Dataset):
     @property
     def class_names(self):
         """Expose class names from the wrapped dataset if available."""
-        return getattr(self.wrapped_dataset, "class_names", None)
+        return getattr(self.wrapped_dataset, "class_names", getattr(self.wrapped_dataset, "classes", None))
 
     def _get_stats_dataframe(self, limit: int = -1):
         """Return a copy of the stats dataframe (optionally limited)."""
@@ -979,9 +979,6 @@ class DataSampleTrackingWrapper(Dataset):
 
         The result is cached in `_num_classes_cache`.
         """
-        # Cached value
-        if hasattr(self, "_num_classes_cache") and isinstance(getattr(self, "_num_classes_cache"), (int, np.integer)):
-            return int(getattr(self, "_num_classes_cache"))
 
         # 1) Dataset-provided attribute
         try:
@@ -1027,10 +1024,17 @@ class DataSampleTrackingWrapper(Dataset):
             uniq_labels: Set[int] = set()
             n = min(len(self.wrapped_dataset), int(sample_limit))
             for i in trange(n, desc='Inference num of classes from data..'):
-                data = self.wrapped_dataset[i]
+                data = self.wrapped_dataset.get_items(i, include_labels=True, include_images=False, include_metadata=True) if hasattr(self.wrapped_dataset, 'get_items') else self.wrapped_dataset[i]
                 if not isinstance(data, tuple) or len(data) < 2:
                     continue
                 target = data[2]
+                meta = data[3]
+
+                # Check meta first
+                num_classes = meta.get('num_classes', None)
+                if num_classes:
+                    self._num_classes_cache = int(num_classes + 1)
+                    return self._num_classes_cache
 
                 # Convert to numpy
                 if isinstance(target, th.Tensor):

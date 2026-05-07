@@ -98,6 +98,88 @@ def is_copy_metadata_column_name(column_name: str) -> bool:
     return bool(re.match(r".+_\d+@.+$", name))
 
 
+def detect_bbox_format(bboxes: np.ndarray) -> str:
+    """Detect bounding box format: 'xyxy' (x1,y1,x2,y2) or 'xywh' (x,y,w,h).
+
+    Args:
+        bboxes: numpy array of shape (N, 4) or (N, 5+) containing bbox data
+
+    Returns:
+        'xyxy' or 'xywh' format string. Defaults to 'xyxy' if ambiguous.
+    """
+    if bboxes is None or bboxes.size == 0 or bboxes.shape[-1] < 4:
+        return 'xyxy'
+
+    bboxes = np.asarray(bboxes, dtype=np.float32)
+    if bboxes.ndim < 2:
+        return 'xyxy'
+
+    coords = bboxes[..., :4] if bboxes.shape[-1] >= 4 else bboxes
+    if coords.size == 0:
+        return 'xyxy'
+
+    x1_or_x = coords[..., 0]
+    y1_or_y = coords[..., 1]
+    x2_or_w = coords[..., 2]
+    y2_or_h = coords[..., 3]
+
+    x1_or_x_max = np.max(x1_or_x)
+    x1_or_x_min = np.min(x1_or_x)
+    x2_or_w_max = np.max(x2_or_w)
+    x2_or_w_min = np.min(x2_or_w)
+
+    if x1_or_x_max <= x2_or_w_max and x1_or_x_min <= x2_or_w_min:
+        return 'xyxy'
+
+    return 'xywh'
+
+
+def bboxes_to_segmentation_mask(bboxes: np.ndarray, height: int, width: int,
+                                 bbox_format: str = 'xyxy', class_ids: np.ndarray = None) -> np.ndarray:
+    """Convert bounding boxes to a segmentation mask by rasterizing them.
+
+    Args:
+        bboxes: array of shape (N, 4) with bbox coordinates
+        height: height of the output mask
+        width: width of the output mask
+        bbox_format: 'xyxy' or 'xywh' format
+        class_ids: optional array of shape (N,) with class IDs for each bbox. If None, uses 1 for all.
+
+    Returns:
+        uint8 mask array of shape (height, width) with class IDs
+    """
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    if bboxes is None or bboxes.size == 0:
+        return mask
+
+    bboxes = np.asarray(bboxes, dtype=np.float32)
+    if bboxes.ndim < 2:
+        return mask
+
+    if class_ids is not None:
+        class_ids = np.asarray(class_ids, dtype=np.uint8)
+
+    for idx, bbox in enumerate(bboxes):
+        if len(bbox) < 4:
+            continue
+
+        if bbox_format == 'xywh':
+            x, y, w, h = bbox[:4]
+            x1, y1, x2, y2 = x, y, x + w, y + h
+        else:
+            x1, y1, x2, y2 = bbox[:4]
+
+        x1, y1 = max(0, int(round(x1))), max(0, int(round(y1)))
+        x2, y2 = min(width, int(round(x2))), min(height, int(round(y2)))
+
+        if x2 > x1 and y2 > y1:
+            class_id = class_ids[idx] if class_ids is not None else 1
+            mask[y1:y2, x1:x2] = int(class_id)
+
+    return mask
+
+
 def is_protected_metadata_name(column_name: str) -> bool:
     """
         Determine if a metadata column name is protected (cannot be edited by user). Exception if contains "@" to allow editing of copied columns.
@@ -1104,39 +1186,91 @@ class DataService:
                 label_raw = row.get(SampleStatsEx.TARGET.value) if label is None else label
                 if label_raw is None and dataset is not None:
                     label_raw = load_label(dataset, sample_id)
-                label_arr = to_numpy_safe(label_raw)
-                if label_arr is None:
-                    try:
-                        label_arr = np.asarray(label_raw)
-                    except Exception:
-                        label_arr = np.array([])
 
-                # Ensure mask is uint8 (class IDs are 0-255) and RLE-encode for efficient transfer.
-                # RLE-encoded masks are ~100-500x smaller than float arrays for typical segmentation masks.
-                label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
-                t_label_convert = time.time() - t0_gt_conv
+                # Handle detection task type with bounding boxes
+                if task_type == "detection":
+                    # Send raw bbox data as JSON
+                    bbox_data = {}
+                    if isinstance(label_raw, dict):
+                        # Support multiple dict key names for bboxes: 'bboxes', 'boxes', 'bb'
+                        bbox_key = next((k for k in ['bboxes', 'boxes', 'bb'] if k in label_raw), None)
+                        if bbox_key:
+                            try:
+                                # Convert dict to arrays
+                                bboxes = label_raw.get(bbox_key)
+                                bboxes = np.asarray([bbox for bbox in bboxes if len(bbox)])
+                            except (ValueError, TypeError):
+                                bboxes = np.array([])
 
-                t0_rle = time.time()
-                rle_bytes = rle_encode_mask(label_u8.ravel()) if label_u8.size > 0 else b""
-                t_mask_encode += time.time() - t0_rle
+                            class_ids = label_raw.get('class_ids')
+                            if bboxes.size > 0 and bboxes.ndim >= 2:
+                                bbox_format = detect_bbox_format(bboxes)
+                                bbox_data = {
+                                    "bboxes": bboxes.tolist(),
+                                    "class_ids": class_ids.tolist() if class_ids is not None else 1,
+                                    "format": bbox_format
+                                }
+                    if not bbox_data and label_raw is not None:
+                        label_arr = to_numpy_safe(label_raw)
+                        if label_arr is None:
+                            try:
+                                label_arr = np.asarray(label_raw, dtype=np.float32)
+                            except Exception:
+                                label_arr = np.array([])
 
-                data_stats.append(
-                    create_data_stat(
-                        name='target',
-                        stat_type='rle_mask',
-                        shape=list(label_arr.shape),
-                        value=[],
-                        thumbnail=rle_bytes
+                        if label_arr.size > 0 and label_arr.ndim == 2 and label_arr.shape[-1] >= 4:
+                            bbox_format = detect_bbox_format(label_arr)
+                            bbox_data = {
+                                "bboxes": label_arr.tolist(),
+                                "class_ids": None,
+                                "format": bbox_format
+                            }
+
+                    t_label_convert = time.time() - t0_gt_conv
+
+                    # Send bbox data as JSON string
+                    bbox_json = json.dumps(bbox_data) if bbox_data else ""
+                    data_stats.append(
+                        create_data_stat(
+                            name='target',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=bbox_json,
+                            thumbnail=b""
+                        )
                     )
-                )
-                target_mask_stat_index = len(data_stats) - 1
-                target_mask_u8 = label_u8
+                # Handle segmentation task type
+                else:
+                    label_arr = to_numpy_safe(label_raw)
+                    if label_arr is None:
+                        try:
+                            label_arr = np.asarray(label_raw)
+                        except Exception:
+                            label_arr = np.array([])
+
+                    label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
+                    t_label_convert = time.time() - t0_gt_conv
+
+                    t0_rle = time.time()
+                    rle_bytes = rle_encode_mask(label_u8.ravel()) if label_u8.size > 0 else b""
+                    t_mask_encode += time.time() - t0_rle
+
+                    data_stats.append(
+                        create_data_stat(
+                            name='target',
+                            stat_type='rle_mask',
+                            shape=list(label_u8.shape) if label_u8.size > 0 else [],
+                            value=[],
+                            thumbnail=rle_bytes
+                        )
+                    )
+                    target_mask_stat_index = len(data_stats) - 1
+                    target_mask_u8 = label_u8
 
                 # Prefer row attribute if available, fallback to dataset, then model
                 num_classes = (
                     row.get('num_classes')
                     or (getattr(dataset, "num_classes", None) if dataset else None)
-                    or getattr(self._ctx.components.get("model"), "num_classes", None)
                 )
                 if num_classes is None:
                     # Fallback: infer from this label
@@ -1157,11 +1291,9 @@ class DataService:
                 )
 
                 # Append class_names if available
-                model_comp = self._ctx.components.get("model")
                 class_names = (
                     row.get('class_names')
                     or (getattr(dataset, "class_names", None) if dataset else None)
-                    or getattr(model_comp, "class_names", None)
                 )
 
                 if class_names:
@@ -1242,24 +1374,83 @@ class DataService:
                 pred = None
 
             if task_type != "classification" and pred is not None:
-                try:
-                    t0_pmask = time.time()
-                    pred_arr = np.asarray(pred, dtype=np.uint8)
-                    rle_bytes = rle_encode_mask(pred_arr.ravel()) if pred_arr.size > 0 else b""
+                t0_pmask = time.time()
+
+                # Handle detection task type with bounding boxes
+                if task_type == "detection":
+                    # Send raw bbox data as JSON
+                    pred_bbox_data = {}
+                    if isinstance(pred, dict):
+                        # Support multiple dict key names for bboxes: 'bboxes', 'boxes', 'bb'
+                        bbox_key = next((k for k in ['bboxes', 'boxes', 'bb'] if k in pred), None)
+                        if bbox_key:
+                            try:
+                                pred_bboxes = np.asarray(pred.get(bbox_key), dtype=np.float32)
+                            except (ValueError, TypeError):
+                                # Handle jagged arrays or inconsistent shapes - convert via object dtype
+                                try:
+                                    # Convert dict to arrays
+                                    pred_bboxes = pred.get(bbox_key)
+                                    pred_bboxes = np.asarray([bbox for bbox in pred_bboxes if len(bbox)])
+                                except (ValueError, TypeError):
+                                    pred_bboxes = np.array([])
+
+                            pred_class_ids = pred.get('class_ids')
+                            if pred_bboxes.size > 0 and pred_bboxes.ndim >= 2:
+                                bbox_format = detect_bbox_format(pred_bboxes)
+                                pred_bbox_data = {
+                                    "bboxes": pred_bboxes.tolist(),
+                                    "class_ids": pred_class_ids.tolist() if pred_class_ids is not None else 1,
+                                    "format": bbox_format
+                                }
+                    if not pred_bbox_data and pred is not None:
+                        pred_arr = to_numpy_safe(pred)
+                        if pred_arr is None:
+                            try:
+                                pred_arr = np.asarray(pred, dtype=np.float32)
+                            except Exception:
+                                pred_arr = np.array([])
+
+                        if pred_arr.size > 0 and pred_arr.ndim == 2 and pred_arr.shape[-1] >= 4:
+                            bbox_format = detect_bbox_format(pred_arr)
+                            pred_bbox_data = {
+                                "bboxes": pred_arr.tolist(),
+                                "class_ids": None,
+                                "format": bbox_format
+                            }
+
                     t_mask_encode += time.time() - t0_pmask
+
+                    # Send bbox data as JSON string
+                    bbox_json = json.dumps(pred_bbox_data) if pred_bbox_data else ""
                     data_stats.append(
                         create_data_stat(
-                            name='pred_mask',
-                            stat_type='rle_mask',
-                            shape=list(pred_arr.shape),
-                            value=[],
-                            thumbnail=rle_bytes
+                            name='pred',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=bbox_json,
+                            thumbnail=b""
                         )
                     )
-                    pred_mask_stat_index = len(data_stats) - 1
-                    pred_mask_u8 = pred_arr
-                except Exception:
-                    pass
+                # Handle segmentation task type
+                else:
+                    try:
+                        pred_arr = np.asarray(pred, dtype=np.uint8) if not isinstance(pred, dict) else np.array([])
+                        rle_bytes = rle_encode_mask(pred_arr.ravel()) if pred_arr.size > 0 else b""
+                        t_mask_encode += time.time() - t0_pmask
+                        data_stats.append(
+                            create_data_stat(
+                                name='pred_mask',
+                                stat_type='rle_mask',
+                                shape=list(pred_arr.shape) if pred_arr.size > 0 else [],
+                                value=[],
+                                thumbnail=rle_bytes
+                            )
+                        )
+                        pred_mask_stat_index = len(data_stats) - 1
+                        pred_mask_u8 = pred_arr
+                    except Exception as e:
+                        logger.debug(f"Error processing prediction mask: {e}")
             else:
                 # Classification: get prediction from row or dataset
                 if pred is None:

@@ -1,38 +1,51 @@
 # Global configuration
 device: auto
-experiment_name: coco_detection_usecase
+experiment_name: det_YOLO_usecase
+training_steps_to_do: null  # Set to null for infinite training until manually stopped
+# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
+
+# Checkppoint Manager
+checkpoint_manager:
+  load_config: true  # Disable loading previous checkpoint configuration to allow for changes in the current config.yaml file
+  load_data: true  # Disable loading previous checkpoint data to allow for changes in the current config.yaml file
+  load_model: true  # Disable loading previous checkpoint model weights and archi. to allow for changes in the current config.yaml file
+
+# Model config.
+model:
+  name: yolo11s.pt
+  lr: 0.01
+  momentum: 0.9
 
 # Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
 compute_natural_sort: true
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 25
-experiment_dump_to_train_steps_ratio: 25
+eval_full_to_train_steps_ratio: 5
+experiment_dump_to_train_steps_ratio: 5
 tqdm_display: true
 is_training: false  # Start training immediately or not
-training_steps_to_do: null  # Set to null for infinite training until manually stopped
-
-# Configure global dataframe storage
-ledger_enable_flushing_threads: true
-ledger_enable_h5_persistence: false
-ledger_flush_max_rows: 15
-ledger_flush_interval: 2
 
 # Serving
 serving_grpc: true
 serving_cli: false
 
+# Configure global dataframe storage
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: false
+ledger_flush_max_rows: 5000
+ledger_flush_interval: 60.0
+
 # Data
-image_size: 128
+num_classes: 2
+image_size: 320
+data_root: C:\\Users\\GuillaumePELLUET\\Documents\\Codes\\weightslab\\weightslab\\examples\\PyTorch\\ws-detection\\data\\data.yaml
+class_names:
+  - box
+  - human
 data:
-  coco_train_final_v1:
-    batch_size: 1
+  train_loader:
+    batch_size: 4
     shuffle: true
-    # Using val2017 for training in this example to speed up iterations, but can be switched to train2017 for real training
-    images_dir: ../datasets/coco/images/val2017
-    annotations_file: ../datasets/coco/annotations/instances_val2017.json
-  coco_val_final_v1:
-    batch_size: 1
+  test_loader:
+    batch_size: 4
     shuffle: false
-    images_dir: ../datasets/coco/images/val2017
-    annotations_file: ../datasets/coco/annotations/instances_val2017.json

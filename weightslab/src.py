@@ -412,7 +412,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         except Exception as e:
             logger.debug(f"Automatic backend discard masking failed: {e}")
 
-    if kwargs.get('per_sample', False):
+    if kwargs.get('per_sample', False) and not isinstance(out, dict):
         if out.ndim > 1:
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
 
