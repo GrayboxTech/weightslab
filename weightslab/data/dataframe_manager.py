@@ -459,8 +459,6 @@ class LedgeredDataFrameManager:
             rec: Dict[str, Any] = {"sample_id": sample_id}
 
             # Process data to store
-            ## Prediction raw
-            preds_raw = None
             ## Prediction
             if preds is not None:
                 pred = index_batch(preds, batch_index)

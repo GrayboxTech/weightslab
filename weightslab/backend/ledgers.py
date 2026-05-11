@@ -484,13 +484,13 @@ class Proxy:
             raise TypeError("Proxy target not set")
         return self._obj.keys() if hasattr(self._obj, 'keys') else []
 
-    def eval(self):
+    def eval(self, state=None):
         """Model eval mode"""
-        self.get().eval()
+        self.get().eval(state)
 
-    def train(self):
+    def train(self, state=None):
         """Model train mode"""
-        self.get().train()
+        self.get().train(state)
 
     def values(self):
         """Support dict.values() method"""

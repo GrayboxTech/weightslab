@@ -28,7 +28,6 @@ def _decode_predictions(pred, img_h, img_w, conf=0.25, iou_thres=0.5):
     pred = pred.detach().cpu()
     pred = pred.permute(0, 2, 1)  # [batch, 8400, 64+nc]
 
-    nc = pred.shape[-1] - 64
     pred_boxes = pred[..., :64]  # DFL distributions
     pred_cls = pred[..., 64:]    # class logits
 
