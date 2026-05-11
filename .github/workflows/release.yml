@@ -263,9 +263,13 @@ jobs:
             echo "---" >> release_body.md
           fi
 
-          # Add placeholder for auto-generated notes (will be appended by action)
+          # Add contributors/thank you section
           echo "" >> release_body.md
-          echo "## Merged Pull Requests" >> release_body.md
+          echo "## 🙏 Contributors" >> release_body.md
+          echo "" >> release_body.md
+          echo "Thank you to all contributors who made this release possible!" >> release_body.md
+          echo "" >> release_body.md
+          echo "Special thanks to the WeightsLab development team at GrayBox Tech." >> release_body.md
           echo "" >> release_body.md
 
       - name: Create GitHub Release
