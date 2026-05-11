@@ -29,7 +29,7 @@ class YOLODatasetWL(YOLODataset):
             imgsz=cfg.imgsz,
             batch_size=batch,
             augment=mode == "train",  # augmentation
-            hyp=cfg,
+            hyp=cfg, 
             rect=cfg.rect or rect,  # rectangular batches
             cache=cfg.cache or None,
             single_cls=cfg.single_cls or False,
@@ -47,14 +47,14 @@ class YOLODatasetWL(YOLODataset):
 
     def get_labels(self):
         return super().get_labels()
-
+    
     def __getitem__(self, idx):
         """Override to return dicts as (dict, uid, _target) tuples for WL."""
-        return self.get_items(idx, include_metadata=True, include_labels=True, include_images=True)
-
+        return self.get_items(idx, include_metadata=True, include_labels=True, include_images=True)    
+    
     def get_items(self, i, include_metadata=False, include_labels=False, include_images=False):
         data = super().__getitem__(i)
-
+        
         # WL preview expects (img, uid, labels, metadata) tuple; we'll pack everything into metadata and return labels and image optionally to avoid unnecessary overhead in the training loop
         image = None
         labels = None
@@ -70,7 +70,7 @@ class YOLODatasetWL(YOLODataset):
                 'batch': data
             }
         if include_images:
-            image = data['img']
+            image = data['img'] 
         if include_labels:
             labels = data['bboxes']
             # BBx GT are x1 y1 len_x1 len_y1...

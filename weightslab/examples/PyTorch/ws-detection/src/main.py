@@ -163,6 +163,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
         # Gen. bounding boxes
         pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)  # Convert to raw model predictions format [batch, 64+nc, 8400]
         preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=0.25, iou_thres=cls_thresh)
+
         return preds_nms
 
     def train(self):
@@ -246,9 +247,34 @@ class WLCompatileDetTrainer(DetectionTrainer):
                     self.validate()
 
     def validate(self):
-        # --- One training batch ---
-        inputs = next(iter(self.data_val_loader))
+        """Instance method that delegates to standalone validate function."""
+        validate(self.data_val_loader)
 
+@wl.eval_fn
+def validate(loader):
+    """
+    Standalone validation function that uses parameters from the ledger.
+
+    This function retrieves the model, device, and metric/loss functions from the
+    WeightsLab ledger, making it suitable for independent evaluation workflows.
+
+    Args:
+        loader: Data loader providing batches of validation data.
+    """
+    # Get components from ledger
+    model = wl.ledger.get_model()
+    device = model.device
+    val_criterion_boxes = wl.ledger.get_loss(name="val_detection_loss/bboxes")
+    val_criterion_cls = wl.ledger.get_loss(name="val_detection_loss/cls")
+    val_criterion_dfl = wl.ledger.get_loss(name="val_detection_loss/dfl")
+    val_metric = wl.ledger.get_metric(name="val_per_sample_iou")
+
+    if model is None or device is None:
+        raise RuntimeError("Model or device not found in ledger. Ensure they are registered with wl.watch_or_edit()")
+
+    # --- One validation batch ---
+    l_loader = len(loader)
+    for step, inputs in enumerate(loader):
         # Process inputs
         image = inputs[0].float()
         batch_ids = inputs[1]  # uids
@@ -258,10 +284,19 @@ class WLCompatileDetTrainer(DetectionTrainer):
         targets = batch['bboxes']  # (N, 4)
 
         # Inference
-        raw_preds = self.model(image.to(self.device))[1]
+        raw_preds = model(image.to(device))[1]  # Eval mode model in ultralytics returns (pred, dict of preds) - train mode returns dict of preds
 
-        # Process outputs to generate predictions as BB (bs, x, 5 | 6)
-        preds = self.process_predictions(raw_preds, image, cls_thresh=0.5)
+        # Process outputs to generate predictions as BB
+        # Helper function to process predictions
+        def process_predictions(pred_raw, image, cls_thresh=0.5):
+            img_h, img_w = image[0].shape[-2:]
+            if isinstance(pred_raw, (tuple, list)):
+                pred_raw = pred_raw[1]
+            pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
+            preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=0.25, iou_thres=cls_thresh)
+            return preds_nms
+
+        preds = process_predictions(raw_preds, image, cls_thresh=0.5)
 
         # Split preds and targets by batch index
         batch_size = image.shape[0]
@@ -269,40 +304,36 @@ class WLCompatileDetTrainer(DetectionTrainer):
         targets_by_batch = []
         for i in range(batch_size):
             mask = batch['batch_idx'].view(-1) == i
-            p = preds[mask] if isinstance(preds, torch.Tensor) and preds.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
-            t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
+            p = preds[mask] if isinstance(preds, torch.Tensor) and preds.shape[0] > 0 else torch.zeros((0, 4), device=device)
+            t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=device)
             preds_by_batch.append(p)
             targets_by_batch.append(t)
 
-        # Compute valing loss with per-sample tracking
-        # # Bboxes
-        per_sample_losses_bboxes = self.val_criterion_boxes(
+        # Compute validation loss with per-sample tracking
+        per_sample_losses_bboxes = val_criterion_boxes(
             raw_preds,
             batch,
             batch_ids=batch_ids,
             preds={'bboxes': preds_by_batch},
             targets={'bboxes': targets_by_batch}
-        )
-        per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes)) if per_sample_losses_bboxes else torch.zeros(batch_size, device=self.device)
+        ) if val_criterion_boxes is not None else None
+        per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes)) if per_sample_losses_bboxes else torch.zeros(batch_size, device=device)
 
-        # # Cls
-        per_sample_losses_cls = self.val_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
-        per_sample_losses_cls = torch.stack(list(per_sample_losses_cls)) if per_sample_losses_cls else torch.zeros(batch_size, device=self.device)
+        per_sample_losses_cls = val_criterion_cls(raw_preds, batch, batch_ids=batch_ids) if val_criterion_cls is not None else None
+        per_sample_losses_cls = torch.stack(list(per_sample_losses_cls)) if per_sample_losses_cls else torch.zeros(batch_size, device=device)
 
-        # # Dfl
-        per_sample_losses_dfl = self.val_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
-        per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl)) if per_sample_losses_dfl else torch.zeros(batch_size, device=self.device)
+        per_sample_losses_dfl = val_criterion_dfl(raw_preds, batch, batch_ids=batch_ids) if val_criterion_dfl is not None else None
+        per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl)) if per_sample_losses_dfl else torch.zeros(batch_size, device=device)
 
-        # # Compute final loss
+        # Compute final loss
         loss = (per_sample_losses_bboxes + per_sample_losses_cls + per_sample_losses_dfl).mean()
 
-        # Compute valing metric
-        ious = self.val_metric(raw_preds, batch, batch_ids=batch_ids)
+        # Compute validation metric
+        ious = val_metric(raw_preds, batch, batch_ids=batch_ids) if val_metric is not None else None
         iou_mean = ious.mean().item() if ious is not None and ious.numel() > 0 else 0.0
 
         # Verbose
-        step = self.model.get_age()
-        print(f"Validation step {step} — loss: {loss.item():.4f} (bboxes: {per_sample_losses_bboxes.item()}; cls: {per_sample_losses_cls.item()}; dfl: {per_sample_losses_dfl.item()}) - iou: {ious.mean().item():.4f}")
+        print(f"Validation step {step+1}/{l_loader} — loss: {loss.item():.4f} (bboxes: {per_sample_losses_bboxes.mean().item():.4f}; cls: {per_sample_losses_cls.mean().item():.4f}; dfl: {per_sample_losses_dfl.mean().item():.4f}) - iou: {iou_mean:.4f}")
 
 
 def main():

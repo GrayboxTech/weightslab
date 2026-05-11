@@ -110,6 +110,67 @@ class PerSampleIoU(nn.Module):
         return out_ious
 
 
+@wl.signal(name="detection/dice_score", compute_every_n_steps=10)
+def detection_dice_signal(pred, batch, conf: float = 0.25, iou_thres: float = 0.5, **kwargs):
+    """
+    Compute Dice score (F1 score) for detection predictions.
+
+    Dice = 2 * |X ∩ Y| / (|X| + |Y|) = 2 * IoU / (1 + IoU)
+
+    This metric combines precision and recall for bounding box predictions.
+    Computed as a function of the IoU between predicted and ground truth boxes.
+
+    Args:
+        pred: Model predictions
+        batch: Batch dict with 'img', 'batch_idx', 'bboxes'
+        conf: Confidence threshold for NMS (default: 0.25)
+        iou_thres: IoU threshold for NMS (default: 0.5)
+        **kwargs: Additional arguments from WeightsLab
+
+    Returns:
+        Mean Dice score (F1) value for logging
+    """
+    from ultralytics.utils.nms import box_iou
+    from ultralytics.utils.ops import xywh2xyxy
+
+    if isinstance(pred, (tuple, list)):
+        pred = pred[0]
+    elif isinstance(pred, dict) and 'boxes' in pred and 'scores' in pred:
+        pred = th.cat([pred['boxes'], pred['scores']], dim=1)
+
+    img, batch_idx, boxes_norm = batch['img'], batch['batch_idx'], batch['bboxes']
+
+    img_h, img_w = img.shape[-2:]
+    preds_nms = _decode_predictions(pred, img_h, img_w, conf, iou_thres)
+
+    # Convert GT boxes to xyxy
+    scale = th.tensor([img_w, img_h, img_w, img_h], dtype=boxes_norm.dtype)
+    gt_xyxy = xywh2xyxy(boxes_norm.detach().cpu()) * scale
+
+    bs = img.shape[0]
+    dice_scores = th.full((bs,), float("nan"))
+
+    for i in range(bs):
+        gi = (batch_idx == i).nonzero(as_tuple=True)[0]
+        pred_boxes = preds_nms[i][:, :4]
+
+        if pred_boxes.shape[0] > 0 and gi.numel() > 0:
+            # Compute IoU matrix between GT and predictions
+            iou_matrix = box_iou(gt_xyxy[gi], pred_boxes)
+            # Get max IoU for each GT box
+            max_ious = iou_matrix.max(dim=1).values
+
+            if max_ious.numel() > 0:
+                # Convert IoU to Dice score: Dice = 2*IoU / (1 + IoU)
+                # This is the F1 score based on IoU
+                dice = 2.0 * max_ious / (1.0 + max_ious)
+                dice_scores[i] = dice.mean()
+
+    dice_scores = th.nan_to_num(dice_scores, nan=0.0)
+
+    return dice_scores.mean().item() if dice_scores.numel() > 0 else 0.0
+
+
 class PerSampleDetectionLoss(nn.Module):
     """Per-sample detection loss wrapping Ultralytics DetectionLoss.
 
