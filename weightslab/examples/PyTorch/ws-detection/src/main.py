@@ -389,7 +389,6 @@ def main():
 
     # Extract key parameters
     exp_name = parameters["experiment_name"]
-    num_classes = int(parameters["num_classes"])
     image_size = parameters["image_size"]
     max_steps = parameters["training_steps_to_do"]
     eval_every = parameters["eval_full_to_train_steps_ratio"]
@@ -401,8 +400,6 @@ def main():
 
     # Model config
     model_name = parameters["model"]["name"]
-    model_lr = float(parameters["model"]["lr"])
-    model_momentum = float(parameters["model"]["momentum"])
 
     # Data root
     data_root = parameters.get("data_root", "./data/data.yaml")
