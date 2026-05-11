@@ -2204,6 +2204,7 @@ def run_pending_evaluation(
             pass
 
     controlled_loader = _EvalManagedLoader(loader_if, split_name, total_batches, max_batches=max_steps)
+    eval_error = None
     try:
         _eval_fn(controlled_loader)
     except _EvalCanceled as exc:
@@ -2217,7 +2218,8 @@ def run_pending_evaluation(
         return True
     except _EvalTimeout as exc:
         logger_obj.error("[wl.run_pending_evaluation] timeout: %s", exc)
-        eval_controller.mark_error(str(exc))
+        eval_error = f"Evaluation timeout: {exc}"
+        eval_controller.mark_error(eval_error)
         if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
             signal_logger.abort_evaluation_mode()
         _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
@@ -2227,8 +2229,9 @@ def run_pending_evaluation(
     except Exception as exc:
         import traceback
         tb_str = traceback.format_exc()
+        eval_error = f"{type(exc).__name__}: {exc}"
         logger_obj.error("[wl.run_pending_evaluation] eval_fn raised: %s\n%s", exc, tb_str)
-        eval_controller.mark_error(str(exc))
+        eval_controller.mark_error(eval_error)
         if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
             signal_logger.abort_evaluation_mode()
         _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
@@ -2312,10 +2315,9 @@ def run_pending_evaluation(
     _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
 
     # ------------------------------------------------------------------
-    # 8. Re-pause if training was paused before evaluation
+    # 8. Pause training
     # ------------------------------------------------------------------
-    if was_paused:
-        pause_controller.pause()
+    pause_controller.pause()
 
     # Atomic completion: if cancel was requested in the final race window,
     # convert to canceled and purge markers for this eval hash.
@@ -2332,23 +2334,45 @@ def run_pending_evaluation(
         eval_controller.mark_done(result)
 
     # Console output — visible even without Weights Studio connected.
-    print(f"\n{'='*70}", flush=True)
-    print(f"[WeightsLab] Evaluation Results", flush=True)
-    print(f"{'='*70}", flush=True)
-    print(f"  Split:        {split_name}", flush=True)
-    print(f"  Model Step:   {model_age}", flush=True)
+    logger.info(f"\n{'='*70}", flush=True)
+    logger.info(f"[WeightsLab] Evaluation Results", flush=True)
+    logger.info(f"{'='*70}", flush=True)
+    logger.info(f"  Split:        {split_name}", flush=True)
+    logger.info(f"  Model Step:   {model_age}", flush=True)
 
     if result:
-        print(f"  Metrics:\n", flush=True)
+        logger.info(f"  Metrics:\n", flush=True)
         for k, v in result.items():
             if isinstance(v, float):
-                print(f"    {k:30s} = {v:.6f}", flush=True)
+                logger.info(f"    {k:30s} = {v:.6f}", flush=True)
             else:
-                print(f"    {k:30s} = {v}", flush=True)
+                logger.info(f"    {k:30s} = {v}", flush=True)
     else:
-        print(f"  Status:       No metrics recorded", flush=True)
+        logger.info(f"  Status:       No metrics recorded", flush=True)
+        error_msg = (
+            f"Evaluation did not produce any metrics.\n"
+            f"  Possible causes:\n"
+            f"    • Evaluation function is not compatible with the experiment setup\n"
+            f"    • No signals were computed during evaluation\n"
+            f"    • Model or data loader not registered in the ledger\n\n"
+            f"  Solution: Create a custom evaluation function decorated with @wl.eval_fn.\n"
+            f"  This function should:\n"
+            f"    1. Accept only one parameter: loader\n"
+            f"    2. Be fully based on the WeightsLab ledger\n"
+            f"    3. Retrieve model, device, and metrics from wl.ledger.*\n"
+            f"    4. Register loss/metric functions with wl.watch_or_edit(..., flag='loss/metric')\n\n"
+            f"  Example from detection use case:\n"
+            f"    @wl.eval_fn\n"
+            f"    def validate(loader):\n"
+            f"        model = wl.ledger.get_model()\n"
+            f"        device = wl.ledger.get_device()\n"
+            f"        for batch in loader:\n"
+            f"            ...\n\n"
+            f"  See documentation: https://grayboxtech.github.io/weightslab/latest/index.html"
+        )
+        logger.warning(error_msg)
 
-    print(f"{'='*70}\n", flush=True)
+    logger.info(f"{'='*70}\n", flush=True)
 
     logger_obj.info(
         "[wl.run_pending_evaluation] Evaluation complete on '%s' @ step %d: %s",
@@ -2534,6 +2558,8 @@ class _EvalManagedLoader:
                 f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s "
                 f"(projected={projected:.1f}s, limit={timeout_seconds:.1f}s, multiplier={self._multiplier:.2f})"
             )
+    def __len__(self):
+        return len(self._loader)
 
     def __iter__(self):
         it = iter(self._loader)
@@ -2587,7 +2613,7 @@ if __name__ == "__main__":
 
     # Query and process tagged samples
     difficult_ids = get_samples_by_tag('difficult', origin='train')
-    print(f"Found {len(difficult_ids)} difficult samples")
+    logger.info(f"Found {len(difficult_ids)} difficult samples")
 
     # Remove tag after review
     tag_samples([5], 'outlier', mode='remove')
