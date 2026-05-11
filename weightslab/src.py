@@ -9,13 +9,14 @@ import sys
 import ctypes
 import time
 import types
-import threading
-import traceback
 import logging
 import inspect
 import functools
+import threading
+import traceback
 import numpy as np
 import torch as th
+import weightslab as wl
 
 from tqdm import tqdm
 from typing import Callable, Optional, Any
@@ -215,13 +216,13 @@ def _get_step(step: int | None = None) -> int:
         if hasattr(m, 'get_age'):
             val = m.get_age()
             if val is not None:
-                step = max([int(val)-1, 0])  # Use age-1 as step to reflect completed step; ensure non-negative
+                step = max([int(val), 0])  # Use age-1 as step to reflect completed step; ensure non-negative
 
         elif hasattr(m, 'current_step'):
             val = m.current_step
 
             if val is not None:
-                step = max([int(val)-1, 0])  # Use current_step-1 as step to reflect completed step; ensure non-negative
+                step = max([int(val), 0])  # Use current_step-1 as step to reflect completed step; ensure non-negative
 
             elif step is not None:
                 # step = step # fallback to provided step
@@ -2200,11 +2201,17 @@ def run_pending_evaluation(
             from weightslab.components.tracking import TrackingMode as _TrackingMode
             _prev_tracking_mode = getattr(_model, "tracking_mode", None)
             _model.set_tracking_mode(_TrackingMode.EVAL)
+            _model.eval() if hasattr(_model, 'eval') else None
         except Exception:
             pass
 
     controlled_loader = _EvalManagedLoader(loader_if, split_name, total_batches, max_batches=max_steps)
     eval_error = None
+
+    # Set evaluation context (exempt from watchdog timeouts)
+    from weightslab.components.global_monitoring import set_in_evaluation, reset_in_evaluation
+    eval_context_token = set_in_evaluation(True)
+
     try:
         _eval_fn(controlled_loader)
     except _EvalCanceled as exc:
@@ -2238,6 +2245,9 @@ def run_pending_evaluation(
         if was_paused:
             pause_controller.pause()
         return True
+    finally:
+        # Reset evaluation context
+        reset_in_evaluation(eval_context_token)
 
     # A cancel request can arrive just as eval_fn returns. In that race window,
     # honor cancellation before finalizing marker persistence.
@@ -2334,21 +2344,21 @@ def run_pending_evaluation(
         eval_controller.mark_done(result)
 
     # Console output — visible even without Weights Studio connected.
-    logger.info(f"\n{'='*70}", flush=True)
-    logger.info(f"[WeightsLab] Evaluation Results", flush=True)
-    logger.info(f"{'='*70}", flush=True)
-    logger.info(f"  Split:        {split_name}", flush=True)
-    logger.info(f"  Model Step:   {model_age}", flush=True)
+    logger.info(f"\n{'='*70}")
+    logger.info(f"[WeightsLab] Evaluation Results")
+    logger.info(f"{'='*70}")
+    logger.info(f"  Split:        {split_name}")
+    logger.info(f"  Model Step:   {model_age}")
 
     if result:
-        logger.info(f"  Metrics:\n", flush=True)
+        logger.info(f"  Metrics:\n")
         for k, v in result.items():
             if isinstance(v, float):
-                logger.info(f"    {k:30s} = {v:.6f}", flush=True)
+                logger.info(f"    {k:30s} = {v:.6f}")
             else:
-                logger.info(f"    {k:30s} = {v}", flush=True)
+                logger.info(f"    {k:30s} = {v}")
     else:
-        logger.info(f"  Status:       No metrics recorded", flush=True)
+        logger.info(f"  Status:       No metrics recorded")
         error_msg = (
             f"Evaluation did not produce any metrics.\n"
             f"  Possible causes:\n"
@@ -2372,7 +2382,7 @@ def run_pending_evaluation(
         )
         logger.warning(error_msg)
 
-    logger.info(f"{'='*70}\n", flush=True)
+    logger.info(f"{'='*70}\n")
 
     logger_obj.info(
         "[wl.run_pending_evaluation] Evaluation complete on '%s' @ step %d: %s",
@@ -2462,6 +2472,8 @@ def _restore_eval_state(sampler, prev_shuffle: bool, prev_eval_allow_list, model
     if model is not None and prev_tracking_mode is not None and hasattr(model, "set_tracking_mode"):
         try:
             model.set_tracking_mode(prev_tracking_mode)
+            if prev_tracking_mode == 'train':
+                model.train() if hasattr(model, 'train') else None
         except Exception:
             pass
     if sampler is None:

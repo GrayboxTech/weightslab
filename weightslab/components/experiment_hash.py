@@ -193,7 +193,8 @@ class ExperimentHashGenerator:
             arch_info.append(f"init_step:{int(model_init_step)}")
 
             # Layer structure
-            for name, module in model.named_modules():
+            modules = model.model.named_modules() if hasattr(model, 'model') else model.named_modules()
+            for name, module in modules:
                 # Remove these trackers from hash
                 if 'train_dataset_tracker' in name or 'eval_dataset_tracker' in name:
                     continue

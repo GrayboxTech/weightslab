@@ -155,6 +155,12 @@ class WLCompatileDetTrainer(DetectionTrainer):
 
     def process_predictions(self, pred_raw, image, cls_thresh=0.5):
         img_h, img_w = image[0].shape[-2:]
+
+        # Process check for eval mode
+        if isinstance(pred_raw, (tuple, list)):
+            pred_raw = pred_raw[1]
+
+        # Gen. bounding boxes
         pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)  # Convert to raw model predictions format [batch, 64+nc, 8400]
         preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=0.25, iou_thres=cls_thresh)
         return preds_nms

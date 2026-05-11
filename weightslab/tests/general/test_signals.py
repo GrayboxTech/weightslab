@@ -10,9 +10,118 @@ class TestSignals(unittest.TestCase):
     def setUp(self):
         # Clear registered signals before each test
         _REGISTERED_SIGNALS.clear()
-        
+
     def tearDown(self):
         _REGISTERED_SIGNALS.clear()
+
+    # =========================================================================
+    # Input Type Tests - Different signal and data input formats
+    # =========================================================================
+
+    def test_signals_with_numpy_inputs(self):
+        """Test save_signals with numpy array inputs for predictions and targets."""
+        with patch("weightslab.src.get_dataframe") as mock_get_df, \
+             patch("weightslab.src._gm") as mock_gm:
+
+            mock_df = MagicMock()
+            mock_get_df.return_value = mock_df
+            mock_model = MagicMock()
+            mock_model.current_step = 1
+            mock_gm.return_value = mock_model
+
+            with patch("weightslab.src.DATAFRAME_M", mock_df):
+                batch_ids = np.array([10, 11, 12])
+                signals = {"loss": np.array(0.5)}
+                preds = np.array([0.9, 0.1, 0.8])
+                targets = np.array([1, 0, 1])
+
+                wl.save_signals(
+                    signals=signals,
+                    batch_ids=batch_ids,
+                    preds=preds,
+                    targets=targets,
+                    log=True
+                )
+
+                self.assertTrue(mock_df.enqueue_batch.called)
+
+    def test_signals_with_list_batch_ids(self):
+        """Test save_signals with list batch IDs instead of tensors."""
+        with patch("weightslab.src.get_dataframe") as mock_get_df, \
+             patch("weightslab.src._gm") as mock_gm:
+
+            mock_df = MagicMock()
+            mock_get_df.return_value = mock_df
+            mock_model = MagicMock()
+            mock_model.current_step = 1
+            mock_gm.return_value = mock_model
+
+            with patch("weightslab.src.DATAFRAME_M", mock_df):
+                batch_ids = [20, 21, 22]  # list instead of tensor
+                signals = {"loss": 0.3}
+
+                wl.save_signals(
+                    signals=signals,
+                    batch_ids=batch_ids,
+                    log=True
+                )
+
+                self.assertTrue(mock_df.enqueue_batch.called)
+                call_kwargs = mock_df.enqueue_batch.call_args[1]
+                self.assertEqual(len(call_kwargs['sample_ids']), 3)
+
+    def test_signals_with_scalar_values(self):
+        """Test save_signals with scalar signal values."""
+        with patch("weightslab.src.get_dataframe") as mock_get_df, \
+             patch("weightslab.src._gm") as mock_gm:
+
+            mock_df = MagicMock()
+            mock_get_df.return_value = mock_df
+            mock_model = MagicMock()
+            mock_model.current_step = 1
+            mock_gm.return_value = mock_model
+
+            with patch("weightslab.src.DATAFRAME_M", mock_df):
+                batch_ids = torch.tensor([30, 31])
+                signals = {
+                    "loss": 0.25,  # scalar float
+                    "accuracy": 0.95,
+                    "f1": np.float32(0.92)
+                }
+
+                wl.save_signals(
+                    signals=signals,
+                    batch_ids=batch_ids,
+                    log=True
+                )
+
+                self.assertTrue(mock_df.enqueue_batch.called)
+                call_kwargs = mock_df.enqueue_batch.call_args[1]
+                self.assertIn("signals//loss", call_kwargs['losses'])
+
+    def test_signals_with_multidimensional_tensors(self):
+        """Test save_signals with multidimensional tensor signals."""
+        with patch("weightslab.src.get_dataframe") as mock_get_df, \
+             patch("weightslab.src._gm") as mock_gm:
+
+            mock_df = MagicMock()
+            mock_get_df.return_value = mock_df
+            mock_model = MagicMock()
+            mock_model.current_step = 1
+            mock_gm.return_value = mock_model
+
+            with patch("weightslab.src.DATAFRAME_M", mock_df):
+                batch_ids = torch.tensor([40, 41, 42])
+                # Multidimensional signal (e.g., per-layer losses)
+                signals = {"layer_losses": torch.tensor([[0.1, 0.2], [0.15, 0.25], [0.12, 0.22]])}
+
+                wl.save_signals(
+                    signals=signals,
+                    batch_ids=batch_ids,
+                    log=True
+                )
+
+                self.assertTrue(mock_df.enqueue_batch.called)
 
     def test_signal_registration(self):
         """Test that @wl.signal registers the function correctly."""
@@ -360,6 +469,338 @@ class TestSignals(unittest.TestCase):
 
             # Verify all were queued correctly
             self.assertEqual(mock_df.enqueue_batch.call_count, 3)
+
+    # =========================================================================
+    # Edge Cases and Error Handling
+    # =========================================================================
+
+    def test_signals_with_empty_batch_ids(self):
+        """Test save_signals with empty batch IDs."""
+        with patch("weightslab.src.get_dataframe") as mock_get_df, \
+             patch("weightslab.src._gm") as mock_gm:
+
+            mock_df = MagicMock()
+            mock_get_df.return_value = mock_df
+            mock_model = MagicMock()
+            mock_model.current_step = 1
+            mock_gm.return_value = mock_model
+
+            with patch("weightslab.src.DATAFRAME_M", mock_df):
+                batch_ids = torch.tensor([])
+                signals = {"loss": torch.tensor(0.5)}
+
+                # Should not crash, but should skip logging
+                wl.save_signals(
+                    signals=signals,
+                    batch_ids=batch_ids,
+                    log=True
+                )
+
+    def test_signals_with_none_batch_ids(self):
+        """Test save_signals with None batch IDs."""
+        with patch("weightslab.src.get_dataframe") as mock_get_df, \
+             patch("weightslab.src._gm") as mock_gm:
+
+            mock_df = MagicMock()
+            mock_get_df.return_value = mock_df
+            mock_model = MagicMock()
+            mock_model.current_step = 1
+            mock_gm.return_value = mock_model
+
+            with patch("weightslab.src.DATAFRAME_M", mock_df):
+                signals = {"loss": torch.tensor(0.5)}
+
+                # Should not crash
+                wl.save_signals(
+                    signals=signals,
+                    batch_ids=None,
+                    log=False  # Don't log without IDs
+                )
+
+    def test_signal_with_mixed_data_types(self):
+        """Test signal registration and computation with mixed data types."""
+        @wl.signal(name="mixed_type_signal")
+        def compute_mixed(item, **kwargs):
+            if isinstance(item, (list, tuple)):
+                return np.mean(item)
+            elif isinstance(item, torch.Tensor):
+                return item.mean().item()
+            elif isinstance(item, np.ndarray):
+                return np.mean(item)
+            return float(item)
+
+        self.assertIn("mixed_type_signal", _REGISTERED_SIGNALS)
+
+        # Test with different types
+        signal_fn = _REGISTERED_SIGNALS["mixed_type_signal"]
+
+        result_list = signal_fn([1, 2, 3])
+        self.assertAlmostEqual(result_list, 2.0)
+
+        result_tensor = signal_fn(torch.tensor([1.0, 2.0, 3.0]))
+        self.assertAlmostEqual(result_tensor, 2.0)
+
+        result_numpy = signal_fn(np.array([1.0, 2.0, 3.0]))
+        self.assertAlmostEqual(result_numpy, 2.0)
+
+    @patch("weightslab.src.get_dataframe")
+    @patch("weightslab.src._gm")
+    def test_save_signals_with_dict_predictions(self, mock_gm, mock_get_dataframe):
+        """Test save_signals with dict-structured predictions (e.g., multi-output model)."""
+        mock_df = MagicMock()
+        mock_get_dataframe.return_value = mock_df
+
+        mock_model = MagicMock()
+        mock_model.current_step = 1
+        mock_gm.return_value = mock_model
+
+        with patch("weightslab.src.DATAFRAME_M", mock_df):
+            batch_ids = torch.tensor([1, 2])
+            signals = {"loss": torch.tensor(0.5)}
+            # Multi-output predictions (e.g., bounding boxes + class probabilities)
+            preds = {
+                "bboxes": [torch.tensor([[10.0, 20.0, 100.0, 150.0]]), torch.tensor([[15.0, 25.0, 110.0, 160.0]])],
+                "classes": torch.tensor([[0.9, 0.1], [0.85, 0.15]])
+            }
+
+            wl.save_signals(
+                signals=signals,
+                batch_ids=batch_ids,
+                preds=preds,
+                log=True
+            )
+
+            self.assertTrue(mock_df.enqueue_batch.called)
+
+    # =========================================================================
+    # Signal Composition and Combination Tests
+    # =========================================================================
+
+    def test_multiple_signals_in_single_call(self):
+        """Test saving multiple signals in a single save_signals call."""
+        with patch("weightslab.src.get_dataframe") as mock_get_df, \
+             patch("weightslab.src._gm") as mock_gm:
+
+            mock_df = MagicMock()
+            mock_get_df.return_value = mock_df
+            mock_model = MagicMock()
+            mock_model.current_step = 1
+            mock_gm.return_value = mock_model
+
+            with patch("weightslab.src.DATAFRAME_M", mock_df):
+                batch_ids = torch.tensor([1, 2, 3])
+                signals = {
+                    "loss/cls": torch.tensor(0.3),
+                    "loss/reg": torch.tensor(0.15),
+                    "loss/total": torch.tensor(0.45),
+                    "accuracy": torch.tensor(0.92),
+                    "f1_score": torch.tensor(0.89)
+                }
+
+                wl.save_signals(
+                    signals=signals,
+                    batch_ids=batch_ids,
+                    log=True
+                )
+
+                self.assertTrue(mock_df.enqueue_batch.called)
+                call_kwargs = mock_df.enqueue_batch.call_args[1]
+                losses = call_kwargs['losses']
+
+                # Verify all signals are present
+                self.assertIn("signals//loss/cls", losses)
+                self.assertIn("signals//loss/reg", losses)
+                self.assertIn("signals//loss/total", losses)
+                self.assertIn("signals//accuracy", losses)
+                self.assertIn("signals//f1_score", losses)
+
+    def test_signal_naming_with_nested_paths(self):
+        """Test that signal names with nested paths (slashes) are handled correctly."""
+        @wl.signal(name="train/loss/weighted")
+        def nested_signal(x):
+            return x
+
+        @wl.signal(name="eval/metrics/precision")
+        def nested_signal2(x):
+            return x
+
+        self.assertIn("train/loss/weighted", _REGISTERED_SIGNALS)
+        self.assertIn("eval/metrics/precision", _REGISTERED_SIGNALS)
+
+    @patch("weightslab.src.get_dataframe")
+    @patch("weightslab.src._gm")
+    def test_signals_with_different_batch_sizes(self, mock_gm, mock_get_dataframe):
+        """Test save_signals with different batch sizes."""
+        mock_df = MagicMock()
+        mock_get_dataframe.return_value = mock_df
+
+        mock_model = MagicMock()
+        mock_model.current_step = 1
+        mock_gm.return_value = mock_model
+
+        with patch("weightslab.src.DATAFRAME_M", mock_df):
+            # Small batch
+            wl.save_signals(
+                signals={"loss": torch.tensor(0.5)},
+                batch_ids=torch.tensor([1]),
+                log=True
+            )
+
+            # Large batch
+            wl.save_signals(
+                signals={"loss": torch.tensor(0.4)},
+                batch_ids=torch.tensor([i for i in range(256)]),
+                log=True
+            )
+
+            self.assertEqual(mock_df.enqueue_batch.call_count, 2)
+
+    # =========================================================================
+    # Detection-Specific Signal Tests
+    # =========================================================================
+
+    @patch("weightslab.src.get_dataframe")
+    @patch("weightslab.src._gm")
+    def test_detection_signals_with_variable_boxes(self, mock_gm, mock_get_dataframe):
+        """Test detection signals with variable number of bounding boxes per image."""
+        mock_df = MagicMock()
+        mock_get_dataframe.return_value = mock_df
+
+        mock_model = MagicMock()
+        mock_model.current_step = 1
+        mock_gm.return_value = mock_model
+
+        with patch("weightslab.src.DATAFRAME_M", mock_df):
+            batch_ids = torch.tensor([1, 2, 3, 4])
+            signals = {
+                "loss/bbox": torch.tensor(0.25),
+                "loss/cls": torch.tensor(0.15),
+                "loss/dfl": torch.tensor(0.10)
+            }
+
+            # Variable number of boxes: img1 has 3, img2 has 1, img3 has 5, img4 has 2
+            preds = [
+                torch.tensor([[10, 20, 110, 120], [50, 60, 150, 160], [200, 210, 300, 310]]),  # 3 boxes
+                torch.tensor([[15, 25, 115, 125]]),  # 1 box
+                torch.tensor([[30, 40, 130, 140], [70, 80, 170, 180], [250, 260, 350, 360],
+                             [100, 110, 200, 210], [180, 190, 280, 290]]),  # 5 boxes
+                torch.tensor([[45, 55, 145, 155], [220, 230, 320, 330]])  # 2 boxes
+            ]
+
+            targets = [
+                torch.tensor([[12, 22, 112, 122], [52, 62, 152, 162], [202, 212, 302, 312]]),
+                torch.tensor([[17, 27, 117, 127]]),
+                torch.tensor([[32, 42, 132, 142], [72, 82, 172, 182], [252, 262, 352, 362],
+                             [102, 112, 202, 212], [182, 192, 282, 292]]),
+                torch.tensor([[47, 57, 147, 157], [222, 232, 322, 332]])
+            ]
+
+            wl.save_signals(
+                signals=signals,
+                batch_ids=batch_ids,
+                preds=preds,
+                targets=targets,
+                log=True
+            )
+
+            self.assertTrue(mock_df.enqueue_batch.called)
+            call_kwargs = mock_df.enqueue_batch.call_args[1]
+            self.assertEqual(len(call_kwargs['sample_ids']), 4)
+
+    # =========================================================================
+    # Integration Tests with Wrapped Models
+    # =========================================================================
+
+    def test_signal_metadata_inheritance(self):
+        """Test that signal metadata is properly inherited and accessible."""
+        @wl.signal(
+            name="comprehensive_signal",
+            subscribe_to="training_loss",
+            compute_every_n_steps=5,
+            custom_param="custom_value",
+            priority=10
+        )
+        def signal_func(x):
+            return x
+
+        meta = signal_func._wl_signal_meta
+        self.assertEqual(meta['subscribe_to'], "training_loss")
+        self.assertEqual(meta['compute_every_n_steps'], 5)
+        self.assertEqual(meta['custom_param'], "custom_value")
+        self.assertEqual(meta['priority'], 10)
+        self.assertEqual(signal_func._wl_signal_name, "comprehensive_signal")
+
+    @patch("weightslab.src.get_dataframe")
+    @patch("weightslab.src._gm")
+    def test_signals_for_multiclass_classification(self, mock_gm, mock_get_dataframe):
+        """Test signals for multi-class classification task."""
+        mock_df = MagicMock()
+        mock_get_dataframe.return_value = mock_df
+
+        mock_model = MagicMock()
+        mock_model.current_step = 1
+        mock_gm.return_value = mock_model
+
+        with patch("weightslab.src.DATAFRAME_M", mock_df):
+            batch_ids = torch.tensor([1, 2, 3, 4, 5])
+            signals = {
+                "loss": torch.tensor(0.45),
+                "top1_accuracy": torch.tensor(0.88),
+                "top5_accuracy": torch.tensor(0.98)
+            }
+            # Multi-class logits (5 samples, 10 classes)
+            preds = torch.rand(5, 10)
+            targets = torch.randint(0, 10, (5,))
+
+            wl.save_signals(
+                signals=signals,
+                batch_ids=batch_ids,
+                preds=preds,
+                targets=targets,
+                log=True
+            )
+
+            self.assertTrue(mock_df.enqueue_batch.called)
+            call_kwargs = mock_df.enqueue_batch.call_args[1]
+            self.assertIn("signals//loss", call_kwargs['losses'])
+            self.assertIn("signals//top1_accuracy", call_kwargs['losses'])
+
+    @patch("weightslab.src.get_dataframe")
+    @patch("weightslab.src._gm")
+    def test_signals_for_binary_classification(self, mock_gm, mock_get_dataframe):
+        """Test signals for binary classification task."""
+        mock_df = MagicMock()
+        mock_get_dataframe.return_value = mock_df
+
+        mock_model = MagicMock()
+        mock_model.current_step = 1
+        mock_gm.return_value = mock_model
+
+        with patch("weightslab.src.DATAFRAME_M", mock_df):
+            batch_ids = torch.tensor([10, 11, 12, 13, 14])
+            signals = {
+                "loss": torch.tensor(0.35),
+                "accuracy": torch.tensor(0.92),
+                "precision": torch.tensor(0.91),
+                "recall": torch.tensor(0.90),
+                "auc": torch.tensor(0.95)
+            }
+            # Binary classification probabilities
+            preds = torch.sigmoid(torch.randn(5))
+            targets = torch.randint(0, 2, (5,), dtype=torch.float32)
+
+            wl.save_signals(
+                signals=signals,
+                batch_ids=batch_ids,
+                preds=preds,
+                targets=targets,
+                log=True
+            )
+
+            self.assertTrue(mock_df.enqueue_batch.called)
+            call_kwargs = mock_df.enqueue_batch.call_args[1]
+            losses = call_kwargs['losses']
+            self.assertEqual(len(losses), 5)  # All signals should be saved
 
 if __name__ == "__main__":
     unittest.main()

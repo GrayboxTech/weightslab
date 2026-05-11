@@ -383,7 +383,8 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
                 np_img = np_img[0]
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
-        is_volumetric = np_img.ndim == 4
+
+    is_volumetric = np_img.ndim >= 4  # 3 is for RGB; while 4 is 3D  # TODO (GP): Should be fix because this will not work with grayscale image wo. color channel
 
     # For 4D volumetric data, detect and transpose channel-first formats:
     # 1. (C, Z, H, W) → (Z, H, W, C) - channels first in all dimensions

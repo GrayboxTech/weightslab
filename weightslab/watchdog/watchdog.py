@@ -153,10 +153,23 @@ class WeighlabsWatchdog:
     # ------------------------------------------------------------------
 
     def _check_locks(self) -> None:  # noqa: C901
+        # Import here to avoid circular imports
+        try:
+            from weightslab.components.global_monitoring import is_in_evaluation
+            in_evaluation = is_in_evaluation()
+        except Exception:
+            in_evaluation = False
+
         for name, lock in list(self._monitored_locks.items()):
             duration = lock.held_duration()
             if duration is None:
                 continue
+
+            # Skip timeout enforcement during evaluation — evaluation duration is variable
+            # (from seconds to 30+ minutes) and the user can cancel from the UI.
+            if in_evaluation:
+                continue
+
             lock_timeout = lock.get_timeout()
             effective_threshold = self._stuck_threshold_s if lock_timeout is None else lock_timeout
             if duration >= effective_threshold:

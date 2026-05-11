@@ -421,6 +421,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GetEvaluationStatus({request})")
         return self._exp_service.GetEvaluationStatus(request, context)
 
+    def CancelEvaluation(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.CancelEvaluation({request})")
+        return self._exp_service.CancelEvaluation(request, context)
+
 
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
