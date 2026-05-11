@@ -408,6 +408,24 @@ class ExperimentService:
             split_name=str(status.get("split_name", "")),
         )
 
+    def CancelEvaluation(self, request, context):
+        """Cancel a pending or running evaluation."""
+        reason = str(request.reason or "Canceled by user")
+        accepted = eval_controller.request_cancel(reason=reason)
+
+        if accepted:
+            logger.info("[ExperimentService] CancelEvaluation accepted: %s", reason)
+            return pb2.CancelEvaluationResponse(
+                success=True,
+                message=f"Evaluation canceled: {reason}",
+            )
+        else:
+            logger.info("[ExperimentService] CancelEvaluation rejected: no active evaluation")
+            return pb2.CancelEvaluationResponse(
+                success=False,
+                message="No active evaluation to cancel",
+            )
+
     def _get_live_hyper_parameter_descs(self, components):
         hyper_parameter_descs = list(get_hyper_parameters_pb(self._ctx.hyper_parameters))
 
