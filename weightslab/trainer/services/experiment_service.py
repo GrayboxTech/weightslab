@@ -5,6 +5,7 @@ import threading
 import grpc
 
 import weightslab.proto.experiment_service_pb2 as pb2
+import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
 from weightslab.components.global_monitoring import weightslab_rlock, try_acquire_rlock, _GRPC_LOCK_TIMEOUT_S
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
@@ -21,7 +22,7 @@ from weightslab.components.evaluation_controller import eval_controller
 logger = logging.getLogger(__name__)
 
 
-class ExperimentService:
+class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     """
     Domain-level experiment service that orchestrates model/data services
     and handles general experiment-related commands.
