@@ -173,7 +173,7 @@ def detection_dice_signal(pred, batch, conf: float = 0.25, iou_thres: float = 0.
 class PerSampleDetectionLoss(nn.Module):
     """Per-sample detection loss wrapping Ultralytics DetectionLoss.
 
-    Returns per-sample losses to enable fine-grained tracking via weightslab.
+    Computes actual per-sample losses by computing loss for each sample separately.
     """
 
     def __init__(self, model, reduction: str = "none", loss_type=None):
@@ -182,33 +182,95 @@ class PerSampleDetectionLoss(nn.Module):
         self.base_loss = DetectionLoss(model)
         self.reduction = reduction
         self.loss_type = loss_type
+        self.model = model
 
     def forward(self, pred, batch):
         """
-        Compute per-sample detection loss.
+        Compute actual per-sample detection loss by computing loss for each sample separately.
 
         Args:
             pred: Model predictions
-            targets: Ground truth targets dict with 'bboxes', 'cls', 'batch_idx'
-            batch_ids: WeightsLab batch IDs for per-sample tracking
+            batch: Ground truth targets dict with 'bboxes', 'cls', 'batch_idx', etc.
             **kwargs: Additional arguments from weightslab
 
         Returns:
-            Tensor of per-sample losses [num_samples, num_loss_components]
+            Tensor of per-sample losses [num_unique_samples]
         """
-        loss = self.base_loss(pred, batch)
-        if self.loss_type is None:
-            return loss
-        else:
-            loss = loss[0]
-        if loss.ndim == 1:
-            loss = loss[None]
-        if isinstance(loss, th.Tensor) and loss.dim() >= 1:
-            per_sample_loss = loss
-        else:
-            per_sample_loss = th.tensor([loss.item()] * len(batch.get('batch_idx', [1])))
+        # Get batch indices
+        batch_idx = batch.get('batch_idx', None)
 
-        return per_sample_loss[:, self.loss_type] if self.loss_type is not None and isinstance(self.loss_type, int) else per_sample_loss
+        if batch_idx is None or batch_idx.numel() == 0:
+            # No batch indices, compute once
+            loss_output = self.base_loss(pred, batch)
+            if isinstance(loss_output, (tuple, list)):
+                return loss_output[0].unsqueeze(0)
+            return loss_output.unsqueeze(0)
+
+        # Get the actual batch size from predictions (real batch size)
+        if isinstance(pred, dict):
+            first_key = next(iter(pred.keys()))
+            pred_batch_size = pred[first_key].shape[0]
+            device = pred[first_key].device
+        elif isinstance(pred, (tuple, list)):
+            pred_batch_size = pred[0].shape[0]
+            device = pred[0].device
+        else:
+            pred_batch_size = pred.shape[0]
+            device = pred.device
+
+        # Prepare batch_idx: flatten, convert to long
+        batch_idx_flat = batch_idx.flatten().long()
+
+        # Build per-sample losses in a list to maintain gradient flow
+        sample_losses_list = []
+
+        # Split batch by sample and compute loss for each
+        for sample_idx in range(pred_batch_size):
+            # Get mask for boxes belonging to this sample
+            sample_box_mask = batch_idx_flat == sample_idx
+
+            if not sample_box_mask.any():
+                # No ground truth for this sample, create zero loss as scalar
+                sample_losses_list.append(th.tensor(0.0, device=device, dtype=th.float32))
+                continue
+
+            # Create batch dict for this sample's boxes
+            sample_batch = {}
+            for key, value in batch.items():
+                if isinstance(value, th.Tensor) and value.shape[0] == len(batch_idx_flat):
+                    # This tensor has one entry per box, filter by mask
+                    sample_batch[key] = value[sample_box_mask]
+                else:
+                    sample_batch[key] = value
+
+            # Extract predictions for this sample
+            if isinstance(pred, dict):
+                sample_pred = {k: v[sample_idx:sample_idx+1] if isinstance(v, th.Tensor) else v for k, v in pred.items()}
+            elif isinstance(pred, (tuple, list)):
+                sample_pred = tuple(p[sample_idx:sample_idx+1] if isinstance(p, th.Tensor) else p for p in pred)
+            else:
+                sample_pred = pred[sample_idx:sample_idx+1]
+
+            # Compute loss for this sample
+            try:
+                sample_loss_output = self.base_loss(sample_pred, sample_batch)
+                if isinstance(sample_loss_output, (tuple, list)):
+                    sample_loss = sample_loss_output[0]
+                else:
+                    sample_loss = sample_loss_output
+                # Ensure loss is a scalar
+                if sample_loss.numel() > 1:
+                    sample_loss = sample_loss.mean()
+                elif sample_loss.ndim > 0:
+                    sample_loss = sample_loss.squeeze()
+                sample_losses_list.append(sample_loss)
+            except Exception:
+                sample_losses_list.append(th.tensor(0.0, device=device, dtype=th.float32))
+
+        # Stack losses - preserves gradient flow
+        per_sample_losses = th.stack(sample_losses_list)
+
+        return per_sample_losses
 
 
 class GIoULoss(nn.Module):

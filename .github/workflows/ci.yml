@@ -14,7 +14,7 @@ on:
 
 jobs:
   skip-push-when-pr-open:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
     steps:
@@ -57,7 +57,7 @@ jobs:
   code-quality:
     needs: skip-push-when-pr-open
     if: needs.skip-push-when-pr-open.outputs.should_run == 'true'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -75,20 +75,15 @@ jobs:
           mkdir -p ~/.cache/pip
           mkdir -p ~/.cache/ruff
 
-      - name: Ensure cache directories exist
-        run: |
-          mkdir -p ~/.cache/pip
-          mkdir -p ~/.cache/ruff
-
       - name: Cache pip and Ruff
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/pip
             ~/.cache/ruff
-          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache
+          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache-${{ hashFiles('**/setup.py', '**/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
+            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache-
             ${{ runner.os }}-
 
       - name: Get changed Python files
@@ -155,7 +150,7 @@ jobs:
           fi
 
   install-and-test:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: skip-push-when-pr-open
     strategy:
       fail-fast: false
@@ -176,9 +171,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/setup.py', '**/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip
+            ${{ runner.os }}-pip-
 
       - name: Install project dependencies
         run: |
@@ -227,24 +222,12 @@ jobs:
             echo "::endgroup::"
           fi
 
-      - name: Cleanup Python installations (keep 3.10 only)
-        if: always()
-        run: |
-          if [ "${{ matrix.python-version }}" != "3.10" ]; then
-            echo "Removing Python ${{ matrix.python-version }} installation to save disk space..."
-            PYTHON_CACHE_DIR="/mnt/runner-cache-disk/_work/_tool/Python"
-            if [ -d "$PYTHON_CACHE_DIR" ]; then
-              # Remove all Python directories except 3.10.x
-              find "$PYTHON_CACHE_DIR" -maxdepth 1 -type d -name "3.1[1-4]*" -exec rm -rfv {} + || true
-              echo "Cleanup completed"
-            fi
-          fi
 
   trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
     name: Trigger WeightsStudio CI (workflow_dispatch)
     needs: install-and-test
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Resolve target branch
         id: resolve-target
@@ -343,7 +326,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Build & Publish Dev (TestPyPI)
     needs: trigger-weightsstudio-dispatch
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
@@ -413,7 +396,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Test Install From Pip Dev
     needs: build-and-publish-dev
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:

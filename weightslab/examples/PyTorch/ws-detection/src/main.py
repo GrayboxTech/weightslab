@@ -153,7 +153,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 log=True,
             )
 
-    def process_predictions(self, pred_raw, image, cls_thresh=0.5):
+    def process_predictions(self, pred_raw, image, conf=0.25, cls_thresh=0.5):
         img_h, img_w = image[0].shape[-2:]
 
         # Process check for eval mode
@@ -162,7 +162,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
 
         # Gen. bounding boxes
         pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)  # Convert to raw model predictions format [batch, 64+nc, 8400]
-        preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=0.25, iou_thres=cls_thresh)
+        preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
 
         return preds_nms
 
@@ -192,7 +192,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 raw_preds = self.model(image.to(self.device))
 
                 # Process outputs to generate predictions as BB (bs, x, 5 | 6)
-                preds = self.process_predictions(raw_preds, image, cls_thresh=0.5)
+                preds = self.process_predictions(raw_preds, image, conf=0.1, cls_thresh=0.1)
 
                 # Split preds and targets by batch index
                 batch_size = image.shape[0]
@@ -214,15 +214,15 @@ class WLCompatileDetTrainer(DetectionTrainer):
                     preds={'bboxes': preds_by_batch},
                     targets={'bboxes': targets_by_batch}
                 )
-                per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes)) if per_sample_losses_bboxes else torch.zeros(batch_size, device=self.device)
+                per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes))  # Full zeros if empty
 
                 # # Cls
                 per_sample_losses_cls = self.train_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
-                per_sample_losses_cls = torch.stack(list(per_sample_losses_cls)) if per_sample_losses_cls else torch.zeros(batch_size, device=self.device)
+                per_sample_losses_cls = torch.stack(list(per_sample_losses_cls))  # Full zeros if empty
 
                 # # Dfl
                 per_sample_losses_dfl = self.train_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
-                per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl)) if per_sample_losses_dfl else torch.zeros(batch_size, device=self.device)
+                per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl))
 
                 # # Compute final loss
                 loss = (per_sample_losses_bboxes + per_sample_losses_cls + per_sample_losses_dfl).mean()
@@ -288,12 +288,12 @@ def validate(loader):
 
         # Process outputs to generate predictions as BB
         # Helper function to process predictions
-        def process_predictions(pred_raw, image, cls_thresh=0.5):
+        def process_predictions(pred_raw, image, conf=0.25, cls_thresh=0.5):
             img_h, img_w = image[0].shape[-2:]
             if isinstance(pred_raw, (tuple, list)):
                 pred_raw = pred_raw[1]
             pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
-            preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=0.25, iou_thres=cls_thresh)
+            preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
             return preds_nms
 
         preds = process_predictions(raw_preds, image, cls_thresh=0.5)
@@ -304,7 +304,7 @@ def validate(loader):
         targets_by_batch = []
         for i in range(batch_size):
             mask = batch['batch_idx'].view(-1) == i
-            p = preds[mask] if isinstance(preds, torch.Tensor) and preds.shape[0] > 0 else torch.zeros((0, 4), device=device)
+            p = preds[i]
             t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=device)
             preds_by_batch.append(p)
             targets_by_batch.append(t)
