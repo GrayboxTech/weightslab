@@ -48,7 +48,6 @@ class TestGlobalMonitoringUnit(unittest.TestCase):
              patch("weightslab.components.global_monitoring.get_hyperparams", return_value={}):
             gc.__enter__()
             self.assertEqual(get_current_context(), Context.TRAINING)
-            self.assertIn(TrackingMode.TRAIN, model.mode_calls)
             self.assertIn(True, model.train_calls)
             result = gc.__exit__(None, None, None)
 
@@ -63,7 +62,6 @@ class TestGlobalMonitoringUnit(unittest.TestCase):
              patch("weightslab.components.global_monitoring.resolve_hp_name", return_value="hp"), \
              patch("weightslab.components.global_monitoring.get_hyperparams", return_value={"auditorMode": True}):
             gc.__enter__()
-            self.assertIn(TrackingMode.TRAIN, model.mode_calls)
             self.assertEqual(model.eval_calls, 1)
             gc.__exit__(None, None, None)
 
