@@ -43,6 +43,12 @@ def _decode_predictions(pred, img_h, img_w, conf=0.25, iou_thres=0.5):
     pred_boxes = pred_boxes.softmax(-1) @ th.arange(16).float()
     pred_boxes = dist2bbox(pred_boxes, anchors.unsqueeze(0), xywh=False)  # xyxy in pixels
 
+    # Clip boxes to image bounds (x1, y1, x2, y2)
+    pred_boxes[..., 0] = th.clamp(pred_boxes[..., 0], min=0, max=img_w)  # x1
+    pred_boxes[..., 1] = th.clamp(pred_boxes[..., 1], min=0, max=img_h)  # y1
+    pred_boxes[..., 2] = th.clamp(pred_boxes[..., 2], min=0, max=img_w)  # x2
+    pred_boxes[..., 3] = th.clamp(pred_boxes[..., 3], min=0, max=img_h)  # y2
+
     # Apply NMS
     pred_scores = pred_cls.sigmoid()
     pred_combined = th.cat([pred_boxes, pred_scores], dim=-1)
