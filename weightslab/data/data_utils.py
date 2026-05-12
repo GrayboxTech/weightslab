@@ -383,7 +383,8 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
                 np_img = np_img[0]
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
-        is_volumetric = np_img.ndim == 4
+
+    is_volumetric = np_img.ndim >= 4  # 3 is for RGB; while 4 is 3D  # TODO (GP): Should be fix because this will not work with grayscale image wo. color channel
 
     # For 4D volumetric data, detect and transpose channel-first formats:
     # 1. (C, Z, H, W) → (Z, H, W, C) - channels first in all dimensions
@@ -462,10 +463,8 @@ def load_label(dataset, sample_id):
                 return None  # Only data, no label
             elif len(data) == 2:  # Commonly (data, label) in standard PyTorch datasets
                 label = to_numpy_safe(data[1])
-                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
             elif len(data) == 3:  # if len==3, data, uids, label, no extra info
                 label = to_numpy_safe(data[2])  # Third element is typically the label
-                label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
             elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
                 if len(data) == 4:
                     label = to_numpy_safe(data[2])  # Third element is typically the label
@@ -477,10 +476,8 @@ def load_label(dataset, sample_id):
                         label = np.concatenate([label, classes[..., None]], axis=1)
                     else:
                         label = to_numpy_safe(data[2])  # Second element is typically the label
-                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                 else:
                     label = to_numpy_safe(data[2])  # Third element is typically the label
-                    label = get_mask(label, dataset=wrapped, dataset_index=index, raw_data=data)
                     metadata = data[3:]
             if label is not None:
                 return label[0] if label.ndim == 1 and label.shape[0] == 1 else label

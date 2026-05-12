@@ -9,13 +9,14 @@ import sys
 import ctypes
 import time
 import types
-import threading
-import traceback
 import logging
 import inspect
 import functools
+import threading
+import traceback
 import numpy as np
 import torch as th
+import weightslab as wl
 
 from tqdm import tqdm
 from typing import Callable, Optional, Any
@@ -215,13 +216,13 @@ def _get_step(step: int | None = None) -> int:
         if hasattr(m, 'get_age'):
             val = m.get_age()
             if val is not None:
-                step = max([int(val)-1, 0])  # Use age-1 as step to reflect completed step; ensure non-negative
+                step = max([int(val), 0])  # Use age-1 as step to reflect completed step; ensure non-negative
 
         elif hasattr(m, 'current_step'):
             val = m.current_step
 
             if val is not None:
-                step = max([int(val)-1, 0])  # Use current_step-1 as step to reflect completed step; ensure non-negative
+                step = max([int(val), 0])  # Use current_step-1 as step to reflect completed step; ensure non-negative
 
             elif step is not None:
                 # step = step # fallback to provided step
@@ -363,7 +364,7 @@ def _fwd_params(fn):
     except (ValueError, TypeError):
         return frozenset()
 
-_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals')
+_WL_KWARGS = ('flag', 'batch_ids', 'group_id', 'preds', 'signals', 'targets')
 
 
 def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
@@ -383,12 +384,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     wl_kw = {k: kw.pop(k) for k in _WL_KWARGS if k in kw and k not in fwd_params}
 
     _ = wl_kw.get('flag')
+    preds_raw = a[0] if len(a) > 0 else None
     batch_ids = wl_kw.get('batch_ids')
     group_ids = wl_kw.get('group_id')
-    preds = wl_kw.get('preds')
     batch_scalar = wl_kw.get('signals')
-    preds_raw = a[0] if len(a) > 0 else None
-    targets = a[1] if len(a) > 1 else None
+    preds = wl_kw.get('preds')
+    targets = wl_kw.get('targets') if 'targets' in wl_kw else None
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
@@ -412,7 +413,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         except Exception as e:
             logger.debug(f"Automatic backend discard masking failed: {e}")
 
-    if kwargs.get('per_sample', False):
+    if kwargs.get('per_sample', False) and not isinstance(out, dict):
         if out.ndim > 1:
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
 
@@ -420,7 +421,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     scalar, batch_scalar = _extract_scalar_from_tensor(batch_scalar, out, batch_ids)
 
     # Log if requested
-    step = _get_step(None)
+    step = _get_step()
     _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
 
     # CHECK FOR SUBSCRIBERS (Dynamic Signals)
@@ -513,7 +514,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          dynamic_updates[name] = np.array(batch_res)
                      except Exception as e:
                          logger.debug(f"Dynamic signal {name} failed: {e}")
-                         pass # User function error, skip
+                         pass  # User function error, skip
 
     # Save statistics if requested and applicable
     if (batch_scalar is not None and batch_ids is not None) or dynamic_updates:
@@ -523,10 +524,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         signals.update(dynamic_updates) # Merge dynamic signals
 
         save_signals(
-            batch_ids=batch_ids,
-            preds=preds,
-            preds_raw=preds_raw,
             signals=signals,
+            batch_ids=batch_ids,
+            preds_raw=preds_raw,
+            preds=preds,
             targets=targets,
             log=False  # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
@@ -1417,10 +1418,10 @@ def get_discarded_samples(
 
 def save_signals(
     signals: dict,
-    batch_ids: th.Tensor,
-    preds_raw: th.Tensor = None,
-    targets: th.Tensor = None,
-    preds: th.Tensor = None,
+    batch_ids: th.Tensor | np.ndarray | list ,
+    preds_raw: th.Tensor | np.ndarray | dict = None,
+    targets: th.Tensor | np.ndarray | dict = None,
+    preds: th.Tensor | np.ndarray | dict = None,
     step: int | None = None,
     log: bool = True
 ):
@@ -1429,8 +1430,8 @@ def save_signals(
 
         Args:
             signals (th.Tensor): The batch losses.
-            preds_raw (th.Tensor, optional): The raw batch predictions. Defaults to None.
-            targets (th.Tensor, optional): The batch targets. Defaults to None.
+            preds_raw (th.Tensor, ...etc, optional): The raw batch predictions. Defaults to None.
+            targets (th.Tensor, ...etc, optional): The batch targets. Defaults to None.
             batch_ids (th.Tensor, optional): The batch ids. Defaults to None.
             preds (th.Tensor, optional): The batch predictions. Defaults to None.
             step (int, optional): The current training step. Defaults to 0.
@@ -1479,34 +1480,37 @@ def save_signals(
     else:
         batch_ids_np = [str(i) for i in batch_ids] if batch_ids is not None else None
 
-    if preds is not None:
-        pred_np = preds.detach().cpu().numpy() if isinstance(preds, th.Tensor) else np.asarray(preds)
-        if np.issubdtype(pred_np.dtype, np.floating):
-             pred_np = pred_np.astype(np.float32)
-        else:
-             pred_np = pred_np.astype(np.uint16)
-    else:
-        pred_np = None
+    # Normalize to np arrays
+    def to_numpy(t):
+        arr = t.detach().cpu().numpy() if isinstance(t, th.Tensor) else np.asarray(t)
+        if np.issubdtype(arr.dtype, np.floating):
+            return arr.astype(np.float32)
+        return arr.astype(np.uint16)
 
-    if preds_raw is not None:
-        pred_raw_np = preds_raw.detach().cpu().numpy() if isinstance(preds_raw, th.Tensor) else np.asarray(preds_raw)
-    else:
-        pred_raw_np = None
+    def normalize(x):
+        if x is None:
+            return None
+        if isinstance(x, list):
+            return [to_numpy(t) for t in x]
+        if isinstance(x, th.Tensor):
+            return to_numpy(x)
+        return None
 
-    if targets is not None:
-        target_np = targets.detach().cpu().numpy() if isinstance(targets, th.Tensor) else np.asarray(targets)
-        if np.issubdtype(target_np.dtype, np.floating):
-             target_np = target_np.astype(np.float32)
-        else:
-             target_np = target_np.astype(np.uint16)
-    else:
-        target_np = None
+    def expand_dim(x):
+        """Add axis if 1D — skip for lists (inhomogeneous shapes)."""
+        if x is None or isinstance(x, list):
+            return x
+        if x.ndim == 1:
+            return x[:, np.newaxis]
+        return x
 
-    # Processing
-    # # Process signals
+    preds_np     = normalize(preds)
+    preds_raw_np = normalize(preds_raw)
+    target_np    = normalize(targets)
+
+    # Processing signals
     if isinstance(signals, dict):
-        losses_data = {\
-            # Convert losses map of shape (B, ...) to (B,) by averaging all axes except batch (axis 0)
+        losses_data = {
             'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
                 v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v)
             )
@@ -1520,13 +1524,11 @@ def save_signals(
         }
     else:
         losses_data = None
-    # # Process targets
-    if target_np is not None and target_np.ndim == 1:
-        target_np = target_np[:, np.newaxis]
-    if pred_np is not None and pred_np.ndim == 1:
-        pred_np = pred_np[:, np.newaxis]
-    if pred_raw_np is not None and pred_raw_np.ndim == 1:
-        pred_raw_np = pred_raw_np[:, np.newaxis]
+
+    # Expand dims for 1D arrays (skipped for lists)
+    target_np    = expand_dim(target_np)
+    preds_np     = expand_dim(preds_np)
+    preds_raw_np = expand_dim(preds_raw_np)
 
     # During evaluation mode we must not mutate dataframe state.
     try:
@@ -1536,12 +1538,12 @@ def save_signals(
     except Exception:
         pass
 
-    # Enqueue to dataframe manager buffer for efficientcy
+    # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(
         sample_ids=batch_ids_np,
-        preds_raw=pred_raw_np,
-        preds=pred_np,
-        targets=target_np,
+        preds_raw=preds_raw_np if preds_raw_np is not None else preds_raw,
+        preds=preds_np if preds_np is not None else preds,
+        targets=target_np if target_np is not None else targets,
         losses=losses_data,
         step=step
     )
@@ -2199,10 +2201,17 @@ def run_pending_evaluation(
             from weightslab.components.tracking import TrackingMode as _TrackingMode
             _prev_tracking_mode = getattr(_model, "tracking_mode", None)
             _model.set_tracking_mode(_TrackingMode.EVAL)
+            _model.eval() if hasattr(_model, 'eval') else None
         except Exception:
             pass
 
     controlled_loader = _EvalManagedLoader(loader_if, split_name, total_batches, max_batches=max_steps)
+    eval_error = None
+
+    # Set evaluation context (exempt from watchdog timeouts)
+    from weightslab.components.global_monitoring import set_in_evaluation, reset_in_evaluation
+    eval_context_token = set_in_evaluation(True)
+
     try:
         _eval_fn(controlled_loader)
     except _EvalCanceled as exc:
@@ -2216,7 +2225,8 @@ def run_pending_evaluation(
         return True
     except _EvalTimeout as exc:
         logger_obj.error("[wl.run_pending_evaluation] timeout: %s", exc)
-        eval_controller.mark_error(str(exc))
+        eval_error = f"Evaluation timeout: {exc}"
+        eval_controller.mark_error(eval_error)
         if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
             signal_logger.abort_evaluation_mode()
         _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
@@ -2226,14 +2236,18 @@ def run_pending_evaluation(
     except Exception as exc:
         import traceback
         tb_str = traceback.format_exc()
+        eval_error = f"{type(exc).__name__}: {exc}"
         logger_obj.error("[wl.run_pending_evaluation] eval_fn raised: %s\n%s", exc, tb_str)
-        eval_controller.mark_error(str(exc))
+        eval_controller.mark_error(eval_error)
         if signal_logger is not None and hasattr(signal_logger, "abort_evaluation_mode"):
             signal_logger.abort_evaluation_mode()
         _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
         if was_paused:
             pause_controller.pause()
         return True
+    finally:
+        # Reset evaluation context
+        reset_in_evaluation(eval_context_token)
 
     # A cancel request can arrive just as eval_fn returns. In that race window,
     # honor cancellation before finalizing marker persistence.
@@ -2311,10 +2325,9 @@ def run_pending_evaluation(
     _restore_eval_state(sampler, prev_shuffle, prev_eval_allow_list, model=_model, prev_tracking_mode=_prev_tracking_mode)
 
     # ------------------------------------------------------------------
-    # 8. Re-pause if training was paused before evaluation
+    # 8. Pause training
     # ------------------------------------------------------------------
-    if was_paused:
-        pause_controller.pause()
+    pause_controller.pause()
 
     # Atomic completion: if cancel was requested in the final race window,
     # convert to canceled and purge markers for this eval hash.
@@ -2331,23 +2344,45 @@ def run_pending_evaluation(
         eval_controller.mark_done(result)
 
     # Console output — visible even without Weights Studio connected.
-    print(f"\n{'='*70}", flush=True)
-    print(f"[WeightsLab] Evaluation Results", flush=True)
-    print(f"{'='*70}", flush=True)
-    print(f"  Split:        {split_name}", flush=True)
-    print(f"  Model Step:   {model_age}", flush=True)
+    logger.info(f"\n{'='*70}")
+    logger.info(f"[WeightsLab] Evaluation Results")
+    logger.info(f"{'='*70}")
+    logger.info(f"  Split:        {split_name}")
+    logger.info(f"  Model Step:   {model_age}")
 
     if result:
-        print(f"  Metrics:\n", flush=True)
+        logger.info(f"  Metrics:\n")
         for k, v in result.items():
             if isinstance(v, float):
-                print(f"    {k:30s} = {v:.6f}", flush=True)
+                logger.info(f"    {k:30s} = {v:.6f}")
             else:
-                print(f"    {k:30s} = {v}", flush=True)
+                logger.info(f"    {k:30s} = {v}")
     else:
-        print(f"  Status:       No metrics recorded", flush=True)
+        logger.info(f"  Status:       No metrics recorded")
+        error_msg = (
+            f"Evaluation did not produce any metrics.\n"
+            f"  Possible causes:\n"
+            f"    • Evaluation function is not compatible with the experiment setup\n"
+            f"    • No signals were computed during evaluation\n"
+            f"    • Model or data loader not registered in the ledger\n\n"
+            f"  Solution: Create a custom evaluation function decorated with @wl.eval_fn.\n"
+            f"  This function should:\n"
+            f"    1. Accept only one parameter: loader\n"
+            f"    2. Be fully based on the WeightsLab ledger\n"
+            f"    3. Retrieve model, device, and metrics from wl.ledger.*\n"
+            f"    4. Register loss/metric functions with wl.watch_or_edit(..., flag='loss/metric')\n\n"
+            f"  Example from detection use case:\n"
+            f"    @wl.eval_fn\n"
+            f"    def validate(loader):\n"
+            f"        model = wl.ledger.get_model()\n"
+            f"        device = wl.ledger.get_device()\n"
+            f"        for batch in loader:\n"
+            f"            ...\n\n"
+            f"  See documentation: https://grayboxtech.github.io/weightslab/latest/index.html"
+        )
+        logger.warning(error_msg)
 
-    print(f"{'='*70}\n", flush=True)
+    logger.info(f"{'='*70}\n")
 
     logger_obj.info(
         "[wl.run_pending_evaluation] Evaluation complete on '%s' @ step %d: %s",
@@ -2437,6 +2472,8 @@ def _restore_eval_state(sampler, prev_shuffle: bool, prev_eval_allow_list, model
     if model is not None and prev_tracking_mode is not None and hasattr(model, "set_tracking_mode"):
         try:
             model.set_tracking_mode(prev_tracking_mode)
+            if prev_tracking_mode == 'train':
+                model.train() if hasattr(model, 'train') else None
         except Exception:
             pass
     if sampler is None:
@@ -2533,6 +2570,8 @@ class _EvalManagedLoader:
                 f"Evaluation timeout on '{self._split_name}' after {elapsed:.1f}s "
                 f"(projected={projected:.1f}s, limit={timeout_seconds:.1f}s, multiplier={self._multiplier:.2f})"
             )
+    def __len__(self):
+        return len(self._loader)
 
     def __iter__(self):
         it = iter(self._loader)
@@ -2586,7 +2625,7 @@ if __name__ == "__main__":
 
     # Query and process tagged samples
     difficult_ids = get_samples_by_tag('difficult', origin='train')
-    print(f"Found {len(difficult_ids)} difficult samples")
+    logger.info(f"Found {len(difficult_ids)} difficult samples")
 
     # Remove tag after review
     tag_samples([5], 'outlier', mode='remove')

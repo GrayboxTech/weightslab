@@ -7,7 +7,6 @@ permissions:
 on:
   push:
     branches: [ main, dev ]
-    tags: [ 'v*' ]
   pull_request:
     branches: [ main, dev ]
     types: [opened, reopened, ready_for_review, synchronize]
@@ -15,7 +14,7 @@ on:
 
 jobs:
   skip-push-when-pr-open:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
     steps:
@@ -57,8 +56,8 @@ jobs:
 
   code-quality:
     needs: skip-push-when-pr-open
-    if: needs.skip-push-when-pr-open.outputs.should_run == 'true' && (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/'))
-    runs-on: ubuntu-latest
+    if: needs.skip-push-when-pr-open.outputs.should_run == 'true'
+    runs-on: self-hosted
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -156,13 +155,14 @@ jobs:
           fi
 
   install-and-test:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: skip-push-when-pr-open
     strategy:
       fail-fast: false
       matrix:
         python-version: ${{ github.event_name == 'pull_request' && fromJson('["3.10","3.11","3.12","3.13","3.14"]') || fromJson('["3.10"]') }}
+    env:
+      MAX_CACHE_PKG_SIZE_MB: 100
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -172,24 +172,24 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Cache pip (save + restore, Python 3.10 only, excluding torch)
+      - name: Cache pip (save + restore, Python 3.10 only)
         if: matrix.python-version == '3.10'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
+          key: ${{ runner.os }}-pip
           restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}
+            ${{ runner.os }}-pip
             ${{ runner.os }}-pip
 
-      - name: Restore pip cache (no save, Python 3.11+, excluding torch)
+      - name: Restore pip cache (no save, Python 3.11+)
         if: matrix.python-version != '3.10'
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
+          key: ${{ runner.os }}-pip
           restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}
+            ${{ runner.os }}-pip
             ${{ runner.os }}-pip
 
       - name: Install project dependencies
@@ -197,11 +197,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[onnx,dev,utest]"
 
-      - name: Remove torch from pip cache to save storage
-        continue-on-error: true
+      - name: Clean pip cache of large packages (>${{ env.MAX_CACHE_PKG_SIZE_MB }}MB)
         run: |
-          rm -rf ~/.cache/pip/http-v2/*/torch* ~/.cache/pip/http-v2/*/pytorch*
-          rm -rf ~/.cache/pip/*/torch* ~/.cache/pip/*/pytorch*
+          echo "Removing packages larger than ${{ env.MAX_CACHE_PKG_SIZE_MB }}MB from pip cache..."
+          find ~/.cache/pip -type f \( -name "*.whl" -o -name "*.tar.gz" \) -size +${{ env.MAX_CACHE_PKG_SIZE_MB }}M -exec rm -v {} \;
+          echo "Cache cleanup completed"
 
       - name: Verify installation
         run: |
@@ -243,7 +243,7 @@ jobs:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
     name: Trigger WeightsStudio CI (workflow_dispatch)
     needs: install-and-test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Resolve target branch
         id: resolve-target
@@ -342,7 +342,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Build & Publish Dev (TestPyPI)
     needs: trigger-weightsstudio-dispatch
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
     outputs:
@@ -412,7 +412,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Test Install From Pip Dev
     needs: build-and-publish-dev
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
     steps:

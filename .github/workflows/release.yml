@@ -8,7 +8,7 @@ on:
 jobs:
   detect-release-channel:
     name: Detect Release Channel
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
     if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch' }}
@@ -63,7 +63,7 @@ jobs:
   build-and-publish:
     name: Build & Publish
     needs: detect-release-channel
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
     if: ${{ needs.detect-release-channel.outputs.channel == 'main' || needs.detect-release-channel.outputs.channel == 'dev' }}
@@ -137,7 +137,7 @@ jobs:
   test-install-from-pip:
     name: Test Install From Pip
     needs: [detect-release-channel, build-and-publish]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
     if: ${{ needs.detect-release-channel.outputs.channel == 'main' || needs.detect-release-channel.outputs.channel == 'dev' }}
@@ -211,7 +211,7 @@ jobs:
           python -c "import weightslab; import importlib.metadata as m; print('weightslab import OK'); print('installed version:', m.version('weightslab'))"
 
   create_release:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [detect-release-channel, build-and-publish, test-install-from-pip]
     permissions:
       contents: write
@@ -263,9 +263,13 @@ jobs:
             echo "---" >> release_body.md
           fi
 
-          # Add placeholder for auto-generated notes (will be appended by action)
+          # Add contributors/thank you section
           echo "" >> release_body.md
-          echo "## Merged Pull Requests" >> release_body.md
+          echo "## 🙏 Contributors" >> release_body.md
+          echo "" >> release_body.md
+          echo "Thank you to all contributors who made this release possible!" >> release_body.md
+          echo "" >> release_body.md
+          echo "Special thanks to the WeightsLab development team at GrayBox Tech." >> release_body.md
           echo "" >> release_body.md
 
       - name: Create GitHub Release

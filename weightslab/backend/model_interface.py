@@ -349,6 +349,9 @@ class ModelInterface(NetworkWithOps):
     def _registration(self, weak: bool = False):
         register_model(self, weak=weak)
 
+    def get(self):
+        return self.model
+
     def load_state_dict(self, state_dict, strict: bool = True):
         """
         Loads the state dictionary into the wrapped model.

@@ -445,7 +445,7 @@ class Proxy:
                 except KeyError:
                     traceback.print_exc()
                     logger.error(
-                        "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." + 
+                        "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." +
                         "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
                     )
         return _ProxyIterator(underlying_iter)
@@ -483,6 +483,14 @@ class Proxy:
         if self._obj is None:
             raise TypeError("Proxy target not set")
         return self._obj.keys() if hasattr(self._obj, 'keys') else []
+
+    def eval(self, state=None):
+        """Model eval mode"""
+        self.get().eval(state)
+
+    def train(self, state=None):
+        """Model train mode"""
+        self.get().train(state)
 
     def values(self):
         """Support dict.values() method"""
@@ -876,6 +884,15 @@ class Ledger:
             self._signals[name] = proxy
             self._proxies_signals[name] = proxy
             return proxy
+
+    def get_loss(self, name: str = DEFAULT_NAME) -> Any:
+        return self.get_signal(name)
+
+    def get_metric(self, name: str = DEFAULT_NAME) -> Any:
+        return self.get_signal(name)
+
+    def get_criterion(self, name: str = DEFAULT_NAME) -> Any:
+        return self.get_signal(name)
 
     def list_signals(self) -> List[str]:
         with self._lock:
