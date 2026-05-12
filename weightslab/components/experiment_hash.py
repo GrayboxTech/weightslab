@@ -232,10 +232,13 @@ class ExperimentHashGenerator:
             str: Hash of configuration (8 bytes)
         """
         # Remove random state from config, i.e., root log dir as can be generated randomly
+        # TODO (GP): Config from weightslab for experiment state should be in a cfg['exp_state'] or something not wrote and considered.
         config_cp = config.copy()
         config_cp.pop('root_log_dir', None)
         config_cp.pop('is_training', None)
         config_cp.pop('pause_at_step', None)
+        config_cp.pop('auditorMode', None)
+        config_cp.pop('auditor_mode', None)
 
         try:
             # Sort keys for deterministic hashing
