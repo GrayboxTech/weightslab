@@ -841,9 +841,13 @@ class DataLoaderInterface:
                     except Exception as e:
                         diagnostic_info["dataset_info_error"] = str(e)
 
-                logger.warning(
+                logger.debug(
                     f"Dataloader exhausted after reset. Diagnostic info: {diagnostic_info}"
                 )
+
+                # Reset iterator before signaling end of iteration
+                logger.debug("Resetting iterator before end of iteration")
+                self._reset_iterator()
                 raise
         except Exception as e:
             # Log unexpected errors to help diagnosis with multiprocessing

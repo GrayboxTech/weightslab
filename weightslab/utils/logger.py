@@ -325,7 +325,7 @@ class LoggerQueue:
             self._flush_current_step_buffer(add_to_queue=True)
 
         # Update per-sample signal history with compact array storage
-        if signal_per_sample and isinstance(signal_per_sample, dict):
+        if isinstance(signal_per_sample, dict) and len(signal_per_sample):
             if graph_name not in self._signal_history_per_sample:
                 self._signal_history_per_sample[graph_name] = {}
             if exp_hash not in self._signal_history_per_sample[graph_name]:
@@ -339,7 +339,7 @@ class LoggerQueue:
                 buf["values"].append(self._to_float(value))
 
         metric_values = []
-        if aggregate_by_step and signal_per_sample and isinstance(signal_per_sample, dict):
+        if isinstance(signal_per_sample, dict) and aggregate_by_step and len(signal_per_sample):
             for value in signal_per_sample.values():
                 metric_values.append(self._to_float(value))
         else:

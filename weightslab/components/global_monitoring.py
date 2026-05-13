@@ -8,7 +8,7 @@ import threading
 import time
 import logging
 
-from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager
+from weightslab.backend.ledgers import get_hyperparams, set_hyperparam, resolve_hp_name, get_checkpoint_manager, get_model
 from weightslab.components.tracking import TrackingMode
 from weightslab.watchdog.lock_monitor import MonitoredRLock
 
@@ -56,6 +56,11 @@ _active_origin: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     'weightslab_origin', default=None
 )
 
+# Track whether evaluation is currently running (exempt from watchdog timeouts)
+_in_evaluation: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    'weightslab_in_evaluation', default=False
+)
+
 
 def get_current_context() -> Context:
     """Get the current WeightsLab execution context (training or testing)."""
@@ -75,6 +80,21 @@ def get_active_origin() -> Optional[str]:
 def set_active_origin(origin: Optional[str]) -> contextvars.Token[Optional[str]]:
     """Set the current active dataset origin name."""
     return _active_origin.set(origin)
+
+
+def is_in_evaluation() -> bool:
+    """Check if evaluation is currently running (exempt from watchdog timeouts)."""
+    return _in_evaluation.get()
+
+
+def set_in_evaluation(value: bool) -> contextvars.Token[bool]:
+    """Set evaluation state and return a token for restoration."""
+    return _in_evaluation.set(value)
+
+
+def reset_in_evaluation(token: contextvars.Token[bool]) -> None:
+    """Reset evaluation state using a token from set_in_evaluation()."""
+    _in_evaluation.reset(token)
 
 
 class PauseController:
@@ -185,6 +205,10 @@ class GuardContext:
         context = Context.TRAINING if self.for_training else Context.TESTING
         self._context_token = set_current_context(context)
 
+        # Update model
+        _model = get_model()
+        self.model = _model if _model != None else self.model
+
         # The exact logic requested by the user:
         if self.model is not None:
             # Save current mode to restore on exit
@@ -230,7 +254,7 @@ class GuardContext:
         if self.model is not None and hasattr(self, '_prev_training_mode'):
             self.model.train(self._prev_training_mode)
 
-        # Reset context to unknown
+        # Reset contxt to unknown
         if self._context_token is not None:
             _current_context.reset(self._context_token)
             self._context_token = None

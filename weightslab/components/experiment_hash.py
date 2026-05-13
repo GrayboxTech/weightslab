@@ -193,7 +193,8 @@ class ExperimentHashGenerator:
             arch_info.append(f"init_step:{int(model_init_step)}")
 
             # Layer structure
-            for name, module in model.named_modules():
+            modules = model.model.named_modules() if hasattr(model, 'model') else model.named_modules()
+            for name, module in modules:
                 # Remove these trackers from hash
                 if 'train_dataset_tracker' in name or 'eval_dataset_tracker' in name:
                     continue
@@ -231,10 +232,13 @@ class ExperimentHashGenerator:
             str: Hash of configuration (8 bytes)
         """
         # Remove random state from config, i.e., root log dir as can be generated randomly
+        # TODO (GP): Config from weightslab for experiment state should be in a cfg['exp_state'] or something not wrote and considered.
         config_cp = config.copy()
         config_cp.pop('root_log_dir', None)
         config_cp.pop('is_training', None)
         config_cp.pop('pause_at_step', None)
+        config_cp.pop('auditorMode', None)
+        config_cp.pop('auditor_mode', None)
 
         try:
             # Sort keys for deterministic hashing

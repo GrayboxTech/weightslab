@@ -3,6 +3,10 @@ device: auto
 experiment_name: seg_BDD_usecase
 training_steps_to_do: null  # Set to null for infinite training until manually stopped
 
+# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
+checkpoint_manager:
+  load_config: false  # Disable loading previous checkpoint configuration to allow for changes in the current config.yaml file
+
 # Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
 compute_natural_sort: true
 
@@ -24,8 +28,8 @@ ledger_flush_interval: 60.0
 
 # Data
 num_classes: 6
-image_size: 360
-data_root: ./BDD_subset
+image_size: 180
+data_root: .\BDD_subset
 data:
   train_loader:
     batch_size: 2

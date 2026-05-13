@@ -7,8 +7,9 @@ import torch as th
 import torch.nn as nn
 import numpy as np
 import random
+import torch
+import pathlib
 
-from typing import Union
 from copy import deepcopy
 from typing import List, Union, Any, Dict
 
@@ -20,6 +21,24 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
+def normalize_config(obj: Any) -> Any:
+    """Recursively normalize a config dict for JSON/YAML serialization."""
+    if isinstance(obj, dict):
+        return {k: normalize_config(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [normalize_config(v) for v in obj]
+    elif isinstance(obj, torch.device):
+        return str(obj)  # e.g. "cuda" or "cuda:0"
+    elif isinstance(obj, pathlib.Path):
+        return obj.as_posix()
+    elif isinstance(obj, (bool, int, float, str)) or obj is None:
+        return obj
+    else:
+        # Fallback: try str(), warn about unknown types
+        print(f"[normalize_config] Warning: unhandled type {type(obj).__name__}, converting to str")
+        return str(obj)
+
+
 def recursive_update(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively update a dictionary with another dictionary.
 

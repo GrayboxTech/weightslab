@@ -1,0 +1,67 @@
+# ============================================================
+#  Face Recognition — Training Config
+# ============================================================
+
+experiment_name: face_triplet_training
+device: auto             # "auto" → cuda if available, else cpu
+
+# Training schedule
+eval_every:     50       # evaluation frequency (steps); set to -1 to disable
+experiment_dump_to_train_steps_ratio:      10       # print running loss every N steps
+is_training:    true    # start training immediately or not
+
+# WeightsLAB persistence
+# root_log_dir: # leave empty → auto temp dir
+enable_h5_persistence: true
+
+# WeightsLAB serving
+serving_grpc: true
+serving_cli:  true
+
+# ------------------------------------------------------------------
+# Data
+# ------------------------------------------------------------------
+data:
+  # dataset_type options:
+  #   "olivetti"  — sklearn Olivetti Faces (40 ids, 400 imgs, 64×64 grey).
+  #                Works offline, no download needed. Ideal for quick tests.
+  #   "lfw"       — LFW People via torchvision (download on first run).
+  #                Set root_data_dir to a writable directory.
+  #   "folder"    — Generic ImageFolder layout:
+  #                root_data_dir/{train,test}/{class_name}/*.jpg
+  dataset_type:          olivetti
+  root_data_dir:         ""   # only required for lfw / folder
+  image_size:            64   # images are resized to image_size × image_size
+  train_ratio:           0.8  # olivetti only: fraction used for training
+  min_images_per_class:  2    # identities with fewer samples are discarded
+
+  train_loader:
+    batch_size: 32
+    shuffle:    true
+    n_workers:  0      # set >0 for multi-process loading (not needed for Olivetti)
+
+  test_loader:
+    batch_size: 64
+    shuffle:    false
+    n_workers:  0
+
+# ------------------------------------------------------------------
+# Model
+# ------------------------------------------------------------------
+model:
+  # backbone options: "resnet18" | "resnet50" | "mobilenet_v3_small"
+  backbone:        resnet18
+  pretrained:      true      # load ImageNet-pretrained weights
+  freeze_backbone: true      # train the embedding head only (fast & effective)
+
+  # Embedding head
+  embedding_dim:   128       # output dimensionality of the L2-normalised vector
+  head_hidden_dim: 256       # hidden dim of the projection MLP
+
+  # Optimiser (AdamW, applied to trainable parameters only)
+  lr:           0.001
+  weight_decay: 0.0001
+
+  # Triplet loss
+  loss:   triplet
+  margin: 0.3               # triplet margin α

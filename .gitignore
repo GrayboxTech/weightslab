@@ -8,6 +8,7 @@ logs
 root_log_dir
 __pycache__
 venv
+runs
 
 # Ignore hidden directories
 .history
@@ -23,10 +24,12 @@ venv
 .venv*
 
 # Ignore hidden files
-!.env
+.env
 .DS_Store
+.cache
 
 # Ignore specific files
+*.cache
 experiment_service_pb2.py
 experiment_service_pb2_grpc.py
 settings.json

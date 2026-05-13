@@ -5,6 +5,7 @@ import threading
 import grpc
 
 import weightslab.proto.experiment_service_pb2 as pb2
+import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
 
 from weightslab.components.global_monitoring import weightslab_rlock, try_acquire_rlock, _GRPC_LOCK_TIMEOUT_S
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
@@ -21,7 +22,7 @@ from weightslab.components.evaluation_controller import eval_controller
 logger = logging.getLogger(__name__)
 
 
-class ExperimentService:
+class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     """
     Domain-level experiment service that orchestrates model/data services
     and handles general experiment-related commands.
@@ -408,6 +409,24 @@ class ExperimentService:
             split_name=str(status.get("split_name", "")),
         )
 
+    def CancelEvaluation(self, request, context):
+        """Cancel a pending or running evaluation."""
+        reason = str(request.reason or "Canceled by user")
+        accepted = eval_controller.request_cancel(reason=reason)
+
+        if accepted:
+            logger.info("[ExperimentService] CancelEvaluation accepted: %s", reason)
+            return pb2.CancelEvaluationResponse(
+                success=True,
+                message=f"Evaluation canceled: {reason}",
+            )
+        else:
+            logger.info("[ExperimentService] CancelEvaluation rejected: no active evaluation")
+            return pb2.CancelEvaluationResponse(
+                success=False,
+                message="No active evaluation to cancel",
+            )
+
     def _get_live_hyper_parameter_descs(self, components):
         hyper_parameter_descs = list(get_hyper_parameters_pb(self._ctx.hyper_parameters))
 
@@ -456,6 +475,8 @@ class ExperimentService:
             metric_name = str(note_op.metric_name or "")
             experiment_hash = str(note_op.experiment_hash or "")
             note_text = str(note_op.note or "")
+
+            # Get Current Model Age
             try:
                 model_age = int(note_op.model_age)
             except Exception:
@@ -500,18 +521,27 @@ class ExperimentService:
 
         if request.HasField("hyper_parameter_change"):
             hyper_parameters = request.hyper_parameter_change.hyper_parameters
+
+            # Get Hyper parameter context
             hp_name = None
             if self._ctx.exp_name:
                 hp_name = self._ctx.exp_name
             else:
                 hp_name = resolve_hp_name()
-
             if hp_name is None:
                 hps = list_hyperparams()
                 detailed_msg = f"Cannot find an active hyperparameter set (LEDGER_HPS={hps}, CTX_EXP={self._ctx.exp_name})"
                 logger.error(detailed_msg)
                 return pb2.CommandResponse(success=False, message=detailed_msg)
 
+            # Pause the experiment for HP chanage
+            trainer = components.get("trainer")
+            if trainer:
+                trainer.pause()
+                set_hyperparam(name=hp_name, key_path="is_training", value=False)
+            logger.info("[WeightsLab] UI Command: HP changed, experiment paused!")
+
+            # Update HP
             try:
                 hp_now = None
                 if hyper_parameters.HasField("training_steps_to_do"):

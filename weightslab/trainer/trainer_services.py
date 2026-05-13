@@ -421,6 +421,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GetEvaluationStatus({request})")
         return self._exp_service.GetEvaluationStatus(request, context)
 
+    def CancelEvaluation(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.CancelEvaluation({request})")
+        return self._exp_service.CancelEvaluation(request, context)
+
 
 # -----------------------------------------------------------------------------
 # Serving gRPC communication
@@ -443,7 +447,7 @@ def grpc_serve(
 
     grpc_host = os.getenv("GRPC_BACKEND_HOST", "0.0.0.0") if not force_parameters or grpc_host is None else grpc_host
     grpc_port = int(os.getenv("GRPC_BACKEND_PORT", 50051)) if not force_parameters or grpc_port is None else grpc_port
-    watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "60"))
+    watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "180"))  # 3 minutes default stuck threshold
     watchdog_interval_s = float(os.getenv("GRPC_WATCHDOG_INTERVAL_SECONDS", "5"))
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
     watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks

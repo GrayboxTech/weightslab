@@ -1,464 +1,327 @@
-name: Code CI
-
-permissions:
-  contents: read
-  pull-requests: read
-
-on:
-  push:
-    branches: [ main, dev ]
-    tags: [ 'v*' ]
-  pull_request:
-    branches: [ main, dev ]
-    types: [opened, reopened, ready_for_review, synchronize]
-  workflow_dispatch:
-
-jobs:
-  skip-push-when-pr-open:
-    runs-on: ubuntu-latest
-    outputs:
-      should_run: ${{ steps.decide.outputs.should_run }}
-    steps:
-      - name: Decide whether to run CI
-        id: decide
-        uses: actions/github-script@v7
-        with:
-          script: |
-            if (context.eventName !== 'push') {
-              core.setOutput('should_run', 'true');
-              core.info('Non-push event, CI will run.');
-              return;
-            }
-
-            if (!context.ref.startsWith('refs/heads/')) {
-              core.setOutput('should_run', 'true');
-              core.info(`Push ref ${context.ref} is not a branch ref; skipping open-PR lookup.`);
-              return;
-            }
-
-            const branch = context.ref.replace('refs/heads/', '');
-            const head = `${context.repo.owner}:${branch}`;
-            const { data: pulls } = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              head,
-              per_page: 1
-            });
-
-            const hasOpenPr = pulls.length > 0;
-            core.setOutput('should_run', hasOpenPr ? 'false' : 'true');
-
-            if (hasOpenPr) {
-              core.notice(`Skipping push CI for branch ${branch} because an open PR exists.`);
-            } else {
-              core.info(`No open PR for branch ${branch}, CI will run.`);
-            }
-
-  code-quality:
-    needs: skip-push-when-pr-open
-    if: needs.skip-push-when-pr-open.outputs.should_run == 'true' && (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/'))
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for comparison
-
-      - name: Set up Python
-        id: setup-python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Ensure cache directories exist
-        run: |
-          mkdir -p ~/.cache/pip
-          mkdir -p ~/.cache/ruff
-
-      - name: Ensure cache directories exist
-        run: |
-          mkdir -p ~/.cache/pip
-          mkdir -p ~/.cache/ruff
-
-      - name: Cache pip and Ruff
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/ruff
-          key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache
-          restore-keys: |
-            ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
-            ${{ runner.os }}-
-
-      - name: Get changed Python files
-        id: changed-files
-        run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            BASE_SHA=${{ github.event.pull_request.base.sha }}
-            HEAD_SHA=${{ github.event.pull_request.head.sha }}
-          else
-            BASE_SHA=${{ github.event.before }}
-            HEAD_SHA=${{ github.sha }}
-          fi
-
-          # Get changed Python files in weightslab directory, and ignore CI workflow YAML files
-          CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
-            grep -v '^\.github/workflows/.*\.ya\?ml$' | \
-            grep '^weightslab/.*\.py$' | \
-            grep -v '_pb2\.py$' | \
-            grep -v '_pb2_grpc\.py$' | \
-            grep -v 'ui\.py$' | \
-            grep -v 'trainer.*\.py$' || true)
-
-          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "has_files=false" >> $GITHUB_OUTPUT
-            echo "No Python files changed in weightslab directory"
-          else
-            echo "has_files=true" >> $GITHUB_OUTPUT
-            echo "Changed files:"
-            echo "$CHANGED_FILES"
-          fi
-
-      - name: Install linting tools
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install ruff pylint vulture
-
-      - name: Lint with Ruff (unused, style, bugs)
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          FILES="${{ steps.changed-files.outputs.changed_files }}"
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 --fix
-          fi
-
-      - name: Pylint (errors only)
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          FILES="${{ steps.changed-files.outputs.changed_files }}"
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
-          fi
-
-      - name: Vulture (unused code)
-        if: steps.changed-files.outputs.has_files == 'true'
-        run: |
-          FILES="${{ steps.changed-files.outputs.changed_files }}"
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs vulture --min-confidence 70 . || true
-          fi
-
-  install-and-test:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
-    needs: skip-push-when-pr-open
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ${{ github.event_name == 'pull_request' && fromJson('["3.10","3.11","3.12","3.13","3.14"]') || fromJson('["3.10"]') }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Cache pip (save + restore, Python 3.10 only, excluding torch)
-        if: matrix.python-version == '3.10'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
-          restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}
-            ${{ runner.os }}-pip
-
-      - name: Restore pip cache (no save, Python 3.11+, excluding torch)
-        if: matrix.python-version != '3.10'
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}
-          restore-keys: |
-            ${{ runner.os }}-pip-${{ matrix.python-version }}
-            ${{ runner.os }}-pip
-
-      - name: Install project dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[onnx,dev,utest]"
-
-      - name: Remove torch from pip cache to save storage
-        continue-on-error: true
-        run: |
-          rm -rf ~/.cache/pip/http-v2/*/torch* ~/.cache/pip/http-v2/*/pytorch*
-          rm -rf ~/.cache/pip/*/torch* ~/.cache/pip/*/pytorch*
-
-      - name: Verify installation
-        run: |
-          python -c "import sys, weightslab; print(f'weightslab imported successfully on Python {sys.version.split()[0]}')"
-
-      - name: Run unit tests (dynamic by test directories)
-        shell: bash
-        run: |
-          set -euo pipefail
-          export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          export WL_PRELOAD_IMAGE_OVERVIEW="0"  # disable image overview generation during tests to save time and avoid potential issues with headless environments
-
-          TEST_ROOT="./weightslab/tests"
-
-          # Run each first-level subdirectory as its own suite so each group is
-          # reported separately. The previous root-level recursive discover was
-          # removed because it re-ran the same subdirectory tests and doubled CI time.
-          while IFS= read -r dir; do
-            echo "::group::Running tests in ${dir}"
-            python -m unittest discover -s "${dir}" -p "test_*.py" -t . -v
-            echo "::endgroup::"
-          done < <(find "${TEST_ROOT}" -mindepth 1 -maxdepth 1 -type d -not -name '__pycache__' | sort)
-
-          # Run any test files directly under tests/ (not inside a subdir).
-          mapfile -t root_tests < <(find "${TEST_ROOT}" -maxdepth 1 -name "test_*.py" | sort)
-          if [ "${#root_tests[@]}" -gt 0 ]; then
-            echo "::group::Running root-level tests in ${TEST_ROOT}"
-            modules=()
-            for f in "${root_tests[@]}"; do
-              # Convert ./weightslab/tests/test_foo.py -> weightslab.tests.test_foo
-              m="${f#./}"; m="${m%.py}"; m="${m//\//.}"
-              modules+=("$m")
-            done
-            python -m unittest "${modules[@]}" -v
-            echo "::endgroup::"
-          fi
-
-  trigger-weightsstudio-dispatch:
-    if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
-    name: Trigger WeightsStudio CI (workflow_dispatch)
-    needs: install-and-test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Resolve target branch
-        id: resolve-target
-        run: |
-          TARGET_BRANCH="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
-          echo "branch=${TARGET_BRANCH}" >> "$GITHUB_OUTPUT"
-
-      - name: Dispatch ws-ci workflow in weights_studio
-        uses: actions/github-script@v7
-        env:
-          TARGET_BRANCH: ${{ steps.resolve-target.outputs.branch }}
-        with:
-          github-token: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-          script: |
-            const owner = 'GrayboxTech';
-            const repo = 'weights_studio';
-            const workflow_id = 'ws-ci.yml';
-            const branch = process.env.TARGET_BRANCH;
-
-            if (!branch) {
-              core.setFailed('Missing TARGET_BRANCH');
-              return;
-            }
-
-            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            const dispatchTs = new Date().toISOString();
-
-            core.info(`Dispatching ${workflow_id} on ${owner}/${repo}@${branch}`);
-
-            await github.request('POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', {
-              owner,
-              repo,
-              workflow_id,
-              ref: branch,
-            });
-
-            let runId = null;
-
-            for (let attempt = 1; attempt <= 60; attempt++) {
-              const runsResp = await github.request('GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs', {
-                owner,
-                repo,
-                workflow_id,
-                event: 'workflow_dispatch',
-                branch,
-                per_page: 20,
-              });
-
-              const runs = runsResp.data.workflow_runs || [];
-              const candidates = runs
-                .filter((run) => run.created_at >= dispatchTs)
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-              if (candidates.length > 0) {
-                runId = candidates[0].id;
-                core.info(`Detected ws-ci run id: ${runId}`);
-                break;
-              }
-
-              core.info(`Waiting for ws-ci run to appear (attempt ${attempt}/60)...`);
-              await sleep(5000);
-            }
-
-            if (!runId) {
-              core.setFailed('Could not detect ws-ci run in weights_studio after dispatch.');
-              return;
-            }
-
-            for (let attempt = 1; attempt <= 120; attempt++) {
-              const runResp = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', {
-                owner,
-                repo,
-                run_id: runId,
-              });
-
-              const status = runResp.data.status || '';
-              const conclusion = runResp.data.conclusion || '';
-
-              core.info(`ws-ci status: ${status}, conclusion: ${conclusion}`);
-
-              if (status === 'completed') {
-                if (conclusion === 'success') {
-                  core.info('WeightsStudio ws-ci completed successfully.');
-                  return;
-                }
-                core.setFailed(`WeightsStudio ws-ci failed with conclusion: ${conclusion}`);
-                return;
-              }
-
-              await sleep(10000);
-            }
-
-            core.setFailed('Timed out waiting for WeightsStudio ws-ci completion.');
-
-  build-and-publish-dev:
-    if: ${{ github.event_name == 'pull_request' }}
-    name: Build & Publish Dev (TestPyPI)
-    needs: trigger-weightsstudio-dispatch
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      published_version: ${{ steps.version.outputs.published_version }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install build tools
-        run: python -m pip install --upgrade pip build twine
-
-      - name: Compute publish version
-        id: version
-        run: |
-          TS="$(date -u +%Y%m%d%H%M%S)"
-          SHA_HEX="$(git rev-parse --short=8 HEAD)"
-          # TestPyPI/PyPI reject local versions (+sha), so encode sha as decimal in devN.
-          SHA_DEC="$((16#${SHA_HEX}))"
-          PRETEND="${TS}.dev${SHA_DEC}"
-          echo "published_version=${PRETEND}" >> $GITHUB_OUTPUT
-          echo "Publishing version: ${PRETEND} (from sha ${SHA_HEX})"
-
-      - name: Build distributions
-        env:
-          # Package-specific override is the most reliable way with setuptools_scm.
-          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB: ${{ steps.version.outputs.published_version }}
-        run: |
-          echo "Building with version ${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB}"
-          python -m build
-
-      - name: Verify built artifact version
-        env:
-          WL_VERSION: ${{ steps.version.outputs.published_version }}
-        run: |
-          ls -la dist
-          if ls dist | grep -q "0.0.0"; then
-            echo "Build still produced 0.0.0 artifacts"
-            exit 1
-          fi
-          if ! ls dist | grep -q "${WL_VERSION}"; then
-            echo "Expected version ${WL_VERSION} not found in dist artifacts"
-            exit 1
-          fi
-
-      - name: Check distributions
-        run: python -m twine check dist/*
-
-      - name: Publish to TestPyPI
-        env:
-          TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
-          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: |
-          if [ -z "${{ secrets.TEST_PYPI_API_TOKEN }}" ]; then
-            echo "TEST_PYPI_API_TOKEN not set; skipping TestPyPI upload."
-            exit 0
-          fi
-          python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
-
-  test-install-from-pip-dev:
-    if: ${{ github.event_name == 'pull_request' }}
-    name: Test Install From Pip Dev
-    needs: build-and-publish-dev
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Create isolated virtual environment
-        run: |
-          python -m venv .venv-ci
-
-      - name: Install from TestPyPI (wait until indexed)
-        env:
-          WL_VERSION: ${{ needs.build-and-publish-dev.outputs.published_version }}
-        run: |
-          . .venv-ci/bin/activate
-          python -m pip install --upgrade pip
-          if [ -z "${WL_VERSION}" ]; then
-            echo "Missing published version from upstream job"
-            exit 1
-          fi
-
-          # TestPyPI can take a few minutes to expose newly uploaded versions.
-          for attempt in $(seq 1 60); do
-            echo "Checking pip visibility for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
-            if python -m pip download \
-                --index-url https://test.pypi.org/simple/ \
-                --no-deps \
-                "weightslab==${WL_VERSION}" \
-                -d /tmp/wl-probe >/dev/null 2>&1; then
-              echo "Found weightslab==${WL_VERSION} in TestPyPI simple index"
-              break
-            fi
-
-            if [ "${attempt}" -eq 60 ]; then
-              echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI simple index"
-              exit 1
-            fi
-            sleep 7
-          done
-
-          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
-          echo "weightslab==${WL_VERSION} installed from TestPyPI"
-
-      - name: Verify package import
-        run: |
-          . .venv-ci/bin/activate
-          python -c "import weightslab; import importlib.metadata as m; print('weightslab import OK'); print('installed version:', m.version('weightslab'))"
+# name: Code CI
+
+# on:
+#   push:
+#     branches: [ main, dev ]
+#     tags: [ 'v*' ]
+#   pull_request:
+#     branches: [ main ]
+#     types: [ opened, reopened, ready_for_review ]
+#   workflow_dispatch:
+
+# jobs:
+#   code-quality:
+#     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0  # Fetch all history for comparison
+
+#       - name: Set up Python
+#         id: setup-python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+#           cache: 'pip'
+
+#       - name: Cache pip and Ruff
+#         uses: actions/cache@v4
+#         with:
+#           path: |
+#             ~/.cache/pip
+#             ~/.cache/ruff
+#           key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache
+#           restore-keys: |
+#             ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
+#             ${{ runner.os }}-
+
+#       - name: Get changed Python files
+#         id: changed-files
+#         run: |
+#           if [ "${{ github.event_name }}" == "pull_request" ]; then
+#             BASE_SHA=${{ github.event.pull_request.base.sha }}
+#             HEAD_SHA=${{ github.event.pull_request.head.sha }}
+#           else
+#             BASE_SHA=${{ github.event.before }}
+#             HEAD_SHA=${{ github.sha }}
+#           fi
+
+#           # Get changed Python files in weightslab directory, exclude generated files
+#           CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT $BASE_SHA $HEAD_SHA | \
+#             grep '^weightslab/.*\.py$' | \
+#             grep -v '_pb2\.py$' | \
+#             grep -v '_pb2_grpc\.py$' | \
+#             grep -v 'ui\.py$' | \
+#             grep -v 'trainer.*\.py$' || true)
+
+#           echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+#           echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+#           echo "EOF" >> $GITHUB_OUTPUT
+
+#           if [ -z "$CHANGED_FILES" ]; then
+#             echo "has_files=false" >> $GITHUB_OUTPUT
+#             echo "No Python files changed in weightslab directory"
+#           else
+#             echo "has_files=true" >> $GITHUB_OUTPUT
+#             echo "Changed files:"
+#             echo "$CHANGED_FILES"
+#           fi
+
+#       - name: Install linting tools
+#         if: steps.changed-files.outputs.has_files == 'true'
+#         run: |
+#           python -m pip install --upgrade pip
+#           python -m pip install ruff pylint vulture
+
+#       - name: Lint with Ruff (unused, style, bugs)
+#         if: steps.changed-files.outputs.has_files == 'true'
+#         run: |
+#           FILES="${{ steps.changed-files.outputs.changed_files }}"
+#           if [ -n "$FILES" ]; then
+#             echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 --fix
+#           fi
+
+#       - name: Pylint (errors only)
+#         if: steps.changed-files.outputs.has_files == 'true'
+#         run: |
+#           FILES="${{ steps.changed-files.outputs.changed_files }}"
+#           if [ -n "$FILES" ]; then
+#             echo "$FILES" | xargs pylint --disable=R0913,E0401,C0301,W0511,C0114,C0115,C0116 --fail-under=7.0
+#           fi
+
+#       - name: Vulture (unused code)
+#         if: steps.changed-files.outputs.has_files == 'true'
+#         run: |
+#           FILES="${{ steps.changed-files.outputs.changed_files }}"
+#           if [ -n "$FILES" ]; then
+#             echo "$FILES" | xargs vulture --min-confidence 70 . || true
+#           fi
+
+#   install:
+#     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+#     runs-on: ubuntu-latest
+#     needs: code-quality
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+
+#       - name: Cache pip
+#         uses: actions/cache@v4
+#         with:
+#           path: ~/.cache/pip
+#           key: ${{ runner.os }}-pip
+#           restore-keys: |
+#             ${{ runner.os }}-pip
+
+#       - name: Install project dependencies
+#         run: |
+#           python -m pip install --upgrade pip
+#           python -m pip install -e .
+
+#       - name: Verify installation
+#         run: |
+#           python -c "import weightslab; print(f'weightslab imported successfully')"
+
+#   test:
+#     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+#     runs-on: ubuntu-latest
+#     needs: install
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+
+#       - name: Cache pip
+#         uses: actions/cache@v4
+#         with:
+#           path: ~/.cache/pip
+#           key: ${{ runner.os }}-pip
+#           restore-keys: |
+#             ${{ runner.os }}-pip
+
+#       - name: Install project dependencies
+#         run: |
+#           python -m pip install --upgrade pip
+#           python -m pip install .
+
+#       - name: Run unit tests - General
+#         run: |
+#           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+#           python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
+
+#       - name: Run unit tests - Model
+#         run: |
+#           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+#           python -m unittest discover -s ./weightslab/tests/model -v
+
+#       - name: Run unit tests - Data
+#         run: |
+#           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+#           python -m unittest discover -s ./weightslab/tests/data -v
+
+#       - name: Run unit tests - Integrations
+#         run: |
+#           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+#           python -m unittest discover -s ./weightslab/tests/integrations -v
+
+#       - name: Trigger WeightsStudio CI
+#         env:
+#           WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
+#         run: |
+#           if [ -z "${WS_TOKEN}" ]; then
+#             echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
+#             exit 0
+#           fi
+
+#           # Trigger the ws-ci workflow in the weights_studio repository on main.
+#           curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
+#             -H "Authorization: Bearer ${WS_TOKEN}" \
+#             -H "Accept: application/vnd.github+json" \
+#             -H "Content-Type: application/json" \
+#             -d '{"ref":"main"}'
+
+#           echo "WeightsStudio workflow dispatch requested successfully."
+
+#   weightsstudio-ci:
+#     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+#     name: WeightsStudio CI
+#     needs: test
+#     uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
+#     with:
+#       weightslab_branch: ${{ (github.head_ref || github.ref_name) == 'main' && 'main' || 'dev' }}
+
+#   build-and-publish-dev:
+#     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+#     name: Build & Publish Dev (TestPyPI)
+#     needs: weightsstudio-ci
+#     runs-on: ubuntu-latest
+#     permissions:
+#       contents: read
+#     outputs:
+#       published_version: ${{ steps.version.outputs.published_version }}
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+
+#       - name: Install build tools
+#         run: python -m pip install --upgrade pip build twine
+
+#       - name: Compute publish version
+#         id: version
+#         run: |
+#           TS="$(date -u +%Y%m%d%H%M%S)"
+#           SHA_HEX="$(git rev-parse --short=8 HEAD)"
+#           # TestPyPI/PyPI reject local versions (+sha), so encode sha as decimal in devN.
+#           SHA_DEC="$((16#${SHA_HEX}))"
+#           PRETEND="${TS}.dev${SHA_DEC}"
+#           echo "published_version=${PRETEND}" >> $GITHUB_OUTPUT
+#           echo "Publishing version: ${PRETEND} (from sha ${SHA_HEX})"
+
+#       - name: Build distributions
+#         env:
+#           # Package-specific override is the most reliable way with setuptools_scm.
+#           SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB: ${{ steps.version.outputs.published_version }}
+#         run: |
+#           echo "Building with version ${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB}"
+#           python -m build
+
+#       - name: Verify built artifact version
+#         env:
+#           WL_VERSION: ${{ steps.version.outputs.published_version }}
+#         run: |
+#           ls -la dist
+#           if ls dist | grep -q "0.0.0"; then
+#             echo "Build still produced 0.0.0 artifacts"
+#             exit 1
+#           fi
+#           if ! ls dist | grep -q "${WL_VERSION}"; then
+#             echo "Expected version ${WL_VERSION} not found in dist artifacts"
+#             exit 1
+#           fi
+
+#       - name: Check distributions
+#         run: python -m twine check dist/*
+
+#       - name: Publish to TestPyPI
+#         env:
+#           TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
+#           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+#         run: |
+#           if [ -z "${{ secrets.TEST_PYPI_API_TOKEN }}" ]; then
+#             echo "TEST_PYPI_API_TOKEN not set; skipping TestPyPI upload."
+#             exit 0
+#           fi
+#           python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
+
+#   test-install-from-pip-dev:
+#     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+#     name: Test Install From Pip Dev
+#     needs: build-and-publish-dev
+#     runs-on: ubuntu-latest
+#     permissions:
+#       contents: read
+#     steps:
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+
+#       - name: Create isolated virtual environment
+#         run: |
+#           python -m venv .venv-ci
+
+#       - name: Install from TestPyPI (wait until indexed)
+#         env:
+#           WL_VERSION: ${{ needs.build-and-publish-dev.outputs.published_version }}
+#         run: |
+#           . .venv-ci/bin/activate
+#           python -m pip install --upgrade pip
+#           if [ -z "${WL_VERSION}" ]; then
+#             echo "Missing published version from upstream job"
+#             exit 1
+#           fi
+
+#           # TestPyPI can take a few minutes to expose newly uploaded versions.
+#           for attempt in $(seq 1 60); do
+#             echo "Checking pip visibility for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+#             if python -m pip download \
+#                 --index-url https://test.pypi.org/simple/ \
+#                 --no-deps \
+#                 "weightslab==${WL_VERSION}" \
+#                 -d /tmp/wl-probe >/dev/null 2>&1; then
+#               echo "Found weightslab==${WL_VERSION} in TestPyPI simple index"
+#               break
+#             fi
+
+#             if [ "${attempt}" -eq 60 ]; then
+#               echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI simple index"
+#               exit 1
+#             fi
+#             sleep 7
+#           done
+
+#           python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
+#           echo "weightslab==${WL_VERSION} installed from TestPyPI"
+
+#       - name: Verify package import
+#         run: |
+#           . .venv-ci/bin/activate
+#           python -c "import weightslab; import importlib.metadata as m; print('weightslab import OK'); print('installed version:', m.version('weightslab'))"

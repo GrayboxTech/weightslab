@@ -31,6 +31,7 @@ service ExperimentService {
   // Evaluation mode
   rpc TriggerEvaluation (TriggerEvaluationRequest) returns (TriggerEvaluationResponse);
   rpc GetEvaluationStatus (GetEvaluationStatusRequest) returns (GetEvaluationStatusResponse);
+  rpc CancelEvaluation (CancelEvaluationRequest) returns (CancelEvaluationResponse);
 }
 
 // --- Logger Data Sync ---
@@ -467,4 +468,13 @@ message GetEvaluationStatusResponse {
   string message = 4;
   string error = 5;
   string split_name = 6;
+}
+
+message CancelEvaluationRequest {
+  string reason = 1;
+}
+
+message CancelEvaluationResponse {
+  bool success = 1;
+  string message = 2;
 }

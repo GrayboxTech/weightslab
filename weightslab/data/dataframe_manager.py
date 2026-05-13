@@ -4,6 +4,7 @@ import logging
 import traceback
 import numpy as np
 import pandas as pd
+import torch
 
 from datetime import datetime
 from typing import Dict, Sequence, Any, List
@@ -75,6 +76,7 @@ class LedgeredDataFrameManager:
                     # data.h5 is already in checkpoints/data/, so arrays.h5 goes there too
                     array_path = store.get_path().parent / "arrays.h5"
                     self._array_store = H5ArrayStore(array_path)
+                    self._array_store.recover()
 
     def _normalize_sample_id(self, sample_id: Any) -> Any:
         """Normalize incoming sample IDs while preserving numeric IDs when possible."""
@@ -394,6 +396,8 @@ class LedgeredDataFrameManager:
         Expected shape: (B, C, H, W). Normalization is performed per (B, C)
         across spatial dimensions (H, W), then scaled to [0, 65535].
         """
+        if not isinstance(preds_raw, np.ndarray):
+            return preds_raw
         try:
             arr = np.asanyarray(preds_raw)
             if arr.ndim != 4:
@@ -414,10 +418,10 @@ class LedgeredDataFrameManager:
     def enqueue_batch(
         self,
         sample_ids: Sequence[int],
-        preds_raw: np.ndarray | None,
-        preds: np.ndarray | None,
+        preds_raw: np.ndarray | dict | None,
+        preds: np.ndarray | dict | None,
         losses: Dict[str, Any] | None,
-        targets: np.ndarray | None = None,
+        targets: np.ndarray |  dict | None = None,
         step: int | None = None
     ):
         """
@@ -428,7 +432,7 @@ class LedgeredDataFrameManager:
 
         self._ensure_flush_thread()
 
-        # Helper to check if value is meaningful (not None/NaN)
+        # Helper to check if value is meaningful (not None/NaN) - otherwise pass
         def is_meaningful(v):
             if v is None:
                 return False
@@ -437,29 +441,42 @@ class LedgeredDataFrameManager:
             except (TypeError, ValueError):
                 return True
 
+        def index_batch(obj, batch_index, rec=False):
+            if isinstance(obj, dict):
+                return {k: index_batch(v, batch_index, rec=True) for k, v in obj.items()}
+            if rec:
+                return obj[batch_index]
+            if isinstance(obj, (torch.Tensor, np.ndarray)) and obj.shape[0] == 0:
+                return obj[batch_index]
+            return obj[batch_index]
+
         # Build all records BEFORE acquiring lock (faster)
         records_to_add = {}
-        normalized_preds_raw = self._normalize_preds_raw_uint16(preds_raw) if preds_raw is not None else None
-        for i, sid in enumerate(sample_ids):
+        for batch_index, sid in enumerate(sample_ids):
             sample_id = sid if not isinstance(sid, (np.ndarray, list)) else sid[0]
 
             # Build record incrementally - keep numpy arrays as-is for speed
-            rec: Dict[str, Any] = {
-                "sample_id": sample_id,
-            }
+            rec: Dict[str, Any] = {"sample_id": sample_id}
 
-            # Store arrays directly without conversion (FAST)
-            if targets is not None and is_meaningful(targets[i]):
-                rec[SampleStats.Ex.TARGET.value] = targets[i]
-            if preds_raw is not None and is_meaningful(preds_raw[i]):
-                rec[SampleStats.Ex.PREDICTION_RAW.value] = normalized_preds_raw[i]
-            if preds is not None and is_meaningful(preds[i]):
-                rec[SampleStats.Ex.PREDICTION.value] = preds[i]
+            # Process data to store
+            ## Prediction
+            if preds is not None:
+                pred = index_batch(preds, batch_index)
+                pred = pred if is_meaningful(pred) else None  # Replace nan by None
+                if pred is not None:
+                    rec[SampleStats.Ex.PREDICTION.value] = self._normalize_preds_raw_uint16(pred)  # Not normalized as already integer
+            ## Target
+            if targets is not None:
+                target = index_batch(targets, batch_index)
+                target = target if is_meaningful(target) else None  # Replace nan by None
+                if target is not None:
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
+            ## Step
             if step is not None and is_meaningful(step):
                 rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
 
             # Save losses with safe conversion (handles scalars, arrays, NaNs)
-            loss_dict = self._safe_loss_dict(losses, i)
+            loss_dict = self._safe_loss_dict(losses, batch_index)
             if loss_dict is not None:
                 rec.update(loss_dict)
             records_to_add[sample_id] = rec
@@ -469,7 +486,7 @@ class LedgeredDataFrameManager:
             # Merge nested dicts: update existing sample_id records, add new ones
             for sample_id, record in records_to_add.items():
                 self._buffer.setdefault(sample_id, {}).update(record)
-            logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
+            logger.info(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
             should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
 
         # Trigger flush outside lock
@@ -540,7 +557,7 @@ class LedgeredDataFrameManager:
             all_new_cols = set()
             for up in updates_list:
                 all_new_cols.update(up.keys())
-            
+
             if not all_new_cols.issubset(self._df.columns):
                 self._df = self._df.reindex(columns=self._df.columns.union(all_new_cols))
 
@@ -568,7 +585,7 @@ class LedgeredDataFrameManager:
                             indices = gid_to_indices.get(coerced_gid)
                         except Exception:
                             pass
-                            
+
                 if indices:
                     for col, val in updates.items():
                         self._df.loc[indices, col] = val
@@ -576,7 +593,7 @@ class LedgeredDataFrameManager:
                 else:
                     if not affected_ids:  # Only print once to avoid log spam
                         print(f"[DEBUG] Could not find gid {repr(gid)} in gid_to_indices keys. Sample key: {repr(list(gid_to_indices.keys())[0]) if gid_to_indices else 'None'}")
-            
+
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
 
@@ -646,19 +663,19 @@ class LedgeredDataFrameManager:
 
             # Convert all sample_ids to strings for lookup
             s_ids = [str(sid) for sid in sample_ids]
-            
+
             # Efficient lookup: only check samples existing in index
             existing_mask = self._df.index.isin(s_ids)
             if not existing_mask.any():
                 return discarded_ids
-                
+
             slice_df = self._df[existing_mask]
-            
+
             # Narrow by origin if present
             if origin_col in slice_df.columns:
                 origin_mask = slice_df[origin_col] == origin
                 slice_df = slice_df[origin_mask]
-                
+
             if slice_df.empty:
                 return discarded_ids
 
@@ -977,9 +994,10 @@ class LedgeredDataFrameManager:
                             self._flush_queue_count -= 1
                             force_requested = True
 
+                    # Forced when buffer is full
                     if force_requested:
                         self._flush_event.clear()  # Clear before flush
-                        self.flush_if_needed_nonblocking(force=True)
+                        self.flush()
 
                     # Wait for flush event (force) or timeout (periodic)
                     # self._flush_event.wait(timeout=self._flush_interval)
@@ -1135,44 +1153,68 @@ class LedgeredDataFrameManager:
             return len(self._pending) >= self._flush_max_rows or self._force_flush
 
     def flush_async(self):
+        """Signal flush thread. Returns once buffer has been drained (not after H5 write).
+
+        Training is only blocked for the brief buffer-drain window (~1ms), not for the
+        full DF→H5 write.  If the buffer refills before the flush thread loops back, the
+        next call will wait again — bounding in-memory usage to 2×flush_max_rows records.
+        """
         with self._queue_lock:
             self._flush_queue_count += 1
-        self._flush_event.set()  # Wake thread immediately
+        self._flush_event.set()
+        # Wait only until the flush thread has drained the buffer (fast path).
+        # Do NOT wait on _should_flush() / _pending — that would block until H5 write
+        # is complete, stalling the training thread for seconds.
+        deadline = time.time() + 60.0
+        logger.debug(f"[LedgeredDataFrameManager] Waiting for buffer to drain. Buffer size: {len(self._buffer)}.")
+        while time.time() < deadline:
+            with self._buffer_lock:
+                logger.debug(f"[LedgeredDataFrameManager] Acquiring buffer lock for flush_async check. Buffer size: {len(self._buffer)}.")
+                if len(self._buffer) < self._flush_max_rows:
+                    logger.debug(f"[LedgeredDataFrameManager] Buffer drained, proceeding. Buffer size: {len(self._buffer)}.")
+                    return
+            time.sleep(0.1)
+        logger.warning("[LedgeredDataFrameManager] flush_async timed out waiting for buffer drain after 60s")
 
     def flush_if_needed_nonblocking(self, force: bool = False):
         """Non-blocking flush - if can't acquire lock immediately, defer to next cycle."""
-        # Acquire buffer lock to flush data to DF or h5
+        # Drain buffer quickly, then release lock before any DF/H5 work.
         with self._buffer_lock:
-            if not self._buffer:
-                return
-            # Drain buffer quickly
             buffered = list(self._buffer.values())
             self._buffer = {}
 
-        # Apply records outside buffer lock to avoid deadlock
         if buffered:
+            logger.info(f"Flushing {len(buffered)} buffered records to DataFrame (non-blocking).")
             self._apply_buffer_records_nonblocking(buffered)
+            logger.info(f"Applied {len(buffered)} buffered records to DataFrame (non-blocking).")
 
-        # Flush to H5 if needed outside buffer lock
+        # Always check H5 flush even when buffer was empty (pending rows must drain too).
+        logger.info(f"Checking if flush to H5 is needed (non-blocking). Pending count: {len(self._pending)}.")
         self._flush_to_h5_if_needed(force=force)
+        logger.info(f"Completed non-blocking flush check. Pending count after flush: {len(self._pending)}.")
 
     def flush(self):
-        """Blocking flush to ensure all data is persisted to H5 immediately."""
-        # 1. Drain buffer fully (blocking)
+        """Blocking flush: buffer → DF → H5.
+
+        The buffer lock is released immediately after draining so that the training
+        thread can enqueue new records while the (slower) DF and H5 writes proceed.
+        """
+        # Step 1: drain buffer atomically — fast, minimal lock hold.
         with self._buffer_lock:
-            if not self._buffer:
-                buffered = []
-            else:
-                buffered = list(self._buffer.values())
-                self._buffer = {}
+            buffered = list(self._buffer.values())
+            self._buffer = {}
+        # _buffer_lock released here; training can enqueue again.
 
-        # 2. Apply records (blocking)
+        # Step 2: apply to DF (blocking _lock acquisition; outside buffer lock).
         if buffered:
+            logger.info(f"Flushing {len(buffered)} buffered records to DataFrame.")
             self._apply_buffer_records(buffered)
+            logger.info(f"Applied {len(buffered)} buffered records to DataFrame.")
 
-        # 3. Force flush to H5 (blocking)
+        # Step 3: flush DF → H5 (outside buffer lock).
+        logger.info(f"Checking if flush to H5 is needed. Pending count: {len(self._pending)}.")
         self._flush_to_h5_if_needed(force=True, blocking=True)
-
+        logger.info(f"Completed flush. Pending count after flush: {len(self._pending)}.")
 
 # Create global instance with config-driven parameters
 def create_ledger_manager():

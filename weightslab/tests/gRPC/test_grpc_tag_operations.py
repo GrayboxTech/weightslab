@@ -99,6 +99,10 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         cls.temp_dir = tempfile.mkdtemp(prefix="wl_grpc_test_")
         cls.exp_name = "mnist_grpc_tag_test"
 
+        # Clean previous ledger session as test are ran into one python process
+        from weightslab.backend.ledgers import clear_all
+        clear_all()
+
         print(f"\n========== Setting up test environment ==========")
         print(f"Temp dir: {cls.temp_dir}")
 

@@ -442,12 +442,16 @@ class Proxy:
             def __next__(self):
                 try:
                     return next(self._it)
+                except StopIteration:
+                    # Let StopIteration propagate naturally
+                    raise
                 except KeyError:
                     traceback.print_exc()
                     logger.error(
-                        "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." + 
+                        "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." +
                         "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
                     )
+                    raise StopIteration
         return _ProxyIterator(underlying_iter)
 
     def __len__(self):
@@ -483,6 +487,14 @@ class Proxy:
         if self._obj is None:
             raise TypeError("Proxy target not set")
         return self._obj.keys() if hasattr(self._obj, 'keys') else []
+
+    def eval(self):
+        """Model eval mode"""
+        self.get().eval()
+
+    def train(self, mode: bool = True):
+        """Model train mode"""
+        self.get().train(mode)
 
     def values(self):
         """Support dict.values() method"""
@@ -563,6 +575,9 @@ class Proxy:
         """
         try:
             return next(self._obj)
+        except StopIteration:
+            # Let StopIteration propagate naturally to signal end of iteration
+            raise
         except Exception:
             traceback.print_exc()
             # clear cached iterator so future next(proxy) restarts
@@ -571,7 +586,7 @@ class Proxy:
                     object.__delattr__(self, '_iterator')
             except Exception:
                 traceback.print_exc()
-        raise StopIteration
+            raise StopIteration
 
     # Context manager support so `with proxy as x:` works when the proxy
     # wraps an object that implements the context manager protocol. If the
@@ -876,6 +891,15 @@ class Ledger:
             self._signals[name] = proxy
             self._proxies_signals[name] = proxy
             return proxy
+
+    def get_loss(self, name: str = DEFAULT_NAME) -> Any:
+        return self.get_signal(name)
+
+    def get_metric(self, name: str = DEFAULT_NAME) -> Any:
+        return self.get_signal(name)
+
+    def get_criterion(self, name: str = DEFAULT_NAME) -> Any:
+        return self.get_signal(name)
 
     def list_signals(self) -> List[str]:
         with self._lock:
