@@ -387,6 +387,26 @@ User: "Can you add the tag 'goldset' to 50% of train samples, where 30% of that 
 }}
 
 
+**Ex23: Persistent Show-Only (Discard Inverse + Sort)**
+User: "Show only samples with loss > 5"
+{{
+  "reasoning": "Persistent show-only: deny-list everything NOT matching, then sort by discarded so excluded rows fall to the bottom of the view.",
+  "primary_goal": "ui_manipulation",
+  "steps": [
+    {{
+      "kind": "transform",
+      "target_column": "discarded",
+      "transform_code": "np.where(~(df['loss'] > 5), True, df['discarded'])"
+    }},
+    {{
+      "kind": "sort",
+      "sort_by": ["discarded"],
+      "ascending": [true]
+    }}
+  ]
+}}
+
+
 </examples>
 
 ---
