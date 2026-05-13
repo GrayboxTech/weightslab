@@ -14,7 +14,7 @@ on:
 
 jobs:
   skip-push-when-pr-open:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
     steps:
@@ -57,7 +57,7 @@ jobs:
   code-quality:
     needs: skip-push-when-pr-open
     if: needs.skip-push-when-pr-open.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -72,15 +72,15 @@ jobs:
 
       - name: Ensure cache directories exist
         run: |
-          mkdir -p ~/.cache/pip
-          mkdir -p ~/.cache/ruff
+          mkdir -p /mnt/cache/pip
+          mkdir -p /mnt/cache/ruff
 
       - name: Cache pip and Ruff
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/pip
-            ~/.cache/ruff
+            /mnt/cache/pip
+            /mnt/cache/ruff
           key: ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache-${{ hashFiles('**/setup.py', '**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-cache-
@@ -150,7 +150,7 @@ jobs:
           fi
 
   install-and-test:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: skip-push-when-pr-open
     strategy:
       fail-fast: false
@@ -170,7 +170,7 @@ jobs:
       - name: Cache pip
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
+          path: /mnt/cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/setup.py', '**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
@@ -183,7 +183,7 @@ jobs:
       - name: Clean pip cache of large packages (>${{ env.MAX_CACHE_PKG_SIZE_MB }}MB)
         run: |
           echo "Removing packages larger than ${{ env.MAX_CACHE_PKG_SIZE_MB }}MB from pip cache..."
-          find ~/.cache/pip -type f \( -name "*.whl" -o -name "*.tar.gz" \) -size +${{ env.MAX_CACHE_PKG_SIZE_MB }}M -exec rm -v {} \;
+          find /mnt/cache/pip -type f \( -name "*.whl" -o -name "*.tar.gz" \) -size +${{ env.MAX_CACHE_PKG_SIZE_MB }}M -exec rm -v {} \;
           echo "Cache cleanup completed"
 
       - name: Verify installation
@@ -227,7 +227,7 @@ jobs:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
     name: Trigger WeightsStudio CI (workflow_dispatch)
     needs: install-and-test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Resolve target branch
         id: resolve-target
@@ -326,7 +326,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Build & Publish Dev (TestPyPI)
     needs: trigger-weightsstudio-dispatch
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
     outputs:
@@ -396,7 +396,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: Test Install From Pip Dev
     needs: build-and-publish-dev
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
     steps:
