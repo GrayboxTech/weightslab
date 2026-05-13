@@ -167,6 +167,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Free up disk space (pre-cleanup)
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+
+          echo "=== Cleaning Docker system ==="
+          docker system prune -a --volumes -f || true
+
+          echo "=== Cleaning /tmp directory ==="
+          rm -rf /tmp/* || true
+
+          echo "=== Disk space after cleanup ==="
+          df -h
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -222,6 +236,20 @@ jobs:
             echo "::endgroup::"
           fi
 
+      - name: Clean up disk space (post-cleanup)
+        if: always()
+        run: |
+          echo "=== Disk space before post-cleanup ==="
+          df -h
+
+          echo "=== Removing large pip cache files ==="
+          find /mnt/cache/pip -type f \( -name "*.whl" -o -name "*.tar.gz" \) -size +200M -delete || true
+
+          echo "=== Cleaning Docker system ==="
+          docker system prune -a --volumes -f || true
+
+          echo "=== Final disk space ==="
+          df -h
 
   trigger-weightsstudio-dispatch:
     if: ${{ (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'dev')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')) }}
