@@ -21,13 +21,12 @@ Choose the `kind` based on the user's VERB and INTENT:
 | Intent | Verb Examples | Strategy (`kind`) |
 | :--- | :--- | :--- |
 | **Isolate** | "Keep only...", "Filter to...", "Find the one with..." | `keep` |
-| **Remove** | "Drop...", "Hide...", "Remove all but..." | `drop` |
 | **Extreme** | "Keep the best/worst", "Highest loss" | `keep` + `op="max"`/`min"` |
 | **Ordering** | "Sort by...", "Show highest first", "Rank by..." | `sort` |
 | **Grouping**| "Group by...", "Aggregate...", "Break down by..." | `group` (primary) + `sort` (secondary) |
 | **Calculation**| "What is the average X?", "Sum of Y", "Average of top 10" | `analysis` (or `keep` + `analysis` for subsets) |
 | **Modification**| "Create column...", "Set X to...", "Add 1 to loss", "Calculate error_sq" | `transform` |
-| **Discarding**  | "Discard...", "Ban...", "Denylist...", "Exclude from training" | `transform` (target=`discarded`) |
+| **Discard / Remove** | "Discard...", "Drop...", "Remove...", "Ban...", "Denylist...", "Exclude from training" | `transform` (target=`discarded`) |
 | **Clarify** | "Sort by metrics" (if multiple exist) | `clarify` |
 
 ---
@@ -36,7 +35,7 @@ Choose the `kind` based on the user's VERB and INTENT:
 2. **Path Resolution**: `nested//col_name` can be referred to as `col_name` (e.g. `some_group//metric` -> `metric`).
 3. **Index Access**: Columns marked `[INDEX]` must be accessed via `df.index.get_level_values('name')` in `analysis_expression`.
 4. **ML Terminology**: "class" = `target`/`label`. "set" = `origin` (train/val/test). "lowest/best loss" = `min`.
-5. **Denylisting**: "Discarding", "Excluding", or "Banning" samples means setting the `discarded` column to `True`. Do NOT use `drop` for this, as `drop` only hides them from the view.
+5. **Denylisting** (no-row-loss invariant): ALL removal verbs — "Discarding", "Dropping", "Removing", "Excluding", "Banning" — mean setting the `discarded` column to `True`. **NEVER emit `kind="drop"` for sample removal**; WL never deletes dataframe rows. `kind="drop"` is reserved exclusively for stochastic `drop_frac` sampling steps.
 6. **Tagging Schema (IMPORTANT)**:
   - Do NOT append values into a single `tag`/`tags` string column.
   - Tags are boolean columns named exactly `tag:COLUMN_NAME`.

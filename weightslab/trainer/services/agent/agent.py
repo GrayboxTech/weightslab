@@ -825,6 +825,21 @@ class DataManipulationAgent:
             code = match.group(1).strip() if match else code
         return code.strip()
 
+    def _coerce_discard_intent(self, intent: Intent) -> None:
+        # Invariant: WL never removes dataframe rows. Any kind="drop" with
+        # conditions is rewritten to flip the `discarded` deny-list flag.
+        coerced = False
+        for step in intent.steps:
+            if step.kind != "drop" or not step.conditions:
+                continue
+            expr = self._build_python_mask(step.conditions, n=step.n)
+            if expr:
+                step.kind, step.target_column = "transform", "discarded"
+                step.transform_code = f"np.where({expr}, True, df['discarded'])"
+                coerced = True
+        if coerced:
+            intent.reasoning += " [Note: agent tried to drop samples from view; rewrote as deny-list flag (discarded=True). Rephrase as 'hide' or 'show only' if you wanted view-only filtering.]"
+
     def _intent_to_pandas_op(self, intent: Intent) -> List[dict]:
             """Dispatches structured intent steps to registered handlers."""
             if intent.primary_goal == "out_of_scope":
@@ -929,6 +944,7 @@ class DataManipulationAgent:
 
             if parsed_intent:
                 _LOGGER.info(f"[{name}] Reasoning: {parsed_intent.reasoning}")
+                self._coerce_discard_intent(parsed_intent)
                 ops = self._intent_to_pandas_op(parsed_intent)
                 _LOGGER.info(f"[{name}] Converted to {len(ops)} operations")
                 return ops
