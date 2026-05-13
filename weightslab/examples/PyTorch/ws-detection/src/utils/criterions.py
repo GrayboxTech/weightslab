@@ -54,7 +54,7 @@ def _decode_predictions(pred, img_h, img_w, conf=0.25, iou_thres=0.5):
     pred_combined = th.cat([pred_boxes, pred_scores], dim=-1)
     preds_nms = non_max_suppression(pred_combined, conf_thres=conf, iou_thres=iou_thres, max_det=300)
 
-    return preds_nms
+    return [i[:, :-2] if i.ndim > 1 else i for i in preds_nms], [i[:, -2:] if i.ndim > 1 else i for i in preds_nms]
 
 
 class PerSampleIoU(nn.Module):

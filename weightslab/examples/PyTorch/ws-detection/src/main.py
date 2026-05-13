@@ -162,9 +162,9 @@ class WLCompatileDetTrainer(DetectionTrainer):
 
         # Gen. bounding boxes
         pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)  # Convert to raw model predictions format [batch, 64+nc, 8400]
-        preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
+        preds_bboxes, preds_cls = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
 
-        return preds_nms
+        return preds_bboxes, preds_cls
 
     def train(self):
         """
@@ -192,7 +192,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 raw_preds = self.model(image.to(self.device))
 
                 # Process outputs to generate predictions as BB (bs, x, 5 | 6)
-                preds = self.process_predictions(raw_preds, image, conf=0.1, cls_thresh=0.1)
+                preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.1, cls_thresh=0.1)
 
                 # Split preds and targets by batch index
                 batch_size = image.shape[0]
@@ -200,7 +200,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 targets_by_batch = []
                 for i in range(batch_size):
                     mask = batch['batch_idx'].view(-1) == i
-                    p = preds[mask] if isinstance(preds, torch.Tensor) and preds.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
+                    p = preds_bboxes[mask] if isinstance(preds_bboxes, torch.Tensor) and preds_bboxes.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
                     t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
                     preds_by_batch.append(p)
                     targets_by_batch.append(t)

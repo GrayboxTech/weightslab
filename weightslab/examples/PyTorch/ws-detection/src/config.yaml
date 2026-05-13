@@ -38,7 +38,7 @@ ledger_flush_interval: 60.0
 # Data
 num_classes: 2
 image_size: 320
-data_root: C:\Users\GuillaumePELLUET\Documents\Codes\weightslab\weightslab\examples\PyTorch\ws-detection\data\data.yaml
+data_root: ..\data\data.yaml
 data:
   train_loader:
     batch_size: 4
