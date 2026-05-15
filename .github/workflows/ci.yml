@@ -102,7 +102,6 @@ jobs:
   install:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: self-hosted
-    needs: code-quality
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

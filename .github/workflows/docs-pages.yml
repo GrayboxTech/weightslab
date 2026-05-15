@@ -2,7 +2,7 @@ name: Docs (GitHub Pages) CI
 
 on:
   push:
-    branches: [documentation, dev, main]
+    branches: [dev, main]
     tags:
       - 'v*'
   pull_request:
@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') || !contains(github.ref_name, '-') }}
     runs-on: self-hosted
     steps:
       - name: Checkout
@@ -114,6 +115,7 @@ jobs:
           path: docs/_build/html
 
   deploy:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') || !contains(github.ref_name, '-') }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
