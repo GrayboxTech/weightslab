@@ -27,6 +27,7 @@ runs
 .env
 .DS_Store
 .cache
+.env
 
 # Ignore specific files
 *.cache
