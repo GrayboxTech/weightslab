@@ -1,13 +1,13 @@
 name: Code CI
 
-# on:
-  # push:
-  #   # branches: [ main, dev ]
-  #   tags: [ 'v*' ]
-  # pull_request:
-  #   branches: [ main ]
-  #   types: [ opened, reopened, ready_for_review ]
-  # workflow_dispatch:
+on:
+  push:
+    branches: [ main, dev, 161-github-runners-issues]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+    types: [ opened, reopened, ready_for_review ]
+  workflow_dispatch:
 
 jobs:
   code-quality:
