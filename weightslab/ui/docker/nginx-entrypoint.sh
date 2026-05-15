@@ -40,7 +40,7 @@ if [ "$HAS_CERTS" = true ]; then
     # HTTPS configuration
     cat > "$NGINX_CONF" << 'NGINX_HTTPS_END'
 upstream envoy {
-    server weightslab_envoy:8080;
+    server envoy:8080;
 }
 
 server {
@@ -112,7 +112,7 @@ else
     # HTTP configuration
     cat > "$NGINX_CONF" << 'NGINX_HTTP_END'
 upstream envoy {
-    server weightslab_envoy:8080;
+    server envoy:8080;
 }
 
 server {
@@ -173,6 +173,11 @@ server {
 }
 NGINX_HTTP_END
 fi
+
+# Give envoy time to register in DNS and become ready
+echo "Waiting for envoy service to be ready..."
+sleep 2
+echo "✓ Proceeding with nginx configuration"
 
 # Validate nginx configuration
 echo "Validating nginx configuration..."
