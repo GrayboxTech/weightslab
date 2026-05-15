@@ -1,0 +1,139 @@
+name: Dev Release CI
+
+on:
+  push:
+    tags: [ 'v*-dev' ]
+
+jobs:
+  build-and-publish-dev-tag:
+    name: Build & Publish Dev Tag (TestPyPI)
+    runs-on: self-hosted
+    permissions:
+      contents: read
+    outputs:
+      published_version: ${{ steps.version.outputs.published_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is not on main
+        run: |
+          TAG_COMMIT="$(git rev-list -n 1 "${GITHUB_REF}")"
+          if git merge-base --is-ancestor "${TAG_COMMIT}" refs/remotes/origin/main 2>/dev/null; then
+            echo "Dev release tags must not point to a commit on main. Use release.yml instead."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Derive PEP 440 version from tag
+        id: version
+        run: |
+          # v1.2.3-dev → 1.2.3.dev0
+          TAG="${GITHUB_REF_NAME}"
+          BASE="${TAG#v}"
+          VERSION="${BASE/-dev/.dev0}"
+          echo "published_version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building dev version: ${VERSION} (from tag ${TAG})"
+
+      - name: Build distributions
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WEIGHTSLAB: ${{ steps.version.outputs.published_version }}
+        run: python -m build
+
+      - name: Check distributions
+        run: python -m twine check dist/*
+
+      - name: Publish to TestPyPI
+        env:
+          TWINE_USERNAME: ${{ secrets.TWINE_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${{ secrets.TEST_PYPI_API_TOKEN }}" ]; then
+            echo "TEST_PYPI_API_TOKEN not set; skipping TestPyPI upload."
+            exit 0
+          fi
+          python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
+
+  test-install-from-pip-dev-tag:
+    name: Test Install From Pip Dev Tag
+    needs: build-and-publish-dev-tag
+    runs-on: self-hosted
+    permissions:
+      contents: read
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create isolated virtual environment
+        run: python -m venv .venv-ci
+
+      - name: Install from TestPyPI (wait until indexed)
+        env:
+          WL_VERSION: ${{ needs.build-and-publish-dev-tag.outputs.published_version }}
+        run: |
+          . .venv-ci/bin/activate
+          python -m pip install --upgrade pip
+          if [ -z "${WL_VERSION}" ]; then
+            echo "Missing published version from upstream job"
+            exit 1
+          fi
+
+          for attempt in $(seq 1 60); do
+            echo "Checking pip visibility for weightslab==${WL_VERSION} (attempt ${attempt}/60)"
+            if python -m pip download \
+                --index-url https://test.pypi.org/simple/ \
+                --no-deps \
+                "weightslab==${WL_VERSION}" \
+                -d /tmp/wl-probe >/dev/null 2>&1; then
+              echo "Found weightslab==${WL_VERSION} in TestPyPI"
+              break
+            fi
+            if [ "${attempt}" -eq 60 ]; then
+              echo "Timed out waiting for weightslab==${WL_VERSION} on TestPyPI"
+              exit 1
+            fi
+            sleep 7
+          done
+
+          python -m pip install \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
+          echo "weightslab==${WL_VERSION} installed from TestPyPI"
+
+      - name: Verify package import
+        run: |
+          . .venv-ci/bin/activate
+          python -c "import weightslab; import importlib.metadata as m; print('weightslab import OK'); print('installed version:', m.version('weightslab'))"
+
+  create-dev-release:
+    name: Create Pre-release
+    runs-on: self-hosted
+    needs: test-install-from-pip-dev-tag
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Dev Release ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          prerelease: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

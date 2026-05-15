@@ -8,10 +8,10 @@ on:
 jobs:
   build-and-publish-main:
     name: Build & Publish Main (PyPI)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
     outputs:
       published_version: ${{ steps.main-version.outputs.published_version }}
     steps:
@@ -75,10 +75,10 @@ jobs:
   test-install-from-pip-main:
     name: Test Install From Pip Main
     needs: build-and-publish-main
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -128,7 +128,7 @@ jobs:
           python -c "import weightslab; import importlib.metadata as m; print('weightslab import OK'); print('installed version:', m.version('weightslab'))"
 
   create_release:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: test-install-from-pip-main
     permissions:
       contents: write
