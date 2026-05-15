@@ -72,7 +72,7 @@ services:
     container_name: weights_studio_frontend
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: Dockerfile
       args:
         VITE_IS_A_SANDBOX: ${IS_A_SANDBOX:-0}
         VITE_HISTOGRAM_MAX_BINS: ${VITE_HISTOGRAM_MAX_BINS:-512}
@@ -101,7 +101,8 @@ services:
       # Mount certs directory if available
       - ${WEIGHTSLAB_CERTS_DIR:-${HOME}/.weightslab-certs}:/etc/nginx/certs:ro
     depends_on:
-      - envoy
+      envoy:
+        condition: service_healthy
     networks:
       - weights_studio_network
     restart: unless-stopped

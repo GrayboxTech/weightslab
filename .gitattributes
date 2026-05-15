@@ -1,0 +1,11 @@
+# Auto-convert CRLF to LF on commit, LF to CRLF on checkout
+* text=auto
+
+# Shell scripts should always use LF
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Batch/PowerShell scripts should use CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
