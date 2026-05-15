@@ -312,7 +312,12 @@ class DataSampleTrackingWrapper(Dataset):
             # We use physical index here since we are building the map
             # We bypass the wrapper and call wrapped_dataset directly to avoid recursion
             try:
-                if hasattr(wrapped_dataset, 'get_items'):
+                if hasattr(wrapped_dataset, 'fast_get_label'):
+                    # Cheap, metadata-only access. Contract: no image decode at init.
+                    # Datasets opt in by implementing this; otherwise we fall back
+                    # to get_items() which may load images and run heavy transforms.
+                    raw_item = wrapped_dataset.fast_get_label(p_idx)
+                elif hasattr(wrapped_dataset, 'get_items'):
                     raw_item = wrapped_dataset.get_items(p_idx, include_metadata=preload_metadata, include_labels=preload_labels, include_images=False)  # Try to get metadata if supported
                 else:
                     # logger.warning(f"Wrapped dataset for split '{split}' does not have get_items method. Falling back to __getitem__, which may cause issues if the dataset is not designed for it. Consider implementing get_items for better performance and compatibility.")
