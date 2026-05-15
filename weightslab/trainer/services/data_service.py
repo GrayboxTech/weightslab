@@ -762,10 +762,10 @@ class DataService:
             except Exception:
                 pass
 
-        # Ensure natural_sort_score exists (init with NaN if missing)
-        if self._compute_natural_sort and "natural_sort_score" not in self._all_datasets_df.columns:
+        # Ensure signals.defaults.natural exists (init with NaN if missing)
+        if self._compute_natural_sort and "signals.defaults.natural" not in self._all_datasets_df.columns:
             try:
-                self._all_datasets_df["natural_sort_score"] = np.nan
+                self._all_datasets_df["signals.defaults.natural"] = np.nan
             except Exception:
                 pass
 
@@ -796,7 +796,7 @@ class DataService:
         Compute natural sort statistics (brightness, hue, saturation, entropy) for all samples
         and update the dataframe.
 
-        Includes a 'natural_sort_score' for sorting, configured by weights.
+        Includes 'signals.defaults.natural' (the weighted composite) for sorting.
         """
         # --- CONFIGURATION: Define Natural Sort Cues & Weights ---
         # Weights should sum to 1.0 ideally, but relative magnitude matters most.
@@ -850,7 +850,7 @@ class DataService:
                     sample_id = idx
 
                 # Skip if already computed (optimization for blocking startup)
-                if "natural_sort_score" in row and not pd.isna(row["natural_sort_score"]):
+                if "signals.defaults.natural" in row and not pd.isna(row["signals.defaults.natural"]):
                     return None
 
                 dataset = self._get_dataset(origin)
@@ -922,11 +922,11 @@ class DataService:
                 return {
                     "sample_id": sample_id,
                     "origin": origin,
-                    "brightness": brightness,
-                    "entropy": entropy,
-                    "hue": hue,
-                    "saturation": saturation,
-                    "natural_sort_score": score
+                    "signals.defaults.brightness": brightness,
+                    "signals.defaults.entropy": entropy,
+                    "signals.defaults.hue": hue,
+                    "signals.defaults.saturation": saturation,
+                    "signals.defaults.natural": score,
                 }
             except Exception as e:
                 # Log only the first few errors globally (using a simple counter if we could, but here we can't share state easily)
@@ -2276,8 +2276,8 @@ class DataService:
                 current_all_df = self._all_datasets_df
 
             # Ensure default columns exist
-            if self._compute_natural_sort and "natural_sort_score" not in updated_df.columns:
-                 updated_df["natural_sort_score"] = np.nan
+            if self._compute_natural_sort and "signals.defaults.natural" not in updated_df.columns:
+                 updated_df["signals.defaults.natural"] = np.nan
 
             if SampleStatsEx.DISCARDED.value not in updated_df.columns:
                  updated_df[SampleStatsEx.DISCARDED.value] = False
