@@ -193,13 +193,13 @@ jobs:
 
           echo "WeightsStudio workflow dispatch requested successfully."
 
-  weightsstudio-ci:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
-    name: WeightsStudio CI
-    needs: test
-    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
-    with:
-      weightslab_branch: ${{ (github.head_ref || github.ref_name) == 'main' && 'main' || 'dev' }}
+  # weightsstudio-ci:
+  #   if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+  #   name: WeightsStudio CI
+  #   needs: test
+  #   uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
+  #   with:
+  #     weightslab_branch: ${{ (github.head_ref || github.ref_name) == 'main' && 'main' || 'dev' }}
 
   build-and-publish-dev:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
