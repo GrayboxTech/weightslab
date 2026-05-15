@@ -66,6 +66,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       All environment variables for WeightsLab and Weights Studio with defaults and explanations.
 
+   .. grid-item-card:: 🔁 CI & Release Workflows
+      :link: contributing_ci
+      :link-type: doc
+
+      How CI works: workflows, tag conventions, and what to expect as a contributor.
+
 .. admonition:: Weightslab in one sentence
    :class: note
 
@@ -99,3 +105,10 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    user_functions
    configuration
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Contributing
+   :hidden:
+
+   contributing_ci
