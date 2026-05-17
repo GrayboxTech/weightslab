@@ -2,11 +2,23 @@
 
 ## [v1.1.5] - 2026-05-17
 
-Alignment release with weights_studio v1.1.5. No WL code changes since v1.1.4 — the bump exists so studio image and WL backend stay in lockstep.
+Aligned with weights_studio v1.1.5 — bbox payload schema unified across the stack.
 
-Companion weights_studio v1.1.5 ships:
-- Shared `formatNumber()` helper trimming user-visible numbers to 3 significant figures (scientific notation past 5 chars)
-- Bbox payloads unified to per-row `class_id`/`score` columns; legacy `class_ids` arrays still honored with fallbacks
+### Server / framework
+- `data_service.py`: emit 6-col bbox rows `[x,y,x,y,class,score]`, drop the parallel `class_ids` field. Legacy 4-col rows still render via `format` fallback.
+
+### ws-detection example
+- Optimizer rebind after `wl.watch_or_edit` (otherwise post-wrap params are orphan tensors and `weight_diff_per_step` stays at 0 — silent no-learning).
+- `_setup_train` moved before model wrap (ultralytics' `build_optimizer` needs raw `nn.Module` types).
+- `_decode_predictions`: scale anchors by `stride_tensor` (was off by 8/16/32× stride); emit xywh so NMS's unconditional `xywh2xyxy` doesn't double-convert.
+- `PerSampleDetectionLoss`: pick component by `loss_type` (was `.mean()`-ing the `[box,cls,dfl]` 3-vector across all three criteria → 3× gradient inflation).
+- `fast_get_label` for WL ledger fast-path (~77s → ~1s init at imgsz=1024).
+- New `weight_diff_per_step` diagnostic metric.
+- Pre-import noise suppression: `NaturalNameWarning`, pandas FutureWarning, `WL_PRELOAD_IMAGE_OVERVIEW=0`.
+
+### Studio companion (weights_studio v1.1.5)
+- Shared `formatNumber()` helper for user-visible numbers (3 sig figs, scientific past 5 chars).
+- Bbox payloads unified to per-row `class_id` + `score` (UI side).
 
 ## [Unreleased]
 
