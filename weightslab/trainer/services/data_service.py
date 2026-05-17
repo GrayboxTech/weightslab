@@ -1219,11 +1219,16 @@ class DataService:
                                 label_arr = np.array([])
 
                         if label_arr.size > 0 and label_arr.ndim == 2 and label_arr.shape[-1] >= 4:
-                            bbox_format = detect_bbox_format(label_arr)
+                            # 6-col rows when class+score present: [x,y,x,y,class,score]
+                            # (or [tl_x,tl_y,w,h,class,score] for the xywh-top-left flavor).
+                            # The `format` string stays legacy-compatible ('xyxy' | 'xywh')
+                            # so any deployed renderer reads cols 0-3 correctly and ignores
+                            # extras. Renderers that know the new schema infer class/score
+                            # by row length (bbox.length >= 6).
+                            fmt = detect_bbox_format(label_arr[..., :4])
                             bbox_data = {
                                 "bboxes": label_arr.tolist(),
-                                "class_ids": None,
-                                "format": bbox_format
+                                "format": fmt,
                             }
 
                     t_label_convert = time.time() - t0_gt_conv
@@ -1290,7 +1295,12 @@ class DataService:
                     )
                 )
 
-                # Append class_names if available
+                # Per-sample class_names emission. KEPT because the studio has
+                # no dataset-level RPC (no GetClassNames / GetDatasetMetadata
+                # in experiment_service.proto), so this is the only path that
+                # delivers the id→label mapping to the UI. See ISSUES O-17 —
+                # the proper fix is a dedicated dataset RPC; this block goes
+                # away once that lands.
                 class_names = (
                     row.get('class_names')
                     or (getattr(dataset, "class_names", None) if dataset else None)
@@ -1412,11 +1422,13 @@ class DataService:
                                 pred_arr = np.array([])
 
                         if pred_arr.size > 0 and pred_arr.ndim == 2 and pred_arr.shape[-1] >= 4:
-                            bbox_format = detect_bbox_format(pred_arr)
+                            # 6-col rows when class+score present (see GT path above).
+                            # Format string is legacy-compatible; readers detect extras
+                            # by row length.
+                            fmt = detect_bbox_format(pred_arr[..., :4])
                             pred_bbox_data = {
                                 "bboxes": pred_arr.tolist(),
-                                "class_ids": None,
-                                "format": bbox_format
+                                "format": fmt,
                             }
 
                     t_mask_encode += time.time() - t0_pmask

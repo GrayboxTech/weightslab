@@ -8,6 +8,28 @@ Includes:
 - Model, optimizer, and loss function wrapping
 """
 import os
+# Disable WL's preview-cache prewarm. Must be set BEFORE `import weightslab` so the
+# DataService constructor (site-packages/weightslab/trainer/services/data_service.py:279)
+# sees it. With this off, the studio generates 64x64 thumbnails on-demand instead of
+# pre-warming all 1190 samples (~2.5 min of startup at imgsz=1024).
+os.environ.setdefault("WL_PRELOAD_IMAGE_OVERVIEW", "0")
+
+# Silence pytables NaturalNameWarning: WL writes column names like
+# 'signals.defaults.saturation_dtype' (dotted) which pytables flags as not valid
+# Python identifiers for natural-name access. WL uses getattr-style access so the
+# warning is noise. Filtered here, before `import weightslab` triggers the first H5 write.
+import warnings
+from tables import NaturalNameWarning
+warnings.filterwarnings("ignore", category=NaturalNameWarning)
+# Pandas 3.x deprecation: WL's h5_dataframe_store writes string 'nan' arrays into
+# typed columns, which spams a multi-KB FutureWarning every flush. Targeted by
+# message so unrelated FutureWarnings still surface.
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message="Setting an item of incompatible dtype is deprecated.*",
+)
+
 import time
 import logging
 import tempfile
@@ -20,6 +42,7 @@ import numpy as np
 import weightslab as wl
 
 from weightslab.utils.logger import LoggerQueue
+from weightslab.components.global_monitoring import pause_controller
 from ultralytics import YOLO
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.models.yolo.detect import DetectionTrainer
@@ -29,10 +52,24 @@ from ultralytics.data.utils import check_det_dataset
 # from ultralytics.utils.loss import v8DetectionLoss as DetectionLoss
 
 from utils.data import YOLODatasetWL, _wl_yolo_collate
-from utils.criterions import PerSampleDetectionLoss, PerSampleIoU, _decode_predictions
+from utils.criterions import (
+    PerSampleDetectionLoss,
+    PerSampleIoU,
+    AccumulatedConsecutiveAbsWeightDiff,
+    _decode_predictions,
+)
 
 
 logging.basicConfig(level=logging.ERROR)
+
+# Quiet noisy WL informational loggers. dataframe_manager dumps a line per
+# batch (`Enqueued N records ...`) plus per-minute flush ticks — drowns out
+# real signal. Override after WL has set up its own loggers (via the import
+# above) so this stays sticky.
+for _wl_logger in (
+    "weightslab.data.dataframe_manager",
+):
+    logging.getLogger(_wl_logger).setLevel(logging.WARNING)
 
 
 class WLCompatileDetTrainer(DetectionTrainer):
@@ -72,14 +109,53 @@ class WLCompatileDetTrainer(DetectionTrainer):
         # Init criterions (need to be done before model wrapping for DetectionLoss module from ultralytics)
         self._init_training_loss()
 
-        # Finally wrap the model
+        # Order matters: ultralytics' build_optimizer iterates model.modules()
+        # with isinstance(m, nn.Conv2d/Linear/BatchNorm). After WL wraps the
+        # model those type checks fail and the optimizer ends up with 0 param
+        # groups → no learning. Run _setup_train BEFORE wrapping.
+        self._setup_train()
+
+        # Bare-model param refs BEFORE the wrap. The wrap's WL-checkpoint auto-load
+        # swaps every Parameter tensor (a fresh model is built from the saved
+        # state_dict and registered into the ledger). Without re-binding, the
+        # optimizer keeps referencing the bare model's now-orphan tensors:
+        # optimizer.step() moves them, but the wrapped model's forward never reads
+        # them → weight_diff stays 0 and the model never actually learns.
+        _bare_params = list(self.model.parameters())
+
+        # Wrap the model (triggers WL checkpoint auto-load).
         self.model = wl.watch_or_edit(
             self.model,
             flag="model",
             device=self.device,
             compute_dependencies=False
         )
-        self._setup_train()  # init model, optimizer, scheduler in Ultralytics env.
+
+        # Re-bind optimizer's param_groups to the post-wrap (checkpoint-loaded)
+        # params, position-matched (architecture is unchanged). Migrate per-tensor
+        # optimizer state (momentum etc.) so resume keeps its warmup history.
+        _wrapped_params = list(self.model.parameters())
+        assert len(_bare_params) == len(_wrapped_params), (
+            f"Param count drifted across wrap "
+            f"({len(_bare_params)} → {len(_wrapped_params)}); rebind unsafe")
+        _remap = {id(b): w for b, w in zip(_bare_params, _wrapped_params)}
+        for group in self.optimizer.param_groups:
+            new_params = []
+            for p in group["params"]:
+                w = _remap.get(id(p), p)
+                if w is not p and p in self.optimizer.state:
+                    self.optimizer.state[w] = self.optimizer.state.pop(p)
+                new_params.append(w)
+            group["params"] = new_params
+
+        # Tracks Σ|p_now - p_prev| across trainable params per step. Built from
+        # self.model AFTER the optimizer rebind above, so the snapshot lives on
+        # the same Parameter tensors the optimizer updates.
+        self.weight_diff_monitor = wl.watch_or_edit(
+            AccumulatedConsecutiveAbsWeightDiff(self.model),
+            flag="metric", name="weight_diff_per_step",
+            per_sample=False, log=True,
+        )
 
     def _init_training_loss(self):
         """
@@ -93,21 +169,21 @@ class WLCompatileDetTrainer(DetectionTrainer):
             self.train_criterion_boxes = wl.watch_or_edit(
                 PerSampleDetectionLoss(self.model, loss_type=0),
                 flag="loss",
-                name="train_detection_loss/bboxes",
+                name="train/bbxs",
                 per_sample=True,
                 log=True,
             )
             self.train_criterion_cls = wl.watch_or_edit(
                 PerSampleDetectionLoss(self.model, loss_type=1),
                 flag="loss",
-                name="train_detection_loss/cls",
+                name="train/clsf",
                 per_sample=True,
                 log=True,
             )
             self.train_criterion_dfl = wl.watch_or_edit(
                 PerSampleDetectionLoss(self.model, loss_type=2),
                 flag="loss",
-                name="train_detection_loss/dfl",
+                name="train/dfl",
                 per_sample=True,
                 log=True,
             )
@@ -116,7 +192,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
             self.train_metric = wl.watch_or_edit(
                 PerSampleIoU(conf=0.25, iou_thres=0.5),
                 flag="metric",
-                name="train_per_sample_iou",
+                name="miou/train",
                 per_sample=True,
                 log=True,
             )
@@ -125,21 +201,21 @@ class WLCompatileDetTrainer(DetectionTrainer):
             self.val_criterion_boxes = wl.watch_or_edit(
                 PerSampleDetectionLoss(self.model, loss_type=0),
                 flag="loss",
-                name="val_detection_loss/bboxes",
+                name="val/bbxs",
                 per_sample=True,
                 log=True,
             )
             self.val_criterion_cls = wl.watch_or_edit(
                 PerSampleDetectionLoss(self.model, loss_type=1),
                 flag="loss",
-                name="val_detection_loss/cls",
+                name="val/clsf",
                 per_sample=True,
                 log=True,
             )
             self.val_criterion_dfl = wl.watch_or_edit(
                 PerSampleDetectionLoss(self.model, loss_type=2),
                 flag="loss",
-                name="val_detection_loss/dfl",
+                name="val/dfl",
                 per_sample=True,
                 log=True,
             )
@@ -148,7 +224,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
             self.val_metric = wl.watch_or_edit(
                 PerSampleIoU(conf=0.25, iou_thres=0.5),
                 flag="metric",
-                name="val_per_sample_iou",
+                name="miou/val",
                 per_sample=True,
                 log=True,
             )
@@ -161,8 +237,10 @@ class WLCompatileDetTrainer(DetectionTrainer):
             pred_raw = pred_raw[1]
 
         # Gen. bounding boxes
-        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)  # Convert to raw model predictions format [batch, 64+nc, 8400]
-        preds_bboxes, preds_cls = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
+        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1) 
+        # Convert to raw model predictions format [batch, 64+nc, 8400]
+        preds_bboxes, preds_cls = _decode_predictions(
+            pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
 
         return preds_bboxes, preds_cls
 
@@ -173,72 +251,59 @@ class WLCompatileDetTrainer(DetectionTrainer):
         """
         loss = 0.0
 
+        # Infinite batch stream: `yield from loader` re-iterates each pass, which
+        # re-invokes the DataLoader's sampler — so shuffle=True actually re-shuffles
+        # at every epoch boundary instead of recycling a frozen batch order.
+        def _infinite(loader):
+            while True:
+                yield from loader
+        batches = _infinite(self.data_train_loader)
+
         while True:
             with wl.guard_training_context:
                 self.optimizer.zero_grad()  # Zero gradients at the start of the step
 
                 # --- One training batch ---
-                inputs = next(iter(self.data_train_loader))
+                inputs = next(batches)
 
-                # Process inputs
                 image = inputs[0].float()
                 batch_ids = inputs[1]  # uids
 
-                # Process dataset labels (already in ultralytics flat format)
                 batch = inputs[3]['batch']
-                targets = batch['bboxes']  # (N, 4)
 
-                # Inference
                 raw_preds = self.model(image.to(self.device))
-
-                # Process outputs to generate predictions as BB (bs, x, 5 | 6)
                 preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.1, cls_thresh=0.1)
 
-                # Split preds and targets by batch index
-                batch_size = image.shape[0]
-                preds_by_batch = []
-                targets_by_batch = []
-                for i in range(batch_size):
-                    mask = batch['batch_idx'].view(-1) == i
-                    p = preds_bboxes[mask] if isinstance(preds_bboxes, torch.Tensor) and preds_bboxes.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
-                    t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=self.device)
-                    preds_by_batch.append(p)
-                    targets_by_batch.append(t)
+                imgsz = float(image.shape[-1])
+                preds_by_batch = [
+                    torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
+                    if b.numel() > 0 else torch.zeros((0, 6))
+                    for b, c in zip(preds_bboxes, preds_cls)
+                ]
 
-                # Compute training loss with per-sample tracking
-                # # Bboxes
-                per_sample_losses_bboxes = self.train_criterion_boxes(
-                    raw_preds,
-                    batch,
-                    batch_ids=batch_ids,
-                    preds={'bboxes': preds_by_batch},
-                    targets={'bboxes': targets_by_batch}
+                # Compute training loss with per-sample tracking. Pass preds as the bare
+                # list (framework's index_batch slices by batch index); row[PREDICTION]
+                # ends up as the (N_i, 6) tensor.
+                # Each criterion already returns a stacked per-sample tensor (see
+                # PerSampleDetectionLoss.forward); the old torch.stack(list(...))
+                # wraps were no-op rebuilds. Sum per-sample, then reduce once.
+                per_sample = (
+                    self.train_criterion_boxes(raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+                    + self.train_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
+                    + self.train_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
                 )
-                per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes))  # Full zeros if empty
+                loss = per_sample.mean()
 
-                # # Cls
-                per_sample_losses_cls = self.train_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
-                per_sample_losses_cls = torch.stack(list(per_sample_losses_cls))  # Full zeros if empty
-
-                # # Dfl
-                per_sample_losses_dfl = self.train_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
-                per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl))
-
-                # # Compute final loss
-                loss = (per_sample_losses_bboxes + per_sample_losses_cls + per_sample_losses_dfl).mean()
-
-                # Compute training metric
-                ious = self.train_metric(raw_preds, batch, batch_ids=batch_ids)
-                iou_mean = ious.mean().item() if ious is not None and ious.numel() > 0 else 0.0
-
-                # Verbose
-                step = self.model.get_age()
-                print(f"Step {step} — loss: {loss.item():.4f} (bboxes: {per_sample_losses_bboxes.mean().item():.4f}; cls: {per_sample_losses_cls.mean().item():.4f}; dfl: {per_sample_losses_dfl.mean().item():.4f}) - iou: {iou_mean:.4f}")
+                # Drives WL signal logging (return value unused — studio reads it).
+                self.train_metric(raw_preds, batch, batch_ids=batch_ids)
 
                 # Learning
                 loss.backward()
                 self.optimizer.step()
                 self.scheduler.step()
+                # Drives the weight_diff_per_step WL signal. 0 across many steps
+                # would mean the optimizer isn't moving the model's params.
+                self.weight_diff_monitor()
 
             # --- Validate on full val set ---
             step = self.model.get_age()
@@ -264,10 +329,12 @@ def validate(loader):
     # Get components from ledger
     model = wl.ledger.get_model()
     device = model.device
-    val_criterion_boxes = wl.ledger.get_loss(name="val_detection_loss/bboxes")
-    val_criterion_cls = wl.ledger.get_loss(name="val_detection_loss/cls")
-    val_criterion_dfl = wl.ledger.get_loss(name="val_detection_loss/dfl")
-    val_metric = wl.ledger.get_metric(name="val_per_sample_iou")
+    # Names must match what was registered in _init_training_loss() — these were renamed
+    # to short forms (e.g. 'val_detection_loss/bboxes' → 'val/bbxs').
+    val_criterion_boxes = wl.ledger.get_loss(name="val/bbxs")
+    val_criterion_cls = wl.ledger.get_loss(name="val/clsf")
+    val_criterion_dfl = wl.ledger.get_loss(name="val/dfl")
+    val_metric = wl.ledger.get_metric(name="miou/val")
 
     if model is None or device is None:
         raise RuntimeError("Model or device not found in ledger. Ensure they are registered with wl.watch_or_edit()")
@@ -281,59 +348,43 @@ def validate(loader):
 
         # Process dataset labels (already in ultralytics flat format)
         batch = inputs[3]['batch']
-        targets = batch['bboxes']  # (N, 4)
 
-        # Inference
-        raw_preds = model(image.to(device))[1]  # Eval mode model in ultralytics returns (pred, dict of preds) - train mode returns dict of preds
+        # Eval mode model in ultralytics returns (pred, dict of preds) - train mode returns dict of preds
+        raw_preds = model(image.to(device))[1]
 
         # Process outputs to generate predictions as BB
         # Helper function to process predictions
         def process_predictions(pred_raw, image, conf=0.25, cls_thresh=0.5):
             img_h, img_w = image[0].shape[-2:]
-            if isinstance(pred_raw, (tuple, list)):
-                pred_raw = pred_raw[1]
+            # if isinstance(pred_raw, (tuple, list)):
+            #     pred_raw = pred_raw[1]
             pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
-            preds_nms = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
-            return preds_nms
+            preds_bboxes, preds_cls = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
+            return preds_bboxes, preds_cls
 
-        preds = process_predictions(raw_preds, image, cls_thresh=0.5)
+        preds_bboxes, preds_cls = process_predictions(raw_preds, image, cls_thresh=0.5)
 
-        # Split preds and targets by batch index
+        # Convert predictions to [N, 6] format ([x1, y1, x2, y2, class_id, score])
         batch_size = image.shape[0]
-        preds_by_batch = []
-        targets_by_batch = []
-        for i in range(batch_size):
-            mask = batch['batch_idx'].view(-1) == i
-            p = preds[i]
-            t = targets[mask] if isinstance(targets, torch.Tensor) and targets.shape[0] > 0 else torch.zeros((0, 4), device=device)
-            preds_by_batch.append(p)
-            targets_by_batch.append(t)
+        imgsz = float(image.shape[-1])
+        preds_by_batch = [
+            torch.cat([b.detach() / imgsz, c[:, 1:2], c[:, 0:1]], dim=-1) if b.numel() > 0 else torch.zeros((0, 6), device=device)
+            for b, c in zip(preds_bboxes, preds_cls)
+        ]
 
-        # Compute validation loss with per-sample tracking
-        per_sample_losses_bboxes = val_criterion_boxes(
-            raw_preds,
-            batch,
-            batch_ids=batch_ids,
-            preds={'bboxes': preds_by_batch},
-            targets={'bboxes': targets_by_batch}
-        ) if val_criterion_boxes is not None else None
-        per_sample_losses_bboxes = torch.stack(list(per_sample_losses_bboxes)) if per_sample_losses_bboxes else torch.zeros(batch_size, device=device)
+        # Same pattern as train: criterions already return stacked per-sample
+        # tensors, sum them, reduce once. (None-guards dropped — these are
+        # registered in _init_training_loss; if they aren't, fail loudly.)
+        per_sample = (
+            val_criterion_boxes(raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+            + val_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
+            + val_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
+        )
+        loss = per_sample.mean()
 
-        per_sample_losses_cls = val_criterion_cls(raw_preds, batch, batch_ids=batch_ids) if val_criterion_cls is not None else None
-        per_sample_losses_cls = torch.stack(list(per_sample_losses_cls)) if per_sample_losses_cls else torch.zeros(batch_size, device=device)
-
-        per_sample_losses_dfl = val_criterion_dfl(raw_preds, batch, batch_ids=batch_ids) if val_criterion_dfl is not None else None
-        per_sample_losses_dfl = torch.stack(list(per_sample_losses_dfl)) if per_sample_losses_dfl else torch.zeros(batch_size, device=device)
-
-        # Compute final loss
-        loss = (per_sample_losses_bboxes + per_sample_losses_cls + per_sample_losses_dfl).mean()
-
-        # Compute validation metric
-        ious = val_metric(raw_preds, batch, batch_ids=batch_ids) if val_metric is not None else None
-        iou_mean = ious.mean().item() if ious is not None and ious.numel() > 0 else 0.0
-
-        # Verbose
-        print(f"Validation step {step+1}/{l_loader} — loss: {loss.item():.4f} (bboxes: {per_sample_losses_bboxes.mean().item():.4f}; cls: {per_sample_losses_cls.mean().item():.4f}; dfl: {per_sample_losses_dfl.mean().item():.4f}) - iou: {iou_mean:.4f}")
+        # Drives WL signal logging (return value unused — studio reads it).
+        if val_metric is not None:
+            val_metric(raw_preds, batch, batch_ids=batch_ids)
 
 
 def main():
@@ -488,8 +539,8 @@ def main():
         compute_hash=False,
         is_training=True,
         collate_fn=_wl_yolo_collate,
-        preload_labels=False,
-        preload_metadata=False
+        preload_labels=True,
+        preload_metadata=True,
     )
     val_loader = wl.watch_or_edit(
         val_yolo_dataset,
@@ -502,8 +553,8 @@ def main():
         compute_hash=False,
         is_training=False,
         collate_fn=_wl_yolo_collate,
-        preload_labels=False,
-        preload_metadata=False,
+        preload_labels=True,
+        preload_metadata=True,
     )
 
     # --- 8) Initialize WL's gRPC server ---
@@ -512,15 +563,6 @@ def main():
         serving_cli=parameters.get("serving_cli", False),
     )
 
-    print("=" * 60)
-    print("🚀 STARTING YOLO DETECTION TRAINING")
-    print(f"📈 Training steps: {max_steps if max_steps else 'infinite'}")
-    print(f"📊 Evaluation every {eval_every} steps")
-    print(f"📊 Batch size: {batch_size}")
-    print(f"🖼️ Image size: {image_size}")
-    print(f"💾 Logs will be saved to: {log_dir}")
-    print(f"📂 Data: {data_root}")
-    print("=" * 60 + "\n")
 
     # --- 9) Train with WL-compatible trainer ---
     trainer = WLCompatileDetTrainer(
@@ -534,21 +576,19 @@ def main():
             device=device,
             workers=0,  # Single process
             cache=False,
+            optimizer="SGD",
+            lr0=0.001,
         ),
         train_loader=train_loader,
         val_loader=val_loader,
         val_every=eval_every,
     )
 
-    # Train
+    # Autoresume so the verification run doesn't need a manual play click.
+    # Remove this if you want the studio to drive the loop instead.
+    pause_controller.resume(force=True)
     trainer.train()
 
-    print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
-    print(f"💾 Logs saved to: {log_dir}")
-    print("=" * 60)
-
-    # Keep the main thread alive for WL UI exploration
     wl.keep_serving()
 
 

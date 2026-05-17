@@ -1,3 +1,4 @@
+import numpy as np
 import torch as th
 import weightslab as wl
 
@@ -5,6 +6,7 @@ from copy import deepcopy
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.cfg import IterableSimpleNamespace
 from ultralytics.utils import RANK, colorstr
+from ultralytics.utils.ops import xywhn2xyxy
 
 
 class YOLODatasetWL(YOLODataset):
@@ -47,10 +49,62 @@ class YOLODatasetWL(YOLODataset):
 
     def get_labels(self):
         return super().get_labels()
+
+    @property
+    def class_names(self):
+        return self.data.get("names")
+
+    @property
+    def num_classes(self):
+        names = self.data.get("names") or {}
+        return len(names)
+
+    # Explicit task declaration; bypasses WL's label-shape heuristic which
+    # falls back to 'classification' for images with zero GT boxes.
+    task_type = "detection"
     
     def __getitem__(self, idx):
         """Override to return dicts as (dict, uid, _target) tuples for WL."""
-        return self.get_items(idx, include_metadata=True, include_labels=True, include_images=True)    
+        return self.get_items(idx, include_metadata=True, include_labels=True, include_images=True)
+
+    def fast_get_label(self, i):
+        """Cheap, no-decode label access (WL ledger contract).
+
+        Reads ultralytics' cached label entry (no pixel I/O) and emits GT in
+        letterboxed pixel-xyxy — same coord system criterions.py uses at
+        training time. Used by WL during ledger init to avoid the ~10 it/s
+        decode path; returns (data, uid, target, metadata) per the contract
+        in weightslab/data/data_samples_with_ops.py:315.
+        """
+        lab = self.labels[i]
+        h0, w0 = lab["shape"]
+        new = self.imgsz
+        r = min(new / h0, new / w0)
+        nw, nh = round(w0 * r), round(h0 * r)
+        padw, padh = (new - nw) / 2, (new - nh) / 2
+        bboxes_lb = xywhn2xyxy(lab["bboxes"], w=nw, h=nh, padw=padw, padh=padh) / float(new)
+
+        # Unified 6-col bbox tensor: [x1, y1, x2, y2, class_id, confidence].
+        # For GT, confidence is 1.0 (ground-truth is certain). Predictions populate
+        # col 5 with the model's max class probability. Studio's serializer (patched
+        # at site-packages data_service.py) extracts class_ids from col 4 and scores
+        # from col 5 when shape[-1] >= 6.
+        n = bboxes_lb.shape[0]
+        cls = lab["cls"].reshape(-1, 1).astype(np.float32)
+        conf = np.ones((n, 1), dtype=np.float32)
+        target = np.concatenate(
+            [bboxes_lb.astype(np.float32), cls, conf], axis=1
+        ) if n > 0 else np.zeros((0, 6), dtype=np.float32)
+
+        # Only keys the UI / downstream consumers actually use go in metadata.
+        # ori_shape / resized_shape / ratio_pad are dropped here — they fluffed
+        # the studio's per-sample stats panel without anyone reading them.
+        metadata = {
+            "img_path": lab["im_file"],
+            "cls": lab["cls"],
+        }
+        return None, str(i), target, metadata
+
     
     def get_items(self, i, include_metadata=False, include_labels=False, include_images=False):
         data = super().__getitem__(i)
@@ -61,21 +115,31 @@ class YOLODatasetWL(YOLODataset):
         metadata = {}
 
         if include_metadata:
+            # ori_shape / resized_shape / num_classes / class_names dropped — UI clutter,
+            # not consumed downstream in this project. `batch` is the full ultralytics
+            # dict and is kept because the collate function reads from it.
             metadata = {
                 'img_path': data['im_file'],
-                'ori_shape': data['ori_shape'],
-                'resized_shape': data['resized_shape'],
-                'num_classes': 1,  # Cls stands for classes ?
                 'cls': data['cls'],
                 'batch': data
             }
         if include_images:
             image = data['img'] 
         if include_labels:
-            labels = data['bboxes']
-            # BBx GT are x1 y1 len_x1 len_y1...
-            for b in labels:
-                b[2:] = b[:2]+b[2:]
+            # Unified 6-col bbox tensor: [x1, y1, x2, y2, class_id, confidence].
+            # GT confidence is 1.0; matches fast_get_label and the prediction packing
+            # in main.py so every storage site shares one schema.
+            from ultralytics.utils.ops import xywh2xyxy
+            xyxy = xywh2xyxy(data['bboxes'])
+            if hasattr(xyxy, 'detach'):
+                xyxy_np = xyxy.detach().cpu().numpy().astype(np.float32)
+            else:
+                xyxy_np = np.asarray(xyxy, dtype=np.float32)
+            cls = np.asarray(data['cls']).reshape(-1, 1).astype(np.float32)
+            n = xyxy_np.shape[0]
+            conf = np.ones((n, 1), dtype=np.float32)
+            labels = (np.concatenate([xyxy_np, cls, conf], axis=1)
+                      if n > 0 else np.zeros((0, 6), dtype=np.float32))
 
         # Img, uid, lbls, meta
         return image, str(i), labels, metadata
@@ -110,8 +174,6 @@ def _wl_yolo_collate(batchs):
             else:
                 ditem = deepcopy(item_meta)
                 meta['img_path'].append(ditem['img_path'])
-                meta['ori_shape'] = ditem['ori_shape']
-                meta['resized_shape'] = ditem['resized_shape']
 
             if 'batch' in item_meta:
                 buf = item_meta['batch']
