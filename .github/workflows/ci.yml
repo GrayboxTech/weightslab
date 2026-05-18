@@ -173,6 +173,7 @@ jobs:
       - name: Run unit tests - Integrations
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
+          python -m pip install pytorch_lightning
           python -m unittest discover -s ./weightslab/tests/integrations -v
 
       # TODO (GP): WL CI do not find WS CI for now; token or visibility problem ??

@@ -32,93 +32,94 @@ from weightslab.components.global_monitoring import (
 )
 
 
-# Simple CNN model for testing
-class SimpleCNN(nn.Module):
-    def __init__(self, num_classes=10):
-        super().__init__()
-        self.input_shape = (1, 28, 28)
-        self.conv1 = nn.Conv2d(1, 16, 3, 1, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, 3, 1, padding=1)
-        self.fc1 = nn.Linear(32 * 7 * 7, 64)
-        self.fc2 = nn.Linear(64, num_classes)
-        self.pool = nn.MaxPool2d(2)
-        self.relu = nn.ReLU()
+if PYTORCH_LIGHTNING_AVAILABLE:
+    # Simple CNN model for testing
+    class SimpleCNN(nn.Module):
+        def __init__(self, num_classes=10):
+            super().__init__()
+            self.input_shape = (1, 28, 28)
+            self.conv1 = nn.Conv2d(1, 16, 3, 1, padding=1)
+            self.conv2 = nn.Conv2d(16, 32, 3, 1, padding=1)
+            self.fc1 = nn.Linear(32 * 7 * 7, 64)
+            self.fc2 = nn.Linear(64, num_classes)
+            self.pool = nn.MaxPool2d(2)
+            self.relu = nn.ReLU()
 
-    def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.pool(x)
-        x = self.relu(self.conv2(x))
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        def forward(self, x):
+            x = self.relu(self.conv1(x))
+            x = self.pool(x)
+            x = self.relu(self.conv2(x))
+            x = self.pool(x)
+            x = x.view(x.size(0), -1)
+            x = self.relu(self.fc1(x))
+            x = self.fc2(x)
+            return x
 
 
-# Lightning Module with WeightsLab integration
-class LitTestModel(pl.LightningModule):
-    def __init__(self, model, optimizer, criterion_wl=None, metric_wl=None):
-        super().__init__()
-        self.model = model
-        self.criterion_wl = criterion_wl
-        self.metric_wl = metric_wl
-        self.optimizer = optimizer
+    # Lightning Module with WeightsLab integration
+    class LitTestModel(pl.LightningModule):
+        def __init__(self, model, optimizer, criterion_wl=None, metric_wl=None):
+            super().__init__()
+            self.model = model
+            self.criterion_wl = criterion_wl
+            self.metric_wl = metric_wl
+            self.optimizer = optimizer
 
-    def forward(self, x):
-        return self.model(x)
+        def forward(self, x):
+            return self.model(x)
 
-    def training_step(self, batch):
-        with guard_training_context:
-            x, ids, y = batch
-            logits = self(x)
-            preds = torch.argmax(logits, dim=1)
+        def training_step(self, batch):
+            with guard_training_context:
+                x, ids, y = batch
+                logits = self(x)
+                preds = torch.argmax(logits, dim=1)
 
-            if self.criterion_wl is not None:
-                loss_batch = self.criterion_wl(
-                    logits.float(),
-                    y.long(),
+                if self.criterion_wl is not None:
+                    loss_batch = self.criterion_wl(
+                        logits.float(),
+                        y.long(),
+                        batch_ids=ids,
+                        preds=preds
+                    )
+                    loss = loss_batch.mean()
+                else:
+                    loss = nn.functional.cross_entropy(logits, y)
+
+                return loss
+
+        def validation_step(self, batch):
+            with guard_testing_context:
+                x, ids, y = batch
+                logits = self(x)
+                preds = torch.argmax(logits, dim=1)
+
+                if self.criterion_wl is not None:
+                    self.criterion_wl(
+                        logits.float(),
+                        y.long(),
+                        batch_ids=ids,
+                        preds=preds
+                    )
+
+                if self.metric_wl is not None:
+                    self.metric_wl.update(logits, y)
+
+                # Per-sample accuracy
+                acc_per_sample = (preds == y).float()
+
+                signals = {
+                    "val_metric/Accuracy_per_sample": acc_per_sample,
+                }
+                wl.save_signals(
+                    preds_raw=logits,
+                    targets=y,
                     batch_ids=ids,
-                    preds=preds
-                )
-                loss = loss_batch.mean()
-            else:
-                loss = nn.functional.cross_entropy(logits, y)
-
-            return loss
-
-    def validation_step(self, batch):
-        with guard_testing_context:
-            x, ids, y = batch
-            logits = self(x)
-            preds = torch.argmax(logits, dim=1)
-
-            if self.criterion_wl is not None:
-                self.criterion_wl(
-                    logits.float(),
-                    y.long(),
-                    batch_ids=ids,
-                    preds=preds
+                    signals=signals,
+                    preds=preds,
                 )
 
-            if self.metric_wl is not None:
-                self.metric_wl.update(logits, y)
-
-            # Per-sample accuracy
-            acc_per_sample = (preds == y).float()
-
-            signals = {
-                "val_metric/Accuracy_per_sample": acc_per_sample,
-            }
-            wl.save_signals(
-                preds_raw=logits,
-                targets=y,
-                batch_ids=ids,
-                signals=signals,
-                preds=preds,
-            )
-
-    def configure_optimizers(self):
-        return self.optimizer
+        def configure_optimizers(self):
+            return self.optimizer
 
 
 @unittest.skipIf(not PYTORCH_LIGHTNING_AVAILABLE, "PyTorch Lightning not installed")
