@@ -237,7 +237,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
             pred_raw = pred_raw[1]
 
         # Gen. bounding boxes
-        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1) 
+        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
         # Convert to raw model predictions format [batch, 64+nc, 8400]
         preds_bboxes, preds_cls = _decode_predictions(
             pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
@@ -250,21 +250,14 @@ class WLCompatileDetTrainer(DetectionTrainer):
             This is a simplified loop for demonstration.
         """
         loss = 0.0
-
-        # Infinite batch stream: `yield from loader` re-iterates each pass, which
-        # re-invokes the DataLoader's sampler — so shuffle=True actually re-shuffles
-        # at every epoch boundary instead of recycling a frozen batch order.
-        def _infinite(loader):
-            while True:
-                yield from loader
-        batches = _infinite(self.data_train_loader)
+        loader = self.data_train_loader
 
         while True:
             with wl.guard_training_context:
                 self.optimizer.zero_grad()  # Zero gradients at the start of the step
 
                 # --- One training batch ---
-                inputs = next(batches)
+                inputs = next(loader)
 
                 image = inputs[0].float()
                 batch_ids = inputs[1]  # uids
@@ -272,7 +265,9 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 batch = inputs[3]['batch']
 
                 raw_preds = self.model(image.to(self.device))
-                preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.1, cls_thresh=0.1)
+                if not isinstance(raw_preds, dict):
+                    raw_preds = raw_preds[1]  # For audit mode, we are in evaluation so model also output the bb
+                preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
 
                 imgsz = float(image.shape[-1])
                 preds_by_batch = [
@@ -288,7 +283,12 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 # PerSampleDetectionLoss.forward); the old torch.stack(list(...))
                 # wraps were no-op rebuilds. Sum per-sample, then reduce once.
                 per_sample = (
-                    self.train_criterion_boxes(raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+                    self.train_criterion_boxes(
+                        raw_preds,
+                        batch,
+                        batch_ids=batch_ids,
+                        preds={'bboxes': preds_by_batch}
+                    )
                     + self.train_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
                     + self.train_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
                 )
@@ -354,7 +354,7 @@ def validate(loader):
 
         # Process outputs to generate predictions as BB
         # Helper function to process predictions
-        def process_predictions(pred_raw, image, conf=0.25, cls_thresh=0.5):
+        def process_predictions(pred_raw, image, conf=0.001, cls_thresh=0.001):
             img_h, img_w = image[0].shape[-2:]
             # if isinstance(pred_raw, (tuple, list)):
             #     pred_raw = pred_raw[1]
@@ -362,10 +362,9 @@ def validate(loader):
             preds_bboxes, preds_cls = _decode_predictions(pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
             return preds_bboxes, preds_cls
 
-        preds_bboxes, preds_cls = process_predictions(raw_preds, image, cls_thresh=0.5)
+        preds_bboxes, preds_cls = process_predictions(raw_preds, image)
 
         # Convert predictions to [N, 6] format ([x1, y1, x2, y2, class_id, score])
-        batch_size = image.shape[0]
         imgsz = float(image.shape[-1])
         preds_by_batch = [
             torch.cat([b.detach() / imgsz, c[:, 1:2], c[:, 0:1]], dim=-1) if b.numel() > 0 else torch.zeros((0, 6), device=device)
@@ -385,11 +384,10 @@ def validate(loader):
         # Drives WL signal logging (return value unused — studio reads it).
         if val_metric is not None:
             val_metric(raw_preds, batch, batch_ids=batch_ids)
+        print(f'\tLoss value during validation is {loss} at step {step}/{l_loader}.')
 
 
 def main():
-    start_time = time.time()
-
     # --- 1) Load hyperparameters from YAML (if present) ---
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
@@ -406,7 +404,7 @@ def main():
     parameters.setdefault("experiment_dump_to_train_steps_ratio", 5)
     parameters.setdefault("num_classes", 2)
     parameters.setdefault("image_size", None)
-    parameters.setdefault("data_root", "./data/data.yaml")
+    parameters.setdefault("data_root")
     parameters.setdefault("class_names", ["class_0", "class_1"])  # Default class names
     parameters.setdefault("compute_natural_sort", True)
     parameters.setdefault("is_training", False)
@@ -453,7 +451,9 @@ def main():
     model_name = parameters["model"]["name"]
 
     # Data root
-    data_root = parameters.get("data_root", "./data/data.yaml")
+    data_root = parameters.get("data_root")
+    if data_root is None:
+        data_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), './data/data.yaml')
 
     # --- 2) Device selection ---
     if parameters.get("device", "auto") == "auto":
@@ -563,7 +563,6 @@ def main():
         serving_cli=parameters.get("serving_cli", False),
     )
 
-
     # --- 9) Train with WL-compatible trainer ---
     trainer = WLCompatileDetTrainer(
         overrides=dict(
@@ -584,9 +583,7 @@ def main():
         val_every=eval_every,
     )
 
-    # Autoresume so the verification run doesn't need a manual play click.
-    # Remove this if you want the studio to drive the loop instead.
-    pause_controller.resume(force=True)
+    # Start training
     trainer.train()
 
     wl.keep_serving()
