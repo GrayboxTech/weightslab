@@ -585,9 +585,7 @@ def main():
         val_every=eval_every,
     )
 
-    # Autoresume so the verification run doesn't need a manual play click.
-    # Remove this if you want the studio to drive the loop instead.
-    pause_controller.resume(force=True)
+    # Start training
     trainer.train()
 
     wl.keep_serving()
