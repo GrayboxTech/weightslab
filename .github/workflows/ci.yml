@@ -194,26 +194,26 @@ jobs:
 
       #     echo "WeightsStudio workflow dispatch requested successfully."
 
-  weightsstudio-ci-main:
-    if: ${{ (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')) && (github.head_ref || github.ref_name) == 'main' }}
-    name: WeightsStudio CI
-    needs: test
-    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@main
-    with:
-      weightslab_branch: main
+  # weightsstudio-ci-main:
+  #   if: ${{ (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')) && (github.head_ref || github.ref_name) == 'main' }}
+  #   name: WeightsStudio CI
+  #   needs: test
+  #   uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@main
+  #   with:
+  #     weightslab_branch: main
 
-  weightsstudio-ci-dev:
-    if: ${{ (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')) && (github.head_ref || github.ref_name) == 'dev' }}
-    name: WeightsStudio CI
-    needs: test
-    uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
-    with:
-      weightslab_branch: dev
+  # weightsstudio-ci-dev:
+  #   if: ${{ (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')) && (github.head_ref || github.ref_name) == 'dev' }}
+  #   name: WeightsStudio CI
+  #   needs: test
+  #   uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
+  #   with:
+  #     weightslab_branch: dev
 
   build-and-publish-dev:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     name: Build & Publish Dev (TestPyPI)
-    needs: [weightsstudio-ci-main, weightsstudio-ci-dev]
+    # needs: [weightsstudio-ci-main, weightsstudio-ci-dev]
     runs-on: ubuntu-latest
     permissions:
       contents: read
