@@ -8,6 +8,34 @@ from ultralytics.cfg import IterableSimpleNamespace
 from ultralytics.utils import RANK, colorstr
 
 
+class AccumulatedConsecutiveAbsWeightDiff(nn.Module):
+    """Σ|p_now - p_prev| across trainable params, refreshed each call.
+
+    Diagnostic metric: if this stays at 0, the optimizer isn't actually stepping
+    (e.g. param groups are empty because the model was WL-wrapped before
+    build_optimizer). Call AFTER optimizer.step(). First call returns 0 because
+    there's no prior snapshot to diff against.
+    """
+
+    def __init__(self, model: nn.Module, only_trainable: bool = True):
+        super().__init__()
+        self._params = [p for p in model.parameters() if (p.requires_grad or not only_trainable)]
+        self._snapshot = None
+        self._last_value = th.tensor(0.0)
+
+    @th.no_grad()
+    def forward(self) -> th.Tensor:
+        if self._snapshot is None:
+            self._snapshot = [p.detach().clone() for p in self._params]
+            return self._last_value
+        total = 0.0
+        for p, prev in zip(self._params, self._snapshot):
+            total += (p.detach() - prev).abs().sum().item()
+        self._snapshot = [p.detach().clone() for p in self._params]
+        self._last_value = th.tensor(float(total))
+        return self._last_value
+
+
 def _decode_predictions(pred, img_h, img_w, conf=0.25, iou_thres=0.5):
     """Decode model predictions to NMS-filtered bounding boxes.
 
@@ -31,29 +59,31 @@ def _decode_predictions(pred, img_h, img_w, conf=0.25, iou_thres=0.5):
     pred_boxes = pred[..., :64]  # DFL distributions
     pred_cls = pred[..., 64:]    # class logits
 
-    # Generate anchors
+    # make_anchors returns anchor points in feature-grid coords + a stride_tensor
+    # that maps them to pixel coords. We need both — the previous version dropped
+    # stride_tensor and produced boxes in anchor-grid units (off by 8/16/32×).
     strides = [8, 16, 32]
-    anchors, _ = make_anchors(
+    anchors, stride_tensor = make_anchors(
         [th.zeros(1, 1, img_h // s, img_w // s) for s in strides],
         strides, grid_cell_offset=0.5
     )
 
-    # Decode DFL to bbox distances
+    # Decode DFL to bbox distances, then scale by stride to pixel coords.
+    # ultralytics' non_max_suppression unconditionally calls xywh2xyxy on its
+    # input, so we MUST emit center-xywh here — emitting xyxy makes NMS
+    # double-convert and silently drop boxes.
     pred_boxes = pred_boxes.view(*pred_boxes.shape[:2], 4, 16)
     pred_boxes = pred_boxes.softmax(-1) @ th.arange(16).float()
-    pred_boxes = dist2bbox(pred_boxes, anchors.unsqueeze(0), xywh=False)  # xyxy in pixels
+    pred_boxes = dist2bbox(pred_boxes, anchors.unsqueeze(0), xywh=True) * stride_tensor
 
-    # Clip boxes to image bounds (x1, y1, x2, y2)
-    pred_boxes[..., 0] = th.clamp(pred_boxes[..., 0], min=0, max=img_w)  # x1
-    pred_boxes[..., 1] = th.clamp(pred_boxes[..., 1], min=0, max=img_h)  # y1
-    pred_boxes[..., 2] = th.clamp(pred_boxes[..., 2], min=0, max=img_w)  # x2
-    pred_boxes[..., 3] = th.clamp(pred_boxes[..., 3], min=0, max=img_h)  # y2
-
-    # Apply NMS
+    # NMS expects channels-second [B, 4+nc, N]; without the permute the
+    # conf-threshold check reads the wrong axis and drops everything.
     pred_scores = pred_cls.sigmoid()
-    pred_combined = th.cat([pred_boxes, pred_scores], dim=-1)
-    preds_nms = non_max_suppression(pred_combined, conf_thres=conf, iou_thres=iou_thres, max_det=300)
+    pred_combined = th.cat([pred_boxes, pred_scores], dim=-1).permute(0, 2, 1)
+    preds_nms = non_max_suppression(
+        pred_combined, conf_thres=conf, iou_thres=iou_thres, max_det=300)
 
+    # NMS output per sample: (N_i, 6) = [x1, y1, x2, y2, conf, cls] in pixels.
     return [i[:, :-2] if i.ndim > 1 else i for i in preds_nms], [i[:, -2:] if i.ndim > 1 else i for i in preds_nms]
 
 
@@ -95,7 +125,7 @@ class PerSampleIoU(nn.Module):
         img, batch_idx, boxes_norm = batch['img'], batch['batch_idx'], batch['bboxes']
 
         img_h, img_w = img.shape[-2:]
-        preds_nms = _decode_predictions(pred, img_h, img_w, self.conf, self.iou_thres)
+        preds_nms, _ = _decode_predictions(pred, img_h, img_w, self.conf, self.iou_thres)
 
         # Convert GT boxes to xyxy
         scale = th.tensor([img_w, img_h, img_w, img_h], dtype=boxes_norm.dtype)
@@ -146,7 +176,7 @@ def detection_dice_signal(pred, batch, conf: float = 0.25, iou_thres: float = 0.
     img, batch_idx, boxes_norm = batch['img'], batch['batch_idx'], batch['bboxes']
 
     img_h, img_w = img.shape[-2:]
-    preds_nms = _decode_predictions(pred, img_h, img_w, conf, iou_thres)
+    preds_nms, _ = _decode_predictions(pred, img_h, img_w, conf, iou_thres)
 
     # Convert GT boxes to xyxy
     scale = th.tensor([img_w, img_h, img_w, img_h], dtype=boxes_norm.dtype)
@@ -208,9 +238,12 @@ class PerSampleDetectionLoss(nn.Module):
         if batch_idx is None or batch_idx.numel() == 0:
             # No batch indices, compute once
             loss_output = self.base_loss(pred, batch)
-            if isinstance(loss_output, (tuple, list)):
-                return loss_output[0].unsqueeze(0)
-            return loss_output.unsqueeze(0)
+            loss = loss_output[0] if isinstance(loss_output, (tuple, list)) else loss_output
+            # v8DetectionLoss returns the 3-vector [box, cls, dfl]. Select this
+            # criterion's component, or sum if loss_type was not set.
+            if loss.numel() > 1:
+                loss = loss[self.loss_type] if self.loss_type is not None else loss.sum()
+            return loss.unsqueeze(0)
 
         # Get the actual batch size from predictions (real batch size)
         if isinstance(pred, dict):
@@ -245,7 +278,11 @@ class PerSampleDetectionLoss(nn.Module):
             for key, value in batch.items():
                 if isinstance(value, th.Tensor) and value.shape[0] == len(batch_idx_flat):
                     # This tensor has one entry per box, filter by mask
-                    sample_batch[key] = value[sample_box_mask]
+                    if key == 'batch_idx':
+                        # sample_pred is sliced to batch dim 1, so all boxes here belong to image 0
+                        sample_batch[key] = th.zeros_like(value[sample_box_mask])
+                    else:
+                        sample_batch[key] = value[sample_box_mask]
                 else:
                     sample_batch[key] = value
 
@@ -264,9 +301,15 @@ class PerSampleDetectionLoss(nn.Module):
                     sample_loss = sample_loss_output[0]
                 else:
                     sample_loss = sample_loss_output
-                # Ensure loss is a scalar
+                # v8DetectionLoss returns the 3-vector [box, cls, dfl]. Pick this
+                # criterion's component (0=box, 1=cls, 2=dfl); .mean() would
+                # produce (box+cls+dfl)/3 for ALL three criterions, inflating
+                # the effective gradient 3× when their outputs are summed.
                 if sample_loss.numel() > 1:
-                    sample_loss = sample_loss.mean()
+                    if self.loss_type is not None:
+                        sample_loss = sample_loss[self.loss_type]
+                    else:
+                        sample_loss = sample_loss.sum()
                 elif sample_loss.ndim > 0:
                     sample_loss = sample_loss.squeeze()
                 sample_losses_list.append(sample_loss)
