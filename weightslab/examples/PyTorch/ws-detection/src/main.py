@@ -365,7 +365,6 @@ def validate(loader):
         preds_bboxes, preds_cls = process_predictions(raw_preds, image)
 
         # Convert predictions to [N, 6] format ([x1, y1, x2, y2, class_id, score])
-        batch_size = image.shape[0]
         imgsz = float(image.shape[-1])
         preds_by_batch = [
             torch.cat([b.detach() / imgsz, c[:, 1:2], c[:, 0:1]], dim=-1) if b.numel() > 0 else torch.zeros((0, 6), device=device)
@@ -387,9 +386,8 @@ def validate(loader):
             val_metric(raw_preds, batch, batch_ids=batch_ids)
         print(f'\tLoss value during validation is {loss} at step {step}/{l_loader}.')
 
-def main():
-    start_time = time.time()
 
+def main():
     # --- 1) Load hyperparameters from YAML (if present) ---
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     if os.path.exists(config_path):
