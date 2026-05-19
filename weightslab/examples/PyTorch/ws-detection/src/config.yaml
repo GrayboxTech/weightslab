@@ -12,16 +12,16 @@ checkpoint_manager:
 
 # Model config.
 model:
-  name: yolo11n.pt
-  lr: 0.01
+  name: yolo11s.pt
+  lr: 0.001
   momentum: 0.9
 
 # Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
 compute_natural_sort: true
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 5
-experiment_dump_to_train_steps_ratio: 5
+eval_full_to_train_steps_ratio: 128
+experiment_dump_to_train_steps_ratio: 128
 tqdm_display: true
 is_training: false  # Start training immediately or not
 
@@ -38,7 +38,7 @@ ledger_flush_interval: 60.0
 # Data
 num_classes: 2
 image_size: 1024
-data_root: .\data\data.yaml
+data_root: ./data/data.yaml
 data:
   train_loader:
     batch_size: 4
