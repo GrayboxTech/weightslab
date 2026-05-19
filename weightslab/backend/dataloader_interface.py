@@ -724,7 +724,7 @@ class DataLoaderInterface:
         self._sync_batch_size_from_ledger()
         self._wait_if_paused()
         self._reset_iterator()  # Reset
-        return self._iterator
+        return self
 
     def __next__(self) -> Any:
         """Retrieve the next batch; used when iterating directly over the interface."""
