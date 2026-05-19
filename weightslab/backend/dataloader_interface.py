@@ -336,17 +336,15 @@ class DataLoaderInterface:
     **Lazy-Reset Iterator Pattern (Mixed Manual next() and For-Loops):**
     The DataLoaderInterface supports both manual next() calls and for-loop iteration
     in the same training loop. After epoch exhaustion, the iterator automatically
-    resets on the next call:
+    resets on the next call.
 
-        # Pattern 1: Simple manual iteration (auto-resets after StopIteration)
+    IMPORTANT: Do NOT create an iterator first with `loader_iter = iter(loader)`.
+    Always use the loader object directly. Otherwise, each for-loop will call __iter__()
+    again, resetting the iterator and breaking the mixed usage pattern.
+
+        # ✅ CORRECT: Use loader directly for both manual next() and for-loops
         loader = DataLoaderInterface(dataset, batch_size=32)
-        step = 0
-        while True:
-            data = next(loader)  # Auto-resets after epoch, no StopIteration
-            model.train(data)
-            step += 1
 
-        # Pattern 2: Mixed manual next() with conditional for-loops
         step = 0
         while step < max_steps:
             # Manual iteration with auto-reset after epoch exhaustion
@@ -355,19 +353,25 @@ class DataLoaderInterface:
 
             # Conditional for-loop with proper epoch boundary
             if step % 5 == 0:
-                for batch in loader:
+                for batch in loader:  # Use loader directly, not an iterator
                     # For-loop receives StopIteration at epoch end
                     model.eval(batch)
                     # Loop exits cleanly, iterator auto-resets on next manual next()
 
             step += 1
 
-        # How it works:
-        # 1. First epoch: manual next() gets batches until epoch ends
-        # 2. At epoch exhaustion: next(loader) raises StopIteration
-        # 3. Next call to next(loader): automatically resets and returns first batch
-        # 4. For-loops: receive StopIteration at epoch boundary and exit cleanly
-        # 5. Manual next() after for-loop: gets first batch of next epoch (auto-reset)
+        # ❌ WRONG: Do NOT do this - it breaks the pattern!
+        # loader_iter = iter(loader)  # Don't create an iterator first
+        # next(loader_iter)           # This works
+        # for batch in loader_iter:   # But this calls __iter__() again and resets!
+
+        # How the pattern works:
+        # 1. next(loader) gets first batch
+        # 2. At epoch end, next(loader) raises StopIteration, sets _epoch_exhausted=True
+        # 3. Next next(loader) call: sees _epoch_exhausted=True, auto-resets, returns first batch
+        # 4. for batch in loader: calls __iter__() which resets for new epoch context
+        # 5. for-loop gets remaining batches, ends with StopIteration at epoch boundary
+        # 6. Next next(loader): auto-resets for next epoch
 
     Public API:
     - __iter__, __len__, __next__
@@ -752,35 +756,34 @@ class DataLoaderInterface:
     def __iter__(self) -> Iterator:
         """Return iterator that properly handles both for-loops and manual next() calls.
 
-        This returns self so that __next__ is always called, enabling:
-        - for batch in loader: works (raises StopIteration at epoch end)
-        - next(loader) auto-resets on the NEXT call after epoch exhaustion
+        This returns self so that __next__ is always called. Each call to __iter__()
+        (which happens once per for-loop context) resets the iterator and clears
+        the _epoch_exhausted flag, ensuring proper epoch boundary handling.
 
-        The lazy-reset pattern supports mixed iteration:
-            step = 0
+        IMPORTANT: To use mixed manual next() and for-loops, call __iter__() once
+        implicitly per context. Do NOT manually create an iterator with iter(loader)
+        and then reuse it - that breaks the pattern.
+
+        ✅ CORRECT usage:
             while step < max_steps:
-                # Manual iteration with auto-reset after epoch
-                data = next(loader)
-                model.train(data)
-
-                # Conditional for-loop with proper StopIteration at epoch boundary
+                data = next(loader)           # Manual next
                 if step % 5 == 0:
-                    for batch in loader:
-                        model.eval(batch)
-                        # Loop exits cleanly at epoch end
-
+                    for batch in loader:      # For-loop (calls __iter__() once)
+                        process(batch)
                 step += 1
 
-        How it works:
-        1. First __iter__() call: resets iterator and clears _epoch_exhausted flag
-        2. __next__() checks _epoch_exhausted flag:
-           - If True: auto-resets iterator before returning next batch
-           - If False: returns next batch normally
-        3. When epoch exhausts (sampler raises StopIteration):
-           - __next__() catches it, sets _epoch_exhausted=True, re-raises StopIteration
-           - For-loops receive StopIteration and exit cleanly
-           - Manual next() catches StopIteration... but next call will auto-reset
-        4. Next __next__() call: sees _epoch_exhausted=True, auto-resets, returns first batch
+        ❌ WRONG usage:
+            loader_iter = iter(loader)       # Don't do this
+            while step < max_steps:
+                data = next(loader_iter)      # Works, but...
+                for batch in loader_iter:     # Calls __iter__() again, resets!
+                    process(batch)            # Gets batches from epoch start again
+
+        How each context works:
+        1. next(loader) → __next__() gets batch, respects _epoch_exhausted flag
+        2. for batch in loader: → __iter__() resets for new epoch, __next__() iterates
+        3. At epoch end: __next__() raises StopIteration, sets _epoch_exhausted=True
+        4. Next next(loader) call: checks _epoch_exhausted, auto-resets if True
         """
         self._sync_batch_size_from_ledger()
         self._wait_if_paused()
