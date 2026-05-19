@@ -1,8 +1,12 @@
+import logging
+
 import torch
 import tempfile
 import weightslab as wl
 
 from weightslab.backend.ledgers import register_optimizer
+
+logger = logging.getLogger(__name__)
 
 
 class OptimizerInterface:
@@ -121,8 +125,9 @@ class OptimizerInterface:
                     if not any(abs(lr - new_lr) < 1e-10 for lr in current_lrs):
                          old_lr = current_lrs[0]
                          self.set_lr(new_lr)
-                         # Terminal feedback
-                         print(f"\nLearning rate updated: {old_lr} -> {new_lr}", flush=True)
+                         # Fires every step when a scheduler decays lr away
+                         # from the hp_config value — keep at DEBUG to avoid spam.
+                         logger.debug("Learning rate updated: %s -> %s", old_lr, new_lr)
 
         except Exception:
             pass
