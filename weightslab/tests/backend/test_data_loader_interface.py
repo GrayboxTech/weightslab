@@ -343,16 +343,16 @@ class TestDataLoaderInterface(unittest.TestCase):
     def test_mixed_manual_and_for_loop_iteration(self):
         """Verify the exact user pattern: while loop with manual next() and conditional for-loops.
 
-        IMPORTANT: Use loader directly (not iter(loader)). Each for-loop calls __iter__()
-        which resets the iterator - this is correct behavior for independent for-loop contexts.
+        For-loops should continue from where manual next() left off, not restart the epoch.
+        This is because __iter__() does NOT reset when already mid-epoch.
 
         Pattern:
         step = 0
         while step < max_steps:
-            data = next(loader)  # Manual iteration with auto-reset
+            data = next(loader)  # Manual iteration with auto-reset after epoch
             if step % 5 == 0:
-                for batches in loader:  # For-loop: calls __iter__() which resets
-                    process(batches)
+                for batches in loader:  # For-loop continues from current position
+                    process(batches)    # Gets remaining batches, ends with StopIteration
             step += 1
         """
         iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
@@ -373,7 +373,7 @@ class TestDataLoaderInterface(unittest.TestCase):
                 manual_batches_collected += 1
 
             # Conditional for-loop iteration with proper epoch boundary
-            # Note: for batch in iface calls __iter__() which resets - intentional
+            # For-loop continues from where manual next() left off (no reset mid-epoch)
             if step % 5 == 0:
                 for _ in iface:
                     for_loop_batches_collected += 1
@@ -386,7 +386,7 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         # Verify total collection matches expected pattern
         # In 30 steps, for-loops run at steps 0, 5, 10, 15, 20, 25 (6 times)
-        # Each for-loop calls __iter__() which resets, then collects full epoch
+        # For-loops continue from where manual next() left off, don't restart epoch
         total_collected = manual_batches_collected + for_loop_batches_collected
         self.assertGreater(total_collected, batches_per_epoch)
 
