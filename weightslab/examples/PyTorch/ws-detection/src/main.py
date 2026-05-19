@@ -91,29 +91,68 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 flag="metric", name=f"miou/{split}", per_sample=True, log=True,
             )
 
-    def train(self):
-        cs, m = self.criterions["train"], self.iou["train"]
+    def process_predictions(self, pred_raw, image, conf=0.25, cls_thresh=0.5):
+        img_h, img_w = image[0].shape[-2:]
 
-        # `yield from loader` re-iterates each pass, re-invoking the sampler — so
-        # shuffle=True re-shuffles each epoch instead of recycling order.
-        def _infinite(loader):
-            while True:
-                yield from loader
-        batches = _infinite(self.data_train_loader)
+        # Process check for eval mode
+        if isinstance(pred_raw, (tuple, list)):
+            pred_raw = pred_raw[1]
+
+        # Gen. bounding boxes
+        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
+        # Convert to raw model predictions format [batch, 64+nc, 8400]
+        preds_bboxes, preds_cls = _decode_predictions(
+            pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
+
+        return preds_bboxes, preds_cls
+
+    def train(self):
+        """
+            Override the default step loop to add WL guards and per-sample IoU tracking.
+            This is a simplified loop for demonstration.
+        """
+        loss = 0.0
+        loader = self.data_train_loader
 
         while True:
             with wl.guard_training_context:
-                self.optimizer.zero_grad()
-                inputs = next(batches)
-                image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
+                self.optimizer.zero_grad()  # Zero gradients at the start of the step
+
+                # --- One training batch ---
+                inputs = next(loader)
+
+                image = inputs[0].float()
+                batch_ids = inputs[1]  # uids
+
+                batch = inputs[3]['batch']
 
                 raw_preds = self.model(image.to(self.device))
-                preds_by_batch = _decode_preds_to_6col(raw_preds, image, conf=0.1, cls_thresh=0.1)
+                if not isinstance(raw_preds, dict):
+                    raw_preds = raw_preds[1]  # For audit mode, we are in evaluation so model also output the bb
+                preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
 
+                imgsz = float(image.shape[-1])
+                preds_by_batch = [
+                    torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
+                    if b.numel() > 0 else torch.zeros((0, 6))
+                    for b, c in zip(preds_bboxes, preds_cls)
+                ]
+
+                # Compute training loss with per-sample tracking. Pass preds as the bare
+                # list (framework's index_batch slices by batch index); row[PREDICTION]
+                # ends up as the (N_i, 6) tensor.
+                # Each criterion already returns a stacked per-sample tensor (see
+                # PerSampleDetectionLoss.forward); the old torch.stack(list(...))
+                # wraps were no-op rebuilds. Sum per-sample, then reduce once.
                 per_sample = (
-                    cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-                    + cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
-                    + cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
+                    self.train_criterion_boxes(
+                        raw_preds,
+                        batch,
+                        batch_ids=batch_ids,
+                        preds={'bboxes': preds_by_batch}
+                    )
+                    + self.train_criterion_cls(raw_preds, batch, batch_ids=batch_ids)
+                    + self.train_criterion_dfl(raw_preds, batch, batch_ids=batch_ids)
                 )
                 loss = per_sample.mean()
                 m(raw_preds, batch, batch_ids=batch_ids)

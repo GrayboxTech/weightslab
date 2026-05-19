@@ -32,7 +32,7 @@ serving_cli: false
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
 ledger_enable_h5_persistence: true
-ledger_flush_max_rows: 5000
+ledger_flush_max_rows: 50
 ledger_flush_interval: 60.0
 
 # Data
