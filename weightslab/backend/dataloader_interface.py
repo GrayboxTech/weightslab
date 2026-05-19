@@ -909,14 +909,7 @@ class DataLoaderInterface:
             self._reset_iterator()
 
         # Generate batch - will raise StopIteration if epoch is exhausted
-        try:
-            batch = next(self._iterator)
-        except StopIteration:
-            if hasattr(self, 'is_a_loop') and self.is_a_loop:
-                raise  # Re-raise so __next__() can handle epoch exhaustion
-            else:
-                self._reset_iterator()
-                batch = next(self._iterator)
+        batch = next(self._iterator)
         # Count yielded samples to support iteration state capture/restore
         self._samples_yielded += 1
 
