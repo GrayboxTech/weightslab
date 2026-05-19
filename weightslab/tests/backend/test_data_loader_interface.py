@@ -302,6 +302,148 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         self.assertLessEqual(calls["get_deny_listed_uids"], 2 + math.ceil(128 / 32))
 
+    def test_manual_next_with_auto_reset(self):
+        """Verify manual next(loader) calls auto-reset after epoch exhaustion without raising StopIteration."""
+        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
+        loader_iter = iter(iface)
+        batches_per_epoch = len(iface.dataloader)
+
+        # Consume exactly one full epoch using manual next()
+        for _ in range(batches_per_epoch):
+            next(loader_iter)
+
+        # After one epoch, next call should raise StopIteration
+        with self.assertRaises(StopIteration):
+            next(loader_iter)
+
+        # But the next next() call should auto-reset and return the first batch
+        first_batch_after_reset = next(loader_iter)
+        self.assertIsNotNone(first_batch_after_reset)
+        self.assertEqual(len(first_batch_after_reset), 3)  # (inputs, batch_ids, labels)
+
+        # And we should be able to continue getting batches
+        second_batch = next(loader_iter)
+        self.assertIsNotNone(second_batch)
+
+    def test_for_loop_raises_stopiteration_on_epoch_boundary(self):
+        """Verify for batch in loader: properly receives StopIteration when epoch exhausted."""
+        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
+        loader_iter = iter(iface)
+        batches_collected = 0
+
+        # For-loop should iterate through exactly one epoch and then stop
+        for batch in loader_iter:
+            batches_collected += 1
+
+        # Verify we got exactly one epoch worth of batches
+        expected_batches = len(iface.dataloader)
+        self.assertEqual(batches_collected, expected_batches)
+
+    def test_mixed_manual_and_for_loop_iteration(self):
+        """Verify the exact user pattern: while loop with manual next() and conditional for-loops.
+
+        Pattern:
+        step = 0
+        while True:
+            data = next(loader)  # Manual iteration with auto-reset
+            if step % 5 == 0:
+                for batches in loader:  # For-loop iteration with proper epoch boundary
+                    process(batches)
+            step += 1
+        """
+        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
+        loader_iter = iter(iface)
+        batches_per_epoch = len(iface.dataloader)
+        step = 0
+        max_steps = 30  # Run for multiple epochs
+        manual_batches_collected = 0
+        for_loop_batches_collected = 0
+
+        while step < max_steps:
+            # Manual iteration with auto-reset after StopIteration
+            try:
+                batch = next(loader_iter)
+                manual_batches_collected += 1
+            except StopIteration:
+                # Auto-reset: next call after StopIteration should succeed
+                batch = next(loader_iter)
+                manual_batches_collected += 1
+
+            # Conditional for-loop iteration with proper epoch boundary
+            if step % 5 == 0:
+                for batch in loader_iter:
+                    for_loop_batches_collected += 1
+
+            step += 1
+
+        # Verify we collected reasonable amounts of batches
+        self.assertGreater(manual_batches_collected, 0)
+        self.assertGreater(for_loop_batches_collected, 0)
+
+        # Verify total collection matches expected pattern
+        # In 30 steps, for-loops run at steps 0, 5, 10, 15, 20, 25 (6 times)
+        # Each for-loop should consume remaining batches in current epoch and complete
+        total_collected = manual_batches_collected + for_loop_batches_collected
+        self.assertGreater(total_collected, batches_per_epoch)
+
+    def test_epoch_exhausted_flag_behavior(self):
+        """Verify internal _epoch_exhausted flag is properly set and reset."""
+        # This test directly verifies the lazy reset pattern behavior
+        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
+        loader_iter = iter(iface)
+        batches_per_epoch = len(iface.dataloader)
+
+        # Consume exactly one full epoch
+        for _ in range(batches_per_epoch):
+            next(loader_iter)
+
+        # At this point, calling next() should raise StopIteration
+        with self.assertRaises(StopIteration):
+            next(loader_iter)
+
+        # The _epoch_exhausted flag should now be True
+        # (The next call will reset the iterator before getting the next batch)
+        first_batch_next_epoch = next(loader_iter)
+        self.assertIsNotNone(first_batch_next_epoch)
+
+        # Verify we can continue iterating through another epoch
+        remaining_batches = 1  # We already got the first
+        for _ in range(batches_per_epoch - remaining_batches):
+            next(loader_iter)
+
+        # We should be at epoch exhaustion again
+        with self.assertRaises(StopIteration):
+            next(loader_iter)
+
+    def test_multiple_sequential_epochs_with_auto_reset(self):
+        """Verify DataLoaderInterface supports multiple sequential epochs using auto-reset."""
+        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
+        loader_iter = iter(iface)
+        batches_per_epoch = len(iface.dataloader)
+        epochs = 3
+        total_batches_collected = 0
+
+        for epoch in range(epochs):
+            epoch_batches = 0
+            while True:
+                try:
+                    next(loader_iter)
+                    epoch_batches += 1
+                    total_batches_collected += 1
+                except StopIteration:
+                    break
+
+            # Each epoch should have the expected number of batches
+            self.assertEqual(
+                epoch_batches,
+                batches_per_epoch,
+                f"Epoch {epoch} should have {batches_per_epoch} batches, got {epoch_batches}"
+            )
+
+        # Total should be epochs * batches_per_epoch
+        expected_total = epochs * batches_per_epoch
+        self.assertEqual(total_batches_collected, expected_total)
+
 
 class TestDataLoaderReproducibility(unittest.TestCase):
     """Test RNG and iteration state reproducibility for dataloaders."""

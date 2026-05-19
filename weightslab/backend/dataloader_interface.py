@@ -731,7 +731,7 @@ class DataLoaderInterface:
         self._wait_if_paused()
         self._reset_iterator()  # Reset
         self._epoch_exhausted = False  # Track if last epoch ended
-        return self._iterator
+        return self
 
     def __next__(self) -> Any:
         """Retrieve the next batch; used when iterating directly over the interface.
