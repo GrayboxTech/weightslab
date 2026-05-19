@@ -398,7 +398,7 @@ class DataLoaderInterface:
                 "DataLoaderInterface: wrapping user-supplied DataLoader !! Highly experimental, user should ensure compatibility !! "
                 "Otherwise, prefer passing a Dataset and let the interface build the DataLoader."
                 )
-            
+
             # User-supplied dataloader
             self.dataloader: DataLoader = data_loader_or_dataset
             self.tracked_dataset = DataSampleTrackingWrapper(
@@ -714,24 +714,49 @@ class DataLoaderInterface:
         return len(self.dataloader)
 
     def __iter__(self) -> Iterator:
-        """Return a self-iterating wrapper that auto-resets on exhaustion.
+        """Return iterator that properly handles both for-loops and manual next() calls.
 
-        Returning ``self`` ensures ``__next__`` is used, which already
-        handles StopIteration by recreating the underlying iterator. This
-        makes ``for batch in dataloader_interface`` loop forever over epochs
-        without the user having to call ``reset_iterator`` manually.
+        This returns self so that __next__ is always called, enabling:
+        - for batch in loader: works (raises StopIteration at epoch end)
+        - next(loader) auto-resets on the NEXT call after epoch exhaustion
+
+        This allows code like:
+            while True:
+                data = next(loader)  # Auto-resets after epoch
+                model(data)
+                for batch in loader:  # Iterates remaining epoch, ends with StopIteration
+                    process(batch)
         """
         self._sync_batch_size_from_ledger()
         self._wait_if_paused()
         self._reset_iterator()  # Reset
-        return self
+        self._epoch_exhausted = False  # Track if last epoch ended
+        return self._iterator
 
     def __next__(self) -> Any:
-        """Retrieve the next batch; used when iterating directly over the interface."""
+        """Retrieve the next batch; used when iterating directly over the interface.
+
+        Behavior:
+        - First call after epoch exhaustion: auto-resets and returns first batch of new epoch
+        - Normal calls: returns next batch from current epoch
+        - When epoch is exhausted: raises StopIteration (for for-loops)
+        """
         self._sync_batch_size_from_ledger()
-        res = self._next_batch()
-        self._wait_if_paused()
-        return res
+
+        # If the previous epoch ended, reset for the next one
+        if getattr(self, '_epoch_exhausted', False):
+            logger.debug("Auto-resetting iterator for next epoch")
+            self._reset_iterator()
+            self._epoch_exhausted = False
+
+        try:
+            res = self._next_batch()
+            self._wait_if_paused()
+            return res
+        except StopIteration:
+            # Mark that epoch is exhausted; next __next__ call will reset
+            self._epoch_exhausted = True
+            raise
 
     # -------------------------------------------------------------------------
     # Ledger / pause helpers
@@ -797,62 +822,20 @@ class DataLoaderInterface:
     def _next_batch(self) -> Any:
         """Return the next batch from the dataloader.
 
-        If the iterator is exhausted it is automatically reset and iteration
-        resumes. With num_workers > 0, this properly cleans up worker processes
-        before resetting the iterator.
+        Raises StopIteration when the epoch is exhausted. The caller (__next__)
+        is responsible for resetting the iterator if needed.
+
+        With num_workers > 0, cleanup of worker processes happens during reset
+        (which is called by __next__).
         """
-        try:
-            if self._iterator is None:
-                self._reset_iterator()
-            # Generate batch
-            batch = next(self._iterator)
-            # Count yielded samples to support iteration state capture/restore
-            self._samples_yielded += 1
-            return batch
-        except StopIteration:
-            # End of epoch: reset iterator and try again (starting new epoch)
-            logger.debug(f"Epoch complete ({self._samples_yielded} samples yielded), resetting iterator for new epoch")
-            # Reset offset tracking for new epoch
-            self._sample_offset = 0
+        if self._iterator is None:
             self._reset_iterator()
 
-            # Try to get first batch from new epoch
-            try:
-                batch = next(self._iterator)
-                self._samples_yielded += 1
-                return batch
-            except StopIteration:
-                # Dataloader is empty or has no more data even after reset
-                sampler = self._mutable_batch_sampler
-                diagnostic_info = {
-                    "dataloader_len": len(self.dataloader),
-                    "sampler_type": type(sampler).__name__ if sampler else None,
-                }
-                if sampler and hasattr(sampler, 'offset'):
-                    diagnostic_info["sampler_offset"] = sampler.offset
-                if sampler and hasattr(sampler, 'batch_size'):
-                    diagnostic_info["sampler_batch_size"] = sampler.batch_size
-                if self.tracked_dataset:
-                    try:
-                        diagnostic_info["dataset_len"] = len(self.tracked_dataset)
-                        if hasattr(self.tracked_dataset, '_get_df_view'):
-                            df = self.tracked_dataset._get_df_view()
-                            diagnostic_info["deny_listed_count"] = (df[SampleStatsEx.DISCARDED.value] == True).sum() if SampleStatsEx.DISCARDED.value in df.columns else 0
-                    except Exception as e:
-                        diagnostic_info["dataset_info_error"] = str(e)
-
-                logger.debug(
-                    f"Dataloader exhausted after reset. Diagnostic info: {diagnostic_info}"
-                )
-
-                # Reset iterator before signaling end of iteration
-                logger.debug("Resetting iterator before end of iteration")
-                self._reset_iterator()
-                raise
-        except Exception as e:
-            # Log unexpected errors to help diagnosis with multiprocessing
-            logger.error(f"Error in _next_batch: {e}", exc_info=True)
-            raise
+        # Generate batch - will raise StopIteration if epoch is exhausted
+        batch = next(self._iterator)
+        # Count yielded samples to support iteration state capture/restore
+        self._samples_yielded += 1
+        return batch
 
     # def _execute_offset(self) -> None:
     #     """
