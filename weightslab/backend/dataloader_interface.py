@@ -912,9 +912,11 @@ class DataLoaderInterface:
         try:
             batch = next(self._iterator)
         except StopIteration:
-            logger.debug('Next iteration raised StopIteration issue')
-            raise  # Re-raise so __next__() can handle epoch exhaustion
-
+            if hasattr(self, 'is_a_loop') and self.is_a_loop:
+                raise  # Re-raise so __next__() can handle epoch exhaustion
+            else:
+                self._reset_iterator()
+                batch = next(self._iterator)
         # Count yielded samples to support iteration state capture/restore
         self._samples_yielded += 1
 
