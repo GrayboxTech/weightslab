@@ -499,7 +499,11 @@ class NetworkWithOps(nn.Module):
                     )
 
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
-        state_dict = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
+        # TODO (GP): Also add jic recursive self.load_state_dict function to manage if self hasattr model, then self.state_dict(not self but self.model)
+        if hasattr(self, 'model'):
+            state_dict = self.model.state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
+        else:
+            state_dict = super().state_dict(**{'destination': destination, 'prefix': prefix, 'keep_vars': keep_vars})
         state_dict[prefix + 'current_step'] = self.current_step
         state_dict[prefix + 'tracking_mode'] = self.tracking_mode
         return state_dict
@@ -516,8 +520,14 @@ class NetworkWithOps(nn.Module):
             if not '_dataset_tracker' in k
         }
         try:
-            super().load_state_dict(
-                state_dict, strict=strict, assign=assign, **kwargs)
+            if hasattr(self, 'model'):
+                self.model.load_state_dict(
+                    state_dict, strict=strict, assign=assign, **kwargs
+                )
+            else:
+                super().load_state_dict(
+                    state_dict, strict=strict, assign=assign, **kwargs
+                )
         except Exception:
             # If the state dict comes from a wrapper (e.g., ModelInterface) it may
             # include a leading "model." prefix. Strip that prefix for matching.
