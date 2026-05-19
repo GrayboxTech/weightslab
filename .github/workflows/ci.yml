@@ -180,26 +180,9 @@ jobs:
 
       #     echo "WeightsStudio workflow dispatch requested successfully."
 
-  # weightsstudio-ci-main:
-  #   if: ${{ (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')) && (github.head_ref || github.ref_name) == 'main' }}
-  #   name: WeightsStudio CI
-  #   needs: test
-  #   uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@main
-  #   with:
-  #     weightslab_branch: main
-
-  # weightsstudio-ci-dev:
-  #   if: ${{ (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')) && (github.head_ref || github.ref_name) == 'dev' }}
-  #   name: WeightsStudio CI
-  #   needs: test
-  #   uses: GrayboxTech/weights_studio/.github/workflows/ws-ci.yml@dev
-  #   with:
-  #     weightslab_branch: dev
-
   build-and-publish-dev:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     name: Build & Publish Dev (TestPyPI)
-    # needs: [weightsstudio-ci-main, weightsstudio-ci-dev]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -230,6 +213,10 @@ jobs:
           echo "published_version=${PRETEND}" >> $GITHUB_OUTPUT
           echo "Publishing version: ${PRETEND} (from sha ${SHA_HEX})"
 
+      - name: Clean build artifacts
+        run: |
+          rm -rf build dist *.egg-info
+
       - name: Build distributions
         env:
           # Package-specific override is the most reliable way with setuptools_scm.
@@ -242,15 +229,25 @@ jobs:
         env:
           WL_VERSION: ${{ steps.version.outputs.published_version }}
         run: |
-          ls -la dist
-          if ls dist | grep -q "0.0.0"; then
-            echo "Build still produced 0.0.0 artifacts"
+          echo "Expected version: ${WL_VERSION}"
+          echo "Files in dist:"
+          ls -la dist/
+
+          # Check for 0.0.0 artifacts (which indicate version not set)
+          if ls dist/ | grep -q "0.0.0"; then
+            echo "ERROR: Build produced 0.0.0 artifacts (version not set properly)"
             exit 1
           fi
-          if ! ls dist | grep -q "${WL_VERSION}"; then
-            echo "Expected version ${WL_VERSION} not found in dist artifacts"
+
+          # Verify at least one artifact has the expected version
+          if ! ls dist/ | grep -q "${WL_VERSION}"; then
+            echo "ERROR: Expected version ${WL_VERSION} not found in dist artifacts"
+            echo "Available files:"
+            ls -1 dist/
             exit 1
           fi
+
+          echo "✓ Version verification passed"
 
       - name: Check distributions
         run: python -m twine check dist/*

@@ -395,5 +395,197 @@ class TestMainCLI(unittest.TestCase):
             main()  # should not raise
 
 
+class TestUserOnboardingFlow(unittest.TestCase):
+    """Integration-like tests for the user onboarding flow."""
+
+    @patch("weightslab.ui_docker_bridge.docker_info")
+    @patch("weightslab.ui_docker_bridge.docker_stop")
+    @patch("weightslab.ui_docker_bridge.docker_launch_secure")
+    @patch("weightslab.ui_docker_bridge.ui_secure_environment")
+    def test_complete_onboarding_workflow(self, mock_se, mock_launch, mock_stop, mock_info):
+        """Test a complete user onboarding workflow: setup -> launch -> check -> stop."""
+        # Step 1: Setup secure environment
+        args_se = argparse.Namespace(
+            certs_dir=None,
+            no_auth=False,
+            force_certs=False,
+        )
+
+        # Step 2: Launch docker
+        args_launch = argparse.Namespace(
+            no_auth=False,
+            force_certs=False,
+            dev=False,
+            test=False,
+        )
+
+        # Step 3: Get info
+        args_info = argparse.Namespace()
+
+        # Step 4: Stop docker
+        args_stop = argparse.Namespace()
+
+        # All commands should be callable without raising
+        try:
+            ui_secure_environment(args_se)
+            docker_launch_secure(args_launch)
+            docker_info(args_info)
+            docker_stop(args_stop)
+        except Exception as e:
+            self.fail(f"Onboarding workflow failed: {e}")
+
+    @patch("sys.argv", ["weightslab", "se"])
+    @patch("weightslab.ui_docker_bridge.ui_secure_environment")
+    def test_cli_secure_environment_command(self, mock_se):
+        """Test CLI command: weightslab se"""
+        main()
+        mock_se.assert_called_once()
+
+    @patch("sys.argv", ["weightslab", "ui", "docker", "launch", "--test"])
+    @patch("weightslab.ui_docker_bridge.docker_launch_secure")
+    def test_cli_docker_launch_with_test(self, mock_launch):
+        """Test CLI command: weightslab ui docker launch --test"""
+        main()
+        mock_launch.assert_called_once()
+        # Verify --test flag was passed
+        call_args = mock_launch.call_args[0][0]
+        self.assertTrue(call_args.test)
+
+    @patch("sys.argv", ["weightslab", "ui", "docker", "info"])
+    @patch("weightslab.ui_docker_bridge.docker_info")
+    def test_cli_docker_info_command(self, mock_info):
+        """Test CLI command: weightslab ui docker info"""
+        main()
+        mock_info.assert_called_once()
+
+    @patch("sys.argv", ["weightslab", "ui", "docker", "launch", "--unsecure"])
+    @patch("weightslab.ui_docker_bridge.docker_launch_secure")
+    def test_cli_docker_launch_unsecure(self, mock_launch):
+        """Test CLI command: weightslab ui docker launch --unsecure"""
+        main()
+        mock_launch.assert_called_once()
+        call_args = mock_launch.call_args[0][0]
+        self.assertTrue(call_args.unsecure)
+
+    @patch("sys.argv", ["weightslab", "ui", "docker", "se", "--force-certs"])
+    @patch("weightslab.ui_docker_bridge.ui_docker_secure_environment")
+    def test_cli_docker_secure_environment_with_force_certs(self, mock_docker_se):
+        """Test CLI command: weightslab ui docker se --force-certs"""
+        main()
+        mock_docker_se.assert_called_once()
+        call_args = mock_docker_se.call_args[0][0]
+        self.assertTrue(call_args.force_certs)
+
+
+class TestBackendConnectionDetection(unittest.TestCase):
+    """Test backend connection detection functionality."""
+
+    @patch("socket.socket")
+    def test_backend_connection_success(self, mock_socket_class):
+        """Test successful backend connection detection."""
+        from weightslab.ui_docker_bridge import _test_backend_connection
+
+        mock_socket = MagicMock()
+        mock_socket.connect_ex.return_value = 0
+        mock_socket_class.return_value = mock_socket
+
+        result = _test_backend_connection()
+        self.assertTrue(result)
+
+    @patch("socket.socket")
+    def test_backend_connection_failure(self, mock_socket_class):
+        """Test failed backend connection detection."""
+        from weightslab.ui_docker_bridge import _test_backend_connection
+
+        mock_socket = MagicMock()
+        mock_socket.connect_ex.return_value = 1  # Connection refused
+        mock_socket_class.return_value = mock_socket
+
+        result = _test_backend_connection()
+        self.assertFalse(result)
+
+    @patch("socket.socket")
+    def test_backend_connection_timeout(self, mock_socket_class):
+        """Test backend connection timeout handling."""
+        from weightslab.ui_docker_bridge import _test_backend_connection
+
+        mock_socket = MagicMock()
+        mock_socket.connect_ex.side_effect = Exception("Connection timeout")
+        mock_socket_class.return_value = mock_socket
+
+        result = _test_backend_connection()
+        self.assertFalse(result)
+
+    @patch("socket.socket")
+    def test_backend_connection_with_custom_host_port(self, mock_socket_class):
+        """Test backend connection with custom host and port."""
+        from weightslab.ui_docker_bridge import _test_backend_connection
+
+        mock_socket = MagicMock()
+        mock_socket.connect_ex.return_value = 0
+        mock_socket_class.return_value = mock_socket
+
+        result = _test_backend_connection(host='192.168.1.1', port=8080, timeout=10.0)
+        self.assertTrue(result)
+        mock_socket.connect_ex.assert_called_once_with(('192.168.1.1', 8080))
+        mock_socket.settimeout.assert_called_once_with(10.0)
+
+
+class TestPathConversion(unittest.TestCase):
+    """Test Windows path to Git Bash conversion."""
+
+    def test_windows_path_conversion(self):
+        """Test converting Windows path to Git Bash format."""
+        from weightslab.ui_docker_bridge import _convert_to_git_bash_path
+
+        # Test Windows path
+        win_path = r"C:\Users\testuser\.weightslab-certs"
+        bash_path = _convert_to_git_bash_path(win_path)
+        self.assertEqual(bash_path, "/mnt/c/Users/testuser/.weightslab-certs")
+
+    def test_unix_path_passthrough(self):
+        """Test Unix paths pass through unchanged."""
+        from weightslab.ui_docker_bridge import _convert_to_git_bash_path
+
+        unix_path = "/home/testuser/.weightslab-certs"
+        bash_path = _convert_to_git_bash_path(unix_path)
+        self.assertEqual(bash_path, "/home/testuser/.weightslab-certs")
+
+
+class TestRunShellScript(unittest.TestCase):
+    """Test shell script execution with proper path handling."""
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_run_shell_script_with_env_vars(self, mock_run):
+        """Test that shell script runs with environment variables without type errors."""
+        from weightslab.ui_docker_bridge import _run_shell_script
+
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
+
+        # This should not raise a type error about concatenating Path with str
+        exit_code = _run_shell_script(
+            "/path/to/script.sh",
+            env_vars={'KEY': 'value'}
+        )
+
+        self.assertEqual(exit_code, 0)
+        mock_run.assert_called_once()
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_run_shell_script_with_args(self, mock_run):
+        """Test shell script execution with arguments."""
+        from weightslab.ui_docker_bridge import _run_shell_script
+
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
+
+        exit_code = _run_shell_script(
+            "/path/to/script.sh",
+            args=['--flag', 'value'],
+            env_vars={'KEY': 'value'}
+        )
+
+        self.assertEqual(exit_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

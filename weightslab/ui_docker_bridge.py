@@ -171,16 +171,21 @@ def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None
 
         # Build environment variable assignments for bash command
         env_assignments = ' '.join([f"{k}='{v}'" for k, v in env_vars.items()]) if env_vars else ""
+        cwd_path = str(Path.home())
 
         if env_assignments:
             # Pass env vars directly in bash command using -c flag
             # This works on Windows (Git Bash), Linux, and macOS
+            logger.info('Using env assignments')
             bash_script_cmd = f"{env_assignments} '{script_path}'"
             if args:
                 bash_script_cmd += " " + " ".join(f"'{arg}'" for arg in args)
+            else:
+                bash_script_cmd += " " + cwd_path
             bash_cmd = ['bash', '-c', bash_script_cmd]
         else:
-            bash_cmd = ['bash', str(script_path)]
+            logger.info('Not using env assignments')
+            bash_cmd = ['bash', '-x', str(script_path), cwd_path]
             if args:
                 bash_cmd.extend(args)
 
@@ -348,7 +353,7 @@ def ui_launch_secure(args):
 
     if not success:
         logger.warning(f"Secure certs not found — falling back to unsecured mode")
-        logger.warning("To set up security, run: weightslab ui se")
+        logger.warning("To set up security, run: weightslab se")
         ui_launch(args)
         return
 

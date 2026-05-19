@@ -144,68 +144,6 @@ class PerSampleIoU(nn.Module):
 
         return out_ious
 
-
-@wl.signal(name="detection/dice_score", compute_every_n_steps=10)
-def detection_dice_signal(pred, batch, conf: float = 0.25, iou_thres: float = 0.5, **kwargs):
-    """
-    Compute Dice score (F1 score) for detection predictions.
-
-    Dice = 2 * |X ∩ Y| / (|X| + |Y|) = 2 * IoU / (1 + IoU)
-
-    This metric combines precision and recall for bounding box predictions.
-    Computed as a function of the IoU between predicted and ground truth boxes.
-
-    Args:
-        pred: Model predictions
-        batch: Batch dict with 'img', 'batch_idx', 'bboxes'
-        conf: Confidence threshold for NMS (default: 0.25)
-        iou_thres: IoU threshold for NMS (default: 0.5)
-        **kwargs: Additional arguments from WeightsLab
-
-    Returns:
-        Mean Dice score (F1) value for logging
-    """
-    from ultralytics.utils.nms import box_iou
-    from ultralytics.utils.ops import xywh2xyxy
-
-    if isinstance(pred, (tuple, list)):
-        pred = pred[0]
-    elif isinstance(pred, dict) and 'boxes' in pred and 'scores' in pred:
-        pred = th.cat([pred['boxes'], pred['scores']], dim=1)
-
-    img, batch_idx, boxes_norm = batch['img'], batch['batch_idx'], batch['bboxes']
-
-    img_h, img_w = img.shape[-2:]
-    preds_nms, _ = _decode_predictions(pred, img_h, img_w, conf, iou_thres)
-
-    # Convert GT boxes to xyxy
-    scale = th.tensor([img_w, img_h, img_w, img_h], dtype=boxes_norm.dtype)
-    gt_xyxy = xywh2xyxy(boxes_norm.detach().cpu()) * scale
-
-    bs = img.shape[0]
-    dice_scores = th.full((bs,), float("nan"))
-
-    for i in range(bs):
-        gi = (batch_idx == i).nonzero(as_tuple=True)[0]
-        pred_boxes = preds_nms[i][:, :4]
-
-        if pred_boxes.shape[0] > 0 and gi.numel() > 0:
-            # Compute IoU matrix between GT and predictions
-            iou_matrix = box_iou(gt_xyxy[gi], pred_boxes)
-            # Get max IoU for each GT box
-            max_ious = iou_matrix.max(dim=1).values
-
-            if max_ious.numel() > 0:
-                # Convert IoU to Dice score: Dice = 2*IoU / (1 + IoU)
-                # This is the F1 score based on IoU
-                dice = 2.0 * max_ious / (1.0 + max_ious)
-                dice_scores[i] = dice.mean()
-
-    dice_scores = th.nan_to_num(dice_scores, nan=0.0)
-
-    return dice_scores.mean().item() if dice_scores.numel() > 0 else 0.0
-
-
 class PerSampleDetectionLoss(nn.Module):
     """Per-sample detection loss wrapping Ultralytics DetectionLoss.
 
@@ -222,7 +160,10 @@ class PerSampleDetectionLoss(nn.Module):
 
     def forward(self, pred, batch):
         """
-        Compute actual per-sample detection loss by computing loss for each sample separately.
+        Compute per-sample detection loss by computing once on full batch, then splitting by sample.
+
+        This avoids per-sample normalization issues (dividing by very small n_positive_anchors per sample).
+        Loss is distributed proportionally to each sample's box count.
 
         Args:
             pred: Model predictions
@@ -235,17 +176,7 @@ class PerSampleDetectionLoss(nn.Module):
         # Get batch indices
         batch_idx = batch.get('batch_idx', None)
 
-        if batch_idx is None or batch_idx.numel() == 0:
-            # No batch indices, compute once
-            loss_output = self.base_loss(pred, batch)
-            loss = loss_output[0] if isinstance(loss_output, (tuple, list)) else loss_output
-            # v8DetectionLoss returns the 3-vector [box, cls, dfl]. Select this
-            # criterion's component, or sum if loss_type was not set.
-            if loss.numel() > 1:
-                loss = loss[self.loss_type] if self.loss_type is not None else loss.sum()
-            return loss.unsqueeze(0)
-
-        # Get the actual batch size from predictions (real batch size)
+        # Get the actual batch size from predictions
         if isinstance(pred, dict):
             first_key = next(iter(pred.keys()))
             pred_batch_size = pred[first_key].shape[0]
@@ -257,69 +188,42 @@ class PerSampleDetectionLoss(nn.Module):
             pred_batch_size = pred.shape[0]
             device = pred.device
 
-        # Prepare batch_idx: flatten, convert to long
+        # Compute loss on full batch
+        loss_output = self.base_loss(pred, batch)
+        if isinstance(loss_output, (tuple, list)):
+            loss_components = loss_output[0]  # [box_loss, cls_loss, dfl_loss]
+        else:
+            loss_components = loss_output
+
+        # Select the loss component (box=0, cls=1, dfl=2), or sum all if not specified
+        if loss_components.numel() > 1:
+            batch_loss = loss_components[self.loss_type] if self.loss_type is not None else loss_components.sum()
+        else:
+            batch_loss = loss_components.squeeze()
+
+        # If no batch_idx or empty, return batch loss as single sample
+        if batch_idx is None or batch_idx.numel() == 0:
+            return batch_loss.unsqueeze(0)
+
+        # Split loss by sample proportionally based on box count
         batch_idx_flat = batch_idx.flatten().long()
+        total_boxes = batch_idx_flat.numel()
 
-        # Build per-sample losses in a list to maintain gradient flow
-        sample_losses_list = []
-
-        # Split batch by sample and compute loss for each
+        per_sample_losses = []
         for sample_idx in range(pred_batch_size):
-            # Get mask for boxes belonging to this sample
-            sample_box_mask = batch_idx_flat == sample_idx
+            sample_mask = batch_idx_flat == sample_idx
+            n_boxes_in_sample = sample_mask.sum().item()
 
-            if not sample_box_mask.any():
-                # No ground truth for this sample, create zero loss as scalar
-                sample_losses_list.append(th.tensor(0.0, device=device, dtype=th.float32))
-                continue
-
-            # Create batch dict for this sample's boxes
-            sample_batch = {}
-            for key, value in batch.items():
-                if isinstance(value, th.Tensor) and value.shape[0] == len(batch_idx_flat):
-                    # This tensor has one entry per box, filter by mask
-                    if key == 'batch_idx':
-                        # sample_pred is sliced to batch dim 1, so all boxes here belong to image 0
-                        sample_batch[key] = th.zeros_like(value[sample_box_mask])
-                    else:
-                        sample_batch[key] = value[sample_box_mask]
-                else:
-                    sample_batch[key] = value
-
-            # Extract predictions for this sample
-            if isinstance(pred, dict):
-                sample_pred = {k: v[sample_idx:sample_idx+1] if isinstance(v, th.Tensor) else v for k, v in pred.items()}
-            elif isinstance(pred, (tuple, list)):
-                sample_pred = tuple(p[sample_idx:sample_idx+1] if isinstance(p, th.Tensor) else p for p in pred)
+            if n_boxes_in_sample == 0:
+                # No boxes for this sample - contribute zero loss
+                per_sample_losses.append(th.tensor(0.0, device=device, dtype=batch_loss.dtype))
             else:
-                sample_pred = pred[sample_idx:sample_idx+1]
+                # Distribute batch loss proportionally by box count
+                # This preserves gradients and avoids normalization by very small numbers
+                loss_weight = n_boxes_in_sample / total_boxes
+                per_sample_losses.append(batch_loss * loss_weight)
 
-            # Compute loss for this sample
-            try:
-                sample_loss_output = self.base_loss(sample_pred, sample_batch)
-                if isinstance(sample_loss_output, (tuple, list)):
-                    sample_loss = sample_loss_output[0]
-                else:
-                    sample_loss = sample_loss_output
-                # v8DetectionLoss returns the 3-vector [box, cls, dfl]. Pick this
-                # criterion's component (0=box, 1=cls, 2=dfl); .mean() would
-                # produce (box+cls+dfl)/3 for ALL three criterions, inflating
-                # the effective gradient 3× when their outputs are summed.
-                if sample_loss.numel() > 1:
-                    if self.loss_type is not None:
-                        sample_loss = sample_loss[self.loss_type]
-                    else:
-                        sample_loss = sample_loss.sum()
-                elif sample_loss.ndim > 0:
-                    sample_loss = sample_loss.squeeze()
-                sample_losses_list.append(sample_loss)
-            except Exception:
-                sample_losses_list.append(th.tensor(0.0, device=device, dtype=th.float32))
-
-        # Stack losses - preserves gradient flow
-        per_sample_losses = th.stack(sample_losses_list)
-
-        return per_sample_losses
+        return th.stack(per_sample_losses)
 
 
 class GIoULoss(nn.Module):
