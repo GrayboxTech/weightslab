@@ -160,7 +160,8 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                                         metric_value=data.get("metric_value", 0.0),
                                         experiment_hash=data.get("experiment_hash", "N.A."),
                                         timestamp=int(data.get("timestamp", time.time())),
-                                        sample_id=sid
+                                        sample_id=sid,
+                                        audit_mode=bool(data.get("audit_mode", False)),
                                     )
                                 )
 
@@ -235,6 +236,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                             split_name=str(s.get("split_name", "")),
                             evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                             point_note=str(s.get("point_note", "")),
+                            audit_mode=bool(s.get("audit_mode", False)),
                         )
                     )
         else:
@@ -260,6 +262,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         split_name=str(s.get("split_name", "")),
                         evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                         point_note=str(s.get("point_note", "")),
+                        audit_mode=bool(s.get("audit_mode", False)),
                     )
                 )
 
