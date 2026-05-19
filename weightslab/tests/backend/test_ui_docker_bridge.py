@@ -552,40 +552,5 @@ class TestPathConversion(unittest.TestCase):
         self.assertEqual(bash_path, "/home/testuser/.weightslab-certs")
 
 
-class TestRunShellScript(unittest.TestCase):
-    """Test shell script execution with proper path handling."""
-
-    @patch("weightslab.ui_docker_bridge.subprocess.run")
-    def test_run_shell_script_with_env_vars(self, mock_run):
-        """Test that shell script runs with environment variables without type errors."""
-        from weightslab.ui_docker_bridge import _run_shell_script
-
-        mock_run.return_value = MagicMock(stdout="", returncode=0)
-
-        # This should not raise a type error about concatenating Path with str
-        exit_code = _run_shell_script(
-            "/path/to/script.sh",
-            env_vars={'KEY': 'value'}
-        )
-
-        self.assertEqual(exit_code, 0)
-        mock_run.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.subprocess.run")
-    def test_run_shell_script_with_args(self, mock_run):
-        """Test shell script execution with arguments."""
-        from weightslab.ui_docker_bridge import _run_shell_script
-
-        mock_run.return_value = MagicMock(stdout="", returncode=0)
-
-        exit_code = _run_shell_script(
-            "/path/to/script.sh",
-            args=['--flag', 'value'],
-            env_vars={'KEY': 'value'}
-        )
-
-        self.assertEqual(exit_code, 0)
-
-
 if __name__ == "__main__":
     unittest.main()

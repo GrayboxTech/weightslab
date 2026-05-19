@@ -424,6 +424,82 @@ class TestLoggerQueueEvaluationMetadata(unittest.TestCase):
         self.assertTrue(cleared)
         self.assertNotIn("point_note", logger.get_signal_history()["train/loss"]["exp-note-001"][7][0])
 
+    def test_audit_mode_captured_in_signal_entries(self):
+        """Test that audit_mode is captured when logging signals."""
+        chkpt = MagicMock()
+        chkpt.get_current_experiment_hash.return_value = "exp-audit-001"
+
+        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+            with patch("weightslab.backend.ledgers.get_hyperparams", return_value={"auditor_mode": True}):
+                logger = LoggerQueue(register=False)
+
+                logger.add_scalars(
+                    "train/loss",
+                    {"train/loss": 0.5},
+                    global_step=5,
+                    signal_per_sample={1: 0.5},
+                    aggregate_by_step=False,
+                )
+
+        history = logger.get_signal_history()
+        self.assertIn("train/loss", history)
+        self.assertIn("exp-audit-001", history["train/loss"])
+        self.assertIn(5, history["train/loss"]["exp-audit-001"])
+
+        entry = history["train/loss"]["exp-audit-001"][5][0]
+        self.assertTrue(entry["audit_mode"], "audit_mode should be True when auditor_mode is enabled")
+
+        # Also check queue
+        queue = logger.get_and_clear_queue()
+        self.assertEqual(len(queue), 1)
+        self.assertTrue(queue[0]["audit_mode"])
+
+    def test_audit_mode_false_when_disabled(self):
+        """Test that audit_mode is False when auditor_mode is disabled."""
+        chkpt = MagicMock()
+        chkpt.get_current_experiment_hash.return_value = "exp-normal-001"
+
+        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+            with patch("weightslab.backend.ledgers.get_hyperparams", return_value={"auditor_mode": False}):
+                logger = LoggerQueue(register=False)
+
+                logger.add_scalars(
+                    "train/loss",
+                    {"train/loss": 0.3},
+                    global_step=2,
+                    signal_per_sample={1: 0.3},
+                    aggregate_by_step=False,
+                )
+
+        history = logger.get_signal_history()
+        entry = history["train/loss"]["exp-normal-001"][2][0]
+        self.assertFalse(entry["audit_mode"], "audit_mode should be False when auditor_mode is disabled")
+
+    def test_evaluation_mode_captures_audit_mode(self):
+        """Test that audit_mode is captured in evaluation mode entries."""
+        chkpt = MagicMock()
+        chkpt.get_current_experiment_hash.return_value = "exp-eval-001"
+
+        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+            with patch("weightslab.backend.ledgers.get_hyperparams", return_value={"auditor_mode": True}):
+                logger = LoggerQueue(register=False)
+
+                logger.start_evaluation_mode("val_loader", "exp-eval-001_1", evaluation_tags=["audit_test"])
+                logger.add_scalars(
+                    "val/accuracy",
+                    {"val/accuracy": 0.95},
+                    global_step=10,
+                    signal_per_sample={1: 0.95},
+                    aggregate_by_step=False,
+                )
+
+                logger.stop_evaluation_mode(model_age=10)
+
+        history = logger.get_signal_history()
+        eval_entry = history["val/accuracy"]["exp-eval-001_1"][10][0]
+        self.assertTrue(eval_entry["audit_mode"], "audit_mode should be True in evaluation mode when auditor_mode is enabled")
+        self.assertTrue(eval_entry["is_evaluation_marker"])
+
 
 if __name__ == "__main__":
     unittest.main()

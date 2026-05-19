@@ -54,6 +54,7 @@ message LoggerDataPoint {
   string split_name = 8;
   repeated string evaluation_tags = 9;
   string point_note = 10;
+  bool audit_mode = 11;            // True if logged during audit mode (read-only inspection)
 }
 
 message GetLatestLoggerDataResponse {

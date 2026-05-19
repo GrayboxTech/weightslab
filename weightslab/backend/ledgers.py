@@ -435,6 +435,7 @@ class Proxy:
         class _ProxyIterator:
             def __init__(self, it):
                 self._it = it
+                self._it.is_a_loop = True
 
             def __iter__(self):
                 return self
