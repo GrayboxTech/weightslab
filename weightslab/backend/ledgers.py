@@ -426,10 +426,29 @@ class Proxy:
     # them here to allow `for x in proxy` and `len(proxy)` to work.
     def __iter__(self):
         # Return a small iterator wrapper that delegates to the underlying
-        # object's iterator. We return a fresh wrapper each call so multiple
-        # concurrent iterations can proceed independently.
+        # object's iterator.
+        #
+        # IMPORTANT: For dataloaders with lazy-reset behavior (e.g., DataLoaderInterface),
+        # we need to handle mid-epoch iteration carefully:
+        # - If already iterating (mid-epoch): return self directly, bypassing iter()
+        #   so we don't trigger unnecessary reset logic
+        # - If not iterating: call iter() to initialize
         if self._obj is None:
             raise TypeError("Proxy target not set")
+
+        # Check if underlying object has lazy-reset iterator semantics
+        # (DataLoaderInterface checks _epoch_exhausted flag in __iter__)
+        # If mid-epoch, return self to continue iteration without reset
+        is_dataloader_interface = (
+            hasattr(self._obj, '_epoch_exhausted') and
+            hasattr(self._obj, '_iterator')
+        )
+        if is_dataloader_interface and getattr(self._obj, '_iterator', None) is not None:
+            # Mid-epoch iteration: return self to delegate to Proxy.__next__()
+            # which calls DataLoaderInterface.__next__() directly
+            return self
+
+        # Not mid-epoch or not a dataloader: create fresh iterator
         underlying_iter = iter(self._obj)
 
         class _ProxyIterator:
