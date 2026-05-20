@@ -259,7 +259,6 @@ class ModelInterface(NetworkWithOps):
                                     logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
                                 except Exception as e:
                                     logger.warning(f"Failed to load weights state dict: {e}")
-                        return
 
                 except Exception as e:
                     logger.debug(f"Could not auto-load model checkpoint: {e}")
@@ -297,27 +296,19 @@ class ModelInterface(NetworkWithOps):
     def _setup_backward_override(self):
         """Set up monkey-patch to disable backward() when model is in audit/eval mode.
 
-        When the model is in eval() mode (audit mode with no gradient computation),
-        calling backward() on loss tensors is a no-op. This allows training scripts
-        to work unchanged in audit mode without explicitly checking for gradients.
-
-        Also checks the model's tracking_mode if it exists (e.g., TrackingMode.DISABLED).
+        When the model is in audit mode (eval or tracking disabled), calling backward()
+        on loss tensors is a no-op. This allows training scripts to work unchanged in
+        audit mode without explicitly checking for gradients.
         """
         # Store the original backward method
         original_backward = th.Tensor.backward
         model_interface_ref = self
 
         def backward_override(tensor_self, gradient=None, retain_graph=False, create_graph=False, inputs=None):
-            """Override backward to be a no-op in audit mode (when model is in eval or tracking disabled)."""
-            # If model is in eval mode (audit mode), skip backward computation
-            if not model_interface_ref.model.training:
+            """Override backward to be a no-op in audit mode."""
+            # Check if model is in audit mode via the audit_mode property
+            if model_interface_ref.audit_mode:
                 return
-
-            # Also check tracking_mode if it exists on the model
-            if hasattr(model_interface_ref.model, 'tracking_mode'):
-                from weightslab.components.tracking import TrackingMode
-                if model_interface_ref.model.tracking_mode == TrackingMode.DISABLED:
-                    return
 
             # Otherwise, call the original backward
             original_backward(
@@ -337,7 +328,7 @@ class ModelInterface(NetworkWithOps):
     def _setup_optimizer_step_override(self):
         """Set up monkey-patch to disable optimizer.step() when model is in audit mode.
 
-        When in audit/eval mode (no gradient computation), optimizer.step() is a no-op
+        When in audit mode (no gradient computation), optimizer.step() is a no-op
         since there are no gradients to apply. This prevents unnecessary state updates
         and keeps the optimizer consistent with the audit mode semantics.
         """
@@ -346,16 +337,10 @@ class ModelInterface(NetworkWithOps):
         model_interface_ref = self
 
         def step_override(self, closure=None):
-            """Override step to be a no-op in audit mode (when model is in eval or tracking disabled)."""
-            # Check if the model is in audit mode
-            if not model_interface_ref.model.training:
+            """Override step to be a no-op in audit mode."""
+            # Check if the model is in audit mode via the audit_mode property
+            if model_interface_ref.audit_mode:
                 return
-
-            # Also check tracking_mode if it exists on the model
-            if hasattr(model_interface_ref.model, 'tracking_mode'):
-                from weightslab.components.tracking import TrackingMode
-                if model_interface_ref.model.tracking_mode == TrackingMode.DISABLED:
-                    return
 
             # Otherwise, call the original step
             return original_step(self, closure=closure)
