@@ -909,7 +909,14 @@ class DataLoaderInterface:
             self._reset_iterator()
 
         # Generate batch - will raise StopIteration if epoch is exhausted
-        batch = next(self._iterator)
+        try:
+            batch = next(self._iterator)
+        except StopIteration:
+            if hasattr(self, 'is_a_loop') and self.is_a_loop:
+                raise  # Re-raise so __next__() can handle epoch exhaustion
+            else:
+                self._reset_iterator()
+                batch = next(self._iterator)
         # Count yielded samples to support iteration state capture/restore
         self._samples_yielded += 1
 
@@ -1111,7 +1118,10 @@ class DataLoaderInterface:
             return
 
         old_batch_size = self.batch_size
-        print(f"\nBatch size updated: {old_batch_size} -> {new_batch_size} (Loader: {getattr(self, '_ledger_name', 'unnamed')})", flush=True)
+        # User-driven change — INFO is appropriate (one event per studio edit).
+        logger.info("Batch size updated: %s -> %s (Loader: %s)",
+                    old_batch_size, new_batch_size,
+                    getattr(self, '_ledger_name', 'unnamed'))
 
         # Case 1: we have a mutable batch sampler
         if getattr(self, "_mutable_batch_sampler", None) is not None:
