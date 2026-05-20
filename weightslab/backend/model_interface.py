@@ -277,8 +277,21 @@ class ModelInterface(NetworkWithOps):
 
     @property
     def audit_mode(self) -> bool:
-        """Return True if model is in audit mode (eval/no-gradient mode)."""
-        return not self.model.training
+        """Return True if model is in audit mode (eval/no-gradient mode).
+
+        Audit mode is active if:
+        - Model is in eval() mode (model.training is False), OR
+        - Model's tracking_mode is DISABLED (if it has this attribute)
+        """
+        if not self.model.training:
+            return True
+
+        if hasattr(self.model, 'tracking_mode'):
+            from weightslab.components.tracking import TrackingMode
+            if self.model.tracking_mode == TrackingMode.DISABLED:
+                return True
+
+        return False
 
     def _setup_backward_override(self):
         """Set up monkey-patch to disable backward() when model is in audit/eval mode.
@@ -286,16 +299,24 @@ class ModelInterface(NetworkWithOps):
         When the model is in eval() mode (audit mode with no gradient computation),
         calling backward() on loss tensors is a no-op. This allows training scripts
         to work unchanged in audit mode without explicitly checking for gradients.
+
+        Also checks the model's tracking_mode if it exists (e.g., TrackingMode.DISABLED).
         """
         # Store the original backward method
         original_backward = th.Tensor.backward
         model_interface_ref = self
 
         def backward_override(tensor_self, gradient=None, retain_graph=False, create_graph=False, inputs=None):
-            """Override backward to be a no-op in audit mode (when model is in eval)."""
+            """Override backward to be a no-op in audit mode (when model is in eval or tracking disabled)."""
             # If model is in eval mode (audit mode), skip backward computation
             if not model_interface_ref.model.training:
                 return
+
+            # Also check tracking_mode if it exists on the model
+            if hasattr(model_interface_ref.model, 'tracking_mode'):
+                from weightslab.components.tracking import TrackingMode
+                if model_interface_ref.model.tracking_mode == TrackingMode.DISABLED:
+                    return
 
             # Otherwise, call the original backward
             original_backward(
