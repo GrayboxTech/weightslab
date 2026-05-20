@@ -283,7 +283,7 @@ class ModelInterface(NetworkWithOps):
         - Model is in eval() mode (model.training is False), OR
         - Model's tracking_mode is DISABLED (if it has this attribute)
         """
-        if not self.model.training:
+        if not self.is_training():
             return True
 
         if hasattr(self.model, 'tracking_mode'):

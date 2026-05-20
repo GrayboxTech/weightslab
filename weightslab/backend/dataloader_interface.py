@@ -856,7 +856,7 @@ class DataLoaderInterface:
             latest = get_hyperparams(hp_name)
             data_cfg = latest.get("data", {})
             if self._ledger_name in data_cfg:
-                bs = data_cfg[self._ledger_name].get("batch_size", None)
+                bs = data_cfg.get(self._ledger_name, {}).get("batch_size", None)
                 if bs is not None:
                     try:
                         self.set_batch_size(bs)
@@ -866,8 +866,8 @@ class DataLoaderInterface:
             else:
                 # No config for this dataloader -> optional default
                 try:
-                    logger.debug(f"No batch size config found for '{self._ledger_name}' in latest hyperparams:\n{data_cfg}; using default batch size of 8.")
-                    self.set_batch_size(8)
+                    logger.debug(f"No batch size config found for '{self._ledger_name}' in latest hyperparams:\n{data_cfg}; using default batch size of 4.")
+                    self.set_batch_size(4)
                 except RuntimeError:
                     pass
         except Exception:

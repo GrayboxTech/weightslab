@@ -181,6 +181,15 @@ class Proxy:
         def __hash__(self) -> int:
             return hash(self._resolve())
 
+        def __contains__(self, item: Any) -> bool:
+            v = self._resolve()
+            if v is None:
+                return False
+            try:
+                return item in v
+            except TypeError:
+                return False
+
         def __int__(self) -> int:
             return int(self._resolve())
 
