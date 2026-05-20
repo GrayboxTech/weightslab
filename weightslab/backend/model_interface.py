@@ -272,6 +272,46 @@ class ModelInterface(NetworkWithOps):
             except Exception:
                 pass
 
+        # Setup backward override for audit mode (skip gradients when model is in eval)
+        self._setup_backward_override()
+
+    @property
+    def audit_mode(self) -> bool:
+        """Return True if model is in audit mode (eval/no-gradient mode)."""
+        return not self.model.training
+
+    def _setup_backward_override(self):
+        """Set up monkey-patch to disable backward() when model is in audit/eval mode.
+
+        When the model is in eval() mode (audit mode with no gradient computation),
+        calling backward() on loss tensors is a no-op. This allows training scripts
+        to work unchanged in audit mode without explicitly checking for gradients.
+        """
+        # Store the original backward method
+        original_backward = th.Tensor.backward
+        model_interface_ref = self
+
+        def backward_override(tensor_self, gradient=None, retain_graph=False, create_graph=False, inputs=None):
+            """Override backward to be a no-op in audit mode (when model is in eval)."""
+            # If model is in eval mode (audit mode), skip backward computation
+            if not model_interface_ref.model.training:
+                return
+
+            # Otherwise, call the original backward
+            original_backward(
+                tensor_self,
+                gradient=gradient,
+                retain_graph=retain_graph,
+                create_graph=create_graph,
+                inputs=inputs
+            )
+
+        # Monkey-patch only if not already patched
+        if not hasattr(th.Tensor.backward, '_wl_patched'):
+            th.Tensor.backward = backward_override
+            th.Tensor.backward._wl_patched = True
+            logger.debug("Installed backward override for audit mode support")
+
     def __getattr__(self, name):
         # 1. Try nn.Module's attribute store (parameters, buffers, submodules)
         try:
