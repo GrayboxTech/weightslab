@@ -498,6 +498,7 @@ class NetworkWithOps(nn.Module):
                         **kwargs
                     )
 
+
     def state_dict(self, destination: Optional[Dict[str, Any]] = None, prefix: str = '', keep_vars: bool = False) -> Dict[str, Any]:
         # TODO (GP): Also add jic recursive self.load_state_dict function to manage if self hasattr model, then self.state_dict(not self but self.model)
         if hasattr(self, 'model'):

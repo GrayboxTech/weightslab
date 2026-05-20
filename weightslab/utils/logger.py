@@ -78,8 +78,23 @@ class LoggerQueue:
         return float(value)
 
     def _get_audit_mode(self):
-        """Get current audit mode from hyperparams."""
+        """Get current audit mode from model interface or hyperparams.
+
+        Priority:
+        1. Check model_interface.audit_mode (reflects actual model state: eval/train, tracking mode)
+        2. Check hyperparams auditor_mode (fallback for legacy/hyperparams-based control)
+        """
         try:
+            # First priority: check registered model interface
+            from weightslab.backend.ledgers import get_model
+            model = get_model()
+            if model is not None and hasattr(model, 'audit_mode'):
+                return bool(model.audit_mode)
+        except Exception:
+            pass
+
+        try:
+            # Fallback: check hyperparams auditor_mode
             from weightslab.backend.ledgers import get_hyperparams
             hp = get_hyperparams()
             if hp is not None:

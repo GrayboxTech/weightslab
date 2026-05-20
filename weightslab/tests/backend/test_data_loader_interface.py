@@ -167,16 +167,6 @@ class TestDataLoaderInterface(unittest.TestCase):
         expected_batches = math.ceil(dataset_size / self.train_loader.batch_size)
         self.assertEqual(len(self.train_loader), expected_batches)
 
-    def test_iterator_next_raises_stopiteration_after_epoch(self):
-        it = iter(self.train_loader)
-        # consume exactly one epoch
-        for _ in range(len(self.train_loader)):
-            next(it)
-
-        # next call should raise StopIteration
-        with self.assertRaises(StopIteration):
-            next(it)
-
     def test_dataloader_interface_worker_defaults_and_override(self):
         iface_default = DataLoaderInterface(self.train_ds, compute_hash=True, batch_size=self.batch_size)
         self.assertEqual(iface_default.dataloader.num_workers, 0)
@@ -305,6 +295,7 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         self.assertLessEqual(calls["get_deny_listed_uids"], 2 + math.ceil(128 / 32))
 
+<<<<<<< HEAD
     def test_manual_next_with_auto_reset(self):
         """Verify manual next(loader) calls auto-reset after epoch exhaustion without raising StopIteration."""
         iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
@@ -334,6 +325,16 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         # For-loop should iterate through exactly one epoch and then stop
         for batch in iface:
+=======
+    def test_for_loop_raises_stopiteration_on_epoch_boundary(self):
+        """Verify for batch in loader: properly receives StopIteration when epoch exhausted."""
+        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
+        loader = ledgers.get_dataloader()
+        batches_collected = 0
+
+        # For-loop should iterate through exactly one epoch and then stop
+        for _ in loader:
+>>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
             batches_collected += 1
 
         # Verify we got exactly one epoch worth of batches
@@ -355,7 +356,12 @@ class TestDataLoaderInterface(unittest.TestCase):
                     process(batches)    # Gets remaining batches, ends with StopIteration
             step += 1
         """
+<<<<<<< HEAD
         iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
+=======
+        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, is_training=False, compute_hash=True)
+        loader = ledgers.get_dataloader()
+>>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
         batches_per_epoch = len(iface.dataloader)
         step = 0
         max_steps = 30  # Run for multiple epochs
@@ -365,17 +371,29 @@ class TestDataLoaderInterface(unittest.TestCase):
         while step < max_steps:
             # Manual iteration with auto-reset after StopIteration
             try:
+<<<<<<< HEAD
                 next(iface)
                 manual_batches_collected += 1
             except StopIteration:
                 # Auto-reset: next call after StopIteration should succeed
                 next(iface)
+=======
+                next(loader)
+                manual_batches_collected += 1
+            except StopIteration:
+                # Auto-reset: next call after StopIteration should succeed
+                next(loader)
+>>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
                 manual_batches_collected += 1
 
             # Conditional for-loop iteration with proper epoch boundary
             # For-loop continues from where manual next() left off (no reset mid-epoch)
             if step % 5 == 0:
+<<<<<<< HEAD
                 for _ in iface:
+=======
+                for _ in loader:
+>>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
                     for_loop_batches_collected += 1
 
             step += 1
@@ -390,6 +408,7 @@ class TestDataLoaderInterface(unittest.TestCase):
         total_collected = manual_batches_collected + for_loop_batches_collected
         self.assertGreater(total_collected, batches_per_epoch)
 
+<<<<<<< HEAD
     def test_epoch_exhausted_flag_behavior(self):
         """Verify internal _epoch_exhausted flag is properly set and reset."""
         # This test directly verifies the lazy reset pattern behavior
@@ -446,6 +465,8 @@ class TestDataLoaderInterface(unittest.TestCase):
         expected_total = epochs * batches_per_epoch
         self.assertEqual(total_batches_collected, expected_total)
 
+=======
+>>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
 
 class TestDataLoaderReproducibility(unittest.TestCase):
     """Test RNG and iteration state reproducibility for dataloaders."""

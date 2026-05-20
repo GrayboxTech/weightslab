@@ -234,7 +234,9 @@ class ExperimentContext:
             ("Eval Frequency", "eval_frequency", "number", _hp_getter("eval_full_to_train_steps_ratio", 100)),
             ("Checkpoint Frequency", "checkpoint_frequency", "number", _hp_getter("experiment_dump_to_train_steps_ratio", 100)),
             ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
-            ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 8)),
+            ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 'n.a.')),
+            ("Val Batch Size", "val_batch_size", "number", _hp_getter("data.val_loader.batch_size", 'n.a.')),
+            ("Test Batch Size", "test_batch_size", "number", _hp_getter("data.test_loader.batch_size", 'n.a.')),
             ("Is Training", "is_training", "number", _hp_getter("is_training", 0)),
             ("Auditor Mode", "auditor_mode", "number", _hp_getter("auditor_mode", 0)),
         }
