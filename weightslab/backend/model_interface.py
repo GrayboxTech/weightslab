@@ -272,8 +272,9 @@ class ModelInterface(NetworkWithOps):
             except Exception:
                 pass
 
-        # Setup backward override for audit mode (skip gradients when model is in eval)
+        # Setup backward and optimizer.step() overrides for audit mode (skip gradients/updates when in eval)
         self._setup_backward_override()
+        self._setup_optimizer_step_override()
 
     @property
     def audit_mode(self) -> bool:
@@ -288,7 +289,7 @@ class ModelInterface(NetworkWithOps):
 
         if hasattr(self.model, 'tracking_mode'):
             from weightslab.components.tracking import TrackingMode
-            if self.model.tracking_mode == TrackingMode.DISABLED:
+            if self.model.tracking_mode in [TrackingMode.DISABLED, TrackingMode.EVAL]:
                 return True
 
         return False
@@ -332,6 +333,38 @@ class ModelInterface(NetworkWithOps):
             th.Tensor.backward = backward_override
             th.Tensor.backward._wl_patched = True
             logger.debug("Installed backward override for audit mode support")
+
+    def _setup_optimizer_step_override(self):
+        """Set up monkey-patch to disable optimizer.step() when model is in audit mode.
+
+        When in audit/eval mode (no gradient computation), optimizer.step() is a no-op
+        since there are no gradients to apply. This prevents unnecessary state updates
+        and keeps the optimizer consistent with the audit mode semantics.
+        """
+        # Store the original step method
+        original_step = th.optim.Optimizer.step
+        model_interface_ref = self
+
+        def step_override(self, closure=None):
+            """Override step to be a no-op in audit mode (when model is in eval or tracking disabled)."""
+            # Check if the model is in audit mode
+            if not model_interface_ref.model.training:
+                return
+
+            # Also check tracking_mode if it exists on the model
+            if hasattr(model_interface_ref.model, 'tracking_mode'):
+                from weightslab.components.tracking import TrackingMode
+                if model_interface_ref.model.tracking_mode == TrackingMode.DISABLED:
+                    return
+
+            # Otherwise, call the original step
+            return original_step(self, closure=closure)
+
+        # Monkey-patch only if not already patched
+        if not hasattr(th.optim.Optimizer.step, '_wl_patched'):
+            th.optim.Optimizer.step = step_override
+            th.optim.Optimizer.step._wl_patched = True
+            logger.debug("Installed optimizer.step() override for audit mode support")
 
     def __getattr__(self, name):
         # 1. Try nn.Module's attribute store (parameters, buffers, submodules)
