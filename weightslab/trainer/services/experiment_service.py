@@ -224,6 +224,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     signal_history = signal_history[::step]
 
                 for s in signal_history:
+                    audit_flag = bool(s.get("audit_mode", False))
                     points.append(
                         pb2.LoggerDataPoint(
                             metric_name=metric_name,
@@ -236,7 +237,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                             split_name=str(s.get("split_name", "")),
                             evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                             point_note=str(s.get("point_note", "")),
-                            audit_mode=bool(s.get("audit_mode", False)),
+                            audit_mode=audit_flag,
                         )
                     )
         else:
@@ -250,6 +251,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             if _tq_ms > 200:
                 logger.warning("get_and_clear_queue() took %.1fms (slow — possible lock contention)", _tq_ms)
             for s in queue_data:
+                audit_flag = bool(s.get("audit_mode", False))
                 points.append(
                     pb2.LoggerDataPoint(
                         metric_name=s.get("metric_name", ""),
@@ -262,7 +264,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         split_name=str(s.get("split_name", "")),
                         evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                         point_note=str(s.get("point_note", "")),
-                        audit_mode=bool(s.get("audit_mode", False)),
+                        audit_mode=audit_flag,
                     )
                 )
 
@@ -564,6 +566,24 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         name=hp_name,
                         key_path="data.train_loader.batch_size",
                         value=hyper_parameters.batch_size
+                    )
+                if hasattr(hyper_parameters, 'val_batch_size') and hyper_parameters.HasField("val_batch_size"):
+                    set_hyperparam(
+                        name=hp_name,
+                        key_path="data.val_loader.batch_size",
+                        value=hyper_parameters.val_batch_size
+                    )
+                elif hasattr(hyper_parameters, 'eval_batch_size') and hyper_parameters.HasField("eval_batch_size"):
+                    set_hyperparam(
+                        name=hp_name,
+                        key_path="data.val_loader.batch_size",
+                        value=hyper_parameters.eval_batch_size
+                    )
+                if hyper_parameters.HasField("test_batch_size"):
+                    set_hyperparam(
+                        name=hp_name,
+                        key_path="data.test_loader.batch_size",
+                        value=hyper_parameters.test_batch_size
                     )
                 if hyper_parameters.HasField("full_eval_frequency"):
                     set_hyperparam(

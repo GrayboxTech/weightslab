@@ -114,7 +114,7 @@ message HyperParameters {
   optional int32 nb_steps = 8;
   optional bool auditor_mode = 9;
   optional int32 train_batch_size = 10;
-  optional int32 eval_batch_size = 11;
+  optional int32 val_batch_size = 11;
   optional int32 test_batch_size = 12;
   optional bool evaluation_mode = 13;
   optional string evaluation_config = 14;
