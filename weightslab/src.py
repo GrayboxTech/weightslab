@@ -198,6 +198,8 @@ def _get_step(step: int | None = None) -> int:
         2. If `get_age()` is not available, try to access `current_step` attribute on the model (common pattern for external checkpoint managers).
         3. If neither is available, fall back to 0 or the provided step argument
                 and add a `current_step` attribute to the model for future tracking.
+
+        TODO (GP): Still not sure because if train and loss computed, then model age at loss value is currently model age minus 1. However, if we start first by evaluation, here model age is 0 as not trained yet. ? To check
     """
     # Fallback: if get_model() failed (e.g. ambiguity), try to find a valid model
     m = None
@@ -214,7 +216,7 @@ def _get_step(step: int | None = None) -> int:
     if m is not None:
         # Safe attribute access (handle Proxy returning None for missing attr)
         if hasattr(m, 'get_age'):
-            val = m.get_age()
+            val = m.get_age() -1  # At this point, model already saw one batch, except if we started by evaluation
             if val is not None:
                 step = max([int(val), 0])  # Use age-1 as step to reflect completed step; ensure non-negative
 
