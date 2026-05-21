@@ -101,7 +101,6 @@ class LoggerQueue:
                 return bool(hp.get('auditor_mode', False))
         except Exception:
             pass
-
         return False
 
     def _append_history_entry(self, graph_name, exp_hash, global_step, metric_value, audit_mode=None):

@@ -237,7 +237,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                             split_name=str(s.get("split_name", "")),
                             evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                             point_note=str(s.get("point_note", "")),
+<<<<<<< HEAD
                             audit_mode=audit_flag,
+=======
+<<<<<<< HEAD
+                            audit_mode=bool(s.get("audit_mode", False)),
+=======
+                            audit_mode=audit_flag,
+>>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
+>>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
                         )
                     )
         else:
@@ -264,7 +272,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         split_name=str(s.get("split_name", "")),
                         evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                         point_note=str(s.get("point_note", "")),
+<<<<<<< HEAD
                         audit_mode=audit_flag,
+=======
+<<<<<<< HEAD
+                        audit_mode=bool(s.get("audit_mode", False)),
+=======
+                        audit_mode=audit_flag,
+>>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
+>>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
                     )
                 )
 
@@ -439,6 +455,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         if trainer is None or not hasattr(trainer, "is_paused"):
             return hyper_parameter_descs
 
+        # Trick for is training - tmp solution TODO(GP) Fix it
         is_training = not trainer.is_paused()
 
         hp_name = self._ctx.exp_name or resolve_hp_name()
