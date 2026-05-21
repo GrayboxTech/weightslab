@@ -447,6 +447,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         if trainer is None or not hasattr(trainer, "is_paused"):
             return hyper_parameter_descs
 
+        # Trick for is training - tmp solution TODO(GP) Fix it
         is_training = not trainer.is_paused()
 
         hp_name = self._ctx.exp_name or resolve_hp_name()

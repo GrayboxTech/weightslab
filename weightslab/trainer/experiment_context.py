@@ -1,5 +1,6 @@
-import logging
 import time
+import logging
+import numpy as np
 
 from weightslab.components.global_monitoring import pause_controller
 
@@ -233,7 +234,7 @@ class ExperimentContext:
             ("Left Training Steps", "training_left", "number", _hp_getter("training_steps_to_do", 999)),
             ("Eval Frequency", "eval_frequency", "number", _hp_getter("eval_full_to_train_steps_ratio", 100)),
             ("Checkpoint Frequency", "checkpoint_frequency", "number", _hp_getter("experiment_dump_to_train_steps_ratio", 100)),
-            ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", 1e-4)),
+            ("Learning Rate", "learning_rate", "number", _hp_getter("optimizer.lr", _hp_getter("model.lr", 1e-3))),
             ("Batch Size", "batch_size", "number", _hp_getter("data.train_loader.batch_size", 'n.a.')),
             ("Val Batch Size", "val_batch_size", "number", _hp_getter("data.val_loader.batch_size", 'n.a.')),
             ("Test Batch Size", "test_batch_size", "number", _hp_getter("data.test_loader.batch_size", 'n.a.')),
