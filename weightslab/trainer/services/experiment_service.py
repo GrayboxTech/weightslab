@@ -224,7 +224,6 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     signal_history = signal_history[::step]
 
                 for s in signal_history:
-                    audit_flag = bool(s.get("audit_mode", False))
                     points.append(
                         pb2.LoggerDataPoint(
                             metric_name=metric_name,
@@ -237,15 +236,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                             split_name=str(s.get("split_name", "")),
                             evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                             point_note=str(s.get("point_note", "")),
-<<<<<<< HEAD
-                            audit_mode=audit_flag,
-=======
-<<<<<<< HEAD
                             audit_mode=bool(s.get("audit_mode", False)),
-=======
-                            audit_mode=audit_flag,
->>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
                         )
                     )
         else:
@@ -259,7 +250,6 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             if _tq_ms > 200:
                 logger.warning("get_and_clear_queue() took %.1fms (slow — possible lock contention)", _tq_ms)
             for s in queue_data:
-                audit_flag = bool(s.get("audit_mode", False))
                 points.append(
                     pb2.LoggerDataPoint(
                         metric_name=s.get("metric_name", ""),
@@ -272,15 +262,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         split_name=str(s.get("split_name", "")),
                         evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                         point_note=str(s.get("point_note", "")),
-<<<<<<< HEAD
-                        audit_mode=audit_flag,
-=======
-<<<<<<< HEAD
                         audit_mode=bool(s.get("audit_mode", False)),
-=======
-                        audit_mode=audit_flag,
->>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
                     )
                 )
 

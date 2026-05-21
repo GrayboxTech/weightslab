@@ -295,40 +295,6 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         self.assertLessEqual(calls["get_deny_listed_uids"], 2 + math.ceil(128 / 32))
 
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
-    def test_manual_next_with_auto_reset(self):
-        """Verify manual next(loader) calls auto-reset after epoch exhaustion without raising StopIteration."""
-        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
-        batches_per_epoch = len(iface.dataloader)
-
-        # Consume exactly one full epoch using manual next()
-        for _ in range(batches_per_epoch):
-            next(iface)
-
-        # After one epoch, next call should raise StopIteration
-        with self.assertRaises(StopIteration):
-            next(iface)
-
-        # But the next next() call should auto-reset and return the first batch
-        first_batch_after_reset = next(iface)
-        self.assertIsNotNone(first_batch_after_reset)
-        self.assertEqual(len(first_batch_after_reset), 3)  # (inputs, batch_ids, labels)
-
-        # And we should be able to continue getting batches
-        second_batch = next(iface)
-        self.assertIsNotNone(second_batch)
-
-    def test_for_loop_raises_stopiteration_on_epoch_boundary(self):
-        """Verify for batch in loader: properly receives StopIteration when epoch exhausted."""
-        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
-        batches_collected = 0
-
-        # For-loop should iterate through exactly one epoch and then stop
-        for batch in iface:
-=======
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
     def test_for_loop_raises_stopiteration_on_epoch_boundary(self):
         """Verify for batch in loader: properly receives StopIteration when epoch exhausted."""
         iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
@@ -337,10 +303,6 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         # For-loop should iterate through exactly one epoch and then stop
         for _ in loader:
-<<<<<<< HEAD
-=======
->>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
             batches_collected += 1
 
         # Verify we got exactly one epoch worth of batches
@@ -362,17 +324,8 @@ class TestDataLoaderInterface(unittest.TestCase):
                     process(batches)    # Gets remaining batches, ends with StopIteration
             step += 1
         """
-<<<<<<< HEAD
         iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, is_training=False, compute_hash=True)
         loader = ledgers.get_dataloader()
-=======
-<<<<<<< HEAD
-        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, compute_hash=True)
-=======
-        iface = DataLoaderInterface(self.train_ds, batch_size=self.batch_size, is_training=False, compute_hash=True)
-        loader = ledgers.get_dataloader()
->>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
         batches_per_epoch = len(iface.dataloader)
         step = 0
         max_steps = 30  # Run for multiple epochs
@@ -382,41 +335,18 @@ class TestDataLoaderInterface(unittest.TestCase):
         while step < max_steps:
             # Manual iteration with auto-reset after StopIteration
             try:
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
-                next(iface)
-                manual_batches_collected += 1
-            except StopIteration:
-                # Auto-reset: next call after StopIteration should succeed
-                next(iface)
-=======
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
                 next(loader)
                 manual_batches_collected += 1
             except StopIteration:
                 # Auto-reset: next call after StopIteration should succeed
                 next(loader)
-<<<<<<< HEAD
-=======
->>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
                 manual_batches_collected += 1
 
             # Conditional for-loop iteration with proper epoch boundary
             # For-loop continues from where manual next() left off (no reset mid-epoch)
             if step % 5 == 0:
-<<<<<<< HEAD
                 for _ in loader:
-=======
-<<<<<<< HEAD
-                for _ in iface:
-=======
-                for _ in loader:
->>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
                     for_loop_batches_collected += 1
-
             step += 1
 
         # Verify we collected reasonable amounts of batches
@@ -429,6 +359,7 @@ class TestDataLoaderInterface(unittest.TestCase):
         total_collected = manual_batches_collected + for_loop_batches_collected
         self.assertGreater(total_collected, batches_per_epoch)
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 =======
 <<<<<<< HEAD
@@ -491,6 +422,8 @@ class TestDataLoaderInterface(unittest.TestCase):
 =======
 >>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
 >>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
+=======
+>>>>>>> 686bb98c727fb594a63b7a14937103edbe2ee55e
 
 class TestDataLoaderReproducibility(unittest.TestCase):
     """Test RNG and iteration state reproducibility for dataloaders."""
