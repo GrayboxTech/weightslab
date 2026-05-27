@@ -165,17 +165,31 @@ Control which format audit logs are written to using the ``AUDIT_LOG_FORMAT`` en
     # CSV format - flattened view for spreadsheet analysis
     export AUDIT_LOG_FORMAT=csv
 
+    # Disable audit logging completely
+    export AUDIT_LOG_FORMAT=none
+
 **Default Behavior:**
 - If not specified: ``AUDIT_LOG_FORMAT`` defaults to ``json``
 - Only one format file is created per experiment (not both)
 - File is created in ``root_log_dir`` as either:
   - ``audit_log.json`` (for json format)
   - ``audit_log.csv`` (for csv format)
+- When set to ``none``, no audit logs are created or maintained
+
+**Valid Options:**
+- ``json`` - Full structured JSON with nested details (default)
+- ``csv`` - Flattened CSV view for spreadsheet analysis
+- ``none`` - Disable audit logging entirely (no files created)
 
 **Precedence:**
 1. Explicit format parameter in code (highest priority)
 2. Environment variable ``AUDIT_LOG_FORMAT``
 3. Default: ``json`` (lowest priority)
+
+**Use Cases for ``AUDIT_LOG_FORMAT=none``:**
+- Reduce disk I/O overhead in high-performance scenarios
+- Disable audit history for development/debugging sessions
+- Focus on other logging without audit pollution
 
 Directory Configuration
 -----------------------

@@ -122,6 +122,46 @@ class TestAuditLoggerFormat:
             logger = AuditLogger(tmpdir, format="json")
             assert logger.format == "json"
 
+    def test_none_format_disables_logging(self):
+        """Test that format='none' disables audit logging."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, format="none")
+            assert logger.format == "none"
+
+            # Log events but they should be skipped
+            logger.log_event("test_action", "success", {"data": "value"})
+            logger.log_event("another_action", "success", {"data": "value2"})
+
+            # No files should be created
+            assert not logger.json_path.exists()
+            assert not logger.csv_path.exists()
+
+    def test_none_format_from_environment_variable(self, monkeypatch):
+        """Test that AUDIT_LOG_FORMAT=none disables logging."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("AUDIT_LOG_FORMAT", "none")
+            logger = AuditLogger(tmpdir)
+            assert logger.format == "none"
+
+            logger.log_event("test_action", "success", {"data": "value"})
+
+            # No files should be created
+            assert not logger.json_path.exists()
+            assert not logger.csv_path.exists()
+
+    def test_explicit_format_none_overrides_json_default(self, monkeypatch):
+        """Test that explicit format='none' overrides JSON default."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("AUDIT_LOG_FORMAT", "json")
+            logger = AuditLogger(tmpdir, format="none")
+            assert logger.format == "none"
+
+            logger.log_event("test_action", "success", {"data": "value"})
+
+            # No files should be created even though env var is json
+            assert not logger.json_path.exists()
+            assert not logger.csv_path.exists()
+
 
 class TestAuditLoggerJSON:
     """Test JSON logging functionality."""

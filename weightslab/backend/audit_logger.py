@@ -26,16 +26,17 @@ class AuditLogger:
     Thread-safe audit logger that writes events to JSON or CSV files.
     Events are appended to existing files (or created if missing).
     Output format is configurable via AUDIT_LOG_FORMAT environment variable.
+    Set format to "none" to disable audit logging entirely.
     """
 
-    # Valid output formats
-    VALID_FORMATS = ("json", "csv")
+    # Valid output formats (including "none" to disable)
+    VALID_FORMATS = ("json", "csv", "none")
 
     def __init__(
         self,
         root_log_dir: str,
         experiment_name: str = "default",
-        format: Optional[Literal["json", "csv"]] = None,
+        format: Optional[Literal["json", "csv", "none"]] = None,
     ):
         """
         Initialize audit logger.
@@ -43,8 +44,9 @@ class AuditLogger:
         Args:
             root_log_dir: Directory where audit logs will be stored
             experiment_name: Name of the experiment (for context, not used in filename)
-            format: Output format ("json" or "csv"). If None, uses AUDIT_LOG_FORMAT
-                   environment variable. Defaults to "json" if not specified.
+            format: Output format ("json", "csv", or "none" to disable).
+                   If None, uses AUDIT_LOG_FORMAT environment variable.
+                   Defaults to "json" if not specified.
         """
         self.root_log_dir = Path(root_log_dir)
         self.experiment_name = experiment_name
@@ -59,7 +61,7 @@ class AuditLogger:
         if format not in self.VALID_FORMATS:
             logger.warning(
                 f"[AuditLogger] Invalid format '{format}', using 'json'. "
-                f"Valid formats: {self.VALID_FORMATS}"
+                f"Valid formats: json, csv, none (to disable logging)"
             )
             format = "json"
 
@@ -70,9 +72,10 @@ class AuditLogger:
         # Thread lock for file operations
         self._lock = threading.Lock()
 
+        status = "disabled" if format == "none" else f"enabled ({format} format)"
         logger.debug(
             f"[AuditLogger] Initialized for experiment '{experiment_name}' "
-            f"at {self.root_log_dir} (format: {format})"
+            f"at {self.root_log_dir} - audit logging {status}"
         )
 
     def log_event(
@@ -91,6 +94,10 @@ class AuditLogger:
             details: Dict containing what changed (before/after values, affected items)
             error: Error message if status == "failed"
         """
+        # Skip logging if disabled
+        if self.format == "none":
+            return
+
         # Create event with ISO timestamp
         timestamp = datetime.utcnow().isoformat(timespec='microseconds') + 'Z'
         event = AuditEvent(

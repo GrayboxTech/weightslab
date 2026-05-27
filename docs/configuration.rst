@@ -39,6 +39,12 @@ Logging
      - *(training script dir)*
      - Root directory where training log snapshots are saved.
        Defaults to a ``root_log_dir/`` folder next to your training script.
+   * - ``AUDIT_LOG_FORMAT``
+     - ``json``
+     - Output format for audit logs tracking all user interactions through gRPC.
+       Accepted values: ``json`` (structured data), ``csv`` (spreadsheet analysis),
+       or ``none`` (disable audit logging).
+       Only one format file is created per experiment.
 
 
 CLI Server
