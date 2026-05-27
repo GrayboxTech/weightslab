@@ -417,8 +417,12 @@ class H5DataFrameStore:
                                     if col not in existing.columns:
                                         is_bool = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
                                         existing[col] = False if is_bool else np.nan
+                                    # Cast existing column to object dtype to avoid incompatible dtype warnings
+                                    # when assigning values from df_norm (which may have different dtypes)
+                                    if existing[col].dtype != df_norm[col].dtype:
+                                        existing[col] = existing[col].astype(object)
                                     # Update values for common rows
-                                    existing.loc[common_idx, col] = df_norm.loc[common_idx, col]
+                                    existing.loc[common_idx, col] = df_norm.loc[common_idx, col].astype(object)
 
                             # 2. Append strictly new rows
                             new_idx = df_norm.index.difference(existing.index)
