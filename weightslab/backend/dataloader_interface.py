@@ -908,6 +908,10 @@ class DataLoaderInterface:
         if self._iterator is None:
             self._reset_iterator()
 
+        # Check if iterator is empty, i.e., everything discarded
+        if len(self.dataloader) == 0:
+            raise StopIteration
+
         # Generate batch - will raise StopIteration if epoch is exhausted
         try:
             batch = next(self._iterator)
