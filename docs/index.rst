@@ -66,6 +66,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       All environment variables for WeightsLab and Weights Studio with defaults and explanations.
 
+   .. grid-item-card:: 📋 Audit Logging
+      :link: audit_logging
+      :link-type: doc
+
+      Track all user interactions with audit logs in JSON and CSV formats.
+
 .. admonition:: Weightslab in one sentence
    :class: note
 
@@ -99,3 +105,4 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    user_functions
    configuration
+   audit_logging
