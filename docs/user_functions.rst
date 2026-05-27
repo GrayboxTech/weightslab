@@ -120,7 +120,7 @@ signal
 
 .. code-block:: python
 
-   @wl.signal(name=None, subscribe_to=None, compute_every_n_steps=1, **kwargs)
+   @wl.signal(name: str, subscribe_to: str, compute_every_n_steps: int = 1, **kwargs)
    def my_signal(ctx):
        ...
 
@@ -134,11 +134,6 @@ Register a custom signal function.
 **Examples**
 
 .. code-block:: python
-
-   @wl.signal(name="brightness")
-   def brightness(ctx):
-      image = ctx.image
-      return 0.0 if image is None else float(image.mean())
 
    @wl.signal(name="weighted_loss", subscribe_to="train-loss", compute_every_n_steps=10)
    def weighted_loss(ctx):
@@ -382,5 +377,4 @@ optional when ``wl.watch_or_edit`` registrations are in place.
 
 **Where SignalContext is used**
 
-- In static signals called by ``wl.compute_signals``.
 - In dynamic signals subscribed through ``@wl.signal(subscribe_to=...)``.

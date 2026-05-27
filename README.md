@@ -224,10 +224,6 @@ if __name__ == "__main__":
 +import weightslab as wl
 +from weightslab.components.global_monitoring import (
 +    guard_training_context, guard_testing_context)
-
-
-+@wl.signal(name="image_bytes")
-+def image_bytes(ctx): return ctx.image.nbytes  # static per-sample signal
 +
 +@wl.signal(name="byte_adjusted_loss", subscribe_to="loss/CE")
 +def byte_adjusted_loss(ctx): return ctx.subscribed_value / ctx.image_bytes  # chains on image_bytes
