@@ -66,6 +66,62 @@ class TestAuditLoggerInitialization:
             logger = AuditLogger(tmpdir)
             assert logger.experiment_name == "default"
 
+    def test_logger_format_json(self):
+        """Test AuditLogger with JSON format."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, format="json")
+            assert logger.format == "json"
+
+    def test_logger_format_csv(self):
+        """Test AuditLogger with CSV format."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, format="csv")
+            assert logger.format == "csv"
+
+    def test_logger_invalid_format_defaults_to_json(self):
+        """Test that invalid format defaults to json."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, format="invalid")
+            assert logger.format == "json"
+
+
+class TestAuditLoggerFormat:
+    """Test format selection and behavior."""
+
+    def test_json_format_only_writes_json(self):
+        """Test that JSON format only creates JSON file, not CSV."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, format="json")
+            logger.log_event("test_action", "success", {"data": "value"})
+
+            assert logger.json_path.exists()
+            assert not logger.csv_path.exists()
+
+    def test_csv_format_only_writes_csv(self):
+        """Test that CSV format only creates CSV file, not JSON."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, format="csv")
+            logger.log_event("test_action", "success", {"data": "value"})
+
+            assert logger.csv_path.exists()
+            assert not logger.json_path.exists()
+
+    def test_format_from_environment_variable(self, monkeypatch):
+        """Test that format can be set via AUDIT_LOG_FORMAT environment variable."""
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Test CSV from env var
+            monkeypatch.setenv("AUDIT_LOG_FORMAT", "csv")
+            logger = AuditLogger(tmpdir)
+            assert logger.format == "csv"
+
+    def test_explicit_format_overrides_environment(self, monkeypatch):
+        """Test that explicit format parameter overrides environment variable."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("AUDIT_LOG_FORMAT", "csv")
+            logger = AuditLogger(tmpdir, format="json")
+            assert logger.format == "json"
+
 
 class TestAuditLoggerJSON:
     """Test JSON logging functionality."""
@@ -139,7 +195,7 @@ class TestAuditLoggerCSV:
     def test_log_event_creates_csv_file(self):
         """Test that logging an event creates the CSV file."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
             logger.log_event("hp_change", "success", {"param": "learning_rate"})
 
             assert logger.csv_path.exists()
@@ -153,7 +209,7 @@ class TestAuditLoggerCSV:
     def test_csv_headers(self):
         """Test that CSV has correct headers."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
             logger.log_event("test_action", "success", {"data": "value"})
 
             with open(logger.csv_path, 'r') as f:
@@ -163,7 +219,7 @@ class TestAuditLoggerCSV:
     def test_csv_details_escaped_as_json(self):
         """Test that details in CSV are properly escaped JSON."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
             details = {"field": "learning_rate", "before": 0.001, "after": 0.0005}
             logger.log_event("hp_change", "success", details)
 
@@ -179,7 +235,7 @@ class TestAuditLoggerCSV:
     def test_csv_appends_to_file(self):
         """Test that logging multiple events appends to CSV."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
 
             logger.log_event("hp_change", "success", {"param": "lr"})
             logger.log_event("pause", "success", {"state": "paused"})
@@ -196,7 +252,7 @@ class TestAuditLoggerCSV:
     def test_csv_with_error_message(self):
         """Test CSV logging with error messages."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
             logger.log_event(
                 "checkpoint_restore",
                 "failed",
@@ -229,7 +285,7 @@ class TestAuditLoggerErrorHandling:
     def test_log_event_with_complex_nested_details(self):
         """Test logging with complex nested data structures."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="json")
             details = {
                 "config": {
                     "metrics": ["accuracy", "f1", "loss"],
@@ -249,17 +305,10 @@ class TestAuditLoggerErrorHandling:
                 events = json.load(f)
             assert events[0]["details"] == details
 
-            # Verify CSV also has correct nested JSON
-            with open(logger.csv_path, 'r') as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-            csv_details = json.loads(rows[0]["details"])
-            assert csv_details == details
-
     def test_log_event_with_special_characters(self):
         """Test logging with special characters in details."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="json")
             details = {
                 "message": 'Special chars: "quotes", \'apostrophes\', \\backslash',
                 "path": "C:\\Users\\test\\file.txt",
@@ -270,12 +319,6 @@ class TestAuditLoggerErrorHandling:
             with open(logger.json_path, 'r') as f:
                 events = json.load(f)
             assert events[0]["details"] == details
-
-            with open(logger.csv_path, 'r') as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-            csv_details = json.loads(rows[0]["details"])
-            assert csv_details == details
 
     def test_log_event_with_empty_details(self):
         """Test logging with empty details dict."""
@@ -294,7 +337,7 @@ class TestAuditLoggerThreadSafety:
     def test_concurrent_logging(self):
         """Test that concurrent logging works correctly with file locking."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", format="json")
             num_threads = 10
             events_per_thread = 10
 
@@ -320,12 +363,6 @@ class TestAuditLoggerThreadSafety:
             with open(logger.json_path, 'r') as f:
                 events = json.load(f)
             assert len(events) == num_threads * events_per_thread
-
-            # Verify CSV also has all events
-            with open(logger.csv_path, 'r') as f:
-                reader = csv.DictReader(f)
-                csv_rows = list(reader)
-            assert len(csv_rows) == num_threads * events_per_thread
 
 
 class TestAuditLoggerSummary:

@@ -146,11 +146,39 @@ The CSV file provides a flattened view suitable for spreadsheet analysis:
 Configuration
 ==============
 
-No configuration is required. Audit logging is automatically enabled when:
+Audit logging is automatically enabled when:
 
 1. A checkpoint manager is initialized with a ``root_log_dir``
 2. The gRPC server starts
 3. A user interaction triggers a gRPC handler
+
+Output Format Selection
+-----------------------
+
+Control which format audit logs are written to using the ``AUDIT_LOG_FORMAT`` environment variable:
+
+.. code-block:: bash
+
+    # JSON format (default) - full structured data with nested details
+    export AUDIT_LOG_FORMAT=json
+
+    # CSV format - flattened view for spreadsheet analysis
+    export AUDIT_LOG_FORMAT=csv
+
+**Default Behavior:**
+- If not specified: ``AUDIT_LOG_FORMAT`` defaults to ``json``
+- Only one format file is created per experiment (not both)
+- File is created in ``root_log_dir`` as either:
+  - ``audit_log.json`` (for json format)
+  - ``audit_log.csv`` (for csv format)
+
+**Precedence:**
+1. Explicit format parameter in code (highest priority)
+2. Environment variable ``AUDIT_LOG_FORMAT``
+3. Default: ``json`` (lowest priority)
+
+Directory Configuration
+-----------------------
 
 The ``root_log_dir`` is typically determined by:
 - The ``checkpoint_manager`` configuration
@@ -192,9 +220,9 @@ Access audit logs programmatically after an experiment:
     print(f"By action type: {summary['by_action_type']}")
     print(f"By status: {summary['by_status']}")
 
-**Spreadsheet Analysis**
+**Spreadsheet Analysis** (when using CSV format)
 
-1. Open ``audit_log.csv`` in Excel or Google Sheets
+1. Open ``audit_log.csv`` in Excel or Google Sheets (requires ``AUDIT_LOG_FORMAT=csv``)
 2. Use filters to find specific action types (Data → Filter)
 3. Sort by timestamp to review operation sequence
 4. Parse the details column as JSON for full context

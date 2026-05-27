@@ -1,11 +1,12 @@
 import json
 import csv
+import os
 import threading
 import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +23,28 @@ class AuditEvent:
 
 class AuditLogger:
     """
-    Thread-safe audit logger that writes events to JSON and CSV files.
+    Thread-safe audit logger that writes events to JSON or CSV files.
     Events are appended to existing files (or created if missing).
+    Output format is configurable via AUDIT_LOG_FORMAT environment variable.
     """
 
-    def __init__(self, root_log_dir: str, experiment_name: str = "default"):
+    # Valid output formats
+    VALID_FORMATS = ("json", "csv")
+
+    def __init__(
+        self,
+        root_log_dir: str,
+        experiment_name: str = "default",
+        format: Optional[Literal["json", "csv"]] = None,
+    ):
         """
         Initialize audit logger.
 
         Args:
             root_log_dir: Directory where audit logs will be stored
             experiment_name: Name of the experiment (for context, not used in filename)
+            format: Output format ("json" or "csv"). If None, uses AUDIT_LOG_FORMAT
+                   environment variable. Defaults to "json" if not specified.
         """
         self.root_log_dir = Path(root_log_dir)
         self.experiment_name = experiment_name
@@ -40,6 +52,18 @@ class AuditLogger:
         # Ensure directory exists
         self.root_log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Determine output format from parameter, environment variable, or default
+        if format is None:
+            format = os.getenv("AUDIT_LOG_FORMAT", "json").lower().strip()
+
+        if format not in self.VALID_FORMATS:
+            logger.warning(
+                f"[AuditLogger] Invalid format '{format}', using 'json'. "
+                f"Valid formats: {self.VALID_FORMATS}"
+            )
+            format = "json"
+
+        self.format = format
         self.json_path = self.root_log_dir / "audit_log.json"
         self.csv_path = self.root_log_dir / "audit_log.csv"
 
@@ -48,7 +72,7 @@ class AuditLogger:
 
         logger.debug(
             f"[AuditLogger] Initialized for experiment '{experiment_name}' "
-            f"at {self.root_log_dir}"
+            f"at {self.root_log_dir} (format: {format})"
         )
 
     def log_event(
@@ -77,13 +101,16 @@ class AuditLogger:
             error=error,
         )
 
-        # Write atomically to both formats
+        # Write to configured format
         with self._lock:
             try:
-                self._append_to_json(event)
-                self._append_to_csv(event)
+                if self.format == "json":
+                    self._append_to_json(event)
+                elif self.format == "csv":
+                    self._append_to_csv(event)
+
                 logger.debug(
-                    f"[AuditLogger] Logged {action_type} ({status}) - details: {details}"
+                    f"[AuditLogger] Logged {action_type} ({status}) to {self.format} - details: {details}"
                 )
             except Exception as e:
                 logger.error(
