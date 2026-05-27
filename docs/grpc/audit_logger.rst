@@ -1,5 +1,5 @@
 ===============
-Audit Logging
+Audit Logger
 ===============
 
 Overview
@@ -27,28 +27,31 @@ Key Features
 Logged Actions
 ==============
 
-The audit logger tracks the following user actions:
+The audit logger tracks the following user actions across all gRPC handlers:
 
 **Model & Training Control**
 - ``hp_change``: Hyperparameter modifications (learning rate, batch size, etc.)
-- ``pause``: Training paused
-- ``resume``: Training resumed
+- ``pause``: Training paused (from ExperimentCommand)
+- ``resume``: Training resumed (from ExperimentCommand)
 - ``mode_switch``: Mode changes (train/audit/evaluation)
 
 **Data Operations**
-- ``tag_add``: Add tags to samples
-- ``tag_remove``: Remove tags from samples
-- ``sample_discard``: Mark samples as discarded
-- ``sample_restore``: Restore discarded samples
-- ``query_execute``: Execute data queries (filters, analysis)
-- ``data_fetch``: Retrieve sample batches
+- ``tag_add``: Add tags to samples (from EditDataSample)
+- ``tag_remove``: Remove tags from samples (from EditDataSample)
+- ``sample_discard``: Mark samples as discarded (from EditDataSample)
+- ``sample_restore``: Restore discarded samples (from EditDataSample)
+- ``query_execute``: Execute data queries (filters, analysis) from ApplyDataQuery
+- ``data_fetch``: Retrieve sample batches (from GetDataSamples)
 
 **Checkpoint & Evaluation**
-- ``checkpoint_restore``: Restore model from checkpoint
-- ``evaluation_start``: Begin evaluation on a dataset split
-- ``metrics_fetch``: Fetch training metrics
+- ``checkpoint_restore``: Restore model from checkpoint (from RestoreCheckpoint)
+- ``evaluation_start``: Begin evaluation on a dataset split (from TriggerEvaluation)
+- ``metrics_fetch``: Fetch training metrics (from GetLatestLoggerData)
 
-**Details Captured**
+See :doc:`grpc_functions` for details on all RPC methods.
+
+Details Captured
+================
 
 Each log entry includes:
 - **timestamp**: ISO 8601 format with microseconds (UTC)
@@ -383,6 +386,6 @@ Best Practices
 See Also
 ========
 
-- :doc:`configuration`: Setting up experiment directories and checkpointing
-- :doc:`weights_studio`: Using the UI to trigger logged actions
-- :doc:`user_functions`: Custom hooks for experiment initialization
+- :doc:`grpc_functions`: All gRPC RPC handlers and their behavior
+- :doc:`/weights_studio`: Using the UI to trigger logged actions
+- :doc:`/configuration`: gRPC configuration options
