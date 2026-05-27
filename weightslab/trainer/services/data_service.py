@@ -3381,7 +3381,7 @@ class DataService:
 
                 # Log audit event for data edits
                 if is_tag_request:
-                    action_type = "tag_add" if request.type == SampleEditType.EDIT_ADD else "tag_remove"
+                    action_type = "tag_add" if request.type == SampleEditType.EDIT_ACCUMULATE else "tag_remove"
                     self._log_audit(
                         action_type,
                         "success",
