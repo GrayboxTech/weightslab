@@ -771,7 +771,6 @@ class DataLoaderInterface:
         5. Next next(loader): calls __iter__() which DOES reset (epoch exhausted)
         """
         self._sync_batch_size_from_ledger()
-        self._wait_if_paused()
 
         # Only reset iterator if:
         # 1. Not initialized yet (no _iterator attribute)
@@ -828,7 +827,6 @@ class DataLoaderInterface:
 
         try:
             res = self._next_batch()
-            self._wait_if_paused()
             return res
         except StopIteration:
             # Mark that epoch is exhausted; next __next__ call will reset
