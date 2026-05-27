@@ -83,11 +83,12 @@ class SignalContext:
     Unified context object for WeightsLab signals.
     Carries all available metadata for a single sample during computation.
     """
-    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, origin=None):
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, subscribed_history=None, origin=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
         self.subscribed_value = subscribed_value
+        self.subscribed_history = subscribed_history
         self.origin = origin
 
     @property
@@ -449,6 +450,9 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                  subscribers.append((name, func))
 
          if subscribers:
+             # Get logger history
+             signal_history = ledgers.get_logger().get_current_signaL_history(reg_name, meta=True)
+
              # Resolve generic value vector
              val_tensor = out
              if hasattr(val_tensor, 'detach'):
@@ -503,6 +507,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              ctx = SignalContext(
                                  sample_id=int(uid),
                                  subscribed_value=val,
+                                 subscribed_history=signal_history,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train')
                              )
@@ -1029,7 +1034,7 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
         logger.info("Shutting down WeightsLab services.")
 
 
-def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
+def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
     Decorator that registers a custom signal function.
 

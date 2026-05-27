@@ -108,7 +108,6 @@ class LoggerQueue:
             audit_mode = self._get_audit_mode()
 
         signal_entry = {
-            "experiment_name": graph_name,
             "model_age": global_step,
             "metric_name": graph_name,
             "metric_value": metric_value,
@@ -232,7 +231,6 @@ class LoggerQueue:
                 self._signal_history[graph_name][eval_hash][model_age] = []
 
             entry = {
-                "experiment_name": graph_name,
                 "model_age": model_age,
                 "metric_name": graph_name,
                 "metric_value": avg,
@@ -447,6 +445,25 @@ class LoggerQueue:
         # self._flush_current_step_buffer(add_to_queue=False)  # History should already be up to date since we flush on step change and on add_scalars when not aggregating by step, but we can flush here as well to be safe before retrieving history for checkpoint saving
         return deepcopy(self._signal_history)
 
+    def get_current_signaL_history(self, signal_name: str, meta: bool = False):
+        """Get current history for a specific signal."""
+        if signal_name not in self._signal_history:
+            return {}
+
+        if meta:
+            return self._signal_history.get(signal_name, {}).get(self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None, {})
+        else:
+            history = self._signal_history.get(signal_name, {}).get(self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None, {})
+            result = {}
+            for step, entries in history.items():
+                result[step] = []
+                for entry in entries:
+                    result[step].append({
+                        "model_age": entry.get("model_age"),
+                        "metric_value": entry.get("metric_value"),
+                    })
+            return result
+
     def get_signal_history_per_sample(self):
         """Reconstruct per-sample history as list-of-dicts from compact array storage."""
         result = {}
@@ -456,7 +473,6 @@ class LoggerQueue:
                 entries = []
                 for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
                     entries.append({
-                        "experiment_name": graph_name,
                         "sample_id": sid,
                         "model_age": step,
                         "metric_name": graph_name,
@@ -626,7 +642,6 @@ class LoggerQueue:
                                 continue
                             signal_entry = dict(entry)
                             signal_entry.setdefault("metric_name", metric_name)
-                            signal_entry.setdefault("experiment_name", metric_name)
                             signal_entry.setdefault("model_age", step)
                             signal_entry.setdefault("experiment_hash", exp_hash)
                             signal_entry.setdefault("timestamp", int(time.time()))
@@ -637,14 +652,13 @@ class LoggerQueue:
             for signal in signals:
                 if not isinstance(signal, dict):
                     continue
-                metric_name = signal.get("metric_name") or signal.get("experiment_name")
+                metric_name = signal.get("metric_name")
                 if not metric_name:
                     continue
                 exp_hash = signal.get("experiment_hash")
                 step = signal.get("model_age")
                 signal_entry = dict(signal)
                 signal_entry.setdefault("metric_name", metric_name)
-                signal_entry.setdefault("experiment_name", metric_name)
                 signal_entry.setdefault("model_age", step)
                 signal_entry.setdefault("experiment_hash", exp_hash)
                 signal_entry.setdefault("timestamp", int(time.time()))
