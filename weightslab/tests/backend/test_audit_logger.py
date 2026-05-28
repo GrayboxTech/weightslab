@@ -47,7 +47,7 @@ class TestAuditLoggerInitialization:
     def test_logger_initialization(self):
         """Test AuditLogger initialization with valid directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
             assert logger.root_log_dir == Path(tmpdir)
             assert logger.experiment_name == "test_experiment"
             assert logger.json_path == Path(tmpdir) / "audit_log.json"
@@ -57,31 +57,31 @@ class TestAuditLoggerInitialization:
         """Test that AuditLogger creates parent directories if needed."""
         with tempfile.TemporaryDirectory() as tmpdir:
             nested_dir = Path(tmpdir) / "nested" / "path"
-            logger = AuditLogger(str(nested_dir), "test_experiment")
+            logger = AuditLogger(str(nested_dir), "test_experiment", buffer_size=1)
             assert nested_dir.exists()
 
     def test_logger_with_default_experiment_name(self):
         """Test AuditLogger with default experiment name."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir)
+            logger = AuditLogger(tmpdir, buffer_size=1)
             assert logger.experiment_name == "default"
 
     def test_logger_format_json(self):
         """Test AuditLogger with JSON format."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, format="json")
+            logger = AuditLogger(tmpdir, format="json", buffer_size=1)
             assert logger.format == "json"
 
     def test_logger_format_csv(self):
         """Test AuditLogger with CSV format."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, format="csv")
+            logger = AuditLogger(tmpdir, format="csv", buffer_size=1)
             assert logger.format == "csv"
 
     def test_logger_invalid_format_defaults_to_json(self):
         """Test that invalid format defaults to json."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, format="invalid")
+            logger = AuditLogger(tmpdir, format="invalid", buffer_size=1)
             assert logger.format == "json"
 
 
@@ -91,8 +91,9 @@ class TestAuditLoggerFormat:
     def test_json_format_only_writes_json(self):
         """Test that JSON format only creates JSON file, not CSV."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, format="json")
+            logger = AuditLogger(tmpdir, format="json", buffer_size=1)
             logger.log_event("test_action", "success", {"data": "value"})
+            logger.flush()
 
             assert logger.json_path.exists()
             assert not logger.csv_path.exists()
@@ -100,8 +101,9 @@ class TestAuditLoggerFormat:
     def test_csv_format_only_writes_csv(self):
         """Test that CSV format only creates CSV file, not JSON."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, format="csv")
+            logger = AuditLogger(tmpdir, format="csv", buffer_size=1)
             logger.log_event("test_action", "success", {"data": "value"})
+            logger.flush()
 
             assert logger.csv_path.exists()
             assert not logger.json_path.exists()
@@ -112,20 +114,20 @@ class TestAuditLoggerFormat:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Test CSV from env var
             monkeypatch.setenv("AUDIT_LOG_FORMAT", "csv")
-            logger = AuditLogger(tmpdir)
+            logger = AuditLogger(tmpdir, buffer_size=1)
             assert logger.format == "csv"
 
     def test_explicit_format_overrides_environment(self, monkeypatch):
         """Test that explicit format parameter overrides environment variable."""
         with tempfile.TemporaryDirectory() as tmpdir:
             monkeypatch.setenv("AUDIT_LOG_FORMAT", "csv")
-            logger = AuditLogger(tmpdir, format="json")
+            logger = AuditLogger(tmpdir, format="json", buffer_size=1)
             assert logger.format == "json"
 
     def test_none_format_disables_logging(self):
         """Test that format='none' disables audit logging."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, format="none")
+            logger = AuditLogger(tmpdir, format="none", buffer_size=1)
             assert logger.format == "none"
 
             # Log events but they should be skipped
@@ -140,7 +142,7 @@ class TestAuditLoggerFormat:
         """Test that AUDIT_LOG_FORMAT=none disables logging."""
         with tempfile.TemporaryDirectory() as tmpdir:
             monkeypatch.setenv("AUDIT_LOG_FORMAT", "none")
-            logger = AuditLogger(tmpdir)
+            logger = AuditLogger(tmpdir, buffer_size=1)
             assert logger.format == "none"
 
             logger.log_event("test_action", "success", {"data": "value"})
@@ -153,7 +155,7 @@ class TestAuditLoggerFormat:
         """Test that explicit format='none' overrides JSON default."""
         with tempfile.TemporaryDirectory() as tmpdir:
             monkeypatch.setenv("AUDIT_LOG_FORMAT", "json")
-            logger = AuditLogger(tmpdir, format="none")
+            logger = AuditLogger(tmpdir, format="none", buffer_size=1)
             assert logger.format == "none"
 
             logger.log_event("test_action", "success", {"data": "value"})
@@ -169,8 +171,9 @@ class TestAuditLoggerJSON:
     def test_log_event_creates_json_file(self):
         """Test that logging an event creates the JSON file."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
             logger.log_event("hp_change", "success", {"param": "learning_rate"})
+            logger.flush()
 
             assert logger.json_path.exists()
             with open(logger.json_path, 'r') as f:
@@ -182,7 +185,7 @@ class TestAuditLoggerJSON:
     def test_log_event_json_format(self):
         """Test JSON event format with all fields."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
             details = {"field": "learning_rate", "before": 0.001, "after": 0.0005}
             logger.log_event("hp_change", "success", details)
 
@@ -197,9 +200,9 @@ class TestAuditLoggerJSON:
             assert event["error"] is None
 
     def test_log_event_appends_to_json(self):
-        """Test that logging multiple events appends to JSON."""
+        """Test that logging multiple events appends to JSON in reverse chronological order."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
 
             logger.log_event("hp_change", "success", {"param": "lr"})
             logger.log_event("pause", "success", {"state": "paused"})
@@ -208,14 +211,15 @@ class TestAuditLoggerJSON:
             with open(logger.json_path, 'r') as f:
                 events = json.load(f)
             assert len(events) == 3
-            assert events[0]["action_type"] == "hp_change"
+            # Reverse chronological order: newest first
+            assert events[0]["action_type"] == "resume"
             assert events[1]["action_type"] == "pause"
-            assert events[2]["action_type"] == "resume"
+            assert events[2]["action_type"] == "hp_change"
 
     def test_json_timestamp_format(self):
         """Test that JSON timestamps are in ISO 8601 format with microseconds."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
             logger.log_event("test_action", "success")
 
             with open(logger.json_path, 'r') as f:
@@ -235,7 +239,7 @@ class TestAuditLoggerCSV:
     def test_log_event_creates_csv_file(self):
         """Test that logging an event creates the CSV file."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv", buffer_size=1)
             logger.log_event("hp_change", "success", {"param": "learning_rate"})
 
             assert logger.csv_path.exists()
@@ -249,7 +253,7 @@ class TestAuditLoggerCSV:
     def test_csv_headers(self):
         """Test that CSV has correct headers."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv", buffer_size=1)
             logger.log_event("test_action", "success", {"data": "value"})
 
             with open(logger.csv_path, 'r') as f:
@@ -259,7 +263,7 @@ class TestAuditLoggerCSV:
     def test_csv_details_escaped_as_json(self):
         """Test that details in CSV are properly escaped JSON."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv", buffer_size=1)
             details = {"field": "learning_rate", "before": 0.001, "after": 0.0005}
             logger.log_event("hp_change", "success", details)
 
@@ -275,7 +279,7 @@ class TestAuditLoggerCSV:
     def test_csv_appends_to_file(self):
         """Test that logging multiple events appends to CSV."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv", buffer_size=1)
 
             logger.log_event("hp_change", "success", {"param": "lr"})
             logger.log_event("pause", "success", {"state": "paused"})
@@ -292,7 +296,7 @@ class TestAuditLoggerCSV:
     def test_csv_with_error_message(self):
         """Test CSV logging with error messages."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment", format="csv")
+            logger = AuditLogger(tmpdir, "test_experiment", format="csv", buffer_size=1)
             logger.log_event(
                 "checkpoint_restore",
                 "failed",
@@ -315,7 +319,7 @@ class TestAuditLoggerErrorHandling:
     def test_log_event_with_none_details(self):
         """Test logging with None details."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
             logger.log_event("test_action", "success", details=None)
 
             with open(logger.json_path, 'r') as f:
@@ -325,7 +329,7 @@ class TestAuditLoggerErrorHandling:
     def test_log_event_with_complex_nested_details(self):
         """Test logging with complex nested data structures."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment", format="json")
+            logger = AuditLogger(tmpdir, "test_experiment", format="json", buffer_size=1)
             details = {
                 "config": {
                     "metrics": ["accuracy", "f1", "loss"],
@@ -348,7 +352,7 @@ class TestAuditLoggerErrorHandling:
     def test_log_event_with_special_characters(self):
         """Test logging with special characters in details."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment", format="json")
+            logger = AuditLogger(tmpdir, "test_experiment", format="json", buffer_size=1)
             details = {
                 "message": 'Special chars: "quotes", \'apostrophes\', \\backslash',
                 "path": "C:\\Users\\test\\file.txt",
@@ -363,7 +367,7 @@ class TestAuditLoggerErrorHandling:
     def test_log_event_with_empty_details(self):
         """Test logging with empty details dict."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
             logger.log_event("test_action", "success", {})
 
             with open(logger.json_path, 'r') as f:
@@ -421,7 +425,7 @@ class TestAuditLoggerSummary:
     def test_get_log_summary_with_events(self):
         """Test summary with multiple events."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
 
             logger.log_event("hp_change", "success", {})
             logger.log_event("hp_change", "success", {})
@@ -437,10 +441,136 @@ class TestAuditLoggerSummary:
             assert summary["by_status"]["success"] == 3
             assert summary["by_status"]["failed"] == 1
 
+
+class TestAuditLoggerPersistence:
+    """Test audit log persistence and restart scenarios."""
+
+    def test_persistence_when_restarting(self):
+        """Test that audit logs are appended when restarting an experiment."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # First run: create some audit logs
+            logger1 = AuditLogger(tmpdir, "experiment", format="json", buffer_size=1)
+            logger1.log_event("hp_change", "success", {"lr": 0.001})
+            logger1.log_event("tag_add", "success", {"tag": "defect"})
+
+            with open(logger1.json_path) as f:
+                events_after_first_run = json.load(f)
+            assert len(events_after_first_run) == 2
+
+            # Second run: restart from the same directory
+            logger2 = AuditLogger(tmpdir, "experiment", format="json", buffer_size=1)
+            logger2.log_event("pause", "success", {"state": "paused"})
+
+            with open(logger2.json_path) as f:
+                events_after_restart = json.load(f)
+
+            # Should have 3 events total (2 from first run + 1 from restart)
+            assert len(events_after_restart) == 3
+            # Check that original events are still there (newest first)
+            assert events_after_restart[0]["action_type"] == "pause"
+            assert events_after_restart[1]["action_type"] == "tag_add"
+            assert events_after_restart[2]["action_type"] == "hp_change"
+
+    def test_reverse_chronological_order_json(self):
+        """Test that JSON events are in reverse chronological order (newest first)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, "test", format="json", buffer_size=1)
+
+            logger.log_event("hp_change", "success", {"param": "lr"})
+            time.sleep(0.01)
+            logger.log_event("tag_add", "success", {"tag": "defect"})
+            time.sleep(0.01)
+            logger.log_event("pause", "success", {"state": "paused"})
+
+            with open(logger.json_path) as f:
+                events = json.load(f)
+
+            # Should be in reverse chronological order: newest first
+            assert len(events) == 3
+            assert events[0]["action_type"] == "pause"  # Most recent
+            assert events[1]["action_type"] == "tag_add"
+            assert events[2]["action_type"] == "hp_change"  # Oldest
+
+            # Timestamps should be in reverse order
+            ts0 = datetime.fromisoformat(events[0]["timestamp"].replace('Z', '+00:00'))
+            ts1 = datetime.fromisoformat(events[1]["timestamp"].replace('Z', '+00:00'))
+            ts2 = datetime.fromisoformat(events[2]["timestamp"].replace('Z', '+00:00'))
+            assert ts0 > ts1 > ts2
+
+
+class TestAuditLoggerBuffering:
+    """Test event buffering and flushing behavior."""
+
+    def test_events_buffered_before_flush(self):
+        """Test that events are buffered in memory before flushing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, "test", format="json", buffer_size=10)
+
+            # Add events below buffer threshold
+            for i in range(5):
+                logger.log_event("tag_add", "success", {"iteration": i})
+                # File should not exist yet (still buffered)
+                if i < 4:
+                    assert not logger.json_path.exists()
+
+            # After 5th event, file still shouldn't exist (threshold is 10)
+            assert not logger.json_path.exists()
+
+            # Manual flush should write events
+            logger.flush()
+            assert logger.json_path.exists()
+
+            with open(logger.json_path) as f:
+                events = json.load(f)
+            assert len(events) == 5
+
+    def test_auto_flush_on_buffer_threshold(self):
+        """Test that buffer auto-flushes when threshold is reached."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, "test", format="json", buffer_size=3)
+
+            # Add events up to threshold
+            logger.log_event("hp_change", "success", {"param": "lr"})
+            assert not logger.json_path.exists()  # Still buffered
+            logger.log_event("tag_add", "success", {"tag": "defect"})
+            assert not logger.json_path.exists()  # Still buffered
+            logger.log_event("pause", "success", {"state": "paused"})
+            # Now buffer is full (3 events), should auto-flush
+            assert logger.json_path.exists()
+
+            with open(logger.json_path) as f:
+                events = json.load(f)
+            assert len(events) == 3
+
+    def test_buffering_with_multiple_flushes(self):
+        """Test buffering behavior with multiple flush cycles."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = AuditLogger(tmpdir, "test", format="json", buffer_size=2)
+
+            # First batch (reaches threshold)
+            logger.log_event("hp_change", "success", {"param": "lr"})
+            logger.log_event("tag_add", "success", {"tag": "defect"})
+            assert logger.json_path.exists()
+
+            with open(logger.json_path) as f:
+                events1 = json.load(f)
+            assert len(events1) == 2
+
+            # Second batch (reaches threshold again)
+            logger.log_event("pause", "success", {"state": "paused"})
+            logger.log_event("resume", "success", {"state": "running"})
+
+            with open(logger.json_path) as f:
+                events2 = json.load(f)
+            # Should have 4 total (2 from first batch + 2 from second, in reverse order)
+            assert len(events2) == 4
+            assert events2[0]["action_type"] == "resume"  # Most recent
+            assert events2[3]["action_type"] == "hp_change"  # Oldest
+
     def test_get_log_summary_nonexistent_log(self):
         """Test summary when log file doesn't exist yet."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
             summary = logger.get_log_summary()
 
             assert summary["total_events"] == 0
@@ -454,7 +584,7 @@ class TestAuditLoggerRealWorldScenarios:
     def test_hyperparameter_change_scenario(self):
         """Test logging hyperparameter changes."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "mnist_experiment")
+            logger = AuditLogger(tmpdir, "mnist_experiment", buffer_size=1)
 
             # User changes learning rate
             logger.log_event(
@@ -475,7 +605,7 @@ class TestAuditLoggerRealWorldScenarios:
     def test_data_editing_scenario(self):
         """Test logging data editing operations."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "image_classification_experiment")
+            logger = AuditLogger(tmpdir, "image_classification_experiment", buffer_size=1)
 
             # User adds tags to samples
             logger.log_event(
@@ -507,7 +637,7 @@ class TestAuditLoggerRealWorldScenarios:
     def test_training_control_scenario(self):
         """Test logging training state changes."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "training_experiment")
+            logger = AuditLogger(tmpdir, "training_experiment", buffer_size=1)
 
             logger.log_event("resume", "success", {"trainer_state": "running"})
             time.sleep(0.01)  # Simulate training
@@ -518,22 +648,22 @@ class TestAuditLoggerRealWorldScenarios:
             with open(logger.json_path, 'r') as f:
                 events = json.load(f)
 
-            # Verify chronological order with timestamps
+            # Verify reverse chronological order with timestamps
             assert len(events) == 3
-            assert events[0]["action_type"] == "resume"
+            assert events[0]["action_type"] == "resume"  # Newest
             assert events[1]["action_type"] == "pause"
-            assert events[2]["action_type"] == "resume"
+            assert events[2]["action_type"] == "resume"  # Oldest
 
-            # Verify timestamps are in order
+            # Verify timestamps are in reverse chronological order (newest first)
             ts1 = events[0]["timestamp"]
             ts2 = events[1]["timestamp"]
             ts3 = events[2]["timestamp"]
-            assert ts1 < ts2 < ts3
+            assert ts1 > ts2 > ts3
 
     def test_failure_scenario(self):
         """Test logging failed operations."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            logger = AuditLogger(tmpdir, "test_experiment")
+            logger = AuditLogger(tmpdir, "test_experiment", buffer_size=1)
 
             # Failed checkpoint restore
             logger.log_event(
@@ -557,5 +687,6 @@ class TestAuditLoggerRealWorldScenarios:
             with open(logger.json_path, 'r') as f:
                 events = json.load(f)
 
-            assert events[0]["error"] == "Checkpoint file not found at /path/to/checkpoint"
-            assert events[1]["error"] == "Query parsing error: unexpected token"
+            # Reverse chronological order: query_execute (most recent) is first
+            assert events[0]["error"] == "Query parsing error: unexpected token"
+            assert events[1]["error"] == "Checkpoint file not found at /path/to/checkpoint"
