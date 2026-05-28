@@ -359,10 +359,6 @@ class TestDataLoaderInterface(unittest.TestCase):
         total_collected = manual_batches_collected + for_loop_batches_collected
         self.assertGreater(total_collected, batches_per_epoch)
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
     def test_epoch_exhausted_flag_behavior(self):
         """Verify internal _epoch_exhausted flag is properly set and reset."""
         # This test directly verifies the lazy reset pattern behavior
@@ -419,11 +415,6 @@ class TestDataLoaderInterface(unittest.TestCase):
         expected_total = epochs * batches_per_epoch
         self.assertEqual(total_batches_collected, expected_total)
 
-=======
->>>>>>> e51a273ebbc415e68cb5c775b12793dc45d80d00
->>>>>>> b675a42d3ee1bb22db6dbfcab6fb1b6ab74acde1
-=======
->>>>>>> 686bb98c727fb594a63b7a14937103edbe2ee55e
 
 class TestDataLoaderReproducibility(unittest.TestCase):
     """Test RNG and iteration state reproducibility for dataloaders."""
