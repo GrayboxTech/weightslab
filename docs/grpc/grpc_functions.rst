@@ -171,7 +171,7 @@ The ``ExperimentService`` exposes the following RPC methods:
    - Per-sample data available when tagged samples tracked
    - Enforces concurrency limit (max 3 concurrent calls)
 
-   **Audit Logged:** Yes - metrics_fetch
+   **Audit Logged:** No (read-only operation)
 
 **Checkpoint Management**
 
@@ -360,7 +360,7 @@ The ``ExperimentService`` exposes the following RPC methods:
    - Respects current filters/query view
    - Returns metadata columns for sorting/filtering
 
-   **Audit Logged:** Yes - data_fetch
+   **Audit Logged:** No (read-only operation)
 
 8. **ApplyDataQuery**
 

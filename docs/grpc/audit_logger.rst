@@ -41,12 +41,10 @@ The audit logger tracks the following user actions across all gRPC handlers:
 - ``sample_discard``: Mark samples as discarded (from EditDataSample)
 - ``sample_restore``: Restore discarded samples (from EditDataSample)
 - ``query_execute``: Execute data queries (filters, analysis) from ApplyDataQuery
-- ``data_fetch``: Retrieve sample batches (from GetDataSamples)
 
 **Checkpoint & Evaluation**
 - ``checkpoint_restore``: Restore model from checkpoint (from RestoreCheckpoint)
 - ``evaluation_start``: Begin evaluation on a dataset split (from TriggerEvaluation)
-- ``metrics_fetch``: Fetch training metrics (from GetLatestLoggerData)
 
 See :doc:`grpc_functions` for details on all RPC methods.
 
@@ -281,7 +279,7 @@ You need to reproduce a previous experiment exactly:
 
 1. Extract all ``hp_change`` events in chronological order
 2. Note the final hyperparameter values
-3. Review ``data_fetch`` and ``query_execute`` to understand data preparation
+3. Review ``query_execute`` to understand data preparation (tags, filtering)
 4. Reproduce using the same sequence of operations
 
 **Scenario 4: Investigating Failures**
