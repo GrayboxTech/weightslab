@@ -451,7 +451,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
          if subscribers:
              # Get logger history
-             signal_history = ledgers.get_logger().get_current_signaL_history(reg_name, meta=True)
+             signal_history_per_sample = ledgers.get_logger().get_current_signaL_history_per_sample(reg_name, sample_ids=ids_np) if meta.get('include_history', False) else None
 
              # Resolve generic value vector
              val_tensor = out
@@ -498,7 +498,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          continue
 
                      try:
-                         batch_res = []
+                         batch_res = {}
                          for i, uid in enumerate(ids_np):
                              # Generic 'value' argument
                              val = float(val_vec[i])
@@ -507,18 +507,22 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              ctx = SignalContext(
                                  sample_id=int(uid),
                                  subscribed_value=val,
-                                 subscribed_history=signal_history,
+                                 subscribed_history=signal_history_per_sample.get(uid) if signal_history_per_sample is not None else None,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train')
                              )
                              try:
-                                 res = func(ctx)
+                                 res = func(ctx)  # Compute per sample result with unified context
                              except TypeError:
                                  # Fallback for legacy subscriber functions
                                  res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
 
-                             batch_res.append(res)
-                         dynamic_updates[name] = np.array(batch_res)
+                             batch_res[uid] = res
+                         signal_value = list(batch_res.values())
+                         dynamic_updates[name] = signal_value
+                         if dynamic_updates and meta.get('log', True):
+                             logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
+                             _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs)  # Log custom subscribed signals
                      except Exception as e:
                          logger.debug(f"Dynamic signal {name} failed: {e}")
                          pass  # User function error, skip
@@ -1069,12 +1073,6 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         func._wl_signal_meta['subscribe_to'] = subscribe_to
         func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
         func._wl_signal_name = reg_name
-
-        # Register in global ledger for visibility by backend services
-        try:
-            register_signal(func, name=reg_name)
-        except Exception as e:
-            logger.warning(f"Failed to register signal '{reg_name}' in ledger: {e}")
 
         return func
     return decorator
@@ -2510,12 +2508,9 @@ def _resolve_eval_sampler(loader_if):
 
 def _get_eval_timeout_config() -> tuple[float, float, float]:
     """Return (multiplier, min_seconds, absolute_seconds_override)."""
-    multiplier = 1.3
-    min_seconds = 5.0
-    absolute_timeout = 0.0
 
     try:
-        multiplier = max(1.0, float(os.getenv("WEIGHTSLAB_EVAL_TIMEOUT_MULTIPLIER", "1.3")))
+        multiplier = max(1.0, float(os.getenv("WEIGHTSLAB_EVAL_TIMEOUT_MULTIPLIER", "13")))
     except Exception:
         multiplier = 1.3
 
