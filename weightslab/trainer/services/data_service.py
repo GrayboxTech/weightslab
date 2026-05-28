@@ -272,7 +272,6 @@ class DataService:
         if self._compute_natural_sort:
            self._compute_natural_sort_stats()
 
-        # self._compute_custom_signals()
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         # =====================================================================
@@ -821,7 +820,7 @@ class DataService:
 
     def _compute_natural_sort_stats(self):
         """
-        Compute natural sort statistics (brightness, hue, saturation, entropy) for all samples
+        Compute hardcoded natural sort statistics (brightness, hue, saturation, entropy) for all samples
         and update the dataframe.
 
         Includes 'signals.defaults.natural' (the weighted composite) for sorting.
