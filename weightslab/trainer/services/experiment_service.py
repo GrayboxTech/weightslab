@@ -593,6 +593,18 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 except Exception:
                     logger.debug("Could not persist logger snapshot after note update", exc_info=True)
 
+            # Log to audit trail
+            self._log_audit_event(
+                "note_write",
+                "success",
+                {
+                    "metric_name": metric_name,
+                    "model_age": model_age,
+                    "note_text": note_text,
+                    "note_action": "saved" if note_text.strip() else "cleared",
+                },
+            )
+
             return pb2.CommandResponse(
                 success=True,
                 message=(

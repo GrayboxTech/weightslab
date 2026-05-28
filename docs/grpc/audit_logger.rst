@@ -46,6 +46,9 @@ The audit logger tracks the following user actions across all gRPC handlers:
 - ``checkpoint_restore``: Restore model from checkpoint (from RestoreCheckpoint)
 - ``evaluation_start``: Begin evaluation on a dataset split (from TriggerEvaluation)
 
+**Annotations**
+- ``note_write``: Write or clear notes on plot points (from ExperimentCommand)
+
 See :doc:`grpc_functions` for details on all RPC methods.
 
 Details Captured
