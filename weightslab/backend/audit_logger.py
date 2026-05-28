@@ -23,7 +23,7 @@ class AuditEvent:
 
 class AuditLogger:
     """
-    Thread-safe audit logger that writes events to JSON or CSV files.
+    Thread-safe audit logger that writes events immediately to JSON or CSV files.
     Events are persisted to existing files (or created if missing).
     Output format is configurable via AUDIT_LOG_FORMAT environment variable.
     Set format to "none" to disable audit logging entirely.
@@ -31,21 +31,17 @@ class AuditLogger:
     Features:
     - Persistent: Appends to existing audit logs when restarting experiments
     - Reverse chronological: Recent events appear first (newest at top)
-    - Buffered writes: Events are buffered and flushed periodically to reduce I/O
+    - Immediate writes: Events written to disk immediately after logging (no data loss on crash)
     """
 
     # Valid output formats (including "none" to disable)
     VALID_FORMATS = ("json", "csv", "none")
-
-    # Buffer size before flushing to disk (similar to logger chunking approach)
-    DEFAULT_BUFFER_SIZE = 50
 
     def __init__(
         self,
         root_log_dir: str,
         experiment_name: str = "default",
         format: Optional[Literal["json", "csv", "none"]] = None,
-        buffer_size: int = DEFAULT_BUFFER_SIZE,
     ):
         """
         Initialize audit logger.
@@ -56,7 +52,6 @@ class AuditLogger:
             format: Output format ("json", "csv", or "none" to disable).
                    If None, uses AUDIT_LOG_FORMAT environment variable.
                    Defaults to "json" if not specified.
-            buffer_size: Number of events to buffer before flushing to disk (default: 50)
         """
         self.root_log_dir = Path(root_log_dir)
         self.experiment_name = experiment_name
@@ -78,13 +73,9 @@ class AuditLogger:
         self.format = format
         self.json_path = self.root_log_dir / "audit_log.json"
         self.csv_path = self.root_log_dir / "audit_log.csv"
-        self.buffer_size = buffer_size
 
         # Thread lock for file operations
         self._lock = threading.Lock()
-
-        # Event buffer for batching writes (reduces I/O similar to logger chunking)
-        self._event_buffer = []
 
         status = "disabled" if format == "none" else f"enabled ({format} format)"
         logger.debug(
@@ -101,6 +92,7 @@ class AuditLogger:
     ) -> None:
         """
         Log an audit event with before/after details.
+        Events are written immediately to disk (no buffering).
 
         Args:
             action_type: Type of action (e.g., "hp_change", "tag_add", etc.)
@@ -122,18 +114,16 @@ class AuditLogger:
             error=error,
         )
 
-        # Add to buffer
+        # Write immediately to disk
         with self._lock:
             try:
-                self._event_buffer.append(event)
-
-                # Flush buffer if it reaches threshold
-                if len(self._event_buffer) >= self.buffer_size:
-                    self._flush_buffer()
+                if self.format == "json":
+                    self._write_json(event)
+                elif self.format == "csv":
+                    self._write_csv(event)
 
                 logger.debug(
-                    f"[AuditLogger] Logged {action_type} ({status}) - buffered "
-                    f"({len(self._event_buffer)}/{self.buffer_size})"
+                    f"[AuditLogger] Logged {action_type} ({status})"
                 )
             except Exception as e:
                 logger.error(
@@ -141,32 +131,8 @@ class AuditLogger:
                     exc_info=True
                 )
 
-    def _flush_buffer(self) -> None:
-        """Flush buffered events to disk. Must be called within lock."""
-        if not self._event_buffer:
-            return
-
-        try:
-            if self.format == "json":
-                self._flush_to_json()
-            elif self.format == "csv":
-                self._flush_to_csv()
-
-            logger.debug(f"[AuditLogger] Flushed {len(self._event_buffer)} events to disk")
-            self._event_buffer.clear()
-        except Exception as e:
-            logger.error(f"[AuditLogger] Failed to flush buffer: {e}", exc_info=True)
-
-    def flush(self) -> None:
-        """Manually flush any pending events to disk."""
-        with self._lock:
-            self._flush_buffer()
-
-    def _flush_to_json(self) -> None:
-        """Flush buffered events to JSON log file in reverse chronological order (newest first)."""
-        if not self._event_buffer:
-            return
-
+    def _write_json(self, event: AuditEvent) -> None:
+        """Write a single event to JSON log file in reverse chronological order (newest first)."""
         # Read existing events (for persistence when restarting)
         events = []
         if self.json_path.exists():
@@ -182,25 +148,22 @@ class AuditLogger:
                 )
                 events = []
 
-        # Prepend new events in reverse order (latest in buffer is most recent)
-        new_events = [asdict(event) for event in reversed(self._event_buffer)]
-        events = new_events + events
+        # Prepend new event (reverse chronological: newest first)
+        new_event = asdict(event)
+        events = [new_event] + events
 
         # Write back to file
         with open(self.json_path, 'w', encoding='utf-8') as f:
             json.dump(events, f, indent=2, default=str)
 
-    def _flush_to_csv(self) -> None:
-        """Flush buffered events to CSV log file (appends to end, newest rows at bottom)."""
-        if not self._event_buffer:
-            return
-
+    def _write_csv(self, event: AuditEvent) -> None:
+        """Append a single event to CSV log file."""
         fieldnames = ['timestamp', 'action_type', 'status', 'details', 'error']
 
         # Check if file exists and has content
         file_exists = self.csv_path.exists() and self.csv_path.stat().st_size > 0
 
-        # Append buffered events to CSV
+        # Append event to CSV
         with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
 
@@ -208,16 +171,15 @@ class AuditLogger:
             if not file_exists:
                 writer.writeheader()
 
-            for event in self._event_buffer:
-                details_json = json.dumps(event.details) if event.details else ''
-                row = {
-                    'timestamp': event.timestamp,
-                    'action_type': event.action_type,
-                    'status': event.status,
-                    'details': details_json,
-                    'error': event.error or '',
-                }
-                writer.writerow(row)
+            details_json = json.dumps(event.details) if event.details else ''
+            row = {
+                'timestamp': event.timestamp,
+                'action_type': event.action_type,
+                'status': event.status,
+                'details': details_json,
+                'error': event.error or '',
+            }
+            writer.writerow(row)
 
     def get_log_summary(self) -> Dict[str, Any]:
         """

@@ -21,7 +21,8 @@ Key Features
 - **Detailed tracking**: Before/after values show exactly what changed in each operation
 - **Dual format output**: Both JSON (for parsing) and CSV (for spreadsheet analysis)
 - **Thread-safe**: Concurrent operations are safely logged without data loss
-- **Immediate persistence**: Synchronous writes ensure no loss on application crash
+- **Immediate writes**: Events are written to disk immediately after logging (no data loss on process crash)
+- **Reverse chronological**: Newest events appear first in JSON for easy review
 - **ISO 8601 timestamps**: Microsecond precision for accurate sequencing
 
 Logged Actions
