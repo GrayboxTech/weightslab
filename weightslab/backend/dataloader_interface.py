@@ -16,7 +16,6 @@ It also supports:
 - checkpoint-based data loading and reproducible iterator restoration
 """
 import os
-import threading
 import torch
 import logging
 from typing import Any, Iterator, Optional
@@ -25,7 +24,6 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
-from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
@@ -771,7 +769,6 @@ class DataLoaderInterface:
         5. Next next(loader): calls __iter__() which DOES reset (epoch exhausted)
         """
         self._sync_batch_size_from_ledger()
-        self._wait_if_paused()
 
         # Only reset iterator if:
         # 1. Not initialized yet (no _iterator attribute)
@@ -828,7 +825,6 @@ class DataLoaderInterface:
 
         try:
             res = self._next_batch()
-            self._wait_if_paused()
             return res
         except StopIteration:
             # Mark that epoch is exhausted; next __next__ call will reset
@@ -873,25 +869,6 @@ class DataLoaderInterface:
         except Exception:
             # Don't let ledger issues break basic iteration
             return
-
-    def _wait_if_paused(self) -> None:
-        """If the global pause controller is paused, wait until resumed."""
-        try:
-            # Only the evaluation worker thread itself bypasses pause — this way
-            # training threads still respect the pause state even while eval runs,
-            # and only the batches fetched by the eval thread are unblocked.
-            if threading.current_thread().name == "WL-EvalWorker":
-                return
-
-            pause_controller.wait_if_paused()
-            if self.model != None:
-                m_age = self.model.get_age()
-                if m_age > 0 and m_age == self.hp.get("pause_at_step", -1):
-                    logger.info("Model is paused as model aged; waiting for resume...")
-                    pause_controller.pause()
-        except Exception:
-            # Fail-open if pause controller is not available
-            pass
 
     # -------------------------------------------------------------------------
     # Batch iteration helpers
