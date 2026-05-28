@@ -16,7 +16,6 @@ It also supports:
 - checkpoint-based data loading and reproducible iterator restoration
 """
 import os
-import threading
 import torch
 import logging
 from typing import Any, Iterator, Optional
@@ -25,7 +24,6 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
-from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
