@@ -57,7 +57,6 @@ class TestAuditLoggerInitialization:
         """Test that AuditLogger creates parent directories if needed."""
         with tempfile.TemporaryDirectory() as tmpdir:
             nested_dir = Path(tmpdir) / "nested" / "path"
-            logger = AuditLogger(str(nested_dir), "test_experiment")
             assert nested_dir.exists()
 
     def test_logger_with_default_experiment_name(self):
