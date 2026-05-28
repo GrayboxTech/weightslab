@@ -2713,19 +2713,6 @@ class DataService:
                     data_records=[]
                 )
 
-            # Log successful data fetch
-            self._log_audit(
-                "data_fetch",
-                "success",
-                {
-                    "batch_index": request.start_index,
-                    "samples_count": len(data_records),
-                    "batch_size": request.records_cnt,
-                    "resize_width": request.resize_width,
-                    "resize_height": request.resize_height,
-                },
-            )
-
             return pb2.DataSamplesResponse(
                 success=True,
                 message=f"Retrieved {len(data_records)} data records",

@@ -127,7 +127,6 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         components = self._ctx.components
         signal_logger = components.get("signal_logger")
         if signal_logger ==  None:
-            self._log_audit("metrics_fetch", "failed", error="Signal logger unavailable")
             return pb2.GetLatestLoggerDataResponse(points=[])
 
         # Drop the request early if the client already disconnected
@@ -295,16 +294,6 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     )
                 )
 
-        self._log_audit(
-            "metrics_fetch",
-            "success",
-            {
-                "signals_count": len(set(p.metric_name for p in points)),
-                "signal_names": list(set(p.metric_name for p in points)),
-                "points_returned": len(points),
-                "break_by_slices": request.break_by_slices,
-            },
-        )
         return pb2.GetLatestLoggerDataResponse(points=points)
 
     def RestoreCheckpoint(self, request, context):
