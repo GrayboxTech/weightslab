@@ -1,4 +1,10 @@
-"""WL integration for Ultralytics YOLO detection training."""
+"""Benchmark variant of main.py: configurable num_workers + epochs, with timing and progress prints.
+
+Env vars:
+    WL_BENCH_WORKERS: num_workers for both train & val loaders (default 0)
+    WL_BENCH_EPOCHS:  number of train epochs to run (default 1)
+    WL_BENCH_LOG_EVERY: log loss/iou every N steps (default 20)
+"""
 import os
 os.environ.setdefault("WL_PRELOAD_IMAGE_OVERVIEW", "0")
 os.environ.setdefault("WEIGHTSLAB_LOG_LEVEL", "WARNING")
@@ -6,14 +12,11 @@ os.environ.setdefault("WEIGHTSLAB_LOG_LEVEL", "WARNING")
 import warnings
 from tables import NaturalNameWarning
 warnings.filterwarnings("ignore", category=NaturalNameWarning)
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning,
-    message="Setting an item of incompatible dtype is deprecated.*",
-)
+warnings.filterwarnings("ignore", category=FutureWarning, message="Setting an item of incompatible dtype is deprecated.*")
 
 import logging
 import tempfile
+import time
 
 import torch
 import yaml
@@ -33,6 +36,10 @@ logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
 
 
+_WORKERS = int(os.environ.get("WL_BENCH_WORKERS", "0"))
+_EPOCHS = int(os.environ.get("WL_BENCH_EPOCHS", "1"))
+_WALL_S = float(os.environ.get("WL_BENCH_WALL_S", "0") or "0")  # 0 disables wall-time mode
+_LOG_EVERY = int(os.environ.get("WL_BENCH_LOG_EVERY", "20"))
 _LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
 
 
@@ -50,30 +57,33 @@ def _decode_preds_to_6col(raw_preds, image, conf, cls_thresh, device=None):
     ]
 
 
-class WLCompatileDetTrainer(DetectionTrainer):
+class BenchTrainer(DetectionTrainer):
     def __init__(self, *a, **kw):
         self.data_train_loader = kw.pop("train_loader")
         self.data_val_loader = kw.pop("val_loader")
         self.hparams = kw.pop("hparams", {})
         self.device = kw.get("device", torch.device("cpu"))
+        self._bench_max_steps = kw.pop("max_steps")
         super().__init__(*a, **kw)
         self._init_experiment_modules()
 
     @property
     def val_every(self):
+        if os.environ.get("WL_BENCH_NO_VAL") == "1":
+            return 1 << 30  # effectively never, for clean training-throughput benchmarking
         return self.hparams.get("eval_full_to_train_steps_ratio", 1)
 
     def _init_experiment_modules(self):
         super().setup_model()
         self.model = self.model.to(self.device)
-
-        # Order matters: _setup_train builds the optimizer, which iterates model.modules()
-        # with isinstance checks that fail once WL wraps the model. Run it BEFORE wrapping.
         self._init_training_loss()
         self._setup_train()
         self.optimizer = wl.watch_or_edit(self.optimizer, flag="optimizer")
         self.model = wl.watch_or_edit(
             self.model, flag="model", device=self.device, compute_dependencies=False)
+        # watch_or_edit(flag="model") drops its device= kwarg (returns the proxy without
+        # honoring it), leaving the model on CPU — force it back onto the target device.
+        self.model = self.model.to(self.device)
 
     def _init_training_loss(self):
         if not hasattr(self.model, "args"):
@@ -93,23 +103,27 @@ class WLCompatileDetTrainer(DetectionTrainer):
 
     def train(self):
         cs, m = self.criterions["train"], self.iou["train"]
+        max_steps = self._bench_max_steps
+        log_every = _LOG_EVERY
 
-        # `yield from loader` re-iterates each pass, re-invoking the sampler — so
-        # shuffle=True re-shuffles each epoch instead of recycling order.
         def _infinite(loader):
             while True:
                 yield from loader
         batches = _infinite(self.data_train_loader)
 
-        while True:
+        t_train_start = time.perf_counter()
+        wall_deadline = (t_train_start + _WALL_S) if _WALL_S > 0 else float("inf")
+        step = 0
+        loss_sum = 0.0
+        last_loss = float("nan")
+        step_t = time.perf_counter()
+        while step < max_steps and time.perf_counter() < wall_deadline:
             with wl.guard_training_context:
                 self.optimizer.zero_grad()
                 inputs = next(batches)
                 image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
-
                 raw_preds = self.model(image.to(self.device))
                 preds_by_batch = _decode_preds_to_6col(raw_preds, image, conf=0.1, cls_thresh=0.1)
-
                 per_sample = (
                     cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
                     + cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
@@ -117,14 +131,33 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 )
                 loss = per_sample.mean()
                 m(raw_preds, batch, batch_ids=batch_ids)
-
                 loss.backward()
                 self.optimizer.step()
                 self.scheduler.step()
 
-            if self.model.get_age() % self.val_every == 0:
+            last_loss = float(loss.detach().cpu())
+            loss_sum += last_loss
+            step += 1
+            if step % log_every == 0 or step == max_steps:
+                dt = time.perf_counter() - step_t
+                ips = (log_every * image.shape[0]) / max(dt, 1e-9)
+                print(f"  [step {step}/{max_steps}] loss={loss_sum/log_every:.4f}  {dt:.2f}s  ({ips:.1f} img/s)", flush=True)
+                loss_sum = 0.0
+                step_t = time.perf_counter()
+
+            if step % self.val_every == 0 and step < max_steps:
                 with wl.guard_testing_context:
+                    val_start = time.perf_counter()
                     self.do_validate(self.data_val_loader)
+                    print(f"  [val @ step {step}] {time.perf_counter()-val_start:.2f}s", flush=True)
+
+        total = time.perf_counter() - t_train_start
+        try:
+            age = int(self.model.get_age())
+        except Exception:
+            age = -1
+        print(f"  TRAIN DONE: {step} steps in {total:.2f}s  ({step/total:.2f} steps/s)  model_age={age}  last_loss={last_loss:.4f}", flush=True)
+        return total
 
     def do_validate(self, loader):
         cs, m = self.criterions["val"], self.iou["val"]
@@ -133,7 +166,6 @@ class WLCompatileDetTrainer(DetectionTrainer):
             raw_preds = self.model(image.to(self.device))[1]
             preds_by_batch = _decode_preds_to_6col(
                 raw_preds, image, conf=0.25, cls_thresh=0.5, device=self.device)
-
             cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
             cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
             cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
@@ -141,8 +173,10 @@ class WLCompatileDetTrainer(DetectionTrainer):
 
 
 def main():
+    print('[T0] main() entered', flush=True)
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     parameters = yaml.safe_load(open(config_path)) if os.path.exists(config_path) else {}
+    print('[T1] config loaded', flush=True)
 
     if parameters.get("device", "auto") == "auto":
         parameters["device"] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -153,8 +187,7 @@ def main():
     exp_name = parameters["experiment_name"]
     log_dir = parameters["root_log_dir"]
     device = parameters["device"]
-    image_size = parameters.get("image_size")
-    max_steps = parameters.get("training_steps_to_do")
+    image_size = int(os.environ.get("WL_BENCH_IMGSZ") or parameters.get("image_size"))
     data_root = parameters["data_root"]
     model_name = parameters["model"]["name"]
     train_cfg = dict(parameters["data"]["train_loader"])
@@ -168,15 +201,8 @@ def main():
                                   name=exp_name, defaults=parameters, poll_interval=1.0)
 
     cfg = get_cfg()
-    if image_size is not None:
-        cfg.imgsz = image_size
-    for k in ("mosaic", "mixup", "copy_paste",
-              "hsv_h", "hsv_s", "hsv_v",
-              "degrees", "translate", "scale", "shear", "perspective",
-              "flipud", "fliplr", "erasing"):
-        setattr(cfg, k, 0.0)
-    cfg.auto_augment = None
-
+    cfg.imgsz = image_size; cfg.rect = False; cfg.single_cls = False
+    cfg.task = "detect"; cfg.classes = None; cfg.fraction = 1.0
     checked_data = check_det_dataset(data_root)
 
     def _build_dataset(split):
@@ -198,31 +224,40 @@ def main():
         return wl.watch_or_edit(
             ds, flag="data", loader_name=f"{split}_loader",
             batch_size=c["batch_size"], shuffle=c["shuffle"],
-            num_workers=2,
+            num_workers=_WORKERS,
             drop_last=False, compute_hash=False,
             is_training=(split == "train"),
             collate_fn=_wl_yolo_collate,
             preload_labels=True, preload_metadata=True,
         )
 
-    train_loader = _build_loader(_build_dataset("train"), "train")
+    print('[T2] building train dataset', flush=True)
+    _tr_ds = _build_dataset("train")
+    print('[T3] building train loader', flush=True)
+    train_loader = _build_loader(_tr_ds, "train")
+    print('[T4] building val dataset+loader', flush=True)
     val_loader = _build_loader(_build_dataset("val"), "val")
+    print('[T5] loaders built', flush=True)
+
+    steps_per_epoch = len(train_loader)
+    max_steps = steps_per_epoch * _EPOCHS
+
+    print(f"=== BENCH START ===", flush=True)
+    print(f"  workers={_WORKERS} epochs={_EPOCHS} wall_s={_WALL_S} steps_per_epoch={steps_per_epoch} max_steps={max_steps}", flush=True)
+    print(f"  device={device}  batch_train={train_cfg['batch_size']} batch_val={test_cfg['batch_size']}", flush=True)
+    print(f"  train_samples={len(train_loader.tracked_dataset)} val_samples={len(val_loader.tracked_dataset)}", flush=True)
 
     wl.serve(serving_grpc=serving_grpc, serving_cli=serving_cli)
 
-    trainer = WLCompatileDetTrainer(
+    trainer = BenchTrainer(
         overrides=dict(
-            model=model_name,
-            data=str(data_root),
-            epochs=1000 if max_steps is None else max(1, max_steps // len(train_loader)),
-            imgsz=image_size,
-            batch=batch_size, resume=False,
-            device=device,
-            workers=2, cache=False, optimizer="SGD", lr0=0.001,
+            model=model_name, data=str(data_root),
+            epochs=_EPOCHS, imgsz=image_size,
+            batch=batch_size, resume=False, device=device,
+            workers=_WORKERS, cache=False, optimizer="SGD", lr0=0.001,
         ),
-        train_loader=train_loader,
-        val_loader=val_loader,
-        hparams=parameters,
+        train_loader=train_loader, val_loader=val_loader,
+        hparams=parameters, max_steps=max_steps,
     )
 
     @wl.eval_fn
@@ -230,8 +265,11 @@ def main():
         trainer.do_validate(loader)
 
     pause_controller.resume(force=True)
+    t0 = time.perf_counter()
     trainer.train()
-    wl.keep_serving()
+    wall = time.perf_counter() - t0
+    print(f"=== BENCH END workers={_WORKERS} epochs={_EPOCHS} wall={wall:.2f}s ===", flush=True)
+    # exit cleanly — do NOT call wl.keep_serving()
 
 
 if __name__ == "__main__":

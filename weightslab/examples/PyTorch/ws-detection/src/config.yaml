@@ -2,13 +2,13 @@
 device: auto
 experiment_name: det_YOLO_usecase
 training_steps_to_do: null  # Set to null for infinite training until manually stopped
-# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
+root_log_dir: .  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
 
 # Checkppoint Manager
 checkpoint_manager:
-  load_config: true  # Disable loading previous checkpoint configuration to allow for changes in the current config.yaml file
-  load_data: true  # Disable loading previous checkpoint data to allow for changes in the current config.yaml file
-  load_model: true  # Disable loading previous checkpoint model weights and archi. to allow for changes in the current config.yaml file
+  load_config: true  
+  load_data: true
+  load_model: true 
 
 # Model config.
 model:
@@ -32,13 +32,13 @@ serving_cli: false
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
 ledger_enable_h5_persistence: true
-ledger_flush_max_rows: 50
+ledger_flush_max_rows: 5000
 ledger_flush_interval: 60.0
 
 # Data
 num_classes: 2
 image_size: 1024
-data_root: ./data/data.yaml
+data_root: /home/rotaru/Desktop/GRAYBOX/datasets/TrespassColor.v6i.yolov8/data.yaml
 data:
   train_loader:
     batch_size: 4
