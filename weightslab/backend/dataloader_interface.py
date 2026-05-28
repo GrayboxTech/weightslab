@@ -872,25 +872,6 @@ class DataLoaderInterface:
             # Don't let ledger issues break basic iteration
             return
 
-    def _wait_if_paused(self) -> None:
-        """If the global pause controller is paused, wait until resumed."""
-        try:
-            # Only the evaluation worker thread itself bypasses pause — this way
-            # training threads still respect the pause state even while eval runs,
-            # and only the batches fetched by the eval thread are unblocked.
-            if threading.current_thread().name == "WL-EvalWorker":
-                return
-
-            pause_controller.wait_if_paused()
-            if self.model != None:
-                m_age = self.model.get_age()
-                if m_age > 0 and m_age == self.hp.get("pause_at_step", -1):
-                    logger.info("Model is paused as model aged; waiting for resume...")
-                    pause_controller.pause()
-        except Exception:
-            # Fail-open if pause controller is not available
-            pass
-
     # -------------------------------------------------------------------------
     # Batch iteration helpers
     # -------------------------------------------------------------------------
