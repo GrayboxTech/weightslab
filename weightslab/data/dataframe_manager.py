@@ -1030,6 +1030,9 @@ class LedgeredDataFrameManager:
     def _normalize_arrays_for_storage(self, row: pd.Series) -> Any:
         """Normalize array columns to use get_mask before H5 storage."""
         dataset = None
+        # When the dataframe is multi-indexed, row.name is a (sample_id, annotation_id)
+        # tuple — extract just the sample_id for dataset lookup.
+        sample_id = row.name[0] if isinstance(row.name, tuple) else row.name
         for col in row.index:
             value = row[col]
 
@@ -1040,10 +1043,10 @@ class LedgeredDataFrameManager:
                     loader = self._get_loader_by_origin(row.get("origin"))
                     dataset = getattr(loader, "wrapped_dataset", None)
                 try:
-                    dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
+                    dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset is not None else None
                     row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
                 except Exception as e:
-                    logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={row.name}: {e}")
+                    logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={sample_id}: {e}")
         return row
 
     def _broadcast_to_multi_index(self, df_updates: pd.DataFrame) -> pd.DataFrame:

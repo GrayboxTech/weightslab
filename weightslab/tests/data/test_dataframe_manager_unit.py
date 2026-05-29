@@ -264,6 +264,36 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         self.assertAlmostEqual(result.loc[("1", 1), col], 0.99)
         self.assertAlmostEqual(result.loc[("1", 2), col], 0.99)
 
+    def test_normalize_arrays_for_storage_handles_multi_index_row(self):
+        """_normalize_arrays_for_storage must extract sample_id from MultiIndex tuples.
+
+        Regression test: when the dataframe is multi-indexed, ``row.name`` is a
+        ``(sample_id, annotation_id)`` tuple. The previous code passed the
+        tuple directly to ``dataset.get_index_from_sample_id`` which expects a
+        plain ``sample_id`` — flooding the log with KeyError-string warnings.
+        """
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        captured = {}
+        # Fake dataset that records what was passed to it
+        class _FakeDataset:
+            def get_index_from_sample_id(self, sid):
+                captured['sid'] = sid
+                return 7
+        # Stub out the loader lookup so the dataset is reachable
+        mgr._get_loader_by_origin = lambda origin: type('L', (), {'wrapped_dataset': _FakeDataset()})()
+
+        # Build a row that mimics a multi-index row with an array column
+        row = pd.Series({
+            "origin": "train",
+            SampleStats.Ex.TARGET.value: np.zeros((30, 30), dtype=np.float32),
+        })
+        row.name = ("12", 0)  # MultiIndex-style row.name
+
+        # Should not raise and should pass just the sample_id, not the tuple
+        mgr._normalize_arrays_for_storage(row)
+        self.assertEqual(captured.get('sid'), "12")
+
     def test_enqueue_instance_batch_writes_per_annotation(self):
         """enqueue_instance_batch writes one signal value per (sample_id, annotation_id)."""
         mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
