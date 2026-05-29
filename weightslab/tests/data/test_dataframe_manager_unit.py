@@ -202,5 +202,37 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         # Real compression achieved by pandas
 
 
+    def test_enqueue_instance_batch_writes_per_annotation(self):
+        """enqueue_instance_batch writes one signal value per (sample_id, annotation_id)."""
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        # Seed multi-instance dataframe: sample 1 has 3 instances, sample 2 has 2
+        target1 = [np.array([10, 20, 30, 40]), np.array([50, 60, 70, 80]), np.array([90, 100, 110, 120])]
+        target2 = [np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8])]
+        df = pd.DataFrame([
+            {"sample_id": 1, "origin": "train", SampleStats.Ex.TARGET.value: target1},
+            {"sample_id": 2, "origin": "train", SampleStats.Ex.TARGET.value: target2},
+        ]).set_index("sample_id")
+        mgr.upsert_df(df, origin="train")
+
+        # Write per-instance IoU signals
+        mgr.enqueue_instance_batch(
+            sample_ids=["1", "1", "1", "2", "2"],
+            annotation_ids=[0, 1, 2, 0, 1],
+            losses={"signals//train/iou_instance": np.array([0.9, 0.8, 0.7, 0.5, 0.6])},
+            step=5,
+            origin="train",
+        )
+
+        result = mgr.get_df_view()
+        self.assertIn("signals//train/iou_instance", result.columns)
+        # Each instance should have its IoU value at (sample_id, annotation_id)
+        self.assertAlmostEqual(result.loc[("1", 0), "signals//train/iou_instance"], 0.9)
+        self.assertAlmostEqual(result.loc[("1", 1), "signals//train/iou_instance"], 0.8)
+        self.assertAlmostEqual(result.loc[("1", 2), "signals//train/iou_instance"], 0.7)
+        self.assertAlmostEqual(result.loc[("2", 0), "signals//train/iou_instance"], 0.5)
+        self.assertAlmostEqual(result.loc[("2", 1), "signals//train/iou_instance"], 0.6)
+
+
 if __name__ == "__main__":
     unittest.main()

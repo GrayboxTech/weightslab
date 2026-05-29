@@ -19,7 +19,7 @@ import torch as th
 import weightslab as wl
 
 from tqdm import tqdm
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Dict
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -415,8 +415,41 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         except Exception as e:
             logger.debug(f"Automatic backend discard masking failed: {e}")
 
+    # Per-instance handling: extract instance values + batch_idx mapping
+    # and save per-annotation to dataframe. `out` may be a dict
+    # {'instance', 'sample', 'batch'} or a flat tensor of instance values.
+    per_instance = kwargs.get('per_instance', False)
+    instance_values = None
+    instance_batch_idx = None
+    if per_instance:
+        # Resolve instance tensor (dict from PerInstanceDetectionLoss, or flat tensor from PerInstanceIoU)
+        if isinstance(out, dict) and 'instance' in out:
+            instance_values = out['instance']
+        else:
+            instance_values = out
+
+        # Locate batch_idx that maps each instance to a sample position.
+        # Convention: detection tasks pass `batch` dict (with 'batch_idx') as
+        # positional arg #2; we also accept it via kwargs.
+        for arg in a:
+            if isinstance(arg, dict) and 'batch_idx' in arg:
+                instance_batch_idx = arg['batch_idx']
+                break
+        if instance_batch_idx is None and 'batch_idx' in kw:
+            instance_batch_idx = kw['batch_idx']
+
+    # If output is a dict (from PerInstanceDetectionLoss), pick 'sample'
+    # for downstream per-sample logging while keeping the original dict for
+    # the caller (so they can still use out['batch'] for backward).
+    out_original = out
+    if isinstance(out, dict):
+        if 'sample' in out:
+            out = out['sample']
+        elif 'instance' in out:
+            out = out['instance']
+
     if kwargs.get('per_sample', False) and not isinstance(out, dict):
-        if out.ndim > 1:
+        if hasattr(out, 'ndim') and out.ndim > 1:
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
 
     # Extract scalar from tensor
@@ -425,6 +458,21 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Log if requested
     step = _get_step()
     _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
+
+    # Save per-instance values to dataframe with annotation_id
+    if per_instance and instance_values is not None:
+        try:
+            origin_resolved = origin or kwargs.get('origin')
+            save_instance_signals(
+                signals={reg_name: instance_values},
+                batch_ids=batch_ids,
+                batch_idx=instance_batch_idx,
+                step=step,
+                origin=origin_resolved,
+                log=False,  # already logged sample-level above
+            )
+        except Exception as e:
+            logger.debug(f"Per-instance signal save failed for {reg_name}: {e}")
 
     # CHECK FOR SUBSCRIBERS (Dynamic Signals)
     # Allows @wl.signal(subscribe_to="metric_name")
@@ -533,7 +581,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             targets=targets,
             log=False  # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
-    return out
+
+    # Return the original output (dict for per-instance losses so caller can
+    # use out['batch'] for backward, tensor for standard per-sample losses).
+    return out_original if isinstance(out_original, dict) else out
 
 
 # ##############################################################################################################
@@ -1548,6 +1599,112 @@ def save_signals(
         targets=target_np if target_np is not None else targets,
         losses=losses_data,
         step=step
+    )
+
+
+def save_instance_signals(
+    signals: dict,
+    batch_ids: th.Tensor | np.ndarray | list,
+    batch_idx: th.Tensor | np.ndarray | list,
+    step: int | None = None,
+    origin: str | None = None,
+    log: bool = True,
+):
+    """Save per-instance (per-annotation) signals to the dataframe.
+
+    Each value in `signals` is a flat tensor of length `num_instances_total`,
+    where `batch_idx[i]` identifies which sample (by position in `batch_ids`)
+    the i-th instance belongs to. The annotation_id is assigned by order
+    within each sample (0, 1, 2, ...).
+
+    Args:
+        signals: {signal_name: tensor of shape (num_instances_total,)}.
+        batch_ids: Sample IDs for each position in the batch (length B).
+        batch_idx: For each instance, which batch position it belongs to
+            (length num_instances_total, values in [0, B)).
+        step: Current training step (optional).
+        origin: Dataset split (e.g. 'train', 'val').
+        log: Whether to also push to the logger (per-sample aggregated mean).
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    step = _get_step(step=step)
+
+    # Normalize batch_ids to list of strings (matching ledger format)
+    if isinstance(batch_ids, th.Tensor):
+        batch_ids_list = [str(i) for i in batch_ids.detach().cpu().tolist()]
+    else:
+        batch_ids_list = [str(i) for i in batch_ids]
+
+    # Normalize batch_idx to numpy ints (per-instance → batch-position map)
+    if isinstance(batch_idx, th.Tensor):
+        batch_idx_np = batch_idx.detach().cpu().numpy().astype(int).flatten()
+    else:
+        batch_idx_np = np.asarray(batch_idx).astype(int).flatten()
+
+    if len(batch_idx_np) == 0:
+        return
+
+    # Build per-instance sample_ids and annotation_ids
+    instance_sample_ids: list[str] = []
+    instance_annotation_ids: list[int] = []
+    counters: Dict[int, int] = {}
+    for pos in batch_idx_np:
+        pos = int(pos)
+        if pos < 0 or pos >= len(batch_ids_list):
+            continue
+        aid = counters.get(pos, 0)
+        instance_sample_ids.append(batch_ids_list[pos])
+        instance_annotation_ids.append(aid)
+        counters[pos] = aid + 1
+
+    if not instance_sample_ids:
+        return
+
+    # Optionally log per-sample aggregated mean to dashboard
+    if log:
+        for name, values in signals.items():
+            try:
+                arr = values.detach().cpu().numpy() if hasattr(values, 'detach') else np.asarray(values)
+                if arr.size == 0:
+                    continue
+                scalar = float(arr.mean())
+                _log_signal(scalar, None, name, step=step)
+            except Exception:
+                pass
+
+    # During evaluation mode, don't mutate dataframe state
+    try:
+        from weightslab.components.evaluation_controller import eval_controller
+        if eval_controller.is_running():
+            return
+    except Exception:
+        pass
+
+    # Build losses dict with signals// prefix to match save_signals convention
+    losses_data = {}
+    for name, values in signals.items():
+        key = name if name.startswith("signals//") else f"signals//{name}"
+        try:
+            arr = values.detach().cpu().numpy() if hasattr(values, 'detach') else np.asarray(values)
+            if arr.ndim > 1:
+                arr = arr.reshape(arr.shape[0], -1).mean(axis=1)
+            losses_data[key] = arr.astype(np.float32)
+        except Exception:
+            continue
+
+    if not losses_data:
+        return
+
+    active_origin = origin or global_monitoring.get_active_origin() or "train"
+    DATAFRAME_M.enqueue_instance_batch(
+        sample_ids=instance_sample_ids,
+        annotation_ids=instance_annotation_ids,
+        losses=losses_data,
+        step=step,
+        origin=active_origin,
     )
 
 

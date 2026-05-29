@@ -656,6 +656,69 @@ class LedgeredDataFrameManager:
             self.first_init = False
             self.flush_async()
 
+    def enqueue_instance_batch(
+        self,
+        sample_ids: Sequence[Any],
+        annotation_ids: Sequence[int],
+        losses: Dict[str, Any] | None,
+        step: int | None = None,
+        origin: str | None = None,
+    ):
+        """Enqueue per-instance signals indexed by (sample_id, annotation_id).
+
+        Unlike `enqueue_batch` which stores one row per sample_id, this writes one
+        value per (sample_id, annotation_id) pair. Each signal value array must
+        align with `sample_ids` and `annotation_ids` (same length).
+
+        Args:
+            sample_ids: Sequence of sample IDs, one per instance (length N).
+            annotation_ids: Sequence of annotation IDs within each sample (length N).
+            losses: Dict of {signal_name: array-like of length N}.
+            step: Current training step (optional).
+            origin: Dataset split (e.g. 'train', 'val'). Used when creating new rows.
+        """
+        if sample_ids is None or len(sample_ids) == 0 or not losses:
+            return
+        if annotation_ids is None or len(annotation_ids) != len(sample_ids):
+            return
+
+        # Normalize loss arrays to numpy once
+        normalized_losses: Dict[str, np.ndarray] = {}
+        for name, values in losses.items():
+            try:
+                arr = values.detach().cpu().numpy() if hasattr(values, 'detach') else np.asarray(values)
+                if arr.ndim > 1:
+                    arr = arr.reshape(arr.shape[0], -1).mean(axis=1)
+                normalized_losses[name] = arr
+            except Exception:
+                continue
+
+        if not normalized_losses:
+            return
+
+        # Apply each instance via update_values (handles multi-index natively)
+        active_origin = origin or "train"
+        for i, (sid, aid) in enumerate(zip(sample_ids, annotation_ids)):
+            updates: Dict[str, Any] = {}
+            for name, arr in normalized_losses.items():
+                if i < len(arr):
+                    try:
+                        updates[name] = float(arr[i])
+                    except Exception:
+                        updates[name] = None
+            if step is not None:
+                updates[SampleStats.Ex.LAST_SEEN.value] = int(step)
+            if updates:
+                try:
+                    self.update_values(
+                        origin=active_origin,
+                        sample_id=sid,
+                        updates=updates,
+                        annotation_id=int(aid),
+                    )
+                except Exception as e:
+                    logger.debug(f"enqueue_instance_batch update failed for sid={sid}, aid={aid}: {e}")
+
     def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any], annotation_id: int = 0):
         """Update values for a sample (or specific annotation if multi-index).
 
