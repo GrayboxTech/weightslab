@@ -202,6 +202,68 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         # Real compression achieved by pandas
 
 
+    def test_per_sample_buffer_into_multi_index_does_not_corrupt(self):
+        """Single-level per-sample buffer must not corrupt a multi-index dataframe.
+
+        Regression test for: enqueue_batch produces single-level (sample_id)
+        records, and _apply_buffer_records used to concat them into a
+        multi-index dataframe — creating a hybrid index that later crashed
+        reindex with "cannot reindex on an axis with duplicate labels".
+        """
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        # Seed multi-instance dataframe (sample 1 has 3 instances, sample 2 has 2)
+        target1 = [np.array([10, 20, 30, 40]), np.array([50, 60, 70, 80]), np.array([90, 100, 110, 120])]
+        target2 = [np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8])]
+        df = pd.DataFrame([
+            {"sample_id": 1, "origin": "train", SampleStats.Ex.TARGET.value: target1},
+            {"sample_id": 2, "origin": "train", SampleStats.Ex.TARGET.value: target2},
+        ]).set_index("sample_id")
+        mgr.upsert_df(df, origin="train")
+        self.assertTrue(isinstance(mgr.get_df_view().index, pd.MultiIndex))
+
+        # Simulate enqueue_batch flushing per-sample signals (single-level keys)
+        mgr.enqueue_batch(
+            sample_ids=["1", "2"],
+            preds_raw=None,
+            preds=None,
+            targets=None,
+            losses={"signals//train/clsf_sample": np.array([0.42, 0.73])},
+            step=10,
+        )
+        mgr.flush()
+
+        result = mgr.get_df_view()
+
+        # Index must remain a MultiIndex — no rogue single-level rows
+        self.assertTrue(isinstance(result.index, pd.MultiIndex))
+        self.assertEqual(result.index.nlevels, 2)
+        self.assertEqual(result.index.names, ["sample_id", "annotation_id"])
+        # All index entries must be tuples (no mixed types)
+        self.assertTrue(all(isinstance(idx, tuple) for idx in result.index))
+
+        # Per-sample value is broadcast to every annotation of each sample
+        col = "signals//train/clsf_sample"
+        self.assertIn(col, result.columns)
+        self.assertAlmostEqual(result.loc[("1", 0), col], 0.42)
+        self.assertAlmostEqual(result.loc[("1", 1), col], 0.42)
+        self.assertAlmostEqual(result.loc[("1", 2), col], 0.42)
+        self.assertAlmostEqual(result.loc[("2", 0), col], 0.73)
+        self.assertAlmostEqual(result.loc[("2", 1), col], 0.73)
+
+        # Second flush should not crash with "cannot reindex on an axis with duplicate labels"
+        mgr.enqueue_batch(
+            sample_ids=["1"],
+            preds_raw=None, preds=None, targets=None,
+            losses={"signals//train/clsf_sample": np.array([0.99])},
+            step=11,
+        )
+        mgr.flush()  # Would raise if bug regressed
+        result = mgr.get_df_view()
+        self.assertAlmostEqual(result.loc[("1", 0), col], 0.99)
+        self.assertAlmostEqual(result.loc[("1", 1), col], 0.99)
+        self.assertAlmostEqual(result.loc[("1", 2), col], 0.99)
+
     def test_enqueue_instance_batch_writes_per_annotation(self):
         """enqueue_instance_batch writes one signal value per (sample_id, annotation_id)."""
         mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)

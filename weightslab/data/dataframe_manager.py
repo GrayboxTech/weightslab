@@ -1046,6 +1046,47 @@ class LedgeredDataFrameManager:
                     logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={row.name}: {e}")
         return row
 
+    def _broadcast_to_multi_index(self, df_updates: pd.DataFrame) -> pd.DataFrame:
+        """Convert single-level (sample_id) records into (sample_id, annotation_id).
+
+        The per-sample buffer (``enqueue_batch``) produces single-level keys, but
+        when the global dataframe has a MultiIndex, those rows can't be merged
+        directly — pandas creates a mixed index and the next reindex fails with
+        ``cannot reindex on an axis with duplicate labels``.
+
+        Strategy: for each sample_id in ``df_updates``, broadcast the row to
+        every existing ``(sample_id, annotation_id)`` of that sample. If the
+        sample has no annotations yet, fall back to ``(sample_id, 0)``.
+
+        Caller must hold ``self._lock``.
+        """
+        if df_updates.empty or not isinstance(self._df.index, pd.MultiIndex):
+            return df_updates
+
+        # Build sample_id -> list[annotation_id] map from current dataframe
+        sample_to_aids: Dict[Any, list] = {}
+        if not self._df.empty:
+            level0 = self._df.index.get_level_values(0)
+            level1 = self._df.index.get_level_values(1)
+            for sid, aid in zip(level0, level1):
+                sample_to_aids.setdefault(sid, []).append(aid)
+
+        expanded_rows = []
+        expanded_idx = []
+        for sid, record in df_updates.iterrows():
+            aids = sample_to_aids.get(sid, [0])
+            for aid in aids:
+                expanded_idx.append((sid, aid))
+                expanded_rows.append(record.to_dict())
+
+        if not expanded_rows:
+            return df_updates
+
+        return pd.DataFrame(
+            expanded_rows,
+            index=pd.MultiIndex.from_tuples(expanded_idx, names=['sample_id', 'annotation_id']),
+        )
+
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
         if not records:
             return
@@ -1062,6 +1103,11 @@ class LedgeredDataFrameManager:
             # Ensure columns exist (vectorized, no Python loop)
             if not set(df_updates.columns).issubset(self._df.columns):
                 self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
+
+            # If target dataframe is multi-indexed, broadcast each sample_id
+            # record to all its annotation rows so we don't corrupt the index.
+            if isinstance(self._df.index, pd.MultiIndex):
+                df_updates = self._broadcast_to_multi_index(df_updates)
 
             # Ensure target rows exist before masked update
             missing_idx = df_updates.index.difference(self._df.index)
@@ -1109,6 +1155,11 @@ class LedgeredDataFrameManager:
             # Quick DataFrame update while holding lock
             if not set(df_updates.columns).issubset(self._df.columns):
                 self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
+
+            # If target dataframe is multi-indexed, broadcast each sample_id
+            # record to all its annotation rows so we don't corrupt the index.
+            if isinstance(self._df.index, pd.MultiIndex):
+                df_updates = self._broadcast_to_multi_index(df_updates)
 
             missing_idx = df_updates.index.difference(self._df.index)
             if len(missing_idx) > 0:
