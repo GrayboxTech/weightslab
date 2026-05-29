@@ -293,6 +293,45 @@ class TestSignalWrappingWithDetection(unittest.TestCase):
             call_kwargs = mock_df.enqueue_batch.call_args[1]
             self.assertEqual(len(call_kwargs['sample_ids']), 3)
 
+    @patch("weightslab.src.get_dataframe")
+    @patch("weightslab.src._gm")
+    def test_save_instance_signals_maps_batch_idx_to_annotation_ids(self, mock_gm, mock_get_df):
+        """save_instance_signals routes per-instance values to (sample_id, annotation_id)."""
+        mock_df = MagicMock()
+        mock_get_df.return_value = mock_df
+        mock_model = MagicMock()
+        mock_model.current_step = 1
+        mock_gm.return_value = mock_model
+
+        with patch("weightslab.src.DATAFRAME_M", mock_df):
+            # sample 1 has 2 instances, sample 2 has 3 instances → 5 total
+            batch_ids = torch.tensor([1, 2])
+            batch_idx = torch.tensor([0, 0, 1, 1, 1])
+            ious = torch.tensor([0.9, 0.8, 0.5, 0.6, 0.7])
+
+            wl.save_instance_signals(
+                signals={"train/iou_instance": ious},
+                batch_ids=batch_ids,
+                batch_idx=batch_idx,
+                step=1,
+                origin="train",
+                log=False,
+            )
+
+            self.assertTrue(mock_df.enqueue_instance_batch.called)
+            call_kwargs = mock_df.enqueue_instance_batch.call_args[1]
+            self.assertEqual(call_kwargs["sample_ids"], ["1", "1", "2", "2", "2"])
+            self.assertEqual(call_kwargs["annotation_ids"], [0, 1, 0, 1, 2])
+            self.assertEqual(call_kwargs["origin"], "train")
+            # Signal name should be prefixed with "signals//"
+            sig_key = next(iter(call_kwargs["losses"]))
+            self.assertEqual(sig_key, "signals//train/iou_instance")
+            np.testing.assert_allclose(
+                call_kwargs["losses"][sig_key],
+                np.array([0.9, 0.8, 0.5, 0.6, 0.7], dtype=np.float32),
+                rtol=1e-6,
+            )
+
 
 class TestSignalWrappingWithMultiTask(unittest.TestCase):
     """Test signal wrapping with multi-task models (VAD-like use case)."""

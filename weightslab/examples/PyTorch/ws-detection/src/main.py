@@ -98,7 +98,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
             # Per-instance metrics (per annotation) — auto-saved by WL with annotation_id
             for t, n in _LOSS_PARTS:
                 self.criterions_per_instance[split][n] = wl.watch_or_edit(
-                    PerInstanceDetectionLoss(self.model, loss_type=t, return_levels=True),
+                    PerInstanceDetectionLoss(self.model, loss_type=t),
                     flag="loss", name=f"{split}/{n}_instance", per_instance=True, log=True,
                 )
             self.iou_per_instance[split] = wl.watch_or_edit(
@@ -126,21 +126,21 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 raw_preds = self.model(image.to(self.device))
                 preds_by_batch = _decode_preds_to_6col(raw_preds, image, conf=0.1, cls_thresh=0.1)
 
-                # Per-sample signals (aggregated per sample)
-                cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-                cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
-                cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
+                # Per-sample signals — used for backward pass
+                per_sample = (
+                    cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+                    + cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
+                    + cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
+                )
                 m(raw_preds, batch, batch_ids=batch_ids)
 
                 # Per-instance signals (per annotation) — auto-saved with annotation_id
-                bbxs_inst = cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-                clsf_inst = cs_inst["clsf"](raw_preds, batch, batch_ids=batch_ids)
-                dfl_inst = cs_inst["dfl"](raw_preds, batch, batch_ids=batch_ids)
+                cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+                cs_inst["clsf"](raw_preds, batch, batch_ids=batch_ids)
+                cs_inst["dfl"](raw_preds, batch, batch_ids=batch_ids)
                 m_inst(raw_preds, batch, batch_ids=batch_ids)
 
-                # Extract batch-level loss for backward pass
-                loss = bbxs_inst['batch'] + clsf_inst['batch'] + dfl_inst['batch']
-
+                loss = per_sample.mean()
                 loss.backward()
                 self.optimizer.step()
                 self.scheduler.step()

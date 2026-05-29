@@ -192,29 +192,25 @@ class PerSampleDetectionLoss(nn.Module):
 
 
 class PerInstanceDetectionLoss(nn.Module):
-    """Per-instance loss for detection with hierarchical aggregation.
+    """Per-instance detection loss — one value per GT bounding box.
 
-    Computes loss per GT box (instance), then aggregates:
-    - Instance level: individual bbox losses
-    - Sample level: mean loss per sample (for dataframe)
-    - Batch level: mean loss across batch (for backward pass)
-
-    Returns hierarchical losses for multi-instance dataframe integration.
+    Returns a flat tensor of shape (num_instances,). v8DetectionLoss doesn't
+    expose per-box gradients, so each instance is assigned (sample_loss /
+    num_boxes_in_sample) — i.e. the per-sample loss spread equally across its
+    boxes. Use with `per_instance=True` on watch_or_edit to auto-save values
+    at (sample_id, annotation_id). Use PerSampleDetectionLoss for backward.
     """
 
-    def __init__(self, model, loss_type=None, return_levels=True):
+    def __init__(self, model, loss_type=None):
         """
         Args:
             model: YOLO model with loss definition
             loss_type: Pick [0=box, 1=cls, 2=dfl] or None=sum
-            return_levels: If True, return dict with 'instance', 'sample', 'batch' levels
-                          If False, return only batch loss (compatible with standard training)
         """
         super().__init__()
         self.base_loss = DetectionLoss(model)
         self.loss_type = loss_type
         self.model = model
-        self.return_levels = return_levels
 
     def _pick(self, loss):
         if loss.numel() > 1:
@@ -228,29 +224,10 @@ class PerInstanceDetectionLoss(nn.Module):
             batch: Batch dict with 'batch_idx' (shape: num_boxes)
 
         Returns:
-            If return_levels=True:
-                {
-                    'instance': Tensor of shape (num_instances,),  # Per-bbox loss
-                    'sample': Tensor of shape (batch_size,),       # Mean per sample
-                    'batch': scalar Tensor,                        # Mean for backward
-                }
-            If return_levels=False:
-                scalar Tensor (standard training)
+            Tensor of shape (num_instances,) with one loss value per GT box,
+            ordered as in batch['batch_idx'].
         """
         batch_idx = batch.get('batch_idx', None)
-
-        if batch_idx is None or batch_idx.numel() == 0:
-            out = self.base_loss(pred, batch)
-            loss = out[0] if isinstance(out, (tuple, list)) else out
-            batch_loss = self._pick(loss).mean()
-
-            if self.return_levels:
-                return {
-                    'instance': self._pick(loss).unsqueeze(0),
-                    'sample': self._pick(loss).unsqueeze(0),
-                    'batch': batch_loss,
-                }
-            return batch_loss
 
         # Derive batch size and device
         if isinstance(pred, dict):
@@ -261,15 +238,18 @@ class PerInstanceDetectionLoss(nn.Module):
         else:
             pred_bs, device = pred.shape[0], pred.device
 
+        if batch_idx is None or batch_idx.numel() == 0:
+            return th.tensor([], device=device)
+
         batch_idx_flat = batch_idx.flatten().long()
-        instance_losses = []  # Per-instance (per box)
-        sample_losses = []    # Per-sample (aggregated)
+        instance_losses = []
 
         for s in range(pred_bs):
             box_mask = batch_idx_flat == s
             num_boxes_in_sample = box_mask.sum().item()
+            if num_boxes_in_sample == 0:
+                continue
 
-            # Prepare sample-specific data
             sample_batch = {
                 k: (th.zeros_like(v[box_mask]) if k == 'batch_idx' else v[box_mask])
                 if isinstance(v, th.Tensor) and v.shape[0] == len(batch_idx_flat) else v
@@ -283,31 +263,14 @@ class PerInstanceDetectionLoss(nn.Module):
             else:
                 sample_pred = pred[s:s+1]
 
-            # Compute loss for this sample
             out = self.base_loss(sample_pred, sample_batch)
             sample_loss = out[0] if isinstance(out, (tuple, list)) else out
             sample_loss = self._pick(sample_loss)
 
-            # For per-instance: distribute sample loss equally across boxes in sample
-            # This is an approximation since we don't have per-box loss from v8DetectionLoss
-            if num_boxes_in_sample > 0:
-                # Create per-instance loss by dividing sample loss by num instances
-                per_box_loss = sample_loss / num_boxes_in_sample
-                instance_losses.extend([per_box_loss.detach()] * num_boxes_in_sample)
+            # v8DetectionLoss doesn't give per-box values; spread evenly.
+            per_box_loss = (sample_loss / num_boxes_in_sample).detach()
+            instance_losses.extend([per_box_loss] * num_boxes_in_sample)
 
-            sample_losses.append(sample_loss)
-
-        # Aggregate losses at different levels
-        instance_losses_tensor = th.stack(instance_losses) if instance_losses else th.tensor([], device=device)
-        sample_losses_tensor = th.stack(sample_losses) if sample_losses else th.tensor([], device=device)
-        batch_loss = sample_losses_tensor.mean()
-
-        if self.return_levels:
-            return {
-                'instance': instance_losses_tensor,  # (num_instances,)
-                'sample': sample_losses_tensor,      # (batch_size,)
-                'batch': batch_loss,                 # scalar
-            }
-
-        # Standard training: just return batch loss
-        return batch_loss
+        if not instance_losses:
+            return th.tensor([], device=device)
+        return th.stack(instance_losses)

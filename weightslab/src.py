@@ -566,8 +566,11 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          logger.debug(f"Dynamic signal {name} failed: {e}")
                          pass  # User function error, skip
 
-    # Save statistics if requested and applicable
-    if (batch_scalar is not None and batch_ids is not None) or dynamic_updates:
+    # Save statistics if requested and applicable.
+    # Skip the per-sample save path when per_instance=True — instance values
+    # don't map 1:1 to batch_ids, so they're saved separately above via
+    # save_instance_signals (keyed by (sample_id, annotation_id)).
+    if not per_instance and ((batch_scalar is not None and batch_ids is not None) or dynamic_updates):
         signals = {
             reg_name: list(batch_scalar.values()) if isinstance(batch_scalar, dict) else batch_scalar.detach().cpu().tolist()
         } if batch_scalar is not None else {}
