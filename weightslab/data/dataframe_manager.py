@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)  # Set up logger
 class LedgeredDataFrameManager:
     """Central in-memory ledger shared across all loaders/splits.
 
-    Indexing strategy: single-level index on `sample_id`. The `origin` is kept
-    as a normal column to simplify downstream operations.
+    Indexing strategy: multi-level index on (sample_id, annotation_id).
+    The `origin` is kept as a normal column to simplify downstream operations.
+    Sample-level metadata is duplicated on every annotation row.
     """
 
     def __init__(self, flush_interval: float = 3.0, flush_max_rows: int = 100, enable_flushing_threads: bool = True, enable_h5_persistence: bool = True):
@@ -78,6 +79,103 @@ class LedgeredDataFrameManager:
                     self._array_store = H5ArrayStore(array_path)
                     self._array_store.recover()
 
+    @staticmethod
+    def _count_instances(target: Any, prediction: Any = None) -> int:
+        """Detect number of instances in a sample based on target/prediction.
+
+        Rules:
+        1. If target is a list/tuple of array-like items → len(target) instances
+           Example: [array([x1,y1,x2,y2]), array([x1,y1,x2,y2]), ...] = multiple bboxes
+           Example: [mask1, mask2, mask3] = multiple masks
+           Example: ['cat', 'dog'] = multiple labels
+
+        2. If target is a single numpy array/tensor → 1 instance
+           Example: array([x1, y1, x2, y2]) = single bbox
+           Example: array([[...], [...]]) = single instance (could be multi-channel, image, etc.)
+           Example: [0, 1, 1, 0] = single label
+
+        3. Otherwise → 1 instance (default)
+        """
+        if target is None:
+            return 1
+
+        # List/tuple of items → check if it's a list of instances
+        if isinstance(target, (list, tuple)):
+            if len(target) == 0:
+                return 1
+
+            # If the list contains array-like items, it's a list of instances
+            first_item = target[0]
+            if isinstance(first_item, (np.ndarray, torch.Tensor, list)):
+                # List of arrays/lists → each is an instance
+                return len(target)
+
+            # List of scalars (e.g., class indices) → could be 1 instance or multiple
+            # Conservative: treat as single instance if all are scalars
+            # Unless all items are single-value arrays
+            try:
+                # Check if all items are scalar-like
+                all_scalar = all(isinstance(item, (int, float, np.integer, np.floating)) for item in target)
+                if all_scalar:
+                    return 1  # Single instance with multiple values
+            except Exception:
+                pass
+
+            # Default for lists: treat as list of instances
+            return len(target)
+
+        # Single numpy array or tensor → 1 instance
+        if isinstance(target, (np.ndarray, torch.Tensor)):
+            return 1
+
+        # Default: single instance
+        return 1
+
+    def _expand_dataframe_with_annotations(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Expand dataframe from sample-level index to (sample_id, annotation_id) multi-index.
+
+        For each row with multiple instances, replicate it with annotation_id 0..N-1.
+        Sample-level metadata is duplicated on every annotation row.
+        """
+        if df.empty:
+            return df
+
+        annotation_ids = []
+        sample_ids = []
+        expanded_rows = []
+
+        for sample_id, row in df.iterrows():
+            # Normalize sample_id to string
+            normalized_sid = self._normalize_sample_id(sample_id)
+
+            num_instances = self._count_instances(
+                row.get(SampleStats.Ex.TARGET.value),
+                row.get(SampleStats.Ex.PREDICTION.value)
+            )
+
+            # Ensure at least 1 instance
+            num_instances = max(1, num_instances)
+
+            for instance_id in range(num_instances):
+                sample_ids.append(normalized_sid)
+                annotation_ids.append(instance_id)
+                expanded_rows.append(row.copy())
+
+        if not expanded_rows:
+            return df
+
+        # Build expanded dataframe
+        expanded_df = pd.DataFrame(expanded_rows)
+
+        # Create multi-index directly: (sample_id, annotation_id)
+        multi_index = pd.MultiIndex.from_arrays(
+            [sample_ids, annotation_ids],
+            names=['sample_id', 'annotation_id']
+        )
+        expanded_df.index = multi_index
+
+        return expanded_df
+
     def _normalize_sample_id(self, sample_id: Any) -> Any:
         """Normalize incoming sample IDs while preserving numeric IDs when possible."""
         try:
@@ -95,18 +193,31 @@ class LedgeredDataFrameManager:
         return str(sample_id)
 
     def _coerce_sample_id_for_index(self, sample_id: Any) -> Any:
-        """Coerce sample_id to match current dataframe index representation."""
+        """Coerce sample_id to match current dataframe index representation.
+
+        For multi-index (sample_id, annotation_id), returns sample_id component.
+        """
         sid = self._normalize_sample_id(sample_id)
 
         if self._df.empty:
             return sid
 
-        if sid in self._df.index:
-            return sid
-
-        sid_str = str(sid)
-        if sid_str in self._df.index:
-            return sid_str
+        # Check if multi-index
+        if isinstance(self._df.index, pd.MultiIndex):
+            # Get level 0 (sample_id level) values
+            level_0_values = self._df.index.get_level_values(0)
+            if sid in level_0_values:
+                return sid
+            sid_str = str(sid)
+            if sid_str in level_0_values:
+                return sid_str
+        else:
+            # Fallback for single-index
+            if sid in self._df.index:
+                return sid
+            sid_str = str(sid)
+            if sid_str in self._df.index:
+                return sid_str
 
         return sid
 
@@ -152,14 +263,24 @@ class LedgeredDataFrameManager:
         return self._array_store
 
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
-        logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {len(df)} samples.")
+        # Normalize incoming frame
+        df_norm = df if isinstance(df, pd.DataFrame) else pd.DataFrame(df).set_index('sample_id')
+        num_samples_before = len(df_norm)
+
+        logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {num_samples_before} samples.")
+
+        # Expand to annotation-level index (sample_id, annotation_id)
+        df_expanded = self._expand_dataframe_with_annotations(df_norm)
+        num_rows_after = len(df_expanded)
+        logger.info(f"[LedgeredDataFrameManager] After annotation expansion: {num_samples_before} samples → {num_rows_after} annotation rows.")
+
         with self._lock:
             if store is not None:
                 self.set_store(store)
             self._origin_revisions.setdefault(str(origin), 0)
 
-        # Upsert initial data
-        self.upsert_df(df, origin)
+        # Upsert expanded data
+        self.upsert_df(df_expanded, origin)
 
         # Load existing persisted data if needed
         if self._store is not None and self._df is not None:
@@ -172,10 +293,15 @@ class LedgeredDataFrameManager:
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
 
         if not loaded_df.empty:
-            # Ensure single-level index on sample_id
+            # Ensure multi-level index on (sample_id, annotation_id) if available
             if "sample_id" in loaded_df.columns:
                 try:
-                    loaded_df = loaded_df.set_index("sample_id")
+                    if "annotation_id" in loaded_df.columns:
+                        loaded_df = loaded_df.set_index(['sample_id', 'annotation_id'])
+                    else:
+                        # Expand to multi-index if not already
+                        loaded_df = loaded_df.set_index("sample_id")
+                        loaded_df = self._expand_dataframe_with_annotations(loaded_df)
                 except Exception:
                     pass
 
@@ -190,25 +316,25 @@ class LedgeredDataFrameManager:
                         return_proxies=return_proxies,
                     )
 
-                # Merge with right override: loaded_df wins on overlapping sample_ids
+                # Merge with right override: loaded_df wins on overlapping indices
                 all_cols = self._df.columns.union(loaded_df.columns)
                 if self._df.empty:
                     self._df = loaded_df.reindex(columns=all_cols)
                 else:
-                    self._df = self._df.reindex(columns=all_cols)  # set columns first to avoid SettingWithCopyWarning
+                    self._df = self._df.reindex(columns=all_cols)
 
-                    # Process the loaded df
+                    # Process the loaded df with multi-index support
                     loaded_df = loaded_df.reindex(columns=all_cols)
-                    loaded_df = loaded_df.reset_index()
-                    loaded_df['sample_id'] = loaded_df['sample_id'].astype(str)  # Ensure str index
-                    loaded_df = loaded_df.set_index('sample_id')
+                    if isinstance(loaded_df.index, pd.MultiIndex):
+                        # Normalize sample_id values in multi-index
+                        level_0_normalized = pd.Index([self._normalize_sample_id(v) for v in loaded_df.index.get_level_values(0)])
+                        loaded_df.index = pd.MultiIndex.from_arrays(
+                            [level_0_normalized, loaded_df.index.get_level_values(1)],
+                            names=['sample_id', 'annotation_id']
+                        )
 
                     # Override existing rows
                     self._df.update(loaded_df)
-                    # Note: We NO LONGER concat missing_idx here.
-                    # If a sample_id is in H5 but not in our current self._df (which was just seeded
-                    # with the current dataset's IDs), it means it's a stale/ghost record.
-                    # We skip it to keep the session clean.
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
@@ -216,35 +342,63 @@ class LedgeredDataFrameManager:
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
             return
 
-        # Normalize incoming frame: ensure `origin` column and sample_id index
-        df_norm = df_local if isinstance(df_local, pd.DataFrame) else pd.DataFrame(df_local).set_index('sample_id')
-        if origin is not None and "origin" not in df_norm.columns:
-            df_norm["origin"] = origin
+        # Normalize incoming frame
+        df_norm = df_local if isinstance(df_local, pd.DataFrame) else pd.DataFrame(df_local)
 
-        # Ensure sample_id index matches existing frame type or coerces to int
-        if "sample_id" in df_norm.columns:
+        # If origin not specified, infer from existing dataframe or use default
+        if origin is None:
+            if not self._df.empty and "origin" in self._df.columns:
+                # Get most common origin from existing dataframe
+                origin_values = self._df["origin"].dropna().unique()
+                if len(origin_values) > 0:
+                    origin = str(origin_values[0])
+            if origin is None:
+                origin = "unknown"
+
+        # Check if already multi-indexed or needs expansion
+        if isinstance(df_norm.index, pd.MultiIndex):
+            # Already has multi-index (sample_id, annotation_id)
+            pass
+        elif 'sample_id' in df_norm.columns and 'annotation_id' in df_norm.columns:
+            # Columns exist but not yet indexed
+            df_norm = df_norm.set_index(['sample_id', 'annotation_id'])
+        elif 'sample_id' in df_norm.columns:
+            # sample_id is a column, set as index and expand
             try:
-                df_norm = df_norm.set_index("sample_id")
+                df_norm = df_norm.set_index('sample_id')
+                df_norm = self._expand_dataframe_with_annotations(df_norm)
             except Exception:
                 pass
         else:
-            # If index isn't sample_id, try to rename it
-            if df_norm.index.name != "sample_id":
-                try:
-                    df_norm.index.name = "sample_id"
-                except Exception:
-                    pass
+            # sample_id is already the index (or some other index)
+            if df_norm.index.name is None or df_norm.index.name != 'sample_id':
+                df_norm.index.name = 'sample_id'
+            # Expand to multi-index
+            try:
+                df_norm = self._expand_dataframe_with_annotations(df_norm)
+            except Exception as e:
+                logger.debug(f"[LedgeredDataFrameManager] Failed to expand dataframe with annotations: {e}")
 
-        # Normalize index values to avoid int/str mismatches for sample IDs
-        try:
-            df_norm.index = pd.Index([self._normalize_sample_id(v) for v in df_norm.index], name="sample_id")
-        except Exception:
-            pass
+        # Ensure origin column
+        if origin is not None and "origin" not in df_norm.columns:
+            df_norm["origin"] = origin
+
+        # Normalize sample_id values in multi-index
+        if isinstance(df_norm.index, pd.MultiIndex) and df_norm.index.nlevels >= 1:
+            level_0_normalized = pd.Index([self._normalize_sample_id(v) for v in df_norm.index.get_level_values(0)])
+            try:
+                if df_norm.index.nlevels == 2:
+                    df_norm.index = pd.MultiIndex.from_arrays(
+                        [level_0_normalized, df_norm.index.get_level_values(1)],
+                        names=['sample_id', 'annotation_id']
+                    )
+            except Exception:
+                pass
 
         with self._lock:
-            affected_origins = self._collect_affected_origins(df_norm, origin=origin)
+            affected_origins = self._collect_affected_origins(df_norm, origin=origin) if not isinstance(df_norm.index, pd.MultiIndex) else {str(origin)}
 
-            # Align columns: Ensure the global dataframe has all columns present in the update
+            # Align columns
             missing_cols = df_norm.columns.difference(self._df.columns)
             if len(missing_cols) > 0:
                 self._df = self._df.reindex(columns=self._df.columns.union(missing_cols))
@@ -260,16 +414,12 @@ class LedgeredDataFrameManager:
                     try:
                         self._df[col] = self._df[col].astype(target_dtype)
                     except Exception:
-                        # Keep pandas-inferred dtype as fallback
                         pass
 
             if self._df.empty:
-                # Optimized initial load: just use the normalized dataframe
-                # Ensure we use a copy to avoid side effects
                 self._df = df_norm.copy()
             else:
-                # Right-preferred upsert: df_norm overrides existing, adds new rows
-                # Only update columns present in df_norm, keep other columns/values from self._df
+                # Right-preferred upsert with multi-index support
                 existing_idx = df_norm.index.intersection(self._df.index)
                 all_cols = df_norm.columns
                 if len(existing_idx) > 0:
@@ -280,20 +430,32 @@ class LedgeredDataFrameManager:
                 if len(missing_idx) > 0:
                     self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
 
-            logger.debug(f"[LedgeredDataFrameManager] Global DataFrame updated: {len(self._df)} rows, {len(self._df.columns)} columns.")
+            logger.debug(f"[LedgeredDataFrameManager] Global DataFrame updated: {len(self._df)} rows, {len(self._df.columns)} columns. Index: {self._df.index.names}")
 
             # Set missing cols value for bool
             for col in missing_cols:
                 if df_norm[col].dtype == bool:
                     self._df[col] = self._df[col].fillna(False).astype(bool)
 
-            # Flag index to be flushed later (outside lock) to minimize lock time
-            self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
+            # Optimize memory by converting repetitive columns to categorical
+            self._df = self._optimize_dataframe_memory(self._df)
+
+            # Mark dirty for flush (handle multi-index)
+            if isinstance(df_norm.index, pd.MultiIndex):
+                sample_ids = df_norm.index.get_level_values(0).unique().tolist()
+            else:
+                sample_ids = df_norm.index.tolist()
+            self.mark_dirty_batch(sample_ids, force_flush=force_flush)
             self._bump_origin_revisions(affected_origins)
 
     def mark_dirty(self, sample_id: int):
+        """Mark sample as dirty for H5 flush.
+
+        For multi-index, marks the sample_id (all annotations).
+        """
         with self._lock:
-            self._pending.add(self._coerce_sample_id_for_index(sample_id))
+            normalized_id = self._coerce_sample_id_for_index(sample_id)
+            self._pending.add(normalized_id)
 
     def drop_column(self, column: str):
         with self._lock:
@@ -494,50 +656,68 @@ class LedgeredDataFrameManager:
             self.first_init = False
             self.flush_async()
 
-    def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
+    def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any], annotation_id: int = 0):
+        """Update values for a sample (or specific annotation if multi-index).
+
+        For multi-index, updates all annotations of the sample by default (annotation_id=None)
+        or a specific annotation (annotation_id=int).
+        """
         if not updates:
             return
         with self._lock:
             idx = self._coerce_sample_id_for_index(sample_id)
             if self._df.empty:
-                row_data = {"origin": origin, "sample_id": idx, **updates}
-                self._df = pd.DataFrame([row_data]).set_index("sample_id")
+                row_data = {"origin": origin, **updates}
+                if isinstance(self._df.index, pd.MultiIndex):
+                    df_local = pd.DataFrame([row_data])
+                    df_local.index = pd.MultiIndex.from_tuples([(idx, annotation_id)], names=['sample_id', 'annotation_id'])
+                    self._df = df_local
+                else:
+                    df_local = pd.DataFrame([row_data])
+                    df_local.index = pd.Index([idx], name="sample_id")
+                    self._df = df_local
             else:
                 all_cols = self._df.columns.union(updates.keys())
                 if len(all_cols) != len(self._df.columns):
                     self._df = self._df.reindex(columns=all_cols)
-                # Find matching row for this origin and sample_id; if none, create it
-                if "origin" in self._df.columns:
-                    mask = (self._df.index == idx) & (self._df["origin"] == origin)
+
+                # Handle multi-index case
+                if isinstance(self._df.index, pd.MultiIndex) and self._df.index.nlevels >= 2:
+                    if annotation_id is not None:
+                        mask = (self._df.index.get_level_values(0) == idx) & (self._df.index.get_level_values(1) == annotation_id)
+                    else:
+                        mask = self._df.index.get_level_values(0) == idx
                 else:
-                    mask = (self._df.index == idx)
+                    # Single-index fallback
+                    if "origin" in self._df.columns:
+                        mask = (self._df.index == idx) & (self._df["origin"] == origin)
+                    else:
+                        mask = (self._df.index == idx)
+
                 if mask.any():
-                    # Handle multiple column updates by constructing Series
-                    # This supports both single-valued updates and array-valued updates
                     if len(updates) == 1:
-                        # Single column update - use original logic
                         values = np.asanyarray(list(updates.values())[0])
                         if values.ndim == 0:
                             values = np.asanyarray([values])
-                        elif values.ndim == 1:
-                            pass
-                        else:
+                        elif values.ndim > 1:
                             values = values.squeeze(tuple(range(values.ndim-1)))
                         self._df.loc[mask, list(updates.keys())] = values
                     else:
-                        # Multiple column updates - use Series for proper alignment
                         update_series = pd.Series(updates)
                         self._df.loc[mask, update_series.index] = update_series.values
                 else:
                     # Create new row
                     row_data = {"origin": origin, **updates}
                     df_local = pd.DataFrame([row_data])
-                    df_local.index = pd.Index([idx], name="sample_id")
+                    if isinstance(self._df.index, pd.MultiIndex):
+                        df_local.index = pd.MultiIndex.from_tuples([(idx, annotation_id)], names=['sample_id', 'annotation_id'])
+                    else:
+                        df_local.index = pd.Index([idx], name="sample_id")
                     # Align columns and assign
                     df_local = df_local.reindex(columns=self._df.columns.union(df_local.columns))
                     if len(self._df.columns) != len(df_local.columns):
                         self._df = self._df.reindex(columns=df_local.columns)
-                    self._df.loc[df_local.index, df_local.columns] = df_local
+                    self._df = pd.concat([self._df, df_local])
             self._bump_origin_revisions([origin])
 
     def get_origin_revision(self, origin: str) -> int:
@@ -685,24 +865,43 @@ class LedgeredDataFrameManager:
 
         return discarded_ids
 
-    def get_row(self, origin: str, sample_id: int) -> pd.Series | None:
+    def get_row(self, origin: str, sample_id: int, annotation_id: int = None) -> pd.Series | pd.DataFrame | None:
+        """Get row(s) by sample_id and optional annotation_id.
+
+        With multi-index:
+        - If annotation_id is None, returns all annotations for the sample (DataFrame)
+        - If annotation_id is specified, returns single annotation row (Series)
+        """
         with self._lock:
             if self._df.empty:
                 return None
             idx = self._coerce_sample_id_for_index(sample_id)
             try:
-                row = self._df.loc[idx]
+                if isinstance(self._df.index, pd.MultiIndex) and self._df.index.nlevels >= 2:
+                    # Multi-index: (sample_id, annotation_id)
+                    if annotation_id is not None:
+                        row = self._df.loc[(idx, annotation_id)]
+                    else:
+                        row = self._df.loc[idx]
+                else:
+                    # Single-index fallback
+                    row = self._df.loc[idx]
+
                 if isinstance(row, pd.DataFrame):
-                    # Multiple rows with same sample_id; filter by origin
+                    # Multiple rows; filter by origin if available
                     if "origin" in row.columns:
                         row = row[row["origin"] == origin]
-                    # Return first match if multiple
-                    try:
-                        return row.iloc[0]
-                    except Exception:
+                    if row.empty:
                         return None
+                    # Return first match if annotation_id not specified
+                    if annotation_id is None:
+                        try:
+                            return row.iloc[0]
+                        except Exception:
+                            return None
+                    return row.iloc[0] if len(row) > 0 else None
                 return row
-            except KeyError:
+            except (KeyError, TypeError):
                 return None
 
     def get_value(self, origin: str, sample_id: int, column: str):
@@ -980,6 +1179,90 @@ class LedgeredDataFrameManager:
             except Exception as e:
                 logger.error(f"[LedgeredDataFrameManager] Error flushing to H5: {e}")
 
+    def _optimize_dataframe_memory(self, df: pd.DataFrame, categorical_tags: Dict[str, List[str]] | None = None) -> pd.DataFrame:
+        """Optimize dataframe memory by converting repetitive string columns to categorical.
+
+        Categorical dtype compresses repeated values: instead of storing each string,
+        stores integer codes pointing to a category dictionary.
+
+        Args:
+            df: Dataframe to optimize
+            categorical_tags: Optional dict mapping tag names to their possible values.
+                Example: {'weather': ['rain', 'sun', 'cloudy'], 'time_of_day': ['dawn', 'day', 'dusk']}
+                Tags are currently boolean columns (tag:xxxx with bool), but this supports
+                future categorical tags with predefined values.
+
+        Example savings:
+        - ['train', 'train', 'test', 'train'] → codes [0,0,1,0] + categories dict
+        - ~90% memory reduction for highly repetitive columns
+
+        Note: Boolean tag columns (tag:xxxx with dtype bool) are already space-efficient (~1 bit each)
+        and are NOT converted to categorical.
+        """
+        if df.empty:
+            return df
+
+        # Columns that are typically repetitive (good candidates for categorical)
+        categorical_candidates = [
+            SampleStats.Ex.ORIGIN.value,  # Alias for origin (if different column name)
+            SampleStats.Ex.TASK_TYPE.value,  # Task type (e.g. 'classification', 'segmentation')
+        ]
+
+        for col in categorical_candidates:
+            if col not in df.columns:
+                continue
+
+            # Skip boolean columns (already space-efficient: ~1 bit per value)
+            if df[col].dtype == 'bool' or df[col].dtype == 'boolean':
+                continue
+
+            # Only convert to categorical if:
+            # 1. Column contains strings (object dtype)
+            # 2. Number of unique values < 50% of total rows (good compression ratio)
+            if df[col].dtype == 'object':
+                n_unique = df[col].nunique()
+                n_rows = len(df)
+                compression_ratio = n_unique / n_rows if n_rows > 0 else 1.0
+
+                if compression_ratio < 0.5 and n_unique > 1:  # Worth compressing if < 50% unique
+                    try:
+                        df[col] = df[col].astype('category')
+                        logger.debug(
+                            f"[LedgeredDataFrameManager] Optimized column '{col}': "
+                            f"{n_unique} categories from {n_rows} rows ({compression_ratio*100:.1f}% unique)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"[LedgeredDataFrameManager] Failed to optimize column '{col}': {e}")
+
+        # Handle dynamic categorical tags (future feature)
+        # Tags can be boolean (current) or categorical with predefined values (future)
+        # Example: tag:weather → 'rain', 'sun', 'cloudy' (not boolean)
+        if categorical_tags:
+            for tag_name, categories in categorical_tags.items():
+                col_name = f'tag:{tag_name}'
+                if col_name not in df.columns:
+                    continue
+
+                # Skip if already boolean (backward compatibility with current tag system)
+                if df[col_name].dtype == 'bool' or df[col_name].dtype == 'boolean':
+                    continue
+
+                # Skip if already categorical
+                if df[col_name].dtype.name == 'category':
+                    continue
+
+                try:
+                    # Convert to categorical with specified categories
+                    df[col_name] = pd.Categorical(df[col_name], categories=categories)
+                    logger.debug(
+                        f"[LedgeredDataFrameManager] Converted categorical tag '{col_name}': "
+                        f"{len(categories)} categories"
+                    )
+                except Exception as e:
+                    logger.debug(f"[LedgeredDataFrameManager] Failed to optimize categorical tag '{col_name}': {e}")
+
+        return df
+
     def _ensure_flush_thread(self):
         if not self._enable_flushing_threads or (self._flush_thread and self._flush_thread.is_alive()):
             return
@@ -1048,11 +1331,18 @@ class LedgeredDataFrameManager:
                 buffer_df = pd.DataFrame(list(self._buffer.values()))
                 if not buffer_df.empty:
                     buffer_df["sample_id"] = buffer_df["sample_id"].apply(self._normalize_sample_id)
-                    buffer_df = buffer_df.set_index("sample_id")
+
+                    # Handle multi-index if df has it
+                    if isinstance(df.index, pd.MultiIndex) and df.index.nlevels >= 2:
+                        # Expand buffer_df to match multi-index if needed
+                        if not isinstance(buffer_df.index, pd.MultiIndex):
+                            buffer_df = buffer_df.set_index("sample_id")
+                            buffer_df = self._expand_dataframe_with_annotations(buffer_df)
+                    else:
+                        buffer_df = buffer_df.set_index("sample_id")
 
                     # Align and update
                     if not df.empty:
-                        # Vectorized update
                         df.update(buffer_df)
                         # Add completely new rows from buffer
                         new_rows = buffer_df.index.difference(df.index)

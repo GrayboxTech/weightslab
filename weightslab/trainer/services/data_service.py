@@ -1123,6 +1123,8 @@ class DataService:
                 SampleStatsEx.TARGET.value if not skip_label_for_request else None,
                 SampleStatsEx.PREDICTION.value,
                 SampleStatsEx.TASK_TYPE.value,
+                '_instance_signals',  # Special handling for multi-instance signals
+                'annotation_id',       # Internal multi-index tracking
             }
 
             if not stats_to_retrieve:
@@ -1649,6 +1651,22 @@ class DataService:
                     thumbnail=b""
                 )
             )
+
+            # ====== Step 11: Handle multi-instance signals ======
+            instance_signals = row.get('_instance_signals')
+            if instance_signals and isinstance(instance_signals, dict):
+                # Convert signals dictionary to JSON for UI display
+                # Format: {annotation_id: {signal_name: value, ...}}
+                signals_json = json.dumps(instance_signals)
+                data_stats.append(
+                    create_data_stat(
+                        name='_instance_signals',
+                        stat_type='string',
+                        shape=[1],
+                        value_string=signals_json,
+                        thumbnail=b""
+                    )
+                )
 
             record = pb2.DataRecord(sample_id=str(sample_id), data_stats=data_stats)
 
@@ -2461,6 +2479,77 @@ class DataService:
             data_records=data_records,
         )
 
+    def _merge_multi_instance_signals(self, df_slice):
+        """Merge per-instance signals into dictionaries for multi-index dataframes.
+
+        When dataframe has (sample_id, annotation_id) multi-index, group instances
+        by sample_id and merge per-instance signal columns into dictionaries:
+        {annotation_id_0: signal_value_0, annotation_id_1: signal_value_1, ...}
+
+        This allows UI to display all instance signals for a sample while maintaining
+        per-sample analysis view.
+
+        Args:
+            df_slice: Dataframe slice with potential multi-index
+
+        Returns:
+            Tuple of (merged_df, signal_dict_mapping):
+            - merged_df: Single row per sample with merged data
+            - signal_dict_mapping: Dict mapping sample_id to signal dictionaries
+        """
+        # Check if multi-index (sample_id, annotation_id)
+        if not isinstance(df_slice.index, pd.MultiIndex) or df_slice.index.nlevels < 2:
+            return df_slice, {}
+
+        signal_dict_mapping = {}
+        merged_rows = []
+
+        # Identify signal columns (those starting with signal:)
+        signal_cols = [col for col in df_slice.columns if str(col).startswith('signal:')]
+
+        if not signal_cols:
+            # No per-instance signals, just group by sample_id
+            return df_slice.drop_duplicates(subset=['sample_id'], keep='first'), {}
+
+        # Group by sample_id
+        sample_ids = df_slice.index.get_level_values(0).unique()
+
+        for sample_id in sample_ids:
+            sample_rows = df_slice.xs(sample_id, level=0)
+
+            # Handle both Series (single annotation) and DataFrame (multiple annotations)
+            if isinstance(sample_rows, pd.Series):
+                sample_rows = sample_rows.to_frame().T
+
+            # Take first row as template
+            merged_row = sample_rows.iloc[0].copy()
+
+            # Build signal dictionary: {annotation_id: {signal_name: value, ...}}
+            signal_dict = {}
+            for _, instance_row in sample_rows.iterrows():
+                annotation_id = instance_row.get('annotation_id', 0)
+                instance_signals = {}
+
+                for signal_col in signal_cols:
+                    value = instance_row.get(signal_col)
+                    if value is not None:
+                        instance_signals[signal_col] = value
+
+                if instance_signals:
+                    signal_dict[str(annotation_id)] = instance_signals
+
+            # Store merged signal dictionary if we have signals
+            if signal_dict:
+                signal_dict_mapping[sample_id] = signal_dict
+                # Add merged signals dict to row for UI display
+                merged_row['_instance_signals'] = signal_dict
+
+            merged_rows.append(merged_row)
+
+        # Return merged dataframe (one row per sample) and signal mapping
+        merged_df = pd.DataFrame(merged_rows).reset_index(drop=True)
+        return merged_df, signal_dict_mapping
+
     def _process_get_data_samples(self, request, context):
         """
         Actual implementation of GetDataSamples.
@@ -2530,6 +2619,9 @@ class DataService:
                     message=f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}",
                     data_records=[]
                 )
+
+            # Handle multi-instance signal merging if needed
+            df_slice, signal_dict_mapping = self._merge_multi_instance_signals(df_slice)
 
             logger.debug(
                 "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)

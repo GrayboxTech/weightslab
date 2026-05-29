@@ -23,6 +23,7 @@ class SampleStats:
         SIGNAL = "signal"
 
         TARGET = "target"
+
         ORIGIN = "origin"
         TASK_TYPE = "task_type"
         LAST_SEEN = "last_seen"

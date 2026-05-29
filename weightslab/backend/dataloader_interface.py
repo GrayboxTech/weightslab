@@ -18,6 +18,7 @@ It also supports:
 import os
 import torch
 import logging
+import pandas as pd
 from typing import Any, Iterator, Optional
 
 from torch.utils.data import DataLoader, Dataset, Sampler
@@ -141,10 +142,20 @@ class WeightsLabDataSampler(Sampler):
             try:
                 df_view = self.tracked_dataset._get_df_view()
                 if not df_view.empty and SampleStatsEx.DISCARDED.value in df_view.columns:
-                    deny_listed_uids = {
-                        str(uid)
-                        for uid in df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index
-                    }
+                    discarded_rows = df_view[df_view[SampleStatsEx.DISCARDED.value] == True]
+
+                    # Handle multi-index: get level 0 (sample_id) values
+                    if isinstance(discarded_rows.index, pd.MultiIndex):
+                        deny_listed_uids = {
+                            str(uid)
+                            for uid in discarded_rows.index.get_level_values(0).unique()
+                        }
+                    else:
+                        # Single-level index
+                        deny_listed_uids = {
+                            str(uid)
+                            for uid in discarded_rows.index
+                        }
             except Exception:
                 pass
         return deny_listed_uids

@@ -9,6 +9,7 @@ import os
 import tempfile
 import unittest
 import numpy as np
+import pandas as pd
 import torch
 
 import weightslab as wl
@@ -287,7 +288,11 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         # Verify tag column was created
         df = wrapper.get_dataframe()
         self.assertIn('tag:target_tag', df.columns, "tag:target_tag column should exist")
-        self.assertEqual(df.loc[sample_id_0, 'tag:target_tag'], 1, "target_tag should be set to 1")
+        # With multi-index, use .xs() or get first value if Series returned
+        tag_value_0 = df.loc[sample_id_0, 'tag:target_tag']
+        if isinstance(tag_value_0, pd.Series):
+            tag_value_0 = tag_value_0.iloc[0]
+        self.assertEqual(tag_value_0, 1, "target_tag should be set to 1")
 
         # Set non_target_tag for second sample
         wrapper.set(sample_id=sample_id_1, stat_name="tags", value='non_target_tag')
@@ -296,7 +301,10 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         df = wrapper.get_dataframe()
         self.assertIn('tag:target_tag', df.columns)
         self.assertIn('tag:non_target_tag', df.columns)
-        self.assertEqual(df.loc[sample_id_1, 'tag:non_target_tag'], 1)
+        tag_value_1 = df.loc[sample_id_1, 'tag:non_target_tag']
+        if isinstance(tag_value_1, pd.Series):
+            tag_value_1 = tag_value_1.iloc[0]
+        self.assertEqual(tag_value_1, 1)
 
     def test_binary_tag_labeling_single_tag(self):
         """Test binary tag-based labeling with a single target tag.
@@ -325,7 +333,11 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         # Verify tags were set
         df = wrapper.get_dataframe()
         self.assertIn('tag:target_tag', df.columns)
-        self.assertEqual(df.loc[sample_id_0, 'tag:target_tag'], 1)
+        # Handle multi-index - loc returns Series
+        tag_value = df.loc[sample_id_0, 'tag:target_tag']
+        if isinstance(tag_value, pd.Series):
+            tag_value = tag_value.iloc[0]
+        self.assertEqual(tag_value, 1)
 
     def test_tag_parsing_comma_and_semicolon(self):
         """Test that tags can be separated by commas, semicolons, or both.
@@ -352,17 +364,21 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         # Test comma-separated tags
         wrapper.set(sample_id=sample_id, stat_name="tags", value='tag1,tag2,tag3')
         df = wrapper.get_dataframe()
-        self.assertEqual(df.loc[sample_id, 'tag:tag1'], 1)
-        self.assertEqual(df.loc[sample_id, 'tag:tag2'], 1)
-        self.assertEqual(df.loc[sample_id, 'tag:tag3'], 1)
+        for tag in ['tag:tag1', 'tag:tag2', 'tag:tag3']:
+            val = df.loc[sample_id, tag]
+            if isinstance(val, pd.Series):
+                val = val.iloc[0]
+            self.assertEqual(val, 1)
 
         # Test semicolon-separated tags on different sample
         sample_id_2 = wrapper.unique_ids[2]
         wrapper.set(sample_id=sample_id_2, stat_name="tags", value='tag1;tag2;tag3')
         df = wrapper.get_dataframe()
-        self.assertEqual(df.loc[sample_id_2, 'tag:tag1'], 1)
-        self.assertEqual(df.loc[sample_id_2, 'tag:tag2'], 1)
-        self.assertEqual(df.loc[sample_id_2, 'tag:tag3'], 1)
+        for tag in ['tag:tag1', 'tag:tag2', 'tag:tag3']:
+            val = df.loc[sample_id_2, tag]
+            if isinstance(val, pd.Series):
+                val = val.iloc[0]
+            self.assertEqual(val, 1)
 
 class TestDataSampleTrackingWrapperDenylist(unittest.TestCase):
     """Test denylisting and allowlisting functionality."""
