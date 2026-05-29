@@ -14,7 +14,6 @@ warnings.filterwarnings(
 
 import logging
 import tempfile
-
 import torch
 import yaml
 
@@ -27,13 +26,10 @@ from ultralytics.cfg import get_cfg
 from ultralytics.data.utils import check_det_dataset
 
 from utils.data import YOLODatasetWL, _wl_yolo_collate
-from utils.criterions import PerSampleDetectionLoss, PerSampleIoU, _decode_predictions
+from utils.criterions import PerInstanceDetectionLoss, PerInstanceIoU, _decode_predictions
 
 logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
-
-
-_LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
 
 
 def _decode_preds_to_6col(raw_preds, image, conf, cls_thresh, device=None):
@@ -78,17 +74,18 @@ class WLCompatileDetTrainer(DetectionTrainer):
     def _init_training_loss(self):
         if not hasattr(self.model, "args"):
             self.model.args = get_cfg()
+        _LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
         self.criterions = {"train": {}, "val": {}}
         self.iou = {}
         for split in ("train", "val"):
             for t, n in _LOSS_PARTS:
                 self.criterions[split][n] = wl.watch_or_edit(
-                    PerSampleDetectionLoss(self.model, loss_type=t),
-                    flag="loss", name=f"{split}/{n}", per_sample=True, log=True,
+                    PerInstanceDetectionLoss(self.model, loss_type=t, return_levels=True),
+                    flag="loss", name=f"{split}/{n}", per_sample=False, log=False,
                 )
             self.iou[split] = wl.watch_or_edit(
-                PerSampleIoU(conf=0.25, iou_thres=0.5),
-                flag="metric", name=f"miou/{split}", per_sample=True, log=True,
+                PerInstanceIoU(conf=0.25, iou_thres=0.5),
+                flag="metric", name=f"miou/{split}", per_sample=False, log=False,
             )
 
     def train(self):
@@ -110,13 +107,30 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 raw_preds = self.model(image.to(self.device))
                 preds_by_batch = _decode_preds_to_6col(raw_preds, image, conf=0.1, cls_thresh=0.1)
 
-                per_sample = (
-                    cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-                    + cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
-                    + cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
-                )
-                loss = per_sample.mean()
-                m(raw_preds, batch, batch_ids=batch_ids)
+                # PerInstanceDetectionLoss returns {'instance', 'sample', 'batch'} levels
+                bbxs_result = cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+                clsf_result = cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
+                dfl_result = cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
+
+                # Log per-instance and per-sample losses separately
+                wl.log_sample_signals({
+                    "train/bbxs_instance": bbxs_result['instance'],
+                    "train/bbxs_sample": bbxs_result['sample'],
+                    "train/clsf_instance": clsf_result['instance'],
+                    "train/clsf_sample": clsf_result['sample'],
+                    "train/dfl_instance": dfl_result['instance'],
+                    "train/dfl_sample": dfl_result['sample'],
+                }, batch_ids=batch_ids)
+
+                # Extract batch-level loss for backward pass
+                loss = bbxs_result['batch'] + clsf_result['batch'] + dfl_result['batch']
+
+                # Log IoU per-instance and per-sample
+                iou_result = m(raw_preds, batch, batch_ids=batch_ids)
+                if isinstance(iou_result, torch.Tensor):
+                    wl.log_sample_signals({
+                        "train/iou": iou_result,
+                    }, batch_ids=batch_ids)
 
                 loss.backward()
                 self.optimizer.step()
@@ -134,10 +148,27 @@ class WLCompatileDetTrainer(DetectionTrainer):
             preds_by_batch = _decode_preds_to_6col(
                 raw_preds, image, conf=0.25, cls_thresh=0.5, device=self.device)
 
-            cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-            cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
-            cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
-            m(raw_preds, batch, batch_ids=batch_ids)
+            # PerInstanceDetectionLoss returns {'instance', 'sample', 'batch'} levels
+            bbxs_result = cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+            clsf_result = cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
+            dfl_result = cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
+
+            # Log per-instance and per-sample losses separately
+            wl.log_sample_signals({
+                "val/bbxs_instance": bbxs_result['instance'],
+                "val/bbxs_sample": bbxs_result['sample'],
+                "val/clsf_instance": clsf_result['instance'],
+                "val/clsf_sample": clsf_result['sample'],
+                "val/dfl_instance": dfl_result['instance'],
+                "val/dfl_sample": dfl_result['sample'],
+            }, batch_ids=batch_ids)
+
+            # Log IoU per-instance
+            iou_result = m(raw_preds, batch, batch_ids=batch_ids)
+            if isinstance(iou_result, torch.Tensor):
+                wl.log_sample_signals({
+                    "val/iou": iou_result,
+                }, batch_ids=batch_ids)
 
 
 def main():
