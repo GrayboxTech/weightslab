@@ -71,10 +71,22 @@ _collectives = 0  # collectives since the last reset (i.e. during this step)
 
 def reset_collectives():
     """Call once per step at the anchor. Logs the PRIOR step's collective count so
-    a collective leaking into a hot path is visible immediately, then resets."""
+    a collective leaking into a hot path is visible immediately, then resets.
+
+    Optional: WL_DDP_COLLECTIVE_LOG=<path> appends the prior step's count to a
+    file (one int per line). Used by scenario_collective_budget to gate the
+    "≤2 collectives per training step" invariant programmatically.
+    """
     global _collectives
     if _log_on() and _collectives:
         ddp_log(f"collectives last step = {_collectives}")
+    _p = os.environ.get("WL_DDP_COLLECTIVE_LOG")
+    if _p:
+        try:
+            with open(_p, "a") as _f:
+                _f.write(f"{_collectives}\n")
+        except Exception:
+            pass
     _collectives = 0
 
 

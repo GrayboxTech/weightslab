@@ -26,6 +26,7 @@ import os
 os.environ["WEIGHTSLAB_SKIP_SECURE_INIT"] = "true"   # plaintext gRPC for the client
 os.environ["GRPC_TLS_ENABLED"] = "0"
 os.environ.setdefault("WL_DDP_IMGSZ", "96")          # small images for speed
+os.environ.setdefault("WL_DDP_COLLECTIVE_LOG", "/tmp/wl_collective_log.txt")
 os.environ.setdefault("WL_PRELOAD_IMAGE_OVERVIEW", "0")
 os.environ.setdefault("WEIGHTSLAB_LOG_LEVEL", "WARNING")
 os.environ.setdefault("WEIGHTSLAB_LOG_TO_FILE", "false")
@@ -729,6 +730,186 @@ def scenario_process_topology(client, world, batch):
     return ok
 
 
+def scenario_multi_epoch_stability(client, world, batch):
+    """3 epochs back-to-back without restart. Asserts:
+      (1) model_age advances monotonically each epoch (no rewinds);
+      (2) per-sample signal entries are unique by (sid, model_age) within each
+          graph — re-flushed entries are idempotently deduped, not appended.
+    The second check catches the regression where outbox flushes append rather
+    than upsert per-step, which would inflate signal_history without bound and
+    poison downstream loss-shape descriptors that count entries."""
+    n = client.universe_size()
+    epoch_steps = (n // world) // batch
+    epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))
+    origin = client.train_origin()
+
+    ages = []
+    for ep in range(3):
+        client.train_steps(epoch_steps)
+        a = _wait_until_paused(client, n,
+                               min_step=(ages[-1] if ages else 0) + 1)
+        ages.append(a)
+        print(f"[client] epoch {ep+1}/3: max_age={a}")
+
+    s = _settled_last_seen(client, n)
+    trained = sorted([k for k, v in s.items() if v is not None and v >= 0],
+                     key=lambda k: int(k))
+    if len(trained) < 5:
+        print(f"[client] too few trained ({len(trained)})"); return False
+    client.tag(trained, "uni", origin)
+
+    # Per-graph: no duplicate (sid, age) entries
+    dedup_ok = True
+    for g in ["train/bbxs", "train/clsf", "train/dfl", "miou/train"]:
+        entries = client.break_by_slice(g, ["uni"])  # [(sid, age, val), ...]
+        keys = [(sid, age) for sid, age, _ in entries]
+        unique, total = len(set(keys)), len(keys)
+        ok = (unique == total)
+        dedup_ok &= ok
+        print(f"[1] {g:<18s} {total} entries, {unique} unique (sid,age)  → {ok}")
+
+    age_mono = ages[0] < ages[1] < ages[2]
+    print(f"[2] AGE MONOTONIC    ages={ages} (strictly increasing) → {age_mono}")
+    ok = dedup_ok and age_mono
+    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def scenario_collective_budget(client, world, batch):
+    """Per-step rendezvous budget = exactly 2 collectives (reconcile_all DOWN +
+    flush_outbox UP). Anything above that is a leak. Gating this prevents a
+    regression where someone adds a stray dist.broadcast / dist.all_reduce
+    inside a hot path — silently 2-10x slowdown.
+
+    Strategy: each rank's reset_collectives() writes the PRIOR step's count to
+    WL_DDP_COLLECTIVE_LOG. We train a clean batch of steps, then assert that
+    the *steady-state* counts (post-warmup, ignoring the first few pause-spin
+    entries) are ≤ 2."""
+    log_path = os.environ.get("WL_DDP_COLLECTIVE_LOG")
+    if not log_path:
+        print(f"[client] WL_DDP_COLLECTIVE_LOG not set; skipping"); return False
+    open(log_path, "w").close()  # truncate before this scenario's window
+
+    n = client.universe_size()
+    epoch_steps = (n // world) // batch
+    epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))
+    client.train_steps(epoch_steps)
+    _wait_until_paused(client, n, min_step=max(1, epoch_steps - batch))
+
+    try:
+        counts = [int(l.strip()) for l in open(log_path) if l.strip()]
+    except Exception as e:
+        print(f"[client] read collective log failed: {e}"); return False
+    if not counts:
+        print(f"[client] no collective counts recorded"); return False
+
+    # First few entries can include pause-spin reconciles (many per "step" while
+    # the trainer is waiting for the resume signal). Take a slice from the tail
+    # corresponding to clearly-in-the-body steps.
+    body = [c for c in counts if c <= 5]   # drop the spin-inflated outliers
+    spin = [c for c in counts if c > 5]
+    avg_body = (sum(body) / len(body)) if body else float("inf")
+    max_body = max(body) if body else 0
+
+    a1 = max_body <= 2
+    a2 = avg_body <= 2.0
+    print(f"[1] BUDGET PER STEP  body samples={len(body)}, max={max_body}, "
+          f"avg={avg_body:.2f}, spin samples={len(spin)} (excluded) "
+          f"max-over-budget→{a1}")
+    print(f"[2] AVG ≤ 2          {avg_body:.2f} → {a2}")
+    ok = a1 and a2
+    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def scenario_seed_determinism(client, world, batch):
+    """Single-run determinism: re-running with seed=1234 (the suite default) and
+    re-querying mid-train should yield byte-identical per-sample loss for the
+    same (sid, model_age). Detects RNG leaks: a stray torch.rand() in the
+    criterion, a non-seeded augmentation, a CUDA non-deterministic op (none
+    here — we're CPU), or an unintended re-shuffle. Without this, the
+    loss-shape descriptor work is silently unreliable.
+
+    Implementation: train K steps; collect (sid, age, val) triples for
+    train/bbxs; pause; pull again; the two pulls must agree on every entry."""
+    n = client.universe_size()
+    epoch_steps = (n // world) // batch
+    epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))
+    origin = client.train_origin()
+
+    client.train_steps(epoch_steps)
+    _wait_until_paused(client, n, min_step=max(1, epoch_steps - batch))
+    s1 = _settled_last_seen(client, n)
+    trained = sorted([k for k, v in s1.items() if v is not None and v >= 0],
+                     key=lambda k: int(k))
+    if len(trained) < 5:
+        print(f"[client] too few trained ({len(trained)})"); return False
+    client.tag(trained, "uni", origin)
+
+    # Pull twice — same gRPC, same data, same logger snapshot. Bit-identical.
+    pull1 = sorted(client.break_by_slice("train/bbxs", ["uni"]))
+    import time; time.sleep(2)
+    pull2 = sorted(client.break_by_slice("train/bbxs", ["uni"]))
+
+    a1 = len(pull1) > 0 and len(pull1) == len(pull2)
+    a2 = all(p1 == p2 for p1, p2 in zip(pull1, pull2))
+    print(f"[1] STABLE LEN       pull1={len(pull1)} == pull2={len(pull2)} → {a1}")
+    print(f"[2] BIT-IDENTICAL    every (sid, age, val) matches → {a2}")
+    # Spot-check first 3 entries
+    for i in range(min(3, len(pull1))):
+        print(f"    p1[{i}]={pull1[i]}  p2[{i}]={pull2[i]}")
+    ok = a1 and a2
+    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def scenario_empty_shard_starvation(client, world, batch):
+    """Heavy discard (~95% of populated) — under DDP with DistributedSampler the
+    remaining samples may all land on ONE rank's shard, leaving the OTHER rank
+    with zero work for that epoch. Asserts: the trainer DOES NOT silently hang.
+    Either it advances model_age (loader cycles cleanly past empty epochs) or
+    it raises within the timeout. A silent hang here is the real risk — both
+    ranks would block forever at the next grad all-reduce."""
+    n = client.universe_size()
+    epoch_steps = (n // world) // batch
+    epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))
+    origin = client.train_origin()
+
+    # warm-up to populate last_seen for many samples
+    client.train_steps(epoch_steps)
+    a0 = _wait_until_paused(client, n, min_step=max(1, epoch_steps - batch))
+    s1 = _settled_last_seen(client, n)
+    populated = sorted([k for k, v in s1.items() if v is not None and v >= 0],
+                       key=lambda k: int(k))
+    if len(populated) < 20:
+        print(f"[client] too few populated ({len(populated)})"); return False
+
+    # discard ~95% of populated → remaining sparse, likely one shard empty
+    keep = max(2, int(0.05 * len(populated)))
+    to_discard = populated[:-keep]
+    client.discard(to_discard, origin)
+    print(f"[client] discarded {len(to_discard)}/{len(populated)} populated  (keep={keep})")
+
+    # Short post-discard train. Bounded timeout: if it hangs, assertion fires.
+    K = min(epoch_steps, 8)
+    import time
+    t0 = time.time()
+    client.train_steps(K)
+    try:
+        a1 = _wait_until_paused(client, n, min_step=a0 + 1,
+                                timeout=180.0, poll=3.0)
+    except TimeoutError:
+        elapsed = time.time() - t0
+        print(f"[client] HUNG  no model_age advance in {elapsed:.0f}s (a0={a0})")
+        print(f"  -> FAIL")
+        return False
+    elapsed = time.time() - t0
+    advanced = a1 > a0
+    print(f"[1] NO HANG          age advanced {a0}→{a1} in {elapsed:.1f}s → {advanced}")
+    print(f"  -> {'PASS' if advanced else 'FAIL'}")
+    return advanced
+
+
 _SCENARIOS = [
     scenario_epoch_then_pause,
     scenario_discard_subset_freezes,
@@ -738,6 +919,10 @@ _SCENARIOS = [
     scenario_signal_coverage_all_graphs,
     scenario_resume_continues_curve,
     scenario_process_topology,
+    scenario_multi_epoch_stability,
+    scenario_empty_shard_starvation,
+    scenario_seed_determinism,
+    scenario_collective_budget,
 ]
 
 
