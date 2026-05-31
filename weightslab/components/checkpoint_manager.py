@@ -659,10 +659,17 @@ class CheckpointManager:
                     rng_state = capture_rng_state()
                     restore_rng_state(rng_state)
 
-                    # Reset dataloader iterators to sync with new state
+                    # Reset dataloader iterators to sync with new state.
+                    # Lazy invalidate-flag path preferred (see notes above) — avoids
+                    # tearing workers down from a non-owning thread.
                     for loader_name in get_dataloaders():
                         loader = get_dataloader(loader_name)
-                        if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                        if loader is None:
+                            continue
+                        inv = getattr(loader, '_invalidate_iter', None)
+                        if callable(inv):
+                            inv()
+                        elif hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
                             loader.reset_iterator()
                             logger.debug(f"Reset iterator for dataloader: {loader_name}")
                 except Exception as e:
@@ -1991,15 +1998,21 @@ class CheckpointManager:
                 restore_rng_state(checkpoint_data['rng_state'])
                 logger.debug(f"Restored RNG state from checkpoint")
 
-                # Reset dataloaders iterators to ensure reproducibility
+                # Reset dataloaders iterators to ensure reproducibility.
+                # Prefer the lazy `_invalidate_iter` path so worker shutdown happens
+                # on the trainer thread (not this gRPC handler thread) — avoids
+                # the std::terminate crash that occurs when worker subprocs are
+                # torn down from a non-owning thread under num_workers>0.
                 for loader_name in ledgers.get_dataloaders():
                     loader = ledgers.get_dataloader(loader_name)
-
-                    if loader is not None:
-                        # Resume loader state
-                        if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
-                            loader.reset_iterator()
-                            logger.debug(f"Reset iterator for dataloader: {loader}")
+                    if loader is None:
+                        continue
+                    inv = getattr(loader, '_invalidate_iter', None)
+                    if callable(inv):
+                        inv()
+                    elif hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                        loader.reset_iterator()
+                        logger.debug(f"Reset iterator for dataloader: {loader}")
 
                 # Restore RNG state again after resetting dataloaders
                 restore_rng_state(checkpoint_data['rng_state'])
@@ -2033,8 +2046,18 @@ class CheckpointManager:
                     if state_for_loader:
                         try:
                             loader.restore_iteration_state(state_for_loader)
-                            # Resume loader state
-                            if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                            # Reset iterator: prefer the lazy `_invalidate_iter` path
+                            # (sets a flag; next __next__ shuts down workers from the
+                            # TRAINER thread). Calling reset_iterator() directly from
+                            # the gRPC handler thread crashes with std::terminate when
+                            # num_workers > 0 — worker subprocs' C++ thread destructors
+                            # fire while still active. The lazy path moves the shutdown
+                            # to the safe, single-threaded trainer loop.
+                            inv = getattr(loader, '_invalidate_iter', None)
+                            if callable(inv):
+                                inv()
+                                logger.debug(f"Invalidated iter (lazy reset) for dataloader: {loader}")
+                            elif hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
                                 loader.reset_iterator()
                                 logger.debug(f"Reset iterator for dataloader: {loader}")
                             logger.info(f"[OK] Restored dataloader iteration state for {loader_name}: {state_for_loader}")

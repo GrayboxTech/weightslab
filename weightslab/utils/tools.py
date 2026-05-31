@@ -1,4 +1,5 @@
 import io
+import os
 import xxhash
 import types
 import logging
@@ -668,3 +669,111 @@ def safe_call_with_kwargs(func, *args, **kwargs):
     """
     filtered_kwargs = filter_kwargs_for_callable(func, kwargs)
     return func(*args, **filtered_kwargs)
+
+
+def ddp_info():
+    """Return ``(rank, world_size)`` for the current process.
+
+    Single source of truth for DDP rank detection across WeightsLab. Resolves,
+    in order: an initialized ``torch.distributed`` process group, then the
+    ``RANK`` / ``WORLD_SIZE`` env vars (torchrun convention, before init), then
+    ``(0, 1)`` for the ordinary single-process case.
+    """
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized():
+            return dist.get_rank(), dist.get_world_size()
+    except Exception:
+        pass
+    try:
+        return int(os.environ.get("RANK", "0")), max(1, int(os.environ.get("WORLD_SIZE", "1")))
+    except Exception:
+        return 0, 1
+
+
+def is_main_process():
+    """True on rank 0 (or single-process). Gate rank-0-only work (e.g. serve) on this."""
+    return ddp_info()[0] == 0
+
+
+def all_reduce_sum_scalar(value):
+    """Return the sum of ``value`` across all ranks (identity in single-process).
+
+    One tiny scalar all_reduce when a torch.distributed group is live; otherwise
+    returns ``value`` unchanged. Backend-aware: moves to CUDA for nccl, stays on
+    CPU for gloo.
+    """
+    value = int(value)
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            t = torch.tensor([value], dtype=torch.long)
+            if dist.get_backend() == "nccl":
+                t = t.cuda()
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            return int(t.item())
+    except Exception:
+        pass
+    return value
+
+
+class DistributedCounter:
+    """An integer counter that stays globally consistent under DDP.
+
+    ``counter += delta`` adds the *global* sum of every rank's delta — one tiny
+    scalar all_reduce when a torch.distributed group is live, or a plain local
+    add otherwise. Every rank therefore holds the same running total, and call
+    sites stay ``counter += delta`` regardless of world size. This encapsulates
+    the single-vs-multi-worker branch so the rest of the code never sees it.
+
+    Use ``add_local`` for the rare case you want to add WITHOUT reducing (a value
+    that is already globally identical on every rank, e.g. a step tick).
+    """
+
+    def __init__(self, value: int = 0):
+        self._value = int(value)
+
+    def __iadd__(self, delta):
+        self._value += all_reduce_sum_scalar(int(delta))
+        return self
+
+    def add_local(self, delta):
+        """Add ``delta`` locally, with no cross-rank reduction. Returns self."""
+        self._value += int(delta)
+        return self
+
+    @property
+    def value(self) -> int:
+        return self._value
+
+    def set(self, value):
+        """Overwrite the running total (e.g. on checkpoint restore)."""
+        self._value = int(value)
+        return self
+
+    def __int__(self):
+        return self._value
+
+    def __index__(self):
+        return self._value
+
+    def __eq__(self, other):
+        return self._value == int(other)
+
+    def __lt__(self, other):
+        return self._value < int(other)
+
+    def __le__(self, other):
+        return self._value <= int(other)
+
+    def __gt__(self, other):
+        return self._value > int(other)
+
+    def __ge__(self, other):
+        return self._value >= int(other)
+
+    def __hash__(self):
+        return hash(self._value)
+
+    def __repr__(self):
+        return f"DistributedCounter({self._value})"

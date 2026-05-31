@@ -30,6 +30,7 @@ from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
 from weightslab.utils.logger import LoggerQueue
+from weightslab.utils.tools import ddp_info, is_main_process
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -996,7 +997,17 @@ def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> No
         serving_cli: Start the interactive CLI server.
         serving_grpc: Start the gRPC server.
         **kwargs: Extra server options passed to underlying backends.
+
+    Under DDP this is a no-op on non-zero ranks: the gRPC backend binds one
+    fixed port over this process's global ledger, so a second backend on a
+    child rank would only collide on the port and serve that rank's shard. The
+    studio talks to rank 0. Single-process (world_size == 1) is rank 0 -> serves
+    as before, so callers can write ``wl.serve()`` unconditionally.
     """
+    rank, world_size = ddp_info()
+    if not is_main_process():
+        logger.info("[serve] rank %d/%d is not the main process; skipping serve (rank 0 owns the UI backend).", rank, world_size)
+        return
 
     if serving_grpc:
         grpc_serve(**kwargs)
@@ -1013,7 +1024,17 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
             until interrupted.
         release_gpu: If ``True``, move tracked torch objects to CPU and release
             CUDA cached memory before entering the wait loop.
+
+    Under DDP this is a no-op on non-zero ranks: only rank 0 holds the process
+    alive to serve the UI. A child must NOT release its GPU / idle here (it is
+    still a live training replica), so it returns immediately and proceeds to
+    its own clean shutdown.
     """
+    if not is_main_process():
+        rank, world_size = ddp_info()
+        logger.info("[keep_serving] rank %d/%d is not the main process; returning (only rank 0 holds the UI backend alive).", rank, world_size)
+        return
+
     if release_gpu:
         _release_gpu_resources()
         logger.info("WeightsLab switched to CPU idle mode for serving.")

@@ -466,6 +466,29 @@ class LoggerQueue:
                 result[graph_name][exp_hash] = entries
         return result
 
+    def ingest_per_sample(self, graph_name, exp_hash, triples):
+        """Merge external per-sample (sample_id, step, value) triples into the
+        per-sample history. Idempotent by (sample_id, step) — re-ingesting the same
+        triples is a no-op. Used to fold per-sample signals (e.g. loss) computed on
+        OTHER DDP ranks into rank 0's logger so Break-By-Slice plots cover the whole
+        universe, not just rank 0's shard."""
+        if not triples:
+            return
+        self.graph_names.add(graph_name)
+        self._signal_history_per_sample.setdefault(graph_name, {})
+        if exp_hash not in self._signal_history_per_sample[graph_name]:
+            self._signal_history_per_sample[graph_name][exp_hash] = _make_per_sample_buf()
+        buf = self._signal_history_per_sample[graph_name][exp_hash]
+        seen = set(zip(buf["sample_ids"], buf["steps"]))
+        for sid, step, val in triples:
+            key = (str(sid), int(step))
+            if key in seen:
+                continue
+            buf["sample_ids"].append(str(sid))
+            buf["steps"].append(int(step))
+            buf["values"].append(float(val))
+            seen.add(key)
+
     def query_per_sample(self, graph_name: str, sample_ids=None, exp_hash=None):
         """Efficiently query per-sample history for specific sample IDs.
 

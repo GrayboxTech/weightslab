@@ -20,10 +20,10 @@ import torch
 import logging
 from typing import Any, Iterator, Optional
 
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler, DistributedSampler
 
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
-from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
+from weightslab.utils import filter_kwargs_for_callable, restore_rng_state, ddp_info
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
@@ -133,6 +133,14 @@ class WeightsLabDataSampler(Sampler):
         # Evaluation-mode allow-list: when set, only samples whose uid is in
         # this set are yielded.  None = no filter (normal behaviour).
         self._eval_allow_list: Optional[set] = None
+        # DDP sharding: partition indices across ranks via the stock
+        # torch DistributedSampler. (0, 1) when not under DDP -> no-op, so the
+        # single-process path is unchanged. The DistributedSampler composes
+        # with deny-list and eval allow-list in _iter_filtered_indices.
+        self._ddp_rank, self._ddp_world_size = ddp_info()
+        self._ddp_seed = int(os.environ.get("WL_DDP_SEED", "0"))
+        self._epoch = 0
+        self._dist_sampler: Optional[DistributedSampler] = None
 
     def _get_deny_listed_uids(self) -> set:
         """Get set of deny-listed UIDs from tracked dataset."""
@@ -197,8 +205,51 @@ class WeightsLabDataSampler(Sampler):
 
         return uid in self._refresh_deny_list_cache()
 
+    def _get_dist_sampler(self) -> DistributedSampler:
+        """Lazily build the per-rank DistributedSampler used for DDP sharding."""
+        if self._dist_sampler is None:
+            self._dist_sampler = DistributedSampler(
+                self.data_source,
+                num_replicas=self._ddp_world_size,
+                rank=self._ddp_rank,
+                shuffle=self.shuffle,
+                seed=self._ddp_seed,
+                drop_last=False,
+            )
+        return self._dist_sampler
+
+    def set_epoch(self, epoch: int) -> None:
+        """DDP per-epoch reshuffle hook (mirrors DistributedSampler.set_epoch).
+
+        Optional: WL auto-advances the epoch on each fresh iteration, so a thin
+        training script need not call this. Provided for parity with code that
+        drives DistributedSampler explicitly.
+        """
+        self._epoch = int(epoch)
+
+    def _rank_indices_snapshot(self):
+        """This rank's base indices for the current epoch, WITHOUT advancing it.
+
+        Used by __len__ so counting never reshuffles the live iteration order.
+        """
+        if self._ddp_world_size > 1:
+            ds = self._get_dist_sampler()
+            ds.set_epoch(self._epoch)
+            return list(ds)
+        return list(range(len(self.data_source)))
+
     def _generate_indices(self):
-        """Generate base indices (shuffled or sequential)."""
+        """Generate base indices (shuffled or sequential).
+
+        Under DDP (world_size > 1) the index universe is this rank's shard from
+        the stock DistributedSampler, reshuffled per epoch; the epoch counter is
+        auto-advanced so a thin script need not call set_epoch.
+        """
+        if self._ddp_world_size > 1:
+            ds = self._get_dist_sampler()
+            ds.set_epoch(self._epoch)
+            self._epoch += 1
+            return list(ds)
         n = len(self.data_source)
         if self.shuffle:
             indices = torch.randperm(n).tolist()
@@ -207,7 +258,16 @@ class WeightsLabDataSampler(Sampler):
         return indices
 
     def _iter_filtered_indices(self, indices):
-        """Yield indices lazily so new discards are respected mid-epoch."""
+        """Yield indices lazily so new discards are respected mid-epoch.
+
+        Two-layer deny-list check:
+          (1) shm fast-path — bool read from the dataframe-manager's shared-memory
+              mirror of DOWN_ONLY columns. Visible across fork, so a discard
+              landing on the rank-main process is seen IMMEDIATELY by DataLoader
+              workers (no IPC). Solves the "stale deny-list in workers" bug.
+          (2) pandas cache (existing) — covers non-numeric uids and acts as a
+              backup before the shm has populated.
+        """
         skipped = 0
         unique_ids = getattr(self.tracked_dataset, "unique_ids", None)
         # Prefer physical_uids: after grouped indexing __len__ returns
@@ -218,6 +278,16 @@ class WeightsLabDataSampler(Sampler):
         deny_listed_uids = self._refresh_deny_list_cache()
         deny_list_revision = self._deny_list_revision
         polled_since_refresh = 0
+
+        # shm fast-path setup: cache the manager + origin so the per-idx check
+        # below is one attribute lookup + one array read.
+        df_manager = get_dataframe()
+        shm_origin = getattr(self.tracked_dataset, "_dataset_split", None)
+        shm_check = (
+            df_manager.is_in_down_only_shm
+            if df_manager is not None and hasattr(df_manager, "is_in_down_only_shm")
+            else None
+        )
 
         for idx in indices:
             if uid_source is not None:
@@ -237,6 +307,14 @@ class WeightsLabDataSampler(Sampler):
 
                 try:
                     uid_str = str(uid_source[idx])
+                    # (1) shm fast-path — fork-safe, no IPC
+                    if shm_check is not None and shm_origin is not None:
+                        try:
+                            if shm_check(shm_origin, "discarded", int(uid_str)):
+                                continue
+                        except (TypeError, ValueError):
+                            pass  # non-int uid → fall through to pandas check
+                    # (2) pandas cache — non-int uids + early-startup fallback
                     if uid_str in deny_listed_uids:
                         continue
                     # Evaluation allow-list: skip samples not in the set
@@ -275,28 +353,17 @@ class WeightsLabDataSampler(Sampler):
 
     def __len__(self):
         """Return the number of samples or batches."""
-        # In evaluation mode with an allow-list, compute the exact filtered
-        # cardinality so progress/timeout logic uses the real bounded set size.
-        if self._eval_allow_list is not None:
-            total = sum(1 for _ in self._iter_filtered_indices(list(range(len(self.data_source)))))
-
-            if self.batch_size is not None:
-                b = max(1, int(self.batch_size))
-                if self.drop_last:
-                    return total // b
-                return (total + b - 1) // b
-
-            return total
-
-        # Start with total dataset size
-        total = len(self.data_source)
-
-        # Subtract deny-listed samples
-        deny_listed_uids = self._refresh_deny_list_cache()
-        total -= len(deny_listed_uids)
-
-        # Subtract offset
-        total = max(0, total - self.offset)
+        # When a filter bounds the set to less than the whole dataset (eval
+        # allow-list, or a DDP per-rank shard), compute the exact filtered
+        # cardinality over a non-advancing snapshot so progress/timeout logic
+        # uses the real bounded size and counting never reshuffles iteration.
+        if self._eval_allow_list is not None or self._ddp_world_size > 1:
+            total = sum(1 for _ in self._iter_filtered_indices(self._rank_indices_snapshot()))
+        else:
+            # Start with total dataset size, subtract deny-listed and offset.
+            total = len(self.data_source)
+            total -= len(self._refresh_deny_list_cache())
+            total = max(0, total - self.offset)
 
         # If batching, return number of batches
         if self.batch_size is not None:
@@ -523,6 +590,12 @@ class DataLoaderInterface:
         self._samples_yielded: int = 0
         self._sample_offset: int = 0
         self._skipped = []
+        # Flag set by dataframe_manager.upsert_df whenever a DOWN_ONLY column changes
+        # (UI discard / tag). The next __next__ call resets the iterator BEFORE
+        # pulling — workers + their prefetched-but-not-yet-consumed batches are
+        # shut down. Without this, a sample yielded by the sampler PRE-discard
+        # but still sitting in a worker's queue gets trained on POST-discard.
+        self._iter_invalidated: bool = False
 
         # Optionally register in the global ledger for cross-thread access.
         # If no explicit `loader_name` is provided, try to infer a friendly loader_name from
@@ -817,6 +890,17 @@ class DataLoaderInterface:
         """
         self._sync_batch_size_from_ledger()
 
+        # DOWN_ONLY-change invalidation: a UI discard / tag wrote a column that
+        # affects WHICH samples are valid to train on. Any indices already
+        # yielded by the sampler and sitting in worker prefetch queues are now
+        # stale — they were chosen against the OLD deny-list. Reset first so
+        # the model never trains on a since-discarded sample. (Real fix, not a
+        # post-hoc filter: the forward pass on the discarded sample never runs.)
+        if getattr(self, '_iter_invalidated', False):
+            self._iter_invalidated = False
+            logger.debug("[DataLoaderInterface] iter invalidated by DOWN_ONLY change; resetting workers")
+            self._reset_iterator()
+
         # If the previous epoch ended, reset for the next one
         if getattr(self, '_epoch_exhausted', False):
             logger.debug("Auto-resetting iterator for next epoch")
@@ -830,6 +914,17 @@ class DataLoaderInterface:
             # Mark that epoch is exhausted; next __next__ call will reset
             self._epoch_exhausted = True
             raise
+
+    def _invalidate_iter(self) -> None:
+        """Mark the active iterator as stale. Called from dataframe_manager
+        whenever a DOWN_ONLY column changes (the sampler-time filter only
+        protects FUTURE yields; this drops the prefetched queue too).
+
+        Safe to call repeatedly: only flips a flag — the actual worker shutdown
+        happens inside the next __next__ call's _reset_iterator() (via the
+        existing del + gc.collect() path which the iter destructor uses to kill
+        worker subprocesses cleanly)."""
+        self._iter_invalidated = True
 
     # -------------------------------------------------------------------------
     # Ledger / pause helpers
@@ -965,6 +1060,12 @@ class DataLoaderInterface:
 
         # Create new iterator
         self._iterator = iter(self.dataloader)
+        # Clear the invalidate flag — this reset just satisfied it. Without this,
+        # the next __next__ would do a SECOND reset (load_state calls reset_iterator
+        # explicitly, AND our upsert hook may have set _iter_invalidated during the
+        # snapshot apply — so without clearing here, we'd shut down + restart workers
+        # twice back-to-back. Costly under num_workers>0).
+        self._iter_invalidated = False
         logger.debug(f"Created new iterator (num_workers={getattr(self.dataloader, 'num_workers', 'unknown')}, sampler_len={len(self._mutable_batch_sampler) if self._mutable_batch_sampler else 'N/A'})")
 
     def reset_iterator(self) -> None:

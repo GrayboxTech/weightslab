@@ -218,8 +218,38 @@ class GuardContext:
         """
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
-        self._maybe_pause_at_step()
-        pause_controller.wait_if_paused()
+        # Per-step pause + DDP control plane. Under DDP (world_size > 1) pause is
+        # COLLECTIVE: rank 0 evaluates pause_at_step, then ddp_guard_sync broadcasts
+        # the discard set + pause flag and spins ALL ranks while paused — so no rank
+        # blocks alone (which would deadlock the gradient all-reduce). Single-process
+        # keeps the original blocking pause.
+        # Per-step anchor.
+        #   single-process: rank-0-only pause tick + a local blocking wait.
+        #   DDP (world > 1): rank-0 ticks pause state; every rank then enters
+        #     sync_step — ONE bundled broadcast of every consistent state
+        #     (hparams + deny-list + paused) followed by a collective spin if
+        #     paused. No rank ever blocks alone (that would deadlock the grad
+        #     all-reduce). The core states are auto-registered on first call so
+        #     train.py never sees the DDP plumbing.
+        in_ddp = False
+        if self.for_training:
+            try:
+                from weightslab.utils import ddp_info
+                in_ddp = ddp_info()[1] > 1
+                if in_ddp and ddp_info()[0] == 0:
+                    self._maybe_pause_at_step()    # rank 0 is the pause authority
+            except Exception as exc:
+                logger.debug("[GuardContext] ddp probe failed: %s", exc)
+
+        if in_ddp:
+            from weightslab.components.ddp_basic_building_blocks import (
+                _ensure_core_ddp_registered, sync_step,
+            )
+            _ensure_core_ddp_registered()          # idempotent; no-op after first
+            sync_step()                            # the ONE DDP-aware site
+        else:
+            self._maybe_pause_at_step()
+            pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
 
         # Set the current context for this execution

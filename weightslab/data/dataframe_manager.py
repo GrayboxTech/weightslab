@@ -1,6 +1,9 @@
-import time
-import threading
+import ctypes
 import logging
+import multiprocessing as _mp
+import os
+import threading
+import time
 import traceback
 import numpy as np
 import pandas as pd
@@ -66,6 +69,18 @@ class LedgeredDataFrameManager:
             SampleStats.Ex.PREDICTION_RAW.value,
             SampleStats.Ex.TARGET.value,
         ]
+
+        # Shared-memory mirror of DOWN-only per-sample columns (today: 'discarded').
+        # DataLoader subprocess workers fork from this process, so they inherit
+        # the SAME backing bytes — a write here is visible to every forked worker
+        # without any IPC. Solves the "stale deny-list in workers" bug (live UI
+        # discards arrived after fork were invisible to the workers, letting
+        # already-queued samples leak through).
+        # Layout: {(origin: str, col: str): RawArray(bool, capacity)}.
+        # Indexed by int(sample_id). Capacity grows on demand.
+        self._shm_down_only: dict[tuple[str, str], "_mp.RawArray"] = {}
+        self._shm_capacity: dict[str, int] = {}        # per-origin allocation
+        self._shm_lock = threading.Lock()              # serialize grows / replaces
 
     def set_store(self, store: H5DataFrameStore):
         with self._lock:
@@ -146,6 +161,130 @@ class LedgeredDataFrameManager:
             affected_origins.add(str(existing_origins))
 
         return affected_origins
+
+    # ---- DOWN-only shared-memory mirror -----------------------------------
+    # The DDP plane lists DOWN_ONLY columns that flow rank-0 -> children via
+    # `reconcile_all`. We also need them visible to DataLoader worker
+    # subprocesses (forked from the rank's main process). Plain pandas columns
+    # aren't visible across fork — workers carry a snapshot. The shm mirror
+    # below IS visible across fork (same physical bytes), so a discard landing
+    # mid-epoch on rank-0 reaches workers within microseconds.
+    @staticmethod
+    def _down_only_columns() -> set[str]:
+        """Source of truth: weightslab.components.ddp_planes.DOWN_ONLY. Lazy
+        import to avoid a circular dependency (planes -> ledgers -> here)."""
+        try:
+            from weightslab.components.ddp_planes import DOWN_ONLY
+            return set(DOWN_ONLY)
+        except Exception:
+            return {"discarded", "user_tags"}  # safe default; matches planes
+
+    def _ensure_shm_capacity(self, origin: str, col: str, min_capacity: int) -> None:
+        """Allocate / grow the (origin, col) shm vec so int(sample_id)<min_capacity
+        always indexes a live cell. Growing copies prior values; readers in
+        forked workers continue using the OLD array until they re-call
+        `is_in_down_only_shm` (which fetches the current handle). For our
+        steady-state case (N fixed at ledger init) growth happens 0 or 1 times."""
+        key = (str(origin), str(col))
+        with self._shm_lock:
+            existing = self._shm_down_only.get(key)
+            cur = len(existing) if existing is not None else 0
+            if cur >= min_capacity:
+                return
+            # Grow generously so we rarely re-allocate (worker handles to the
+            # OLD array stay valid; new writes go to the new array — callers
+            # MUST re-fetch via is_in_down_only_shm to see growth).
+            new_cap = max(min_capacity, max(cur * 2, 1024))
+            new_arr = _mp.RawArray(ctypes.c_bool, new_cap)
+            if existing is not None:
+                for i in range(cur):
+                    new_arr[i] = existing[i]
+            self._shm_down_only[key] = new_arr
+            self._shm_capacity[str(origin)] = max(
+                self._shm_capacity.get(str(origin), 0), new_cap)
+
+    def _propagate_to_shm(self, df_norm: pd.DataFrame,
+                          affected_origins: set[str]) -> bool:
+        """Mirror DOWN_ONLY column values from `df_norm` into the shm vecs.
+        Called from `upsert_df` after the normal upsert succeeds. Idempotent.
+
+        Returns True iff at least one shm cell was changed (new value differs
+        from prior value). The caller uses this to gate iter-invalidation —
+        absolutely critical under DDP: rank-N receives the SAME df_down bundle
+        every step via reconcile_all and calls upsert_df with the unchanged
+        snapshot. If we invalidated unconditionally, rank-N's loader would die
+        and respawn every step, completely freezing throughput.
+        """
+        down_only = self._down_only_columns()
+        present = [c for c in df_norm.columns if c in down_only]
+        if not present:
+            return False
+        # Determine the origin each row belongs to: prefer the row's "origin"
+        # column if df_norm carries it; otherwise fall through to the caller's
+        # affected_origins (single-origin upsert is the common case).
+        row_origins = None
+        if "origin" in df_norm.columns:
+            row_origins = df_norm["origin"].astype(str)
+        elif len(affected_origins) == 1:
+            single = next(iter(affected_origins))
+            row_origins = pd.Series([single] * len(df_norm), index=df_norm.index)
+        else:
+            return False  # ambiguous; bail rather than mis-mirror
+
+        # df_norm.index is sample_id (set by upsert_df normalization)
+        any_changed = False
+        for col in present:
+            vals = df_norm[col]
+            for sid, origin, val in zip(df_norm.index, row_origins, vals):
+                try:
+                    sid_int = int(str(sid))
+                except (TypeError, ValueError):
+                    continue                       # non-numeric uid: skip shm
+                if pd.isna(val):
+                    continue
+                self._ensure_shm_capacity(str(origin), col, sid_int + 1)
+                arr = self._shm_down_only[(str(origin), col)]
+                new_val = bool(val)
+                if arr[sid_int] != new_val:
+                    arr[sid_int] = new_val
+                    any_changed = True
+        return any_changed
+
+    def _invalidate_loader_iters_on_down_only_change(self, df_norm: pd.DataFrame) -> None:
+        """If `df_norm` touched any DOWN_ONLY column, mark every registered
+        loader's iterator as stale. Triggers on BOTH rank-0 direct discards
+        AND rank-N reconcile-applies (apply_df_down_state calls upsert_df) so
+        every rank gets a fresh iter symmetrically. No-op if no loader has an
+        active iter (e.g. during ledger init, before training starts)."""
+        down_only = self._down_only_columns()
+        if not any(c in down_only for c in df_norm.columns):
+            return
+        try:
+            from weightslab.backend.ledgers import get_dataloaders, get_dataloader
+        except Exception:
+            return
+        for name in get_dataloaders():
+            loader = get_dataloader(name)
+            if loader is None:
+                continue
+            inv = getattr(loader, "_invalidate_iter", None)
+            if callable(inv):
+                try:
+                    inv()
+                except Exception as exc:
+                    logger.debug("[invalidate iter] %s: %s", name, exc)
+
+    def is_in_down_only_shm(self, origin: str, col: str, sid_int: int) -> bool:
+        """Fast (lock-free, fork-safe) read of the shm-mirrored DOWN_ONLY value.
+        Returns False if the cell isn't allocated yet (shm not populated for
+        this origin/col, or sid_int beyond capacity). Falls back cleanly: the
+        sampler still consults the pandas-side cache as a backup."""
+        arr = self._shm_down_only.get((str(origin), str(col)))
+        if arr is None:
+            return False
+        if sid_int < 0 or sid_int >= len(arr):
+            return False
+        return bool(arr[sid_int])
 
     def get_array_store(self) -> H5ArrayStore | None:
         """Get the array store instance."""
@@ -290,6 +429,27 @@ class LedgeredDataFrameManager:
             # Flag index to be flushed later (outside lock) to minimize lock time
             self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
             self._bump_origin_revisions(affected_origins)
+
+            # Mirror DOWN_ONLY column writes to the shm vec so forked DataLoader
+            # workers see live edits (deny-list / user-tags) without IPC.
+            # Returns True iff at least one shm cell actually changed value.
+            down_only_changed = False
+            try:
+                down_only_changed = self._propagate_to_shm(df_norm, affected_origins)
+            except Exception as exc:
+                logger.debug("[shm propagate] failed: %s", exc)
+
+            # Drop every registered loader's iterator ONLY if values actually
+            # changed. Critical under DDP: rank-N's reconcile_all applies the
+            # SAME snapshot every step → if we invalidated unconditionally,
+            # workers would respawn every step and throughput would collapse.
+            # The pre/post compare in _propagate_to_shm makes this a no-op for
+            # idempotent re-applies.
+            if down_only_changed:
+                try:
+                    self._invalidate_loader_iters_on_down_only_change(df_norm)
+                except Exception as exc:
+                    logger.debug("[invalidate iter] failed: %s", exc)
 
     def mark_dirty(self, sample_id: int):
         with self._lock:
@@ -719,7 +879,7 @@ class LedgeredDataFrameManager:
                 subset = self._df[column]
             else:
                 subset = self._df
-        if limit > 0:
+        if limit is not None and limit > 0:
             subset = subset.head(limit)
         return subset.copy() if copy else subset
 

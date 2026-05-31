@@ -332,11 +332,34 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     target_step=target_step,
                 )
             else:
-                success = checkpoint_manager.load_state(experiment_hash, load_logger=False)  # Don't load logger for full restore to avoid overwriting signals already in memory
+                # force=True: explicit user-driven rollback must override the hash-equality
+                # skip in load_checkpoint. When divergent edits (discards / tags) land between
+                # save and restore, the cached data_hash still equals the saved one (it's only
+                # updated on save), so without force the data snapshot would be silently
+                # skipped — restore would succeed for model/config but leave the dataframe
+                # diverged.
+                success = checkpoint_manager.load_state(experiment_hash, load_logger=False, force=True)
 
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
+                # Re-pause after restore: load_state's "Apply config" branch
+                # calls register_hyperparams(saved_config), which OVERWRITES
+                # is_training with whatever was saved (typically True, since
+                # save was triggered during a resume). That undoes the pause
+                # we set before load_state, and the user's subsequent
+                # train_steps(K) gets ignored. Force is_training=False so the
+                # user explicitly drives the next train cycle.
+                if trainer:
+                    try:
+                        trainer.pause()
+                    except Exception as exc:
+                        logger.debug(f"Post-restore re-pause skipped: {exc}")
+                if hp is not None:
+                    try:
+                        hp['is_training'] = False
+                    except Exception:
+                        pass
                 return pb2.RestoreCheckpointResponse(
                     success=True,
                     message=(
