@@ -29,6 +29,7 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
+from weightslab.utils.tools import detach_to_cpu
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -457,7 +458,6 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Log if requested
     step = _get_step()
-    _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
 
     # Save per-instance values to dataframe with annotation_id
     if per_instance and instance_values is not None:
@@ -473,6 +473,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             )
         except Exception as e:
             logger.debug(f"Per-instance signal save failed for {reg_name}: {e}")
+    else:
+        _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
 
     # CHECK FOR SUBSCRIBERS (Dynamic Signals)
     # Allows @wl.signal(subscribe_to="metric_name")
@@ -576,6 +578,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         } if batch_scalar is not None else {}
         signals.update(dynamic_updates) # Merge dynamic signals
 
+        preds = detach_to_cpu(preds)
+        preds_raw = detach_to_cpu(preds_raw)
+
+        # Enqueue signals and data
         save_signals(
             signals=signals,
             batch_ids=batch_ids,

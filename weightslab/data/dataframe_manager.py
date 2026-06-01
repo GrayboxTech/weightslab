@@ -27,6 +27,44 @@ pd.set_option('future.no_silent_downcasting', True)
 logger = logging.getLogger(__name__)  # Set up logger
 
 
+def _safe_update(target: pd.DataFrame, source: pd.DataFrame) -> None:
+    """In-place update of ``target`` from ``source``, immune to the pandas
+    internal AssertionError that ``DataFrame.update()`` raises when the source
+    dtype is incompatible with the target column (e.g. float into int, or any
+    type into a categorical column).
+
+    For each column in ``source``:
+      1. Categorical columns in ``target`` are widened to ``object`` upfront —
+         pandas raises ``AssertionError`` (not a catchable exception) when you
+         assign a value that is not already in the category list.
+      2. Try a direct ``loc`` assignment (fast path, preserves dtype).
+      3. On any exception, widen the target column to ``object`` and retry.
+
+    Only non-NaN values from ``source`` overwrite ``target`` (same semantics
+    as ``DataFrame.update(overwrite=True)``).
+    """
+    common_idx = target.index.intersection(source.index)
+    if common_idx.empty:
+        return
+    for col in source.columns:
+        if col not in target.columns:
+            target[col] = np.nan
+        # Categorical columns must be widened before assignment — pandas raises
+        # an uncatchable AssertionError when the value is not in the category list.
+        if hasattr(target[col], 'cat'):
+            target[col] = target[col].astype(object)
+        src = source.loc[common_idx, col]
+        mask = src.notna()
+        if not mask.any():
+            continue
+        idx_to_write = common_idx[mask.values]
+        try:
+            target.loc[idx_to_write, col] = src[mask].values
+        except Exception:
+            target[col] = target[col].astype(object)
+            target.loc[idx_to_write, col] = src[mask].values
+
+
 class LedgeredDataFrameManager:
     """Central in-memory ledger shared across all loaders/splits.
 
@@ -80,7 +118,7 @@ class LedgeredDataFrameManager:
                     self._array_store.recover()
 
     @staticmethod
-    def _count_instances(target: Any, prediction: Any = None) -> int:
+    def _count_instances(target: Any) -> int:
         """Detect number of instances in a sample based on target/prediction.
 
         Rules:
@@ -146,11 +184,10 @@ class LedgeredDataFrameManager:
 
         for sample_id, row in df.iterrows():
             # Normalize sample_id to string
-            normalized_sid = self._normalize_sample_id(sample_id)
+            normalized_sid = self._normalize_sample_id(sample_id)  # force str
 
             num_instances = self._count_instances(
-                row.get(SampleStats.Ex.TARGET.value),
-                row.get(SampleStats.Ex.PREDICTION.value)
+                row.get(SampleStats.Ex.TARGET.value)
             )
 
             # Ensure at least 1 instance
@@ -170,7 +207,7 @@ class LedgeredDataFrameManager:
         # Create multi-index directly: (sample_id, annotation_id)
         multi_index = pd.MultiIndex.from_arrays(
             [sample_ids, annotation_ids],
-            names=['sample_id', 'annotation_id']
+            names=[SampleStats.Ex.SAMPLE_ID.value, SampleStats.Ex.INSTANCE_ID.value]
         )
         expanded_df.index = multi_index
 
@@ -334,7 +371,7 @@ class LedgeredDataFrameManager:
                         )
 
                     # Override existing rows
-                    self._df.update(loaded_df)
+                    _safe_update(self._df, loaded_df)
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
@@ -907,8 +944,14 @@ class LedgeredDataFrameManager:
             # Convert all sample_ids to strings for lookup
             s_ids = [str(sid) for sid in sample_ids]
 
-            # Efficient lookup: only check samples existing in index
-            existing_mask = self._df.index.isin(s_ids)
+            # Efficient lookup: only check samples existing in index.
+            # With MultiIndex (sample_id, annotation_id), isin() matches tuples,
+            # not scalars — must check level 0 explicitly.
+            if isinstance(self._df.index, pd.MultiIndex):
+                level0 = self._df.index.get_level_values(0).astype(str)
+                existing_mask = level0.isin(s_ids)
+            else:
+                existing_mask = self._df.index.astype(str).isin(s_ids)
             if not existing_mask.any():
                 return discarded_ids
 
@@ -922,8 +965,13 @@ class LedgeredDataFrameManager:
             if slice_df.empty:
                 return discarded_ids
 
-            # Find samples that are discarded
-            discarded = slice_df[slice_df[discard_col] == True].index.tolist()
+            # Find samples that are discarded. Extract sample_id from level 0
+            # (not the full tuple) so the result set contains plain string ids.
+            disc_mask = slice_df[discard_col] == True
+            if isinstance(slice_df.index, pd.MultiIndex):
+                discarded = slice_df.index.get_level_values(0)[disc_mask].tolist()
+            else:
+                discarded = slice_df.index[disc_mask].tolist()
             discarded_ids = set(str(sid) for sid in discarded)
 
         return discarded_ids
@@ -1115,11 +1163,12 @@ class LedgeredDataFrameManager:
             # Ensure target rows exist before masked update
             missing_idx = df_updates.index.difference(self._df.index)
             if len(missing_idx) > 0:
-                # Precreate empty rows so loc assignment does not fail
-                self._df = pd.concat(
-                    [self._df, pd.DataFrame(index=missing_idx, columns=self._df.columns)],
-                    copy=False,
-                )
+                # Precreate empty rows so loc assignment does not fail.
+                # Deduplicate to guard against concurrent flushes adding the same rows.
+                new_rows = pd.DataFrame(index=missing_idx, columns=self._df.columns)
+                self._df = pd.concat([self._df, new_rows], copy=False)
+                if self._df.index.has_duplicates:
+                    self._df = self._df[~self._df.index.duplicated(keep='last')]
 
             # Vectorized masked update: only overwrite where df_updates has non-NaN
             mask = df_updates.notna()
@@ -1166,7 +1215,9 @@ class LedgeredDataFrameManager:
 
             missing_idx = df_updates.index.difference(self._df.index)
             if len(missing_idx) > 0:
-                self._df = self._df.reindex(index=self._df.index.append(missing_idx))
+                # union() is unique by construction — no duplicates, not deprecated.
+                new_index = self._df.index.union(missing_idx)
+                self._df = self._df.reindex(index=new_index)
 
             mask = df_updates.notna()
             self._df.loc[df_updates.index, df_updates.columns] = (
@@ -1338,7 +1389,13 @@ class LedgeredDataFrameManager:
             # 2. Number of unique values < 50% of total rows (good compression ratio)
             if df[col].dtype == 'object':
                 n_unique = df[col].nunique()
-                n_rows = len(df)
+                # Use unique sample count, not row count — with MultiIndex each
+                # sample has multiple annotation rows which would inflate n_rows
+                # and make the ratio appear better than it really is.
+                if isinstance(df.index, pd.MultiIndex):
+                    n_rows = df.index.get_level_values(0).nunique()
+                else:
+                    n_rows = len(df)
                 compression_ratio = n_unique / n_rows if n_rows > 0 else 1.0
 
                 if compression_ratio < 0.5 and n_unique > 1:  # Worth compressing if < 50% unique
@@ -1460,7 +1517,7 @@ class LedgeredDataFrameManager:
 
                     # Align and update
                     if not df.empty:
-                        df.update(buffer_df)
+                        _safe_update(df, buffer_df)
                         # Add completely new rows from buffer
                         new_rows = buffer_df.index.difference(df.index)
                         if not new_rows.empty:

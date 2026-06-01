@@ -16,6 +16,7 @@ __all__ = [
 class SampleStats:
     class Ex(str, Enum):
         SAMPLE_ID = "sample_id"
+        INSTANCE_ID = "annotation_id"
 
         PREDICTION = "prediction"
         PREDICTION_RAW = "prediction_raw"
@@ -39,7 +40,8 @@ class SampleStats:
             return list(map(lambda c: c.value, cls))
 
     DEFAULTS_TYPES: Dict[str, Any] = {
-        Ex.SAMPLE_ID.value: int,
+        Ex.SAMPLE_ID.value: str or int,  # Accept both str and int for sample_id
+        Ex.INSTANCE_ID.value: str or int,  # Accept both str and int for instance_id
 
         Ex.PREDICTION.value: list,
         Ex.PREDICTION_RAW.value: list,
@@ -57,6 +59,7 @@ class SampleStats:
     # None are not accepted by PD H5 storage
     DEFAULTS: Dict[str, Any] = {
         Ex.SAMPLE_ID.value: -1,
+        Ex.INSTANCE_ID.value: -1,
 
         Ex.PREDICTION.value: None, #[],
         Ex.PREDICTION_RAW.value: None, #[],

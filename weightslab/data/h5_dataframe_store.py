@@ -190,10 +190,15 @@ class H5DataFrameStore:
         if df is None or df.empty:
             return pd.DataFrame()
 
-        # Handle multi-index (sample_id, annotation_id) or single-level index
+        # Handle multi-index (sample_id, annotation_id) or single-level index.
+        # Guard against the case where a level name is already both in the index
+        # AND as a column (produced by _normalize_for_read), which causes
+        # set_index to raise ValueError: cannot insert X, already exists.
         if isinstance(df.index, pd.MultiIndex):
-            # Preserve multi-index structure - don't flatten it
-            pass
+            # Already multi-indexed — drop any stale shadow columns for the index levels.
+            shadow_cols = [n for n in df.index.names if n and n in df.columns]
+            if shadow_cols:
+                df = df.drop(columns=shadow_cols)
         elif "annotation_id" in df.columns and "sample_id" in df.columns:
             # Convert columns to multi-index if not already
             df = df.set_index(['sample_id', 'annotation_id'])
@@ -498,6 +503,17 @@ class H5DataFrameStore:
 
                         # Merge data
                         if not existing.empty:
+                            # Widen any categorical columns to object before merging.
+                            # Assigning into a categorical column raises an uncatchable
+                            # AssertionError when the new value is not in the category list.
+                            cat_cols = [c for c in existing.columns if hasattr(existing[c], 'cat')]
+                            if cat_cols:
+                                existing[cat_cols] = existing[cat_cols].astype(object)
+                            cat_cols_src = [c for c in df_norm.columns if hasattr(df_norm[c], 'cat')]
+                            if cat_cols_src:
+                                df_norm = df_norm.copy()
+                                df_norm[cat_cols_src] = df_norm[cat_cols_src].astype(object)
+
                             # Perform safe merge that supports partial updates
                             # Validate index structure compatibility (single-level vs multi-index)
                             existing_is_multi = isinstance(existing.index, pd.MultiIndex)

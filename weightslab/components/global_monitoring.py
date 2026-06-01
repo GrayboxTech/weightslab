@@ -2,6 +2,7 @@ import os
 from typing import Any, Optional
 from enum import Enum
 import contextvars
+import traceback
 
 from threading import Event, Lock
 import threading
@@ -281,7 +282,8 @@ class GuardContext:
             self._context_token = None
 
         if exc_type is RuntimeError:
-            logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__")
+            logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__:")
+            traceback.print_exc() if os.getenv("WL_DEBUG", "0") == "1" else None
             self.architecture_guard.__exit__(exc_type, exc_value, traceback)
             return True  # suppress the exception
 
