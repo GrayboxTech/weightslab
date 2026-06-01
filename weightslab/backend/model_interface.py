@@ -130,10 +130,16 @@ class ModelInterface(NetworkWithOps):
                     inferred_device = None
             device = inferred_device or 'cpu'
 
-        # Ensure device is a string
-        if device and not isinstance(device, str):
-            device = str(device)
-        self.device = 'cuda' if (device == 'auto' and th.cuda.is_available()) or device == 'cuda' else 'cpu'
+        # Normalize device: accept 'auto', 'cuda', 'cuda:N', 'cpu', or torch.device.
+        # Previously the check was `device == 'cuda'` — exact-string match — which
+        # silently dropped 'cuda:0' or torch.device('cuda') to CPU.
+        if device in (None, '', 'auto'):
+            self.device = 'cuda' if th.cuda.is_available() else 'cpu'
+        else:
+            try:
+                self.device = 'cuda' if th.device(device).type == 'cuda' else 'cpu'
+            except (RuntimeError, TypeError):
+                self.device = 'cpu'
         self.model = model.to(self.device) if hasattr(model, 'to') else model
         self.skip_previous_auto_load = skip_previous_auto_load
 
@@ -399,8 +405,29 @@ class ModelInterface(NetworkWithOps):
                 # Store in instance __dict__ directly, bypassing the property
                 self.__dict__[name] = value
                 return
-        # Normal setattr for everything else
+        # Normal setattr for everything else. NOTE: self.model is intentionally
+        # kept in self.__dict__ (not registered as an nn.Module submodule) so
+        # custom __getattr__ continues to work. We propagate .to/.half/.cuda/
+        # .train/.eval explicitly via _apply and train overrides below.
         object.__setattr__(self, name, value)
+
+    def _apply(self, fn, recurse=True):
+        # Propagate .to/.half/.float/.cuda/.cpu etc. to self.model. nn.Module._apply
+        # iterates self._modules / _parameters / _buffers — self.model lives in
+        # self.__dict__ (see __setattr__), so it's missed by the default recursion.
+        if recurse:
+            m = self.__dict__.get('model')
+            if isinstance(m, th.nn.Module):
+                m._apply(fn, recurse=recurse)
+        return super()._apply(fn, recurse=recurse)
+
+    def train(self, mode: bool = True):
+        # Propagate train/eval mode to self.model for the same reason as _apply.
+        super().train(mode)
+        m = self.__dict__.get('model')
+        if isinstance(m, th.nn.Module):
+            m.train(mode)
+        return self
 
     def __enter__(self):
         """

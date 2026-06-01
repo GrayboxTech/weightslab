@@ -366,6 +366,15 @@ class Proxy:
             proxy: When True and ref is provided, return a live key proxy.
         """
         if ref is not None:
+            # Only wrap when the key is actually present in the underlying
+            # mapping. For missing keys, return the plain default so that
+            # callers like UL's `YAML.save(args)` can serialize the value.
+            try:
+                in_obj = self._obj is not None and ref in self._obj
+            except Exception:
+                in_obj = False
+            if not in_obj:
+                return default
             if proxy:
                 return Proxy._ValueProxy(self, ref, default)
             return self._obj.get(ref, default)

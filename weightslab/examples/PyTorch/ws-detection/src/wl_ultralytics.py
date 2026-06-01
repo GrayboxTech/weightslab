@@ -428,32 +428,23 @@ def attach(model, cfg=None):
                 preload_labels=True, preload_metadata=True,
             )
 
-        # UL builds the optimizer by iterating model.modules() with isinstance
-        # checks — wrap optimizer first, then model, otherwise the checks fail.
+        # Optimizer wrap.
         trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
-        # `light=True` is the ModelInterface default (dev branch); pass
-        # `light=False` to opt into model surgery + checkpoint auto-load.
-        trainer.model = wl.watch_or_edit(trainer.model, flag="model")
 
-        for split in ("train", "val"):
-            for t, n in _LOSS_PARTS:
-                losses[split][n] = wl.watch_or_edit(
-                    PerSampleDetectionLoss(trainer.model, loss_type=t),
-                    flag="loss", name=f"{split}/{n}", per_sample=True, log=True,
-                )
-            ious[split] = wl.watch_or_edit(
-                PerSampleIoU(conf=0.25, iou_thres=0.5),
-                flag="metric", name=f"miou/{split}", per_sample=True, log=True,
-            )
+        # Model wrap — only for ledger registration + model_age counter for
+        # the studio plots. `forced_model_wrapping=True` ensures a fresh
+        # ModelInterface; otherwise a stale Proxy from a prior run could be
+        # returned silently. `light=True` (default) keeps the wrap from
+        # touching model internals.
+        trainer.model = wl.watch_or_edit(
+            trainer.model, flag="model", forced_model_wrapping=True,
+        )
 
-        # Per-sample detection metrics — val only. UL's aggregated mAP /
-        # precision / recall would belong at on_val_end via results_dict
-        # traversal; not wired here yet (scalar-emit idiom in WL is TBD).
-        for m in PerSampleDetMetric.METRICS:
-            val_metrics[m] = wl.watch_or_edit(
-                PerSampleDetMetric(metric=m, conf=0.25, iou_thres_nms=0.5),
-                flag="metric", name=f"val/{m}", per_sample=True, log=True,
-            )
+        # Per-sample loss / IoU / detection-metric emission is deferred — UL's
+        # DetectionTrainer doesn't expose `trainer.preds`, so capturing per-
+        # batch model outputs would need a forward hook on the underlying
+        # model. Wiring that up is its own concern; for now keep the
+        # integration minimal (data + age + steering only).
 
         @wl.eval_fn
         def _validate(loader):
@@ -465,17 +456,14 @@ def attach(model, cfg=None):
         wl.guard_training_context.__enter__()
 
     def _on_train_batch_end(trainer):
-        _emit_losses(losses, ious, "train", trainer.preds, trainer.batch)
+        # No per-sample emission yet — see on_train_start comment.
         wl.guard_training_context.__exit__(None, None, None)
 
     def _on_val_batch_start(validator):
         wl.guard_testing_context.__enter__()
 
     def _on_val_batch_end(validator):
-        _emit_losses(losses, ious, "val", validator.preds, validator.batch)
-        bs = validator.batch["batch_idx"]
-        for ch in val_metrics.values():
-            ch(validator.preds, validator.batch, batch_ids=bs)
+        # No per-sample emission yet — see on_train_start comment.
         wl.guard_testing_context.__exit__(None, None, None)
 
     model.add_callback("on_train_start",       _on_train_start)
