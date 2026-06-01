@@ -194,10 +194,31 @@ class GuardContext:
         self.model = None
         self._context_token = None
 
+    def _maybe_pause_at_step(self):
+        # Explicit "pause at step N": flag the pause before the lock is taken so
+        # wait_if_paused() blocks lock-free; pause() zeroes pause_at_step (fires once).
+        if not self.for_training:
+            return
+        try:
+            model = get_model()
+            if model == None:
+                return
+            m_age = model.get_age()
+            if m_age <= 0:
+                return
+            hp = get_hyperparams(resolve_hp_name())
+            if not hp or m_age != hp.get("pause_at_step", -1):
+                return
+            logger.info(f"Reached pause_at_step={m_age}; pausing training.")
+            pause_controller.pause()
+        except Exception:
+            pass
+
     def __enter__(self):
         """
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
+        self._maybe_pause_at_step()
         pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
 

@@ -69,6 +69,8 @@ def get_hyper_parameters_pb(
     for (label, name, type_, getter) in hype_parameters_desc_tuple:
         hyper_parameter_pb2 = None
         value = getter()
+        if callable(value):
+            value = value()
         if type_ == "text":
             hyper_parameter_pb2 = pb2.HyperParameterDesc(
                 label=label,

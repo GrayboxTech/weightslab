@@ -291,7 +291,6 @@ class ModelInterface(NetworkWithOps):
                                     logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
                                 except Exception as e:
                                     logger.warning(f"Failed to load weights state dict: {e}")
-                        return
 
                 except Exception as e:
                     logger.debug(f"Could not auto-load model checkpoint: {e}")
@@ -303,6 +302,86 @@ class ModelInterface(NetworkWithOps):
                 logger.info("Registered new checkpoint manager in ledger")
             except Exception:
                 pass
+
+        # Setup backward and optimizer.step() overrides for audit mode (skip gradients/updates when in eval)
+        self._setup_backward_override()
+        self._setup_optimizer_step_override()
+
+    @property
+    def audit_mode(self) -> bool:
+        """Return True if model is in audit mode (eval/no-gradient mode).
+
+        Audit mode is active if:
+        - Model is in eval() mode (model.training is False), OR
+        - Model's tracking_mode is DISABLED (if it has this attribute)
+        """
+        if not self.is_training():
+            return True
+
+        if hasattr(self.model, 'tracking_mode'):
+            from weightslab.components.tracking import TrackingMode
+            if self.model.tracking_mode in [TrackingMode.DISABLED, TrackingMode.EVAL]:
+                return True
+
+        return False
+
+    def _setup_backward_override(self):
+        """Set up monkey-patch to disable backward() when model is in audit/eval mode.
+
+        When the model is in audit mode (eval or tracking disabled), calling backward()
+        on loss tensors is a no-op. This allows training scripts to work unchanged in
+        audit mode without explicitly checking for gradients.
+        """
+        # Store the original backward method
+        original_backward = th.Tensor.backward
+        model_interface_ref = self
+
+        def backward_override(tensor_self, gradient=None, retain_graph=False, create_graph=False, inputs=None):
+            """Override backward to be a no-op in audit mode."""
+            # Check if model is in audit mode via the audit_mode property
+            if model_interface_ref.audit_mode:
+                return
+
+            # Otherwise, call the original backward
+            original_backward(
+                tensor_self,
+                gradient=gradient,
+                retain_graph=retain_graph,
+                create_graph=create_graph,
+                inputs=inputs
+            )
+
+        # Monkey-patch only if not already patched
+        if not hasattr(th.Tensor.backward, '_wl_patched'):
+            th.Tensor.backward = backward_override
+            th.Tensor.backward._wl_patched = True
+            logger.debug("Installed backward override for audit mode support")
+
+    def _setup_optimizer_step_override(self):
+        """Set up monkey-patch to disable optimizer.step() when model is in audit mode.
+
+        When in audit mode (no gradient computation), optimizer.step() is a no-op
+        since there are no gradients to apply. This prevents unnecessary state updates
+        and keeps the optimizer consistent with the audit mode semantics.
+        """
+        # Store the original step method
+        original_step = th.optim.Optimizer.step
+        model_interface_ref = self
+
+        def step_override(self, closure=None):
+            """Override step to be a no-op in audit mode."""
+            # Check if the model is in audit mode via the audit_mode property
+            if model_interface_ref.audit_mode:
+                return
+
+            # Otherwise, call the original step
+            return original_step(self, closure=closure)
+
+        # Monkey-patch only if not already patched
+        if not hasattr(th.optim.Optimizer.step, '_wl_patched'):
+            th.optim.Optimizer.step = step_override
+            th.optim.Optimizer.step._wl_patched = True
+            logger.debug("Installed optimizer.step() override for audit mode support")
 
     def __getattr__(self, name):
         # 1. Try nn.Module's attribute store (parameters, buffers, submodules)

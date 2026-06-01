@@ -77,7 +77,36 @@ class LoggerQueue:
             value = value.item()
         return float(value)
 
-    def _append_history_entry(self, graph_name, exp_hash, global_step, metric_value):
+    def _get_audit_mode(self):
+        """Get current audit mode from model interface or hyperparams.
+
+        Priority:
+        1. Check model_interface.audit_mode (reflects actual model state: eval/train, tracking mode)
+        2. Check hyperparams auditor_mode (fallback for legacy/hyperparams-based control)
+        """
+        try:
+            # First priority: check registered model interface
+            from weightslab.backend.ledgers import get_model
+            model = get_model()
+            if model is not None and hasattr(model, 'audit_mode'):
+                return bool(model.audit_mode)
+        except Exception:
+            pass
+
+        try:
+            # Fallback: check hyperparams auditor_mode
+            from weightslab.backend.ledgers import get_hyperparams
+            hp = get_hyperparams()
+            if hp is not None:
+                return bool(hp.get('auditor_mode', False))
+        except Exception:
+            pass
+        return False
+
+    def _append_history_entry(self, graph_name, exp_hash, global_step, metric_value, audit_mode=None):
+        if audit_mode is None:
+            audit_mode = self._get_audit_mode()
+
         signal_entry = {
             "experiment_name": graph_name,
             "model_age": global_step,
@@ -85,6 +114,7 @@ class LoggerQueue:
             "metric_value": metric_value,
             "experiment_hash": exp_hash,
             "timestamp": int(time.time()),
+            "audit_mode": audit_mode,
         }
 
         if graph_name not in self._signal_history:
@@ -183,6 +213,7 @@ class LoggerQueue:
         eval_hash = self._eval_mode_hash
         split_name = self._eval_mode_split
         evaluation_tags = list(self._eval_mode_tags)
+        audit_mode = self._get_audit_mode()
         results = {}
 
         for graph_name, (total, count) in self._eval_accum.items():
@@ -210,6 +241,7 @@ class LoggerQueue:
                 "is_evaluation_marker": True,
                 "split_name": split_name,
                 "evaluation_tags": evaluation_tags,
+                "audit_mode": audit_mode,
             }
             self._signal_history[graph_name][eval_hash][model_age].append(entry)
             self._pending_queue.append(entry)

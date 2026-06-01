@@ -198,7 +198,7 @@ def main():
         return wl.watch_or_edit(
             ds, flag="data", loader_name=f"{split}_loader",
             batch_size=c["batch_size"], shuffle=c["shuffle"],
-            num_workers=0,
+            num_workers=2,
             drop_last=False, compute_hash=False,
             is_training=(split == "train"),
             collate_fn=_wl_yolo_collate,
@@ -218,7 +218,7 @@ def main():
             imgsz=image_size,
             batch=batch_size, resume=False,
             device=device,
-            workers=0, cache=False, optimizer="SGD", lr0=0.001,
+            workers=2, cache=False, optimizer="SGD", lr0=0.001,
         ),
         train_loader=train_loader,
         val_loader=val_loader,

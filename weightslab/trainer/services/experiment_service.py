@@ -160,7 +160,8 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                                         metric_value=data.get("metric_value", 0.0),
                                         experiment_hash=data.get("experiment_hash", "N.A."),
                                         timestamp=int(data.get("timestamp", time.time())),
-                                        sample_id=sid
+                                        sample_id=sid,
+                                        audit_mode=bool(data.get("audit_mode", False)),
                                     )
                                 )
 
@@ -235,6 +236,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                             split_name=str(s.get("split_name", "")),
                             evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                             point_note=str(s.get("point_note", "")),
+                            audit_mode=bool(s.get("audit_mode", False)),
                         )
                     )
         else:
@@ -260,6 +262,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         split_name=str(s.get("split_name", "")),
                         evaluation_tags=[str(tag) for tag in s.get("evaluation_tags", []) or []],
                         point_note=str(s.get("point_note", "")),
+                        audit_mode=bool(s.get("audit_mode", False)),
                     )
                 )
 
@@ -434,6 +437,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         if trainer is None or not hasattr(trainer, "is_paused"):
             return hyper_parameter_descs
 
+        # Trick for is training - tmp solution TODO(GP) Fix it
         is_training = not trainer.is_paused()
 
         hp_name = self._ctx.exp_name or resolve_hp_name()
@@ -561,6 +565,24 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         name=hp_name,
                         key_path="data.train_loader.batch_size",
                         value=hyper_parameters.batch_size
+                    )
+                if hasattr(hyper_parameters, 'val_batch_size') and hyper_parameters.HasField("val_batch_size"):
+                    set_hyperparam(
+                        name=hp_name,
+                        key_path="data.val_loader.batch_size",
+                        value=hyper_parameters.val_batch_size
+                    )
+                elif hasattr(hyper_parameters, 'eval_batch_size') and hyper_parameters.HasField("eval_batch_size"):
+                    set_hyperparam(
+                        name=hp_name,
+                        key_path="data.val_loader.batch_size",
+                        value=hyper_parameters.eval_batch_size
+                    )
+                if hyper_parameters.HasField("test_batch_size"):
+                    set_hyperparam(
+                        name=hp_name,
+                        key_path="data.test_loader.batch_size",
+                        value=hyper_parameters.test_batch_size
                     )
                 if hyper_parameters.HasField("full_eval_frequency"):
                     set_hyperparam(
