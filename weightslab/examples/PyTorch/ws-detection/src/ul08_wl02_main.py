@@ -42,7 +42,7 @@ from ultralytics.data.utils import check_det_dataset
 import weightslab as wl
 from weightslab.utils.logger import LoggerQueue
 
-from utils.data import YOLODatasetWL, _wl_yolo_collate
+from wl_ultralytics import YOLODatasetWL, _wl_yolo_collate
 
 
 def regular_train(parameters):

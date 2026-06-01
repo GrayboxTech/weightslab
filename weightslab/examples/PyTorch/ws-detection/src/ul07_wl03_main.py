@@ -38,9 +38,7 @@ from ultralytics.data.utils import check_det_dataset
 
 import weightslab as wl
 from weightslab.utils.logger import LoggerQueue
-import wl_ultralytics  # noqa: F401  installs YOLO dispatch + atexit join
-
-from utils.data import YOLODatasetWL, _wl_yolo_collate
+from wl_ultralytics import YOLODatasetWL, _wl_yolo_collate  # also installs YOLO dispatch + atexit join
 
 
 cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "config.yaml")))
