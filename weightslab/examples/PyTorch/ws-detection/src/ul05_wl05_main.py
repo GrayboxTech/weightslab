@@ -38,16 +38,10 @@ from weightslab.components.global_monitoring import pause_controller
 from ultralytics import YOLO
 from ultralytics.models.yolo.detect import DetectionTrainer
 
-from wl_ultralytics import (
-    YOLODatasetWL, _wl_yolo_collate,
-    PerSampleDetectionLoss, PerSampleIoU,
-)
+from wl_ultralytics import YOLODatasetWL, _wl_yolo_collate
 
 logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
-
-
-_LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
 
 
 class WLCompatibleDetTrainer(DetectionTrainer):
@@ -57,11 +51,7 @@ class WLCompatibleDetTrainer(DetectionTrainer):
     """
 
     def __init__(self, *args, **kwargs):
-        self._wl_hparams = kwargs.pop("hparams", {})
         super().__init__(*args, **kwargs)
-
-        # State shared across callbacks via closures.
-        st = {"losses": {"train": {}, "val": {}}, "ious": {}}
 
         def _on_train_start(trainer):
             # UL has built train_loader, test_loader, optimizer, model by now.
@@ -77,18 +67,16 @@ class WLCompatibleDetTrainer(DetectionTrainer):
                 )
 
             trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
-            trainer.model = wl.watch_or_edit(trainer.model, flag="model")
+            # `forced_model_wrapping=True` ensures a fresh wrap (avoids a stale
+            # Proxy from a prior run silently hosting weights on the wrong device).
+            # Light mode (default) — only ledger handle + model_age for plots.
+            trainer.model = wl.watch_or_edit(
+                trainer.model, flag="model", forced_model_wrapping=True,
+            )
 
-            for split in ("train", "val"):
-                for t, n in _LOSS_PARTS:
-                    st["losses"][split][n] = wl.watch_or_edit(
-                        PerSampleDetectionLoss(trainer.model, loss_type=t),
-                        flag="loss", name=f"{split}/{n}", per_sample=True, log=True,
-                    )
-                st["ious"][split] = wl.watch_or_edit(
-                    PerSampleIoU(conf=0.25, iou_thres=0.5),
-                    flag="metric", name=f"miou/{split}", per_sample=True, log=True,
-                )
+            # Per-sample loss / IoU emission deferred — UL's DetectionTrainer
+            # doesn't expose `trainer.preds`; capturing per-batch outputs needs
+            # a forward hook on the underlying model.
 
             @wl.eval_fn
             def _validate(loader):
@@ -100,14 +88,12 @@ class WLCompatibleDetTrainer(DetectionTrainer):
             wl.guard_training_context.__enter__()
 
         def _on_train_batch_end(trainer):
-            _emit(st, "train", trainer.preds, trainer.batch)
             wl.guard_training_context.__exit__(None, None, None)
 
         def _on_val_batch_start(validator):
             wl.guard_testing_context.__enter__()
 
         def _on_val_batch_end(validator):
-            _emit(st, "val", validator.preds, validator.batch)
             wl.guard_testing_context.__exit__(None, None, None)
 
         self.add_callback("on_train_start",       _on_train_start)
@@ -115,13 +101,6 @@ class WLCompatibleDetTrainer(DetectionTrainer):
         self.add_callback("on_train_batch_end",   _on_train_batch_end)
         self.add_callback("on_val_batch_start",   _on_val_batch_start)
         self.add_callback("on_val_batch_end",     _on_val_batch_end)
-
-
-def _emit(st, split, preds, batch):
-    bs = batch["batch_idx"]
-    for n in ("bbxs", "clsf", "dfl"):
-        st["losses"][split][n](preds, batch, batch_ids=bs)
-    st["ious"][split](preds, batch, batch_ids=bs)
 
 
 def main():
@@ -161,7 +140,12 @@ def main():
         epochs=1000 if max_steps is None else max(1, max_steps),
         batch=batch_size, resume=False,
         device=parameters["device"],
-        workers=0, cache=False, optimizer="SGD", lr0=0.001,
+        # Letting UL use its default `workers` (forked before our on_train_start
+        # callback runs). With workers=0, our `loader.dataset.__class__ = ...`
+        # swap is observed by the main-process dataloader iteration, but UL's
+        # default collate_fn expects the original (dict-returning) YOLODataset,
+        # not our tuple-returning YOLODatasetWL — that mismatch crashes collate.
+        cache=False, optimizer="SGD", lr0=0.001,
     )
 
     wl.keep_serving()
