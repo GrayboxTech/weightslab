@@ -38,13 +38,7 @@ from weightslab.components.global_monitoring import pause_controller
 from ultralytics import YOLO
 from ultralytics.models.yolo.detect import DetectionTrainer
 
-from wl_ultralytics import (
-    YOLODatasetWL, _wl_yolo_collate,
-    PerSampleDetectionLoss, PerSampleIoU,
-)
-
-
-_LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
+from wl_ultralytics import YOLODatasetWL, _wl_yolo_collate
 
 logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
@@ -59,31 +53,6 @@ class WLCompatibleDetTrainer(DetectionTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Closure-shared state populated in on_train_start; read in batch callbacks.
-        state = {"losses": {"train": {}, "val": {}}, "ious": {}, "preds": None, "batch": None}
-
-        def _capture_preds(module, inputs, output):
-            # DetectionModel.forward(x) routes by input type:
-            #   * x is dict  → loss(x)  → returns (loss, loss_items)  ← skip
-            #   * x is tensor → predict(x) → returns raw preds         ← capture
-            # The train-mode dict call internally invokes forward(batch["img"]),
-            # so both fire per training step; we keep only the prediction call.
-            x = inputs[0] if inputs else None
-            if not isinstance(x, dict):
-                state["preds"] = output
-
-        def _patch_preprocess(obj, method_name):
-            """Wrap obj.method_name(batch) so the returned (device-prepared)
-            batch is stashed in state["batch"]. UL keeps batch as a local
-            variable in the loop, so this is our only handle on it from
-            the callbacks."""
-            orig = getattr(obj, method_name)
-            def _wrapped(batch, *a, **kw):
-                out = orig(batch, *a, **kw)
-                state["batch"] = out
-                return out
-            setattr(obj, method_name, _wrapped)
-
         def _on_train_start(trainer):
             # UL has built train_loader, test_loader, optimizer, model by now.
             for split, loader in (("train", trainer.train_loader), ("val", trainer.test_loader)):
@@ -97,16 +66,6 @@ class WLCompatibleDetTrainer(DetectionTrainer):
                     preload_labels=True, preload_metadata=True,
                 )
 
-            # Hook BEFORE wrapping — `underlying` is the raw DetectionModel.
-            # v8DetectionLoss does `model.model[-1]` and needs the raw class.
-            underlying = trainer.model
-            underlying.register_forward_hook(_capture_preds)
-
-            # Capture the device-prepared batch on each preprocess call.
-            _patch_preprocess(trainer, "preprocess_batch")
-            if trainer.validator is not None:
-                _patch_preprocess(trainer.validator, "preprocess")
-
             trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
             # `forced_model_wrapping=True` ensures a fresh wrap (avoids a stale
             # Proxy from a prior run silently hosting weights on the wrong device).
@@ -115,18 +74,12 @@ class WLCompatibleDetTrainer(DetectionTrainer):
                 trainer.model, flag="model", forced_model_wrapping=True,
             )
 
-            # Per-sample channels. Build PerSampleDetectionLoss against the
-            # raw DetectionModel (not the wrapper).
-            for split in ("train", "val"):
-                for t, n in _LOSS_PARTS:
-                    state["losses"][split][n] = wl.watch_or_edit(
-                        PerSampleDetectionLoss(underlying, loss_type=t),
-                        flag="loss", name=f"{split}/{n}", per_sample=True, log=True,
-                    )
-                state["ious"][split] = wl.watch_or_edit(
-                    PerSampleIoU(conf=0.25, iou_thres=0.5),
-                    flag="metric", name=f"miou/{split}", per_sample=True, log=True,
-                )
+            # Per-sample loss / IoU / det-metric emission TBD. We have the
+            # plumbing (forward-patch for preds, preprocess-patch for batch)
+            # but the PerSample* classes were built for main.py's manual loop
+            # and don't slot onto UL 8.4.51's training-mode pred format
+            # (dict with boxes/scores/feats) — v8DetectionLoss internals
+            # crash on the per-sample sliced batch. Needs a re-think.
 
             @wl.eval_fn
             def _validate(loader):
@@ -134,27 +87,16 @@ class WLCompatibleDetTrainer(DetectionTrainer):
 
             pause_controller.resume(force=True)
 
-        def _emit(split):
-            preds, batch = state["preds"], state["batch"]
-            if preds is None or batch is None:
-                return
-            bs = batch["batch_idx"]
-            for n in ("bbxs", "clsf", "dfl"):
-                state["losses"][split][n](preds, batch, batch_ids=bs)
-            state["ious"][split](preds, batch, batch_ids=bs)
-
         def _on_train_batch_start(trainer):
             wl.guard_training_context.__enter__()
 
         def _on_train_batch_end(trainer):
-            _emit("train")
             wl.guard_training_context.__exit__(None, None, None)
 
         def _on_val_batch_start(validator):
             wl.guard_testing_context.__enter__()
 
         def _on_val_batch_end(validator):
-            _emit("val")
             wl.guard_testing_context.__exit__(None, None, None)
 
         self.add_callback("on_train_start",       _on_train_start)
