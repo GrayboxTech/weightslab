@@ -37,7 +37,7 @@ class YOLODatasetWL(YOLODataset):
         # Unified 6-col bbox: [x1, y1, x2, y2, class_id, confidence]; GT confidence = 1.0.
         n = bboxes_lb.shape[0]
         cls = lab["cls"].reshape(-1, 1).astype(np.float32)
-        target = (
+        target = list(
             np.concatenate([bboxes_lb.astype(np.float32), cls, np.ones((n, 1), dtype=np.float32)], axis=1)
             if n > 0 else np.zeros((0, 6), dtype=np.float32)
         )

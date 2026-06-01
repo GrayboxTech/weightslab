@@ -36,20 +36,6 @@ logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
 
 
-def _decode_preds_to_6col(raw_preds, image, conf, cls_thresh, device=None):
-    if isinstance(raw_preds, (tuple, list)):
-        raw_preds = raw_preds[1]
-    img_h, img_w = image[0].shape[-2:]
-    pred = torch.cat([raw_preds['boxes'], raw_preds['scores']], dim=1)
-    preds_bboxes, preds_cls = _decode_predictions(pred, img_h, img_w, conf=conf, iou_thres=cls_thresh)
-    imgsz = float(image.shape[-1])
-    return [
-        torch.cat([b.detach() / imgsz, c[:, 1:2], c[:, 0:1]], dim=-1).to(device) if b.numel() > 0
-        else torch.zeros((0, 6), device=device)
-        for b, c in zip(preds_bboxes, preds_cls)
-    ]
-
-
 class WLCompatileDetTrainer(DetectionTrainer):
     def __init__(self, *a, **kw):
         self.data_train_loader = kw.pop("train_loader")
@@ -106,25 +92,41 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 flag="metric", name=f"iou/{split}_instance", per_instance=True, log=True,
             )
 
+    def process_predictions(self, pred_raw, image, conf=0.25, cls_thresh=0.5):
+        img_h, img_w = image[0].shape[-2:]
+
+        # Process check for eval mode
+        if isinstance(pred_raw, (tuple, list)):
+            pred_raw = pred_raw[1]
+
+        # Gen. bounding boxes
+        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
+        # Convert to raw model predictions format [batch, 64+nc, 8400]
+        preds_bboxes, preds_cls = _decode_predictions(
+            pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
+
+        return preds_bboxes, preds_cls
+
     def train(self):
         cs, m = self.criterions["train"], self.iou["train"]
         cs_inst, m_inst = self.criterions_per_instance["train"], self.iou_per_instance["train"]
 
-        # `yield from loader` re-iterates each pass, re-invoking the sampler — so
-        # shuffle=True re-shuffles each epoch instead of recycling order.
-        def _infinite(loader):
-            while True:
-                yield from loader
-        batches = _infinite(self.data_train_loader)
-
         while True:
             with wl.guard_training_context:
                 self.optimizer.zero_grad()
-                inputs = next(batches)
+                inputs = next(self.data_train_loader)
                 image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
 
                 raw_preds = self.model(image.to(self.device))
-                preds_by_batch = _decode_preds_to_6col(raw_preds, image, conf=0.1, cls_thresh=0.1)
+                if not isinstance(raw_preds, dict):
+                    raw_preds = raw_preds[1]  # For audit mode, we are in evaluation so model also output the bb
+                preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
+                imgsz = float(image.shape[-1])
+                preds_by_batch = [
+                    torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
+                    if b.numel() > 0 else torch.zeros((0, 6))
+                    for b, c in zip(preds_bboxes, preds_cls)
+                ]
 
                 # Per-sample signals — used for backward pass
                 per_sample = (
@@ -135,7 +137,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 m(raw_preds, batch, batch_ids=batch_ids)
 
                 # Per-instance signals (per annotation) — auto-saved with annotation_id
-                cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+                cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids)
                 cs_inst["clsf"](raw_preds, batch, batch_ids=batch_ids)
                 cs_inst["dfl"](raw_preds, batch, batch_ids=batch_ids)
                 m_inst(raw_preds, batch, batch_ids=batch_ids)
@@ -143,7 +145,6 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 loss = per_sample.mean()
                 loss.backward()
                 self.optimizer.step()
-                self.scheduler.step()
 
             if self.model.get_age() % self.val_every == 0:
                 with wl.guard_testing_context:
@@ -155,8 +156,13 @@ class WLCompatileDetTrainer(DetectionTrainer):
         for inputs in loader:
             image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
             raw_preds = self.model(image.to(self.device))[1]
-            preds_by_batch = _decode_preds_to_6col(
-                raw_preds, image, conf=0.25, cls_thresh=0.5, device=self.device)
+            preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
+            imgsz = float(image.shape[-1])
+            preds_by_batch = [
+                torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
+                if b.numel() > 0 else torch.zeros((0, 6))
+                for b, c in zip(preds_bboxes, preds_cls)
+            ]
 
             # Per-sample metrics (aggregated per sample)
             cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
@@ -260,7 +266,6 @@ def main():
     def _wl_validate(loader):
         trainer.do_validate(loader)
 
-    pause_controller.resume(force=True)
     trainer.train()
     wl.keep_serving()
 
