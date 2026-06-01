@@ -25,6 +25,7 @@ except ImportError:
     DictConfig = dict # type: ignore
 
 from weightslab.data.sample_stats import SampleStatsEx
+from weightslab.utils.tools import safe_reset_index
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.proto.experiment_service_pb2 import SampleEditType
 from weightslab.components.global_monitoring import pause_controller
@@ -234,6 +235,16 @@ class DataService:
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
         hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})  # is it already a proxy ?
         self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
+
+        # How per-instance (per-annotation) numeric columns are folded to a single
+        # per-sample scalar when collapsing the (sample_id, annotation_id) view.
+        # Supported: "mean" (default) or "max". The full per-instance breakdown is
+        # always preserved separately in the `_instance_signals` dict column.
+        agg = str(
+            (hp_dict or {}).get("instance_aggregation",
+                                os.environ.get("WL_INSTANCE_AGGREGATION", "mean"))
+        ).strip().lower()
+        self._instance_aggregation = agg if agg in ("mean", "max") else "mean"
 
         # In-memory dataframe view of all datasets combined (streamed to UI)
         self._all_datasets_df = self._pull_into_all_data_view_df()
@@ -678,6 +689,185 @@ class DataService:
         except Exception:
             return True
 
+    def _collapse_annotations_to_samples(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
+
+        The shared dataframe manager now expands every sample into one row per
+        instance/annotation using a ``(sample_id, annotation_id)`` MultiIndex.
+        The studio UI and the agent, however, are sample-centric: they expect a
+        single row per sample.  This helper folds the annotation rows back down:
+
+        - Sample-level columns (metadata, target, prediction, tags, ...) are
+          duplicated identically on every annotation row, so we keep the first.
+        - Per-instance columns (those whose value varies between annotations of
+          the same sample, e.g. per-bbox losses written by
+          ``enqueue_instance_batch`` under the ``signals//`` prefix) are:
+            * aggregated to a per-sample scalar on the column itself using the
+              configured method (``self._instance_aggregation`` — "mean" or "max"),
+              so sorting/filtering by that column stays meaningful, and
+            * preserved in full in an ``_instance_signals`` dict column shaped as
+              ``{annotation_id: {column: value, ...}, ...}`` so the user keeps
+              access to every per-instance value.
+        - An ``annotation_count`` column records how many instances each sample has.
+
+        Performance: this is optimised for the common case where most samples have a
+        single instance and only a few are multi-instance. Singletons take the cheap
+        first-occurrence row directly (their single instance value *is* the sample
+        value); the per-instance dict + mean/max aggregation run only over the rows of
+        multi-instance samples. Consequently ``_instance_signals`` is present only for
+        multi-instance samples — for a single-instance sample the value already lives in
+        the collapsed column, so no per-instance information is lost.
+
+        Returns a single-level ``sample_id``-indexed dataframe (origin stays a
+        column). Dataframes that are not annotation-expanded are returned as-is.
+        """
+        if df is None or df.empty:
+            return df
+
+        ANNOT = SampleStatsEx.INSTANCE_ID.value
+        SID = SampleStatsEx.SAMPLE_ID.value
+
+        has_annot_index = isinstance(df.index, pd.MultiIndex) and ANNOT in (df.index.names or [])
+        has_annot_col = ANNOT in df.columns
+
+        if not has_annot_index and not has_annot_col:
+            # Not annotation-expanded (legacy single-instance layout) — nothing to do.
+            return df
+
+        try:
+            # ``get_combined_df`` already hands us a fresh copy, so we never deep-copy
+            # the full annotation-expanded frame. Per-row sample/annotation ids are read
+            # straight off the index (or columns) as numpy arrays — no reindex of ``df``.
+            if has_annot_index:
+                if SID not in (df.index.names or []):
+                    return df  # Cannot locate the sample level — leave untouched.
+                sid_arr = df.index.get_level_values(SID).to_numpy()
+                annot_arr = df.index.get_level_values(ANNOT).to_numpy()
+            else:
+                annot_arr = np.asarray(df[ANNOT].to_numpy())
+                if SID in df.columns:
+                    sid_arr = np.asarray(df[SID].to_numpy())
+                else:
+                    sid_arr = np.asarray(df.index.to_numpy())
+
+            # One row per sample = first occurrence of each sample_id (vectorized in C).
+            # fancy-indexing returns a fresh reduced frame (one row per sample), so the
+            # subsequent column assignments are safe and cheap.
+            first_mask = ~pd.Index(sid_arr).duplicated()
+            base = df.iloc[np.flatnonzero(first_mask)]
+            if has_annot_index:
+                base = base.droplevel(ANNOT)
+            else:
+                base = base.copy()
+                base.index = pd.Index(sid_arr[first_mask], name=SID)
+
+            # Per-sample annotation counts (single O(n) pass, aligned by reindex).
+            counts = pd.Series(sid_arr).value_counts()
+            base["annotation_count"] = counts.reindex(base.index).fillna(1).astype(int)
+
+            if int(counts.max()) > 1:
+                # Optimised for the common case where the overwhelming majority of
+                # samples have a single instance and only a few are multi-instance.
+                # All the per-instance work (variation detection, dict build, mean/max
+                # aggregation) is restricted to the rows of multi-instance samples; the
+                # singleton majority already has its correct value in the first-occurrence
+                # `base` row (a single instance's value *is* the sample value), so it
+                # needs no merging. This keeps the python dict loop proportional to the
+                # number of exceptional rows, not the whole dataset.
+                multi_sids = counts.index[counts.to_numpy() > 1]
+                # pandas' hashtable-backed .isin is O(n); np.isin on object/string
+                # arrays falls back to an O(n*m) python scan and dominates runtime.
+                multi_mask = pd.Index(sid_arr).isin(multi_sids)
+                multi_pos = np.flatnonzero(multi_mask)
+
+                sub = df.iloc[multi_pos]
+                sub_sid = sid_arr[multi_mask]
+                sub_annot = annot_arr[multi_mask]
+
+                # Per-instance columns vary across a sample's annotation rows. They are
+                # the numeric per-annotation signals (floats written by
+                # ``enqueue_instance_batch``); restricting to numeric dtypes lets us run
+                # a single vectorized ``nunique`` pass and skips unhashable array columns.
+                exclude = {
+                    SampleStatsEx.TARGET.value,
+                    SampleStatsEx.PREDICTION.value,
+                    SampleStatsEx.PREDICTION_RAW.value,
+                    SampleStatsEx.ORIGIN.value,
+                    SampleStatsEx.TASK_TYPE.value,
+                    ANNOT, SID, "_instance_signals", "annotation_count",
+                }
+                candidate_cols = [
+                    c for c in df.columns
+                    if c not in exclude and pd.api.types.is_numeric_dtype(df[c].dtype)
+                ]
+
+                per_instance_cols = []
+                if candidate_cols:
+                    # Single groupby over the numeric subset of *multi-instance rows only*.
+                    nun = sub[candidate_cols].groupby(sub_sid, sort=False).nunique()
+                    per_instance_cols = [c for c in candidate_cols if int(nun[c].max()) > 1]
+
+                if per_instance_cols:
+                    # Build {annotation_id: {col: value}} for the multi-instance samples in
+                    # a single pass over the exceptional rows only. Everything the loop
+                    # touches is precomputed as native python lists: ``.tolist()`` yields
+                    # json-serializable, dtype-preserving scalars (no per-cell .item()), the
+                    # NaN test is the float ``v != v`` idiom (no per-cell pd.isna), and
+                    # annotation keys/sample ids are stringified once up front.
+                    # Single-instance samples are not included — their per-instance value is
+                    # already the collapsed column value, so nothing is lost.
+                    col_lists = {c: sub[c].tolist() for c in per_instance_cols}
+                    sub_sid_list = sub_sid.tolist()
+                    try:
+                        aid_keys = [str(int(a)) for a in sub_annot.tolist()]
+                    except (TypeError, ValueError):
+                        aid_keys = [str(a) for a in sub_annot.tolist()]
+
+                    signals_map: dict = {}
+                    for i in range(len(sub_sid_list)):
+                        vals = None
+                        for c in per_instance_cols:
+                            v = col_lists[c][i]
+                            if v is None or v != v:  # None or NaN
+                                continue
+                            if vals is None:
+                                vals = {}
+                            vals[c] = v
+                        if vals:
+                            sid = sub_sid_list[i]
+                            per_sample = signals_map.get(sid)
+                            if per_sample is None:
+                                per_sample = signals_map[sid] = {}
+                            per_sample[aid_keys[i]] = vals
+
+                    if signals_map:
+                        base["_instance_signals"] = pd.Series(signals_map).reindex(base.index)
+
+                    # Fold each per-instance column to a per-sample scalar (mean or max,
+                    # per self._instance_aggregation) for sort/filter — only for the
+                    # multi-instance samples. Singletons keep their first-occurrence value
+                    # (== their single instance value), so we overwrite via `where` only
+                    # where the aggregate exists. The full breakdown stays in
+                    # _instance_signals. One vectorized groupby-agg pass over the sub-frame.
+                    agg_method = getattr(self, "_instance_aggregation", "mean")
+                    try:
+                        aggregated = sub[per_instance_cols].groupby(sub_sid, sort=False).agg(
+                            "max" if agg_method == "max" else "mean"
+                        )
+                        for c in per_instance_cols:
+                            agg_c = aggregated[c].reindex(base.index)
+                            base[c] = agg_c.where(agg_c.notna(), base[c])
+                    except Exception as agg_err:
+                        logger.debug(f"[_collapse_annotations_to_samples] {agg_method} aggregation skipped: {agg_err}")
+
+            if ANNOT in base.columns:
+                base = base.drop(columns=[ANNOT])
+
+            return base
+        except Exception as e:
+            logger.debug(f"[_collapse_annotations_to_samples] collapse failed, returning raw df: {e}")
+            return df
+
     def _pull_into_all_data_view_df(self):
             """Stream stats from the global in-memory dataframe (ledger manager).
 
@@ -691,9 +881,13 @@ class DataService:
                     logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
                     return df
 
+                # The manager now expands samples into one row per (sample_id, annotation_id)
+                # instance. Collapse back to one row per sample for the sample-centric UI/agent
+                # view, nesting per-instance signals into a dict column.
+                df = self._collapse_annotations_to_samples(df)
+
                 # Ensure sample_id is a column if it was the index
-                if df.index.name == SampleStatsEx.SAMPLE_ID.value:
-                    df = df.reset_index()
+                df = safe_reset_index(df)
 
                 # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
                 # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
@@ -937,7 +1131,7 @@ class DataService:
 
         # Prepare tasks
         tasks = []
-        for idx, row in self._all_datasets_df.reset_index().iterrows():
+        for idx, row in safe_reset_index(self._all_datasets_df).iterrows():
              tasks.append((idx, row))
 
         logger.info(f"[DataService] Computing sort stats for {len(tasks)} samples...")
@@ -1989,7 +2183,7 @@ class DataService:
                     origin_series = pd.Series(df.index, index=df.index)
 
                 # Provide both indexed and reset_index versions for flexibility
-                df_reset = df.reset_index()
+                df_reset = safe_reset_index(df)
                 eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
                 if origin_series is not None:
                     eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
@@ -2124,7 +2318,7 @@ class DataService:
                                           try:
                                               # Save index names to restore later
                                               orig_index_names = sub_df.index.names
-                                              temp_df = sub_df.reset_index()
+                                              temp_df = safe_reset_index(sub_df)
 
                                               # Adjust 'by' if needed (e.g. if 'index' was used, it's now 'sample_id' etc)
                                               # but here columns usually match.
@@ -2336,8 +2530,8 @@ class DataService:
                      try:
                          key_cols = [SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value]
 
-                         old_df_keys = current_all_df.reset_index()
-                         new_df_keys = updated_df.reset_index()
+                         old_df_keys = safe_reset_index(current_all_df)
+                         new_df_keys = safe_reset_index(updated_df)
 
                          if not all(col in old_df_keys.columns for col in key_cols) or not all(col in new_df_keys.columns for col in key_cols):
                              raise KeyError(f"Missing key columns for reindex: required={key_cols}")
@@ -2604,7 +2798,7 @@ class DataService:
 
             # Slice the snapshot
             try:
-                df_slice = current_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()
+                df_slice = safe_reset_index(current_df.iloc[request.start_index:request.start_index + request.records_cnt])
             except IndexError:
                 return pb2.DataSamplesResponse(
                     success=False,
@@ -3234,7 +3428,7 @@ class DataService:
                         experiment_hash = checkpoint_manager.get_current_experiment_hash()
                     experiment_hash = str(experiment_hash or "current_experiment_hash")
 
-                    self._all_datasets_df = self._all_datasets_df.reset_index()
+                    self._all_datasets_df = safe_reset_index(self._all_datasets_df)
                     self._all_datasets_df, backend_column_name = duplicate_metadata_column_in_dataframe(
                         self._all_datasets_df,
                         source_column=source_column,
