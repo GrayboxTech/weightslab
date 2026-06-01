@@ -206,7 +206,20 @@ class WeightsLabDataSampler(Sampler):
         return uid in self._refresh_deny_list_cache()
 
     def _get_dist_sampler(self) -> DistributedSampler:
-        """Lazily build the per-rank DistributedSampler used for DDP sharding."""
+        """Lazily build the per-rank DistributedSampler used for DDP sharding.
+
+        drop_last=False is intentional. The stock DistributedSampler pads each
+        shard up to total_size = num_samples × world by repeating the first
+        few indices of the plan. Each padded yield IS a real training event
+        (forward + backward + grad contribution + criterion __call__), and
+        therefore lands in the loss trajectory as a real (sid, model_age, val)
+        encounter — with a distinct model_age from the sample's earlier yield
+        in the same epoch. The trajectory captures encounters, not
+        per-epoch-uniqueness, so padding is honest, not pollution.
+
+        If a downstream consumer needs per-epoch uniqueness, it should filter
+        by (sid, age) or pick the latest per epoch on its side — that's a
+        consumer policy, not a sampler invariant."""
         if self._dist_sampler is None:
             self._dist_sampler = DistributedSampler(
                 self.data_source,
