@@ -1872,12 +1872,34 @@ class CheckpointManager:
                 if hasattr(model, 'guard_training_context'):
                     del model.guard_training_context
 
-                # Register in ledger
-                ledgers.register_model(model)
-
-                # Set Model Training Guard
-                guard_training_context.model = model  # Train
-                guard_testing_context.model = model  # Eval
+                # Identity-preserving restore: when a live model is already
+                # registered AND its state-dict (keys + tensor shapes) matches
+                # the saved weights, skip register-replace so the apply-weights
+                # branch below can load the saved weights INTO the existing
+                # object in-place. Replacing a live registered object would
+                # orphan captured references (e.g. `model = trainer.model` in a
+                # training loop), leaving the trainer to train a stale model
+                # while pause-checks read the fresh one — so `pause_at_step`
+                # would never match. When arch differs (e.g. neuron surgery
+                # between save and restore) the key set may still match while
+                # shapes don't, so we must compare both — else apply-weights
+                # would shape-mismatch on load_state_dict and hit recovery.
+                _existing = ledgers.get_model()
+                _can_inplace = False
+                try:
+                    _saved_sd = (checkpoint_data.get('weights') or {}).get('model_state_dict') or {}
+                    _exist_sd = _existing.state_dict() if hasattr(_existing, "state_dict") else {}
+                    if _exist_sd and _saved_sd and set(_exist_sd.keys()) == set(_saved_sd.keys()):
+                        _can_inplace = all(
+                            tuple(getattr(_exist_sd[k], "shape", ())) == tuple(getattr(_saved_sd[k], "shape", ()))
+                            for k in _exist_sd
+                        )
+                except Exception:
+                    _can_inplace = False
+                if not _can_inplace:
+                    ledgers.register_model(model)
+                    guard_training_context.model = model  # Train
+                    guard_testing_context.model = model  # Eval
 
                 loaded_step = None
                 if checkpoint_data.get('weights') is not None:
