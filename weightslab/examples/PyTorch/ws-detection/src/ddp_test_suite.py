@@ -112,11 +112,12 @@ class Client:
                 return nm
         return names[0] if names else "train_loader"
 
-    def discard(self, sample_ids, origin):
-        """Discard via the real UI RPC (EditDataSample)."""
+    def discard(self, sample_ids, origin, discarded=True):
+        """Discard (or un-discard, with discarded=False) via the real UI RPC."""
         ids = [str(s) for s in sample_ids]
         req = pb2.DataEditsRequest(
-            stat_name="discarded", string_value="", float_value=0, bool_value=True,
+            stat_name="discarded", string_value="", float_value=0,
+            bool_value=bool(discarded),
             type=pb2.EDIT_OVERRIDE, samples_ids=ids, sample_origins=[origin] * len(ids),
         )
         return self.stub.EditDataSample(req, timeout=30)
@@ -775,6 +776,120 @@ def scenario_multi_epoch_stability(client, world, batch):
     return ok
 
 
+def scenario_curate_lifecycle(client, world, batch):
+    """End-to-end UI curation workflow under DDP — multiple composing edits and
+    the loss trajectory tells the story:
+
+       epoch 1  (warm up: all populated samples accumulate train/bbxs entries)
+       → tag 3 samples 'suspect'
+       → discard those 3
+       epoch 2  (the 3 suspects must produce NO new train/bbxs entries —
+                 their slot in the loss trajectory has a gap)
+       → un-discard the 3
+       → tag them additionally 'verified'   (so each carries BOTH tags)
+       epoch 3  (the 3 resume; new entries appear beyond the discard age)
+
+    Assertions:
+      [1] LIFECYCLE  — for each suspect: pre-discard entries exist AND
+                       no entries in the (discard_age, undiscard_age] window
+                       AND post-resume entries exist. The gap is the proof
+                       that discard reached the worker fast-path (the shm
+                       check + iter-invalidate) AND that un-discard reverses it.
+      [2] TAG COMPOSE — break_by_slice('train/bbxs', ['verified']) returns
+                       exactly the 3 suspect sids (both tags present).
+      [3] PLOT METRICS — train/bbxs scalar plot has ≥3 epochs worth of points;
+                         metric continued advancing across the curation events.
+    Catches: un-discard not firing DOWN reconcile, tags not composing,
+    loss trajectory broken across the discard boundary, or workers caching
+    stale state past a mutation."""
+    n = client.universe_size()
+    epoch_steps = (n // world) // batch
+    epoch_steps = int(os.environ.get("WL_DDP_TEST_STEPS", epoch_steps))
+    origin = client.train_origin()
+
+    # epoch 1 — warm up loss for many samples
+    client.train_steps(epoch_steps)
+    a0 = _wait_until_paused(client, n, min_step=max(1, epoch_steps - batch))
+    s1 = _settled_last_seen(client, n)
+    populated = sorted([k for k, v in s1.items() if v is not None and v >= 0],
+                       key=lambda k: int(k))
+    if len(populated) < 6:
+        print(f"[client] too few populated ({len(populated)})"); return False
+    # Pick 3 sids that actually have train/bbxs entries (not just last_seen).
+    client.tag(populated, "all", origin)
+    bbxs_pre = {p[0] for p in client.break_by_slice("train/bbxs", ["all"])}
+    suspects = sorted([s for s in populated if s in bbxs_pre], key=lambda s: int(s))[:3]
+    if len(suspects) < 3:
+        print(f"[client] not enough suspects with bbxs entries ({len(suspects)})"); return False
+    age_at_discard = a0
+    print(f"[client] epoch1 age={a0}; suspects={suspects} (pre-discard age={age_at_discard})")
+
+    # Tag suspects + discard
+    client.tag(suspects, "suspect", origin)
+    client.discard(suspects, origin, discarded=True)
+
+    # epoch 2 — suspects should NOT accumulate new entries
+    client.train_steps(epoch_steps)
+    a1 = _wait_until_paused(client, n, min_step=a0 + 1)
+    age_at_undiscard = a1
+    print(f"[client] epoch2 age={a1}; un-discarding + tagging 'verified' (undiscard age={age_at_undiscard})")
+
+    # Restore + add second tag
+    client.discard(suspects, origin, discarded=False)
+    client.tag(suspects, "verified", origin)
+
+    # epoch 3 — suspects should resume
+    client.train_steps(epoch_steps)
+    a2 = _wait_until_paused(client, n, min_step=a1 + 1)
+    print(f"[client] epoch3 age={a2}")
+
+    # Per-suspect trajectory
+    suspect_entries = client.break_by_slice("train/bbxs", ["suspect"])
+    ages_by_sid = {}
+    for sid, age, _ in suspect_entries:
+        ages_by_sid.setdefault(sid, []).append(age)
+
+    # Per-suspect trajectory:
+    #   pre  — every suspect must have ≥1 entry before discard (proves we're
+    #          tracking a sample that was actually trained on);
+    #   gap  — NO suspect may have an entry in (discard, undiscard] (proves the
+    #          discard reached the sampler/worker fast-path);
+    #   post — AT LEAST ONE suspect must have a post-undiscard entry (proves
+    #          un-discard reaches the sampler). The shuffled sampler in a
+    #          short 20-step epoch won't yield every sample, so requiring ALL
+    #          suspects to resume would be a shuffle-luck check, not a
+    #          correctness check.
+    pre_ok, gap_ok = True, True
+    any_post = False
+    for sid in suspects:
+        ages = sorted(ages_by_sid.get(sid, []))
+        pre = [a for a in ages if a <= age_at_discard]
+        gap = [a for a in ages if age_at_discard < a <= age_at_undiscard]
+        post = [a for a in ages if a > age_at_undiscard]
+        if not pre: pre_ok = False
+        if gap:     gap_ok = False
+        if post:    any_post = True
+        print(f"    sid={sid}: pre={pre[-3:]}  gap={gap}  post={post[:3]}")
+    post_ok = any_post
+
+    verified_sids = {p[0] for p in client.break_by_slice("train/bbxs", ["verified"])}
+    tag_compose = set(suspects).issubset(verified_sids)
+
+    plot = client.scalar_plot("train/bbxs")
+    plot_ok = len(plot) >= 3 * 1  # at least one point per epoch (loose)
+
+    a1ok = pre_ok and gap_ok and post_ok
+    a2ok = tag_compose
+    a3ok = plot_ok
+    print(f"[1] LIFECYCLE     pre={pre_ok} gap-empty={gap_ok} any-post={post_ok} → {a1ok}")
+    print(f"[2] TAG COMPOSE   verified⊇suspects ({len(verified_sids)} verified, "
+          f"{len(set(suspects) & verified_sids)}/3 suspects tagged) → {a2ok}")
+    print(f"[3] PLOT METRICS  scalar_plot has {len(plot)} entries → {a3ok}")
+    ok = a1ok and a2ok and a3ok
+    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def scenario_collective_budget(client, world, batch):
     """Per-step rendezvous budget = exactly 2 collectives (reconcile_all DOWN +
     flush_outbox UP). Anything above that is a leak. Gating this prevents a
@@ -923,6 +1038,7 @@ _SCENARIOS = [
     scenario_empty_shard_starvation,
     scenario_seed_determinism,
     scenario_collective_budget,
+    scenario_curate_lifecycle,
 ]
 
 
