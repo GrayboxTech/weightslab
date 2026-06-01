@@ -18,7 +18,7 @@ import socket
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from weightslab.components.ddp_basic_building_blocks import (
+from weightslab.components.parallel_primitives import (
     register_consistent_state, reconcile_all, clear_registry,
     reset_collectives, collective_count,
 )

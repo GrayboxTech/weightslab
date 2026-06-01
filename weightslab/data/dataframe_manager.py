@@ -171,10 +171,10 @@ class LedgeredDataFrameManager:
     # mid-epoch on rank-0 reaches workers within microseconds.
     @staticmethod
     def _down_only_columns() -> set[str]:
-        """Source of truth: weightslab.components.ddp_planes.DOWN_ONLY. Lazy
+        """Source of truth: weightslab.components.parallel_state.DOWN_ONLY. Lazy
         import to avoid a circular dependency (planes -> ledgers -> here)."""
         try:
-            from weightslab.components.ddp_planes import DOWN_ONLY
+            from weightslab.components.parallel_state import DOWN_ONLY
             return set(DOWN_ONLY)
         except Exception:
             return {"discarded", "user_tags"}  # safe default; matches planes

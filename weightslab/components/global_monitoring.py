@@ -242,7 +242,7 @@ class GuardContext:
                 logger.debug("[GuardContext] ddp probe failed: %s", exc)
 
         if in_ddp:
-            from weightslab.components.ddp_basic_building_blocks import (
+            from weightslab.components.parallel_primitives import (
                 _ensure_core_ddp_registered, sync_step,
             )
             _ensure_core_ddp_registered()          # idempotent; no-op after first

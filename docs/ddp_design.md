@@ -1,6 +1,6 @@
 # WeightsLab DDP design notes (living draft)
 
-Scratchpad for the DDP refactor. Code home: `ddp_basic_building_blocks.py` (primitives),
+Scratchpad for the DDP refactor. Code home: `parallel_primitives.py` (primitives),
 `ddp_control.py` (current bespoke control plane — to be replaced by the primitives).
 Status tags: **[DECIDED]**, **[OPEN]**, **[CUT]**, **[DEFER]**, **[SEPARATE REALM]**.
 

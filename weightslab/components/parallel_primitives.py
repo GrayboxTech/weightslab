@@ -249,9 +249,9 @@ def _ensure_core_ddp_registered():
     global _CORE_REGISTERED
     if _CORE_REGISTERED or not _active():
         return
-    # Imports are deferred — building_blocks must stay import-light + cycle-free.
+    # Imports are deferred — this module must stay import-light + cycle-free.
     from weightslab.components.global_monitoring import pause_controller
-    from weightslab.components.ddp_planes import (
+    from weightslab.components.parallel_state import (
         rank0_hparams, apply_hparams,                                # CONFIG plane    ↓
         rank0_df_down_state, apply_df_down_state,                    # DATAFRAME plane ↓
         local_df_writes, merge_df_writes,                            # DATAFRAME plane ↑
