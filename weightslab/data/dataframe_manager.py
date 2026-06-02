@@ -81,6 +81,14 @@ class LedgeredDataFrameManager:
         self._shm_down_only: dict[tuple[str, str], "_mp.RawArray"] = {}
         self._shm_capacity: dict[str, int] = {}        # per-origin allocation
         self._shm_lock = threading.Lock()              # serialize grows / replaces
+        # The vec is indexed DIRECTLY by int(sample_id), so a single large /
+        # sparse uid (e.g. an inode-based id ~1e8) would otherwise allocate a
+        # ~100MB bool array. Cap the index: ids at/above this skip the shm
+        # fast-path and fall back to the sampler's pandas deny-list check (which
+        # is the read site anyway — see is_in_down_only_shm). Dense 0..N id
+        # schemes up to the cap keep the fast-path. ~4M → ~4MB max per (origin,col).
+        self._shm_max_sid = 1 << 22
+        self._shm_cap_warned: set[str] = set()         # one warning per origin
 
     def set_store(self, store: H5DataFrameStore):
         with self._lock:
@@ -191,6 +199,8 @@ class LedgeredDataFrameManager:
             cur = len(existing) if existing is not None else 0
             if cur >= min_capacity:
                 return
+            if min_capacity > self._shm_max_sid:
+                return  # defensive: callers pre-filter, but never over-allocate
             # Grow generously so we rarely re-allocate (worker handles to the
             # OLD array stay valid; new writes go to the new array — callers
             # MUST re-fetch via is_in_down_only_shm to see growth).
@@ -240,6 +250,18 @@ class LedgeredDataFrameManager:
                     sid_int = int(str(sid))
                 except (TypeError, ValueError):
                     continue                       # non-numeric uid: skip shm
+                if sid_int < 0 or sid_int >= self._shm_max_sid:
+                    # Large / sparse uid (e.g. inode): indexing the vec by it
+                    # would blow the allocation. Skip the fast-path; the sampler's
+                    # pandas deny-list check still enforces the discard correctly.
+                    if str(origin) not in self._shm_cap_warned:
+                        self._shm_cap_warned.add(str(origin))
+                        logger.warning(
+                            "[shm] origin %r has sample_id %d >= cap %d; "
+                            "shm deny-list fast-path disabled for these ids "
+                            "(pandas fallback still correct).",
+                            str(origin), sid_int, self._shm_max_sid)
+                    continue
                 if pd.isna(val):
                     continue
                 self._ensure_shm_capacity(str(origin), col, sid_int + 1)
@@ -275,10 +297,11 @@ class LedgeredDataFrameManager:
                     logger.debug("[invalidate iter] %s: %s", name, exc)
 
     def is_in_down_only_shm(self, origin: str, col: str, sid_int: int) -> bool:
-        """Fast (lock-free, fork-safe) read of the shm-mirrored DOWN_ONLY value.
-        Returns False if the cell isn't allocated yet (shm not populated for
-        this origin/col, or sid_int beyond capacity). Falls back cleanly: the
-        sampler still consults the pandas-side cache as a backup."""
+        """Fast (lock-free) read of the shm-mirrored DOWN_ONLY value, consulted by
+        the main-process sampler (`WeightsLabDataSampler._iter_filtered_indices`).
+        Returns False if the cell isn't allocated (shm not populated for this
+        origin/col, or sid_int beyond capacity / above the cap) — the sampler
+        then falls back to its pandas-side deny-list cache, which is correct."""
         arr = self._shm_down_only.get((str(origin), str(col)))
         if arr is None:
             return False
