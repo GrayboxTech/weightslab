@@ -43,7 +43,7 @@ import time
 
 from weightslab.utils import ddp_info   # single source of truth for (rank, world)
 
-logger = logging.getLogger("weightslab.ddp")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -168,15 +168,31 @@ def reconcile_all():
     if not _active():
         return
     r, _ = ddp_info()
-    bundle = _broadcast(
-        [{name: snap() for name, snap, _ in _REGISTRY} if r == 0 else None],
-        what="reconcile_all",
-    )
+    # Build the snapshot with each snap() GUARDED: a snapshot that raises must not
+    # crash rank 0 before the broadcast (that would hang every child waiting on
+    # it). A failed state ships as None; children's apply is None-safe.
+    if r == 0:
+        snapshot = {}
+        for name, snap, _ in _REGISTRY:
+            try:
+                snapshot[name] = snap()
+            except Exception as exc:
+                snapshot[name] = None
+                logger.debug("[reconcile_all] snapshot '%s' failed: %s", name, exc)
+        payload = [snapshot]
+    else:
+        payload = [None]
+    bundle = _broadcast(payload, what="reconcile_all")   # collective ALWAYS reached
     if r != 0 and bundle:
         for name, _snap, apply in _REGISTRY:
             if name in bundle:
-                apply(bundle[name])
-                ddp_log(f"applied '{name}'")
+                # apply() GUARDED too: a child that raises here would skip the
+                # next collective (flush gather) and hang the group.
+                try:
+                    apply(bundle[name])
+                    ddp_log(f"applied '{name}'")
+                except Exception as exc:
+                    logger.debug("[reconcile_all] apply '%s' failed: %s", name, exc)
     return bundle
 
 
@@ -226,8 +242,17 @@ def flush_outbox():
     if not _active() or not _OUTBOXES:
         return
     r, _ = ddp_info()
-    payload = {name: dump() for name, dump, _ in _OUTBOXES}
-    bucket = _gather(payload, what="flush_outbox")
+    # Build the payload with each dump() GUARDED: a local_dump that raises must
+    # not crash this rank before the gather (that would hang every other rank).
+    # A failed channel ships None; merge already tolerates None parts.
+    payload = {}
+    for name, dump, _ in _OUTBOXES:
+        try:
+            payload[name] = dump()
+        except Exception as exc:
+            payload[name] = None
+            logger.debug("[flush_outbox] dump '%s' failed: %s", name, exc)
+    bucket = _gather(payload, what="flush_outbox")       # collective ALWAYS reached
     if r != 0 or not bucket:
         return
     for name, _dump, merge in _OUTBOXES:
