@@ -114,6 +114,10 @@ class H5DataFrameStore:
     TODO (GP): Refactor both h5 functions into common utility module first.
     """
 
+    # HDF key holding the categorical tag registry (kept distinct from the
+    # per-origin "stats_<origin>" keys so load_all never picks it up as data).
+    _TAG_REGISTRY_KEY = "/tag_registry"
+
     def __init__(self, path: Union[str, Path], key_prefix: str = "stats", lock_timeout: float = 10.0, poll_interval: float = 0.1):
         self._path = Path(path)
         self._key_prefix = key_prefix
@@ -121,6 +125,9 @@ class H5DataFrameStore:
         self._lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         self._lock_timeout = lock_timeout
         self._poll_interval = poll_interval
+        # In-memory copy of {tag_name: [categories]} so upsert can apply the full
+        # category set without re-reading the file (which would re-enter the lock).
+        self._tag_registry: dict = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -152,18 +159,94 @@ class H5DataFrameStore:
                     tag_cols[col] = non_null.unique().tolist()
         return tag_cols
 
+    # ------------------------------------------------------------------
+    # Categorical tag registry persistence
+    # ------------------------------------------------------------------
+    def save_tag_registry(self, registry: dict) -> None:
+        """Persist the categorical tag registry ({tag_name: [categories]}) to H5.
+
+        Stored as a single JSON blob under a dedicated key so it survives the
+        write/read cycle independently of which category values happen to be
+        present in the data. Also updates the in-memory copy used by upsert().
+        """
+        self._tag_registry = {str(k): [str(c) for c in (v or [])] for k, v in (registry or {}).items()}
+        if not registry:
+            return
+        self._ensure_parent()
+        payload = json.dumps(self._tag_registry)
+        try:
+            with self._local_lock:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                    with pd.HDFStore(str(self._path), mode="a") as store:
+                        if self._TAG_REGISTRY_KEY in store:
+                            store.remove(self._TAG_REGISTRY_KEY)
+                        store.put(self._TAG_REGISTRY_KEY, pd.DataFrame({"registry": [payload]}), format="table")
+                        store.flush()
+        except Exception as e:
+            logger.debug(f"[H5DataFrameStore] Failed to save tag registry: {e}")
+
+    def load_tag_registry(self) -> dict:
+        """Load the categorical tag registry from H5 into memory and return it."""
+        if not self._path.exists():
+            return {}
+        try:
+            with self._local_lock:
+                with _InterProcessFileLock(self._lock_path, timeout=self._lock_timeout, poll_interval=self._poll_interval):
+                    with pd.HDFStore(str(self._path), mode="r") as store:
+                        if self._TAG_REGISTRY_KEY not in store:
+                            return {}
+                        frame = store.select(self._TAG_REGISTRY_KEY)
+            if frame is None or frame.empty:
+                return {}
+            reg = json.loads(frame["registry"].iloc[0])
+            self._tag_registry = {str(k): [str(c) for c in (v or [])] for k, v in reg.items()}
+            return dict(self._tag_registry)
+        except Exception as e:
+            logger.debug(f"[H5DataFrameStore] Failed to load tag registry: {e}")
+            return {}
+
+    def _apply_registry_categories(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Coerce registered categorical tag columns to Categorical with their
+        FULL allowed category set, so categories absent from the data still
+        persist through the HDF write (PyTables stores the category list).
+        """
+        if not self._tag_registry:
+            return df
+        for tag_name, categories in self._tag_registry.items():
+            col = f"{SampleStats.Ex.TAG.value}:{tag_name}"
+            if col not in df.columns or not categories:
+                continue
+            try:
+                if isinstance(df[col].dtype, pd.CategoricalDtype):
+                    missing = [c for c in categories if c not in df[col].cat.categories]
+                    if missing:
+                        df[col] = df[col].cat.add_categories(missing)
+                else:
+                    df[col] = pd.Categorical(df[col], categories=categories)
+            except Exception as e:
+                logger.debug(f"[H5DataFrameStore] Failed to apply registry categories to {col}: {e}")
+        return df
+
     def _optimize_categorical_tags(self, df: pd.DataFrame) -> pd.DataFrame:
         """Convert tag columns to categorical dtype for memory efficiency.
 
         Only converts columns starting with 'tag:' or 'TAG:' prefix.
         Also converts 'discarded' column if present (common boolean column).
+        Registered categorical tags use their full allowed category set so no
+        category is lost on round-trip.
 
         Returns:
             DataFrame with categorical dtypes applied
         """
+        # Registered categorical tags first (authoritative full category sets).
+        df = self._apply_registry_categories(df)
+
         tag_cols = self._extract_tag_columns(df)
 
         for col, categories in tag_cols.items():
+            # Already coerced from the registry — don't narrow it back to present values.
+            if isinstance(df[col].dtype, pd.CategoricalDtype):
+                continue
             try:
                 if categories is None:
                     # Auto-detect categories
@@ -568,8 +651,28 @@ class H5DataFrameStore:
                         # Final safety pass: force any remaining scalar object columns to string
                         # to prevent PyTables serialization errors caused by merging different dtypes
                         # (e.g. initializing a new column with bool False, then updating with string 'True')
+                        registered_cat = set(self._tag_registry.keys())
                         for col in existing.select_dtypes(include=['object']).columns:
+                            name = str(col)
+                            is_tagish = name.startswith("tag:") or name.startswith("TAG:") or name == "discarded"
+                            # Don't stringify boolean tag/discarded columns — that would turn
+                            # True/False into the strings "True"/"False" and break astype(bool)
+                            # semantics on read. Keep them as boolean categoricals (legacy behavior).
+                            if is_tagish:
+                                tag_name = name.split(":", 1)[1] if ":" in name else name
+                                if tag_name in registered_cat:
+                                    continue  # categorical tag → handled by _apply_registry_categories
+                                non_null = existing[col].dropna()
+                                if not non_null.empty and all(isinstance(v, (bool, np.bool_)) for v in non_null):
+                                    existing[col] = pd.Categorical(existing[col], categories=[False, True])
+                                    continue
                             existing[col] = existing[col].astype(str)
+
+                        # Re-apply categorical tag dtypes (with the full registered
+                        # category set) AFTER the string pass so the complete set of
+                        # allowed categories is persisted by PyTables — and "nan"
+                        # strings produced above collapse back to proper NaN (unset).
+                        existing = self._apply_registry_categories(existing)
 
                         # Remove old key
                         if key in store:

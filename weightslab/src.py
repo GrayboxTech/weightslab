@@ -359,6 +359,84 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
+
+def _move_to_cpu(value: Any) -> Any:
+    """Recursively move tensor containers to CPU."""
+    if isinstance(value, th.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {k: _move_to_cpu(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_to_cpu(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_move_to_cpu(v) for v in value)
+    return value
+
+
+def _release_gpu_resources() -> None:
+    """Best-effort migration of tracked Torch objects to CPU and CUDA cache cleanup."""
+    try:
+        model_names = list_models() or []
+    except Exception:
+        model_names = []
+
+    for model_name in model_names:
+        try:
+            model_obj = get_model(model_name)
+
+            # Try direct module first
+            if hasattr(model_obj, 'to') and callable(getattr(model_obj, 'to')):
+                model_obj.to('cpu')
+
+            # Fallback for wrappers exposing an inner model/module
+            inner_model = getattr(model_obj, 'model', None)
+            if inner_model is not None and hasattr(inner_model, 'to') and callable(getattr(inner_model, 'to')):
+                inner_model.to('cpu')
+
+            module = getattr(model_obj, 'module', None)
+            if module is not None and hasattr(module, 'to') and callable(getattr(module, 'to')):
+                module.to('cpu')
+        except Exception as e:
+            logger.debug(f"Could not move model '{model_name}' to CPU: {e}")
+
+    try:
+        optimizer = get_optimizer()
+        if optimizer is not None and hasattr(optimizer, 'state'):
+            for _, state in optimizer.state.items():
+                if isinstance(state, dict):
+                    for key, value in state.items():
+                        state[key] = _move_to_cpu(value)
+    except Exception as e:
+        logger.debug(f"Could not move optimizer state to CPU: {e}")
+
+    # Clean cached data and free memory
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    cuda_module = getattr(th, 'cuda', None)
+    if cuda_module is not None:
+        try:
+            cuda_initialized = bool(
+                hasattr(cuda_module, 'is_initialized') and cuda_module.is_initialized()
+            )
+        except Exception:
+            cuda_initialized = False
+
+        # Important: avoid creating a fresh CUDA context just for cleanup,
+        # which can reserve baseline VRAM in idle keep-serving mode.
+        if cuda_initialized:
+            try:
+                cuda_module.empty_cache()
+            except Exception as e:
+                logger.debug(f"Could not empty CUDA cache: {e}")
+            try:
+                cuda_module.ipc_collect()
+            except Exception:
+                pass
+
+
 @functools.lru_cache(maxsize=128)
 def _fwd_params(fn):
     """Return the frozenset of parameter names accepted by *fn*. Cached per function."""
@@ -562,8 +640,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                                  # Fallback for legacy subscriber functions
                                  res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
 
-                             batch_res.append(res)
-                         dynamic_updates[name] = np.array(batch_res)
+                             if res is not None:
+                                 batch_res.append(res)
+                         if batch_res:
+                             dynamic_updates[name] = np.array(batch_res)
                      except Exception as e:
                          logger.debug(f"Dynamic signal {name} failed: {e}")
                          pass  # User function error, skip
@@ -576,7 +656,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         signals = {
             reg_name: list(batch_scalar.values()) if isinstance(batch_scalar, dict) else batch_scalar.detach().cpu().tolist()
         } if batch_scalar is not None else {}
-        signals.update(dynamic_updates) # Merge dynamic signals
+        if dynamic_updates:
+            signals.update(dynamic_updates) # Merge dynamic signals
 
         preds = detach_to_cpu(preds)
         preds_raw = detach_to_cpu(preds_raw)
@@ -972,83 +1053,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
 
-def _move_to_cpu(value: Any) -> Any:
-    """Recursively move tensor containers to CPU."""
-    if isinstance(value, th.Tensor):
-        return value.detach().cpu()
-    if isinstance(value, dict):
-        return {k: _move_to_cpu(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_move_to_cpu(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_move_to_cpu(v) for v in value)
-    return value
-
-
-def _release_gpu_resources() -> None:
-    """Best-effort migration of tracked Torch objects to CPU and CUDA cache cleanup."""
-    try:
-        model_names = list_models() or []
-    except Exception:
-        model_names = []
-
-    for model_name in model_names:
-        try:
-            model_obj = get_model(model_name)
-
-            # Try direct module first
-            if hasattr(model_obj, 'to') and callable(getattr(model_obj, 'to')):
-                model_obj.to('cpu')
-
-            # Fallback for wrappers exposing an inner model/module
-            inner_model = getattr(model_obj, 'model', None)
-            if inner_model is not None and hasattr(inner_model, 'to') and callable(getattr(inner_model, 'to')):
-                inner_model.to('cpu')
-
-            module = getattr(model_obj, 'module', None)
-            if module is not None and hasattr(module, 'to') and callable(getattr(module, 'to')):
-                module.to('cpu')
-        except Exception as e:
-            logger.debug(f"Could not move model '{model_name}' to CPU: {e}")
-
-    try:
-        optimizer = get_optimizer()
-        if optimizer is not None and hasattr(optimizer, 'state'):
-            for _, state in optimizer.state.items():
-                if isinstance(state, dict):
-                    for key, value in state.items():
-                        state[key] = _move_to_cpu(value)
-    except Exception as e:
-        logger.debug(f"Could not move optimizer state to CPU: {e}")
-
-    # Clean cached data and free memory
-    try:
-        gc.collect()
-    except Exception:
-        pass
-
-    cuda_module = getattr(th, 'cuda', None)
-    if cuda_module is not None:
-        try:
-            cuda_initialized = bool(
-                hasattr(cuda_module, 'is_initialized') and cuda_module.is_initialized()
-            )
-        except Exception:
-            cuda_initialized = False
-
-        # Important: avoid creating a fresh CUDA context just for cleanup,
-        # which can reserve baseline VRAM in idle keep-serving mode.
-        if cuda_initialized:
-            try:
-                cuda_module.empty_cache()
-            except Exception as e:
-                logger.debug(f"Could not empty CUDA cache: {e}")
-            try:
-                cuda_module.ipc_collect()
-            except Exception:
-                pass
-
-
 def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """Start WeightsLab services.
 
@@ -1340,6 +1344,80 @@ def tag_samples(
 
     except Exception as e:
         logger.error(f"Failed to tag samples: {e}", exc_info=True)
+        return False
+
+
+def register_categorical_tag(name: str, categories: list[str], replace: bool = False) -> list:
+    """Declare a categorical (multi-value) tag and its allowed category values.
+
+    Categorical tags hold one string value per sample chosen from a predefined
+    set (e.g. ``weather`` -> ``rainy`` / ``sunny`` / ``cloudy``), as opposed to
+    boolean tags which are simply present/absent. Declaring the tag up-front lets
+    the UI render the full set of choices even before any sample uses a value,
+    and ensures the complete category set survives the dataframe/H5 round-trip.
+
+    Args:
+        name: Tag name (with or without the ``tag:`` prefix), e.g. ``"weather"``.
+        categories: Allowed category values, e.g. ``["rainy", "sunny", "cloudy"]``.
+        replace: If True, replace any existing categories; otherwise merge.
+
+    Returns:
+        The resulting ordered list of allowed categories (empty on failure).
+
+    Examples:
+        >>> wl.register_categorical_tag("weather", ["rainy", "sunny", "cloudy"])
+        >>> wl.set_categorical_tag([0, 3], "weather", "rainy")
+    """
+    from weightslab.backend.ledgers import get_dataframe
+
+    df_manager = get_dataframe()
+    if df_manager is None:
+        logger.error("Dataframe manager not initialized. Call this after registering your dataloader.")
+        return []
+    try:
+        return df_manager.register_categorical_tag(name, categories, replace=replace)
+    except Exception as e:
+        logger.error(f"Failed to register categorical tag '{name}': {e}", exc_info=True)
+        return []
+
+
+def set_categorical_tag(sample_ids: list[int], name: str, value: str) -> bool:
+    """Set a categorical tag value on samples (e.g. weather='rainy').
+
+    The tag is auto-registered and the value added to its allowed categories if
+    not already present. Pass ``value=None`` or ``""`` to clear (unset) the tag.
+
+    Args:
+        sample_ids: Sample IDs to update.
+        name: Categorical tag name (with or without ``tag:`` prefix).
+        value: The category value to set, or None/"" to clear.
+
+    Returns:
+        bool: True if successful.
+    """
+    import pandas as pd
+    from weightslab.backend.ledgers import get_dataframe
+
+    df_manager = get_dataframe()
+    if df_manager is None:
+        logger.error("Dataframe manager not initialized. Call this after registering your dataloader.")
+        return False
+
+    pref = f"{SampleStatsEx.TAG.value}:"
+    tag_name = name[len(pref):] if str(name).startswith(pref) else str(name).strip()
+    tag_col = f"{pref}{tag_name}"
+    cleaned = None if value is None or str(value).strip() == "" else str(value).strip()
+
+    try:
+        if cleaned is not None:
+            df_manager.register_categorical_tag(tag_name, [cleaned])
+        rows = [{"sample_id": sid, tag_col: cleaned} for sid in sample_ids]
+        df_update = pd.DataFrame(rows).set_index("sample_id")
+        df_manager.upsert_df(df_update, force_flush=True)
+        logger.info(f"Set categorical tag '{tag_name}'={cleaned!r} on {len(sample_ids)} samples")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set categorical tag '{name}': {e}", exc_info=True)
         return False
 
 
@@ -1969,6 +2047,10 @@ def _unpack_batch(batch, device=None):
     return inputs, ids, targets, metadata
 
 
+# ##############################################################################################################
+# EVALUATION MODE PUBLIC API
+# ##############################################################################################################
+
 def _make_default_eval_fn(model):
     """Return a default evaluation callable that uses all registered ledger signals.
 
@@ -2173,10 +2255,6 @@ def trigger_pending_evaluation_async() -> bool:
 
     return True
 
-
-# ##############################################################################################################
-# EVALUATION MODE PUBLIC API
-# ##############################################################################################################
 
 def run_pending_evaluation(
     loaders: dict = None,

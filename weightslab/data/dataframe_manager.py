@@ -88,6 +88,10 @@ class LedgeredDataFrameManager:
         self._flush_queue_count = 0
         self._dense_store: Dict[str, Dict[int, np.ndarray]] = {}
         self._buffer: Dict[int, Dict[str, Any]] = {}  # {sample_id: {col: value}}
+        # Registry of categorical tags: tag_name (without "tag:" prefix) -> ordered
+        # list of allowed category values. Distinguishes multi-value string tags
+        # (e.g. weather -> [rainy, sunny]) from the legacy boolean tags.
+        self._categorical_tags: Dict[str, List[str]] = {}
         self._enable_flushing_threads = enable_flushing_threads
         self._enable_h5_persistence = enable_h5_persistence
         self.first_init = True
@@ -116,6 +120,8 @@ class LedgeredDataFrameManager:
                     array_path = store.get_path().parent / "arrays.h5"
                     self._array_store = H5ArrayStore(array_path)
                     self._array_store.recover()
+                # Restore any previously persisted categorical tag registry.
+                self._load_tag_registry()
 
     @staticmethod
     def _count_instances(target: Any) -> int:
@@ -299,6 +305,125 @@ class LedgeredDataFrameManager:
         """Get the array store instance."""
         return self._array_store
 
+    # ------------------------------------------------------------------
+    # Categorical tag registry
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _tag_name_from_col(col: Any) -> str | None:
+        """Return the tag name from a ``tag:<name>`` column, else None."""
+        prefix = SampleStats.Ex.TAG.value + ":"
+        s = str(col)
+        return s[len(prefix):] if s.startswith(prefix) else None
+
+    @staticmethod
+    def _clean_categories(categories) -> List[str]:
+        """Normalize a list of category values to non-empty unique strings (order-preserving)."""
+        out = []
+        for c in (categories or []):
+            if c is None or isinstance(c, bool):
+                continue
+            s = str(c).strip()
+            if s == "" or s.lower() == "nan":
+                continue
+            out.append(s)
+        return list(dict.fromkeys(out))
+
+    def _merge_categories(self, name: str, categories, replace: bool = False) -> List[str]:
+        """Merge categories into the registry for ``name``. Caller must hold self._lock."""
+        cats = self._clean_categories(categories)
+        existing = [] if replace else self._categorical_tags.get(name, [])
+        self._categorical_tags[name] = list(dict.fromkeys([*existing, *cats]))
+        return list(self._categorical_tags[name])
+
+    def register_categorical_tag(self, name: str, categories=None, replace: bool = False) -> List[str]:
+        """Declare (or extend) a categorical tag and its allowed category values.
+
+        ``name`` may be given with or without the ``tag:`` prefix. Returns the
+        resulting ordered category list. Persists the registry to H5.
+        """
+        name = str(name).strip()
+        prefix = SampleStats.Ex.TAG.value + ":"
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        if not name:
+            return []
+        with self._lock:
+            result = self._merge_categories(name, categories or [], replace=replace)
+        self._persist_tag_registry()
+        return result
+
+    def get_categorical_tags(self) -> Dict[str, List[str]]:
+        """Return a copy of the categorical tag registry: {tag_name: [categories]}."""
+        with self._lock:
+            return {k: list(v) for k, v in self._categorical_tags.items()}
+
+    def is_categorical_tag(self, name: str) -> bool:
+        prefix = SampleStats.Ex.TAG.value + ":"
+        name = str(name)
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        with self._lock:
+            return name in self._categorical_tags
+
+    def _auto_register_categorical_tags(self, df: pd.DataFrame) -> None:
+        """Detect string-valued ``tag:<name>`` columns and register their values.
+
+        Boolean tags are ignored. Works for both object/string columns (collect
+        unique values) and already-categorical columns (read the full category
+        list, preserving values absent from the current data).
+        """
+        if df is None or df.empty:
+            return
+        changed = False
+        with self._lock:
+            for col in df.columns:
+                name = self._tag_name_from_col(col)
+                if name is None:
+                    continue
+                s = df[col]
+                if isinstance(s.dtype, pd.CategoricalDtype):
+                    cats = s.dtype.categories.tolist()
+                    if any(isinstance(c, bool) for c in cats):
+                        continue  # boolean-style categorical → not a categorical tag
+                    candidate = cats
+                elif pd.api.types.is_bool_dtype(s.dtype):
+                    continue
+                elif s.dtype == object or pd.api.types.is_string_dtype(s.dtype):
+                    non_null = s.dropna()
+                    candidate = [v for v in non_null.unique().tolist() if not isinstance(v, bool)]
+                else:
+                    continue
+                cleaned = self._clean_categories(candidate)
+                if not cleaned:
+                    continue
+                before = self._categorical_tags.get(name)
+                self._merge_categories(name, cleaned)
+                if self._categorical_tags.get(name) != before:
+                    changed = True
+        if changed:
+            self._persist_tag_registry()
+
+    def _persist_tag_registry(self) -> None:
+        if not self._enable_h5_persistence or self._store is None:
+            return
+        try:
+            reg = self.get_categorical_tags()
+            self._store.save_tag_registry(reg)
+        except Exception as e:
+            logger.debug(f"[LedgeredDataFrameManager] Failed to persist tag registry: {e}")
+
+    def _load_tag_registry(self) -> None:
+        if self._store is None:
+            return
+        try:
+            reg = self._store.load_tag_registry()
+            if reg:
+                with self._lock:
+                    for name, cats in reg.items():
+                        self._merge_categories(name, cats)
+        except Exception as e:
+            logger.debug(f"[LedgeredDataFrameManager] Failed to load tag registry: {e}")
+
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
         # Normalize incoming frame
         df_norm = df if isinstance(df, pd.DataFrame) else pd.DataFrame(df).set_index('sample_id')
@@ -327,6 +452,9 @@ class LedgeredDataFrameManager:
         self._ensure_flush_thread()
 
     def _load_existing_data(self, origin: str = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
+        # Restore the categorical tag registry so loaded string-valued tag columns
+        # get their full allowed category set (not just the values present on disk).
+        self._load_tag_registry()
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
 
         if not loaded_df.empty:
@@ -473,6 +601,10 @@ class LedgeredDataFrameManager:
             for col in missing_cols:
                 if df_norm[col].dtype == bool:
                     self._df[col] = self._df[col].fillna(False).astype(bool)
+
+            # Auto-register any string-valued tag: columns as categorical tags
+            # (e.g. dataset metadata declaring tag:weather = "rainy"/"sunny").
+            self._auto_register_categorical_tags(df_norm)
 
             # Optimize memory by converting repetitive columns to categorical
             self._df = self._optimize_dataframe_memory(self._df)
@@ -1370,6 +1502,10 @@ class LedgeredDataFrameManager:
         if df.empty:
             return df
 
+        # Default to the registered categorical tags when none are passed explicitly.
+        if categorical_tags is None:
+            categorical_tags = self._categorical_tags
+
         # Columns that are typically repetitive (good candidates for categorical)
         categorical_candidates = [
             SampleStats.Ex.ORIGIN.value,  # Alias for origin (if different column name)
@@ -1413,21 +1549,31 @@ class LedgeredDataFrameManager:
         # Example: tag:weather → 'rain', 'sun', 'cloudy' (not boolean)
         if categorical_tags:
             for tag_name, categories in categorical_tags.items():
-                col_name = f'tag:{tag_name}'
-                if col_name not in df.columns:
+                col_name = f'{SampleStats.Ex.TAG.value}:{tag_name}'
+                if col_name not in df.columns or not categories:
                     continue
 
-                # Skip if already boolean (backward compatibility with current tag system)
-                if df[col_name].dtype == 'bool' or df[col_name].dtype == 'boolean':
+                col = df[col_name]
+
+                # Skip if boolean (legacy boolean tag — already space-efficient)
+                if pd.api.types.is_bool_dtype(col.dtype):
                     continue
 
-                # Skip if already categorical
-                if df[col_name].dtype.name == 'category':
+                # Already categorical: just make sure every allowed category is present
+                # (so values absent from current data still survive the H5 round-trip).
+                if isinstance(col.dtype, pd.CategoricalDtype):
+                    missing = [c for c in categories if c not in col.dtype.categories]
+                    if missing:
+                        try:
+                            df[col_name] = col.cat.add_categories(missing)
+                        except Exception as e:
+                            logger.debug(f"[LedgeredDataFrameManager] add_categories failed for '{col_name}': {e}")
                     continue
 
                 try:
-                    # Convert to categorical with specified categories
-                    df[col_name] = pd.Categorical(df[col_name], categories=categories)
+                    # Convert string column to categorical with the full allowed set.
+                    # Values not in `categories` become NaN (treated as unset).
+                    df[col_name] = pd.Categorical(col, categories=categories)
                     logger.debug(
                         f"[LedgeredDataFrameManager] Converted categorical tag '{col_name}': "
                         f"{len(categories)} categories"

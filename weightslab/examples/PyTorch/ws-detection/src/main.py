@@ -18,14 +18,15 @@ import torch
 import yaml
 
 import weightslab as wl
+
 from weightslab.utils.logger import LoggerQueue
-from weightslab.components.global_monitoring import pause_controller
+
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.cfg import get_cfg
 from ultralytics.data.utils import check_det_dataset
 
-from utils.data import YOLODatasetWL, _wl_yolo_collate
+from utils.data import YOLODatasetWL, _wl_yolo_collate as collate_fn
 from utils.criterions import (
     PerSampleDetectionLoss, PerSampleIoU,
     PerInstanceDetectionLoss, PerInstanceIoU,
@@ -35,6 +36,10 @@ from utils.criterions import (
 logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
 
+
+# ==================
+# Trainer Definition
+# ==================
 
 class WLCompatileDetTrainer(DetectionTrainer):
     def __init__(self, *a, **kw):
@@ -238,7 +243,7 @@ def main():
             num_workers=2,
             drop_last=False, compute_hash=False,
             is_training=(split == "train"),
-            collate_fn=_wl_yolo_collate,
+            collate_fn=collate_fn,
             preload_labels=True, preload_metadata=True,
         )
 

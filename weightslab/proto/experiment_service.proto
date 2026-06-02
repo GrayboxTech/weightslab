@@ -327,6 +327,12 @@ enum AgentIntentType {
   INTENT_ANALYSIS = 2;
 }
 
+// Definition of a categorical (multi-value) tag and its allowed category values.
+message CategoricalTagDef {
+  string name = 1;                  // tag name without the "tag:" prefix (e.g. "weather")
+  repeated string categories = 2;   // allowed values, e.g. ["rainy", "sunny", "cloudy"]
+}
+
 message DataQueryResponse {
   bool success = 1;
   string message = 2;
@@ -337,6 +343,10 @@ message DataQueryResponse {
 
   AgentIntentType agent_intent_type = 7;
   string analysis_result = 8;
+
+  // Categorical tags (multi-value, string) with their allowed category sets.
+  // Boolean tags continue to be reported via `unique_tags`.
+  repeated CategoricalTagDef categorical_tags = 9;
 }
 
 message DataSamplesRequest {
@@ -383,6 +393,15 @@ message DataEditsRequest {
   SampleEditType type = 5;
   repeated string samples_ids = 6;
   repeated string sample_origins = 7;
+
+  // --- Categorical tag support ---
+  // When is_categorical=true, the edit targets a categorical (multi-value) tag:
+  //   stat_name    = "tag:<name>" (the column)
+  //   string_value = the category value to set (EDIT_OVERRIDE) or "" to clear
+  //   categories   = optional full allowed-value set to (re)declare for this tag
+  // EDIT_REMOVE with float_value == -1 still deletes the whole tag column.
+  bool is_categorical = 8;
+  repeated string categories = 9;
 }
 
 message DataEditsResponse {

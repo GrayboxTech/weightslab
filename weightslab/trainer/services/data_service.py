@@ -1871,24 +1871,45 @@ class DataService:
             logger.error(f"[Sample {row.get(SampleStatsEx.SAMPLE_ID.value, -1)}] X Error after {total_time:.3f}s: {e}", exc_info=True)
             return None
 
-    def _get_unique_tags(self) -> List[str]:
-        """Collect all unique tags currently present in the tracked datasets.
+    def _get_categorical_tag_names(self) -> set:
+        """Return the set of registered categorical tag names (without prefix)."""
+        try:
+            if self._df_manager is not None:
+                return set(self._df_manager.get_categorical_tags().keys())
+        except Exception:
+            pass
+        return set()
 
-        Tags are stored as individual boolean columns with prefix "tags_".
-        This method extracts all tag names from the column names.
+    def _get_unique_tags(self) -> List[str]:
+        """Collect unique BOOLEAN tag names present in the tracked datasets.
+
+        Tags are stored as individual columns with prefix "tag:". Categorical
+        (multi-value) tags are reported separately via ``categorical_tags`` and
+        excluded here so the UI doesn't render them as boolean toggles.
         """
         tags = set()
         try:
-            # Extract tags from individual tag columns (tags_<tagname>)
+            categorical = self._get_categorical_tag_names()
             if self._all_datasets_df is not None and not self._all_datasets_df.empty:
                 for col in self._all_datasets_df.columns:
                     if col.startswith(f"{SampleStatsEx.TAG.value}:"):
-                        # Extract tag name by removing "tags_" prefix
-                        tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]  # len("tags_") == 5
-                        tags.add(tag_name)
+                        tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]
+                        if tag_name not in categorical:
+                            tags.add(tag_name)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
         return sorted(list(tags))
+
+    def _get_categorical_tag_defs(self) -> List["pb2.CategoricalTagDef"]:
+        """Build CategoricalTagDef protos from the manager's tag registry."""
+        defs = []
+        try:
+            if self._df_manager is not None:
+                for name, categories in self._df_manager.get_categorical_tags().items():
+                    defs.append(pb2.CategoricalTagDef(name=str(name), categories=[str(c) for c in categories]))
+        except Exception as e:
+            logger.debug(f"Error building categorical tag defs: {e}")
+        return defs
 
     def _build_success_response(
         self,
@@ -1920,6 +1941,7 @@ class DataService:
             number_of_samples_in_the_loop=in_loop_count,
             number_of_discarded_samples=discarded_count,
             unique_tags=unique_tags,
+            categorical_tags=self._get_categorical_tag_defs(),
             agent_intent_type=intent_type,
             analysis_result=analysis_result
         )
@@ -2649,16 +2671,27 @@ class DataService:
                         _DataStat(name=col, type="string", shape=[1], value_string=v)
                     )
 
+        categorical_names = self._get_categorical_tag_names()
         for col in tag_cols:
-            bools = df_slice[col].astype(bool).tolist()
-            # Pre-build a single shared DataStat for this tag column –
-            # protobuf messages are mutable so we need one per row, but
-            # the tag "1" stat is tiny so construction is cheap.
-            for i, b in enumerate(bools):
-                if b:
-                    row_stats[i].append(
-                        _DataStat(name=col, type="string", shape=[1], value_string="1")
-                    )
+            tag_name = col[len(tag_prefix):]
+            series = df_slice[col]
+            if tag_name in categorical_names:
+                # Categorical tag: send the actual category value (string), skip unset.
+                str_vals = series.astype(str).tolist()
+                nan_mask = series.isna()
+                for i, v in enumerate(str_vals):
+                    if not nan_mask.iloc[i] and v not in ("", "nan", "None"):
+                        row_stats[i].append(
+                            _DataStat(name=col, type="string", shape=[1], value_string=v)
+                        )
+            else:
+                # Boolean tag: presence indicator "1" when True.
+                bools = series.astype(bool).tolist()
+                for i, b in enumerate(bools):
+                    if b:
+                        row_stats[i].append(
+                            _DataStat(name=col, type="string", shape=[1], value_string="1")
+                        )
 
         # -- Build DataRecord list in one comprehension -----------------------
         _DataRecord = pb2.DataRecord
@@ -3541,13 +3574,48 @@ class DataService:
             try:
                 if request.samples_ids and self._df_manager is not None:
                     updates_by_origin = {}
-                    is_tag_request = request.stat_name == SampleStatsEx.TAG.value or request.stat_name.startswith(SampleStatsEx.TAG.value)
+                    is_categorical = bool(getattr(request, "is_categorical", False))
+                    is_tag_request = (not is_categorical) and (
+                        request.stat_name == SampleStatsEx.TAG.value
+                        or request.stat_name.startswith(SampleStatsEx.TAG.value)
+                    )
+
+                    # Categorical tag set/clear: normalize column + (re)declare categories once.
+                    cat_tag_col = None
+                    cat_value = None
+                    if is_categorical:
+                        pref = f"{SampleStatsEx.TAG.value}:"
+                        raw = (request.stat_name or "").strip()
+                        cat_tag_name = raw[len(pref):] if raw.startswith(pref) else raw
+                        cat_tag_col = f"{pref}{cat_tag_name}"
+                        declared = [c for c in request.categories if c]
+                        if declared:
+                            self._df_manager.register_categorical_tag(cat_tag_name, declared)
+                        if request.type != SampleEditType.EDIT_REMOVE:
+                            cat_value = request.string_value.strip() if request.string_value else None
+                            if cat_value:
+                                self._df_manager.register_categorical_tag(cat_tag_name, [cat_value])
+
                     for sid, origin in zip(request.samples_ids, request.sample_origins):
                         sid_value = str(sid)
+                        # =====================
+                        # CATEGORICAL TAG EDITS
+                        # =====================
+                        if is_categorical:
+                            if origin not in updates_by_origin:
+                                updates_by_origin[origin] = {}
+                            if sid_value not in updates_by_origin[origin]:
+                                updates_by_origin[origin][sid_value] = {
+                                    "sample_id": sid_value,
+                                    SampleStatsEx.ORIGIN.value: origin,
+                                }
+                            # EDIT_REMOVE clears the value (None); otherwise set the chosen category.
+                            updates_by_origin[origin][sid_value][cat_tag_col] = cat_value
+
                         # =========
                         # TAG EDITS
                         # =========
-                        if is_tag_request:
+                        elif is_tag_request:
                             # Calculate tag column updates based on edit type
                             tag_updates = self._calculate_tag_column_updates(
                                 sid,
@@ -3588,8 +3656,15 @@ class DataService:
                         self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
 
                     # Auto-cleanup: if EDIT_REMOVE was used on a tag, delete the entire column immediately
-                    if is_tag_request and request.type == SampleEditType.EDIT_REMOVE and request.float_value == -1:
-                        column_name = request.stat_name.strip()
+                    if (is_tag_request or is_categorical) and request.type == SampleEditType.EDIT_REMOVE and request.float_value == -1:
+                        column_name = cat_tag_col if is_categorical else request.stat_name.strip()
+                        if is_categorical and cat_tag_col:
+                            # Drop the categorical tag from the registry as well.
+                            try:
+                                self._df_manager._categorical_tags.pop(cat_tag_col[len(f"{SampleStatsEx.TAG.value}:"):], None)
+                                self._df_manager._persist_tag_registry()
+                            except Exception:
+                                pass
                         if column_name:
                             logger.info(f"[EditDataSample] Deleting tag column: {column_name}")
                             # Delete the column from storage
