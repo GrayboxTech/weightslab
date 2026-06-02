@@ -219,7 +219,18 @@ class WeightsLabDataSampler(Sampler):
 
         If a downstream consumer needs per-epoch uniqueness, it should filter
         by (sid, age) or pick the latest per epoch on its side — that's a
-        consumer policy, not a sampler invariant."""
+        consumer policy, not a sampler invariant.
+
+        SCOPE — TRAINING ONLY. This shards EVERY sampler, including an eval
+        loader's. That's correct for training (each rank owns a shard; the UP
+        outbox reconverges per-sample writes). It is NOT correct for EVAL under
+        DDP: the per-step anchor runs only in training context, so a sharded
+        eval would have each rank score 1/world of the set with NO scalar-metric
+        aggregation → undercount. No eval currently runs under DDP, so this is
+        latent. Do NOT add a DDP eval loop without first resolving the eval
+        sharding/aggregation policy. TODO(ddp-eval): un-shard eval (rank-0
+        authoritative) or all-reduce eval metrics — see the 'eval sharding'
+        and 'DDP eval loop' tasks."""
         if self._dist_sampler is None:
             self._dist_sampler = DistributedSampler(
                 self.data_source,
