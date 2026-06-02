@@ -62,6 +62,18 @@ class ReshuffleSeqTests(unittest.TestCase):
         self.assertEqual(r0 & r1, set(), "shards must be disjoint")
         self.assertEqual(r0 | r1, set(range(24)), "shards must cover the universe")
 
+    def test_world3_uneven_shards_pad_and_cover(self):
+        # n=25, world=3 → DistributedSampler(drop_last=False) pads total to 27, so
+        # each shard is 9 long and the union still covers the whole universe
+        # (padding repeats a couple of real indices). Exercises uneven/padded shards.
+        shards = [set(_sampler(n=25, rank=r, world=3)._generate_indices())
+                  for r in range(3)]
+        lens = [len(_sampler(n=25, rank=r, world=3)._generate_indices())
+                for r in range(3)]
+        self.assertEqual(lens, [9, 9, 9], "padded shards must be equal length")
+        self.assertEqual(set().union(*shards), set(range(25)),
+                         "padded shards must still cover the whole universe")
+
     def test_seed_mismatch_warns_but_sets(self):
         s = _sampler(seed=0)
         # Different seed → warn, but still set the seq (best-effort).
