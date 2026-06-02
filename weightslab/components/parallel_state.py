@@ -119,8 +119,29 @@ def _is_gather_safe_column(col: str, dtype) -> bool:
     return False
 
 
+# Per-rank delta state. The outbox ships only what CHANGED since the last flush,
+# not the whole dataframe / whole signal history every step — otherwise per-step
+# cost scales with dataset size (df) and grows unboundedly (signals), which is
+# the real scaling wall behind the "~2 collectives/step" budget (the budget
+# counts rendezvous, not bytes). Both caches are process-local: each rank tracks
+# its OWN last-sent state and emits its OWN delta. On respawn/restore the cache
+# resets → one full resend → merge is idempotent, so that's safe.
+_LAST_SENT_DF: dict = {}                 # sample_id(str) -> tuple(sorted (col,val))
+_SIGNAL_CURSOR: dict = {}               # (graph, exp_hash) -> count already sent
+
+
+def reset_outbox_state():
+    """Drop the per-rank delta caches so the next flush re-sends everything.
+    Called from clear_registry (tests) and safe to call on experiment reset."""
+    _LAST_SENT_DF.clear()
+    _SIGNAL_CURSOR.clear()
+
+
 def local_df_writes():
-    """This rank's per-sample dataframe state — gather-safe columns only.
+    """This rank's per-sample dataframe DELTA — gather-safe columns, changed rows
+    only (vs the last flush). Without deltas this dumps the WHOLE dataframe every
+    step and gathers it to rank-0, so per-step bytes scale with N_samples × world;
+    under sharding only ~batch_size rows actually change per step.
 
     Schema-agnostic: no column NAMES baked in (the only column-name use is the
     DOWN_ONLY filter + the object-allowlist). Tensors / dicts / arrays are
@@ -152,7 +173,23 @@ def local_df_writes():
         if _is_gather_safe_column(c, df[c].dtype):
             keep.append(c)
     df = df[keep]
-    return df.to_dict(orient="records")
+    records = df.to_dict(orient="records")
+    # Delta filter: emit only rows whose (col, value) signature changed since the
+    # last flush; update the cache for the ones we send. Rows that haven't moved
+    # (other ranks' shards, not-yet-seen samples) are skipped — rank-0 already
+    # holds their last value.
+    out = []
+    for rec in records:
+        sid = rec.get("sample_id")
+        sig = tuple(sorted(
+            (k, (tuple(v) if isinstance(v, (list, set)) else v))
+            for k, v in rec.items() if k != "sample_id"
+        ))
+        if _LAST_SENT_DF.get(sid) == sig:
+            continue
+        _LAST_SENT_DF[sid] = sig
+        out.append(rec)
+    return out or None
 
 
 # ----------------------------------------------------------------------------
@@ -275,21 +312,41 @@ def apply_hparams(hp):
 # the same triple is a no-op — retries are safe by construction.
 # ============================================================================
 def local_signal_triples():
-    """{graph: {exp_hash: [(sid, step, val)]}} of per-sample signals on THIS rank."""
+    """{graph: {exp_hash: [(sid, step, val)]}} of per-sample signals on THIS rank,
+    DELTA only — triples appended since the last flush.
+
+    The per-sample buffers are append-only typed arrays, so a per-(graph, exp_hash)
+    cursor (count already sent) gives a truly incremental slice in O(new) — reading
+    the raw buffer directly rather than reconstructing the whole history each step
+    (which is O(total) and grows every step). On restore the buffer may be rebuilt
+    SHORTER than the cursor; we detect that (cur_len < cursor) and resend from 0.
+    """
     from weightslab.backend.ledgers import get_logger
     out = {}
     try:
-        hist = get_logger().get_signal_history_per_sample() or {}
+        hist = get_logger()._signal_history_per_sample or {}
     except Exception:
         return out
     for graph, by_hash in hist.items():
-        out[graph] = {}
-        for exp_hash, entries in by_hash.items():
-            out[graph][exp_hash] = [
-                (str(e.get("sample_id")), int(e.get("model_age", 0)),
-                 float(e.get("metric_value", 0.0)))
-                for e in entries
+        graph_out = {}
+        for exp_hash, buf in by_hash.items():
+            sids = buf["sample_ids"]
+            cur_len = len(sids)
+            key = (graph, exp_hash)
+            start = _SIGNAL_CURSOR.get(key, 0)
+            if start > cur_len:          # buffer shrank (restore/clear) → resend all
+                start = 0
+            if start >= cur_len:
+                continue                 # nothing new for this graph/hash
+            steps = buf["steps"]
+            vals = buf["values"]
+            graph_out[exp_hash] = [
+                (str(sids[i]), int(steps[i]), float(vals[i]))
+                for i in range(start, cur_len)
             ]
+            _SIGNAL_CURSOR[key] = cur_len
+        if graph_out:
+            out[graph] = graph_out
     return out
 
 
@@ -309,6 +366,37 @@ def merge_signal_triples_into_logger(maps):
                     logger.debug("[signals] ingest failed for %s: %s", graph, exc)
 
 
+def _rank0_existing_seed(sample_ids, cols):
+    """Rank-0's CURRENT values for `cols` over `sample_ids`, as a records frame.
+    Prepended (existing-first) to the per-rank deltas before reducing so the
+    reducers fold against the authoritative value. Critical for deltas: a rank's
+    delta may omit a sample rank-0 already has a HIGHER value for — without the
+    seed, MAX/UNION would regress it (and the upsert would lower last_seen). With
+    the seed placed first, LATEST still resolves to the newest delta (later row),
+    and a sample with no delta this round simply keeps its existing value."""
+    from weightslab.backend.ledgers import get_dataframe
+    try:
+        df = get_dataframe().get_combined_df(return_proxies=False)
+    except Exception:
+        return None
+    if df is None or getattr(df, "empty", True):
+        return None
+    df = df.copy()
+    if "sample_id" not in df.columns:
+        if isinstance(df.index, pd.MultiIndex):
+            df["sample_id"] = [t[-1] for t in df.index]
+        else:
+            df["sample_id"] = df.index
+    df["sample_id"] = df["sample_id"].astype(str)
+    df = df.reset_index(drop=True)
+    want = set(str(s) for s in sample_ids)
+    df = df[df["sample_id"].isin(want)]
+    if df.empty:
+        return None
+    keep = ["sample_id"] + [c for c in cols if c in df.columns]
+    return df[keep].to_dict(orient="records")
+
+
 def merge_df_writes(parts):
     """Rank-0 fold: per-column reducer apply. Concat all per-rank records,
     groupby sample_id, apply the dtype-keyed reducer per column. Upsert into
@@ -324,9 +412,18 @@ def merge_df_writes(parts):
             continue
     if not frames:
         return
-    big = pd.concat(frames, ignore_index=True)
-    if "sample_id" not in big.columns:
+    delta = pd.concat(frames, ignore_index=True)
+    if "sample_id" not in delta.columns:
         return
+    # Seed with rank-0's existing values (existing-first) so the per-column
+    # reducers fold against the authoritative value — see _rank0_existing_seed.
+    cols = [c for c in delta.columns if c != "sample_id"]
+    seed = _rank0_existing_seed(delta["sample_id"].tolist(), cols)
+    seed_frame = pd.DataFrame(seed) if seed else None
+    big = pd.concat(
+        [f for f in (seed_frame, delta) if f is not None and not f.empty],
+        ignore_index=True,
+    )
     big = big.set_index("sample_id")
 
     reduced = []

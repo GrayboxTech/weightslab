@@ -177,21 +177,30 @@ def reconcile_all():
 
 
 def clear_registry():
-    """Test helper: drop all registered states AND outboxes."""
+    """Test helper: drop all registered states AND outboxes (and the per-rank
+    outbox delta caches, so the next flush re-sends from scratch)."""
     _REGISTRY.clear()
     _OUTBOXES.clear()
     global _CORE_REGISTERED
     _CORE_REGISTERED = False
+    try:
+        from weightslab.components.parallel_state import reset_outbox_state
+        reset_outbox_state()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
-# OUTBOX (① UP plane) — bundled per-step gather of per-sample writes.
+# OUTBOX (① UP plane) — bundled per-step gather of per-sample write DELTAS.
 # Mirror of the reconcile registry, but in the opposite direction: every rank
 # stages local data via local_dump(); flush_outbox() does ONE gather; rank 0
 # folds the per-rank parts in via merge(). Sample writes (last_seen, signals)
 # need to be returned locally each step (children use them for .backward()),
-# so we don't decorate them ①-style — we just snapshot the local state at the
-# anchor and ship it up in one bundled gather. Merge MUST be idempotent.
+# so we don't decorate them ①-style — at the anchor each rank dumps only what
+# CHANGED since its last flush (a delta, not a full snapshot — see
+# parallel_state: _LAST_SENT_DF cache + _SIGNAL_CURSOR), keeping the gather's
+# payload bounded by the per-step change set, not the dataset size. Merge MUST
+# be idempotent (a delta may re-flush on retry / respawn).
 # ---------------------------------------------------------------------------
 _OUTBOXES = []  # (name, local_dump, merge)
 

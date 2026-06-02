@@ -54,13 +54,15 @@ Rank-0 is the **single source of truth**; rank-1+ hold reconciled copies suffici
 **UP — one gather, all per-sample writes.** Rank-1+ stages call-time parameters (e.g. `metric.update(sid, value)`) into a local **outbox**, never touching its own dataframe. The anchor gathers the lot once per step; rank-0 then re-issues the "consolidated call" with everyone's parameters as if it ran once globally. From the caller's view it's a normal function call; under DDP it accumulates locally and is re-issued on rank-0.
 → API: `register_outbox(name, local_dump, merge)` + `flush_outbox()`.
 
-**Shared memory — for gpu-worker → data-worker.** Data-loader workers need `discarded` / `user_tags` at `__getitem__` time, before the next collective fires. So the dataframe manager mirrors `DOWN_ONLY` cols into `mp.RawArray`; workers fast-path-read these without IPC.
+Each outbox dumps a **delta**, not a full snapshot — only what changed on this rank since the last flush (changed dataframe rows; signal triples past a per-`(graph, exp_hash)` cursor). Otherwise the per-step gather carries the whole dataframe + whole signal history every step, so payload scales with `N_samples × world` and grows unboundedly — the budget below caps the *count* of collectives, not their *bytes*, so the delta is what keeps the bytes bounded too. The cache is process-local (each rank ships its own delta); on respawn/restore it resets to a one-time full resend, which is safe because every `merge` is idempotent. Delta merges seed rank-0's current value first so `MAX`/`UNION` never regress and `LATEST` still resolves to the newest write.
+
+**Shared memory — for gpu-worker → data-worker.** Data-loader workers need the **deny-list** (`discarded`) at `__getitem__` time, before the next collective fires — it gates *which* samples are yielded. So the dataframe manager mirrors that bool `DOWN_ONLY` column into `mp.RawArray`; workers fast-path-read it across fork without IPC. The other `DOWN_ONLY` column, `user_tags`, reconciles to children's dataframes via the DOWN broadcast but is *not* read at `__getitem__` (tags don't gate yielding), so the shm fast-path is the deny-list only.
 
 ## Anchor + budget
 
 The whole sync runs once per step at `guard_training_context.__enter__` → `sync_step()`:
 
 1. `reconcile_all()` — 1 broadcast carrying every consistent state.
-2. `flush_outbox()` — 1 gather carrying every per-sample write.
+2. `flush_outbox()` — 1 gather carrying every per-sample write **delta**.
 
-**Collective budget: ~2 rendezvous/step (+ grad all_reduce).** Everything else in WL stays local — read the reconciled value, stage to the outbox, log. A collective leaking into a hot path is a regression: `WL_DDP_LOG=1` traces who-did-what; `WL_DDP_COLLECTIVE_LOG=<path>` records per-step counts so the invariant can be asserted in tests (`scenario_collective_budget`).
+**Collective budget: ~2 rendezvous/step (+ grad all_reduce).** Everything else in WL stays local — read the reconciled value, stage to the outbox, log. A collective leaking into a hot path is a regression: `WL_DDP_LOG=1` traces who-did-what; `WL_DDP_COLLECTIVE_LOG=<path>` records per-step counts so the invariant can be asserted in tests (`scenario_collective_budget`). The budget governs collective *count*; the outbox delta (above) is what keeps each collective's *payload* bounded by the per-step change set rather than the dataset size.
