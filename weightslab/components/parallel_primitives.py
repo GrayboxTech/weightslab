@@ -1,36 +1,40 @@
-"""DDP basic building blocks — small, dual primitives that turn single-process
-WeightsLab calls into DDP-correct ones, embedded at the call boundary.
+"""DDP sync primitives — the small cross-rank machinery that keeps WeightsLab
+state consistent under SPMD, concentrated at one per-step anchor.
 
-The whole DDP data/control plane reduces to tagging each WL action with ONE of
-these (or leaving it unwrapped). All rely on the SPMD lockstep contract: every
-rank reaches the same collective the same number of times, in the same order — a
-mismatch hangs the group. Call params / state snapshots are serializable, which
-is what lets us ship them across ranks.
+Everything rests on the SPMD lockstep contract: every rank reaches the same
+collective the same number of times, in the same order — a mismatch hangs the
+group. State snapshots / per-sample payloads are serializable, which is what
+lets us ship them across ranks.
 
-    ① AGGREGATE_UP   (children -> rank 0)  — for WRITE/produce calls. rank 0
-       gathers every rank's params, `combine`s them, runs the body ONCE on the
-       merged params; children send and return None. (Hot per-sample writes are
-       better done via an outbox + one gather at the anchor — see design notes —
-       but this is the decorator form.)
+There are exactly two cross-rank mechanisms here, mirroring the design doc's two
+directions (see docs/ddp_design.md → "Mechanism, by direction"):
 
-    ② REPLICATE_DOWN (rank 0 -> children)  — for a SYNCHRONOUS in-lockstep control
-       call. rank 0's params are broadcast; every rank runs the body with them.
+  DOWN — reconcile (rank 0 → children), for ASYNC shared state. UI events
+    (discard / tag / lr-edit / restore) hit rank 0 at arbitrary times, mapping to
+    no lockstep call. So at the per-step anchor rank 0 broadcasts a SNAPSHOT of
+    every registered state and children diff-apply it.
+    → `register_consistent_state(name, snapshot, apply)` + `reconcile_all()`:
+      MANY states ride in ONE broadcast (call budget).
 
-    ③ RECONCILE      (rank 0 -> children)  — for ASYNC shared state. UI events
-       (discard/tag/lr-edit/restore) hit rank 0 at arbitrary times, mapping to no
-       lockstep call. So at the per-step anchor, rank 0 broadcasts a SNAPSHOT of
-       its mutable state and children diff-apply it. `register_consistent_state`
-       + `reconcile_all` reconcile MANY states in ONE broadcast (call budget);
-       `reconcile_down` is the single-state hook for per-consumption-point use.
+  UP — outbox (children → rank 0), for per-sample WRITES (last_seen, counters,
+    per-sample signals). Each rank stages a local DELTA (what changed since its
+    last flush — see parallel_state); the anchor gathers them in ONE gather and
+    rank 0 folds each via its `merge`.
+    → `register_outbox(name, local_dump, merge)` + `flush_outbox()`.
+
+The per-step anchor `sync_step()` runs both (reconcile down, then flush up) and
+also rides the collective pause in the same reconcile bundle. Shared memory (in
+the dataframe manager, not here) carries the bool deny-list to data-loader
+workers, where collectives don't reach.
 
 Call budget (hard constraint): collectives are concentrated — ~2 rendezvous/step
-(`reconcile_all` down + a flush gather up) + the grad all-reduce. Every other
+(`reconcile_all` down + `flush_outbox` up) + the grad all-reduce. The budget caps
+the COUNT of collectives; the UP delta caps each one's PAYLOAD. Every other
 injection must be LOCAL (read reconciled state / stage to an outbox / log), never
 a collective. `WL_DDP_LOG=1` traces who-did-what and counts collectives/step.
 
-Skip (do NOT wrap): big-tensor args (raw preds / masks — keep sharded-local; wrap
-the scalar sink, not the compute), spin-style control (collective pause), and
-non-serializable args.
+Skip (do NOT ship): big-tensor args (raw preds / masks — keep sharded-local; wrap
+the scalar sink, not the compute) and non-serializable args.
 """
 import functools
 import logging
@@ -152,7 +156,7 @@ def register_consistent_state(name, snapshot, apply):
     """Register an async-mutated, must-stay-consistent resource (hparam store,
     deny-list, tags). `snapshot()->state` on rank 0; `apply(state)` on children
     (MUST be idempotent). Outputs that flow UP (last_seen/signals) do NOT go here —
-    use ①/outbox for those."""
+    use the UP outbox (register_outbox) for those."""
     _REGISTRY.append((name, snapshot, apply))
     ddp_log(f"registered consistent state '{name}'")
 
@@ -191,13 +195,13 @@ def clear_registry():
 
 
 # ---------------------------------------------------------------------------
-# OUTBOX (① UP plane) — bundled per-step gather of per-sample write DELTAS.
+# OUTBOX (UP plane) — bundled per-step gather of per-sample write DELTAS.
 # Mirror of the reconcile registry, but in the opposite direction: every rank
 # stages local data via local_dump(); flush_outbox() does ONE gather; rank 0
 # folds the per-rank parts in via merge(). Sample writes (last_seen, signals)
 # need to be returned locally each step (children use them for .backward()),
-# so we don't decorate them ①-style — at the anchor each rank dumps only what
-# CHANGED since its last flush (a delta, not a full snapshot — see
+# so they aren't UP-aggregated per call — instead, at the anchor each rank dumps
+# only what CHANGED since its last flush (a delta, not a full snapshot — see
 # parallel_state: _LAST_SENT_DF cache + _SIGNAL_CURSOR), keeping the gather's
 # payload bounded by the per-step change set, not the dataset size. Merge MUST
 # be idempotent (a delta may re-flush on retry / respawn).
@@ -266,11 +270,11 @@ def _ensure_core_ddp_registered():
         local_df_writes, merge_df_writes,                            # DATAFRAME plane ↑
         local_signal_triples, merge_signal_triples_into_logger,      # LOGGER plane    ↑
     )
-    # ③ DOWN reconcile — CONFIG + CONTROL + DATAFRAME (DOWN_ONLY cols) — 1 broadcast
+    # DOWN reconcile — CONFIG + CONTROL + DATAFRAME (DOWN_ONLY cols) — 1 broadcast
     register_consistent_state("hparams", rank0_hparams, apply_hparams)
     register_consistent_state("df_down", rank0_df_down_state, apply_df_down_state)
     register_consistent_state("paused", pause_controller.is_paused, lambda _v: None)
-    # ① UP outbox — DATAFRAME (dtype-keyed reducers) + LOGGER (idempotent ingest) — 1 gather
+    # UP outbox — DATAFRAME (dtype-keyed reducers) + LOGGER (idempotent ingest) — 1 gather
     register_outbox("df_writes", local_df_writes, merge_df_writes)
     register_outbox("signals", local_signal_triples, merge_signal_triples_into_logger)
     _CORE_REGISTERED = True
@@ -300,8 +304,8 @@ def sync_step(spin_sleep=0.02):
         return
     reset_collectives()             # logs prior step's count, then resets
     while True:
-        bundle = reconcile_all()    # ③ DOWN: 1 broadcast, ALL consistent states
+        bundle = reconcile_all()    # DOWN: 1 broadcast, ALL consistent states
         if not bundle or not bundle.get("paused", False):
-            flush_outbox()          # ① UP:   1 gather,   ALL per-sample writes
+            flush_outbox()          # UP:   1 gather,   ALL per-sample write deltas
             return                  # → step body runs; budget = 2 collectives/step
         time.sleep(spin_sleep)      # paused: brief breather, then re-reconcile

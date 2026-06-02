@@ -5,15 +5,16 @@ the four planes below, no train.py code is needed for it to be correctly
 synchronized under DDP — the SDK's `_ensure_core_ddp_registered` hooks each
 plane's local_dump/merge (or snapshot/apply) into the per-step anchor.
 
-The 4 planes
+The 4 planes  (DOWN = reconcile broadcast, UP = outbox gather; see
+              parallel_primitives + docs/ddp_design.md → "Mechanism, by direction")
 ============
-  CONFIG    ↓ ③ reconcile     hparams                       rank-0 authority; no reducer
-  CONTROL   ↓ ③ reconcile     paused, tracking, contexts    rank-0 authority; no reducer
+  CONFIG    ↓ DOWN reconcile  hparams                       rank-0 authority; no reducer
+  CONTROL   ↓ DOWN reconcile  paused, tracking, contexts    rank-0 authority; no reducer
   DATAFRAME ↕ both ways       per-sample columns            DOWN reconcile (deny-list,
                                                             tags) + UP outbox (last_seen,
                                                             counters, …) via dtype-keyed
                                                             reducers
-  LOGGER    ↑ ① outbox        per-sample signal history     idempotent ingest keyed by
+  LOGGER    ↑ UP outbox       per-sample signal history     idempotent ingest keyed by
                                                             (sid, step, exp_hash); no reducer
 
 Reducers (only the DATAFRAME plane needs them)
