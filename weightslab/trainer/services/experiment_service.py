@@ -135,35 +135,27 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         # Normalize to strings because logger sample_id is serialized as text.
                         sample_ids = {str(sid) for sid in filtered_df.index.tolist()}
 
-            # Get per-sample history from signal_logger
-            history_per_sample = signal_logger.get_signal_history_per_sample()
+            if not graph_name or not sample_ids:
+                return pb2.GetLatestLoggerDataResponse(points=[])
 
-            if history_per_sample is None:
-                return pb2.GetLatestLoggerDataResponse(points=[])  # No per-sample history available
-
-            # Collect all points for matching samples, filtered by graph_name if specified
-            if graph_name not in history_per_sample:
-                return pb2.GetLatestLoggerDataResponse(points=[])  # No data for this graph_name
-
-            # Collect points for the specified graph_name and sample_ids
-            sample_data_by_hash = history_per_sample[graph_name]
-            if sample_ids:
-                # Filter by sample_ids if tags were specified
-                for sid in sample_ids:
-                    for _, signals in sample_data_by_hash.items():
-                        for data in signals:
-                            if str(data.get("sample_id", "")) == sid:
-                                points.append(
-                                    pb2.LoggerDataPoint(
-                                        metric_name=graph_name,
-                                        model_age=data.get("model_age", 0),
-                                        metric_value=data.get("metric_value", 0.0),
-                                        experiment_hash=data.get("experiment_hash", "N.A."),
-                                        timestamp=int(data.get("timestamp", time.time())),
-                                        sample_id=sid,
-                                        audit_mode=bool(data.get("audit_mode", False)),
-                                    )
-                                )
+            # Query only this signal's compact arrays instead of inflating the whole
+            # per-sample history into dicts (which OOMs on large signals). Eval/audit
+            # per-sample data lives under eval-marker hashes, so derive audit_mode.
+            now = int(time.time())
+            eval_hashes = set(signal_logger.get_evaluation_marker_hashes())
+            for sid, step, val, exp_hash in signal_logger.query_per_sample(
+                    graph_name, sample_ids=sample_ids):
+                points.append(
+                    pb2.LoggerDataPoint(
+                        metric_name=graph_name,
+                        model_age=int(step),
+                        metric_value=float(val),
+                        experiment_hash=exp_hash if exp_hash else "N.A.",
+                        timestamp=now,
+                        sample_id=str(sid),
+                        audit_mode=(exp_hash in eval_hashes),
+                    )
+                )
 
             return pb2.GetLatestLoggerDataResponse(points=points)
 
