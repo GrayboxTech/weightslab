@@ -50,8 +50,12 @@ def _build_pipeline(cfg, device, rank, world_size):
     model_name = cfg["model"]["name"]
     train_cfg = dict(cfg["data"]["train_loader"])
     # env overrides so the test suite can sweep batch / num_workers without
-    # editing config.yaml. Default to whatever config says (i.e. main.py shape).
-    batch_size = int(os.environ.get("WL_DDP_BATCH", train_cfg["batch_size"]))
+    # editing config.yaml. DDP default is 16 (not config's mono batch): two ranks
+    # share one GPU using ~1.1GB at batch=4 of ~8GB available, so a bigger batch
+    # = fewer steps = less per-step collective overhead (flush/reconcile/grad are
+    # paid per-step regardless of batch) + better GPU use. Override via WL_DDP_BATCH.
+    # (config.yaml batch_size is left as-is for the mono main.py example.)
+    batch_size = int(os.environ.get("WL_DDP_BATCH", "16"))
     num_workers = int(os.environ.get("WL_DDP_WORKERS", "0"))
 
     # Clean slate each run: no checkpoint resume + start empty.
@@ -69,6 +73,16 @@ def _build_pipeline(cfg, device, rank, world_size):
     wl.watch_or_edit(dict(cfg), flag="hyperparameters", name=exp_name,
                      defaults=dict(cfg), poll_interval=1.0)
 
+    import time as _time
+    _bt = os.environ.get("WL_DDP_BUILD_TIMING") == "1" and rank == 0
+    _t0 = _time.perf_counter()
+    def _lap(label):
+        nonlocal _t0
+        if _bt:
+            now = _time.perf_counter()
+            print(f"[build_timing] {label:28s} {1000*(now-_t0):8.0f} ms", flush=True)
+            _t0 = now
+
     ucfg = get_cfg()
     ucfg.imgsz = _IMGSZ; ucfg.rect = False; ucfg.single_cls = False
     ucfg.task = "detect"; ucfg.classes = None; ucfg.fraction = 1.0
@@ -77,7 +91,9 @@ def _build_pipeline(cfg, device, rank, world_size):
               "flipud", "fliplr", "erasing"):
         setattr(ucfg, k, 0.0)
     ucfg.auto_augment = None
+    _lap("ucfg setup")
     checked = check_det_dataset(data_root)
+    _lap("check_det_dataset")
 
     def _build_dataset():
         ds = YOLODataset(
@@ -89,13 +105,16 @@ def _build_pipeline(cfg, device, rank, world_size):
         ds.__class__ = YOLODatasetWL
         return ds
 
+    _ds = _build_dataset()
+    _lap("YOLODataset build")
     train_loader = wl.watch_or_edit(
-        _build_dataset(), flag="data", loader_name="train_loader",
+        _ds, flag="data", loader_name="train_loader",
         batch_size=batch_size, shuffle=train_cfg.get("shuffle", False),
         num_workers=num_workers, drop_last=True, compute_hash=False,
         is_training=True, collate_fn=_wl_yolo_collate,
         preload_labels=True, preload_metadata=True,
     )
+    _lap("LEDGER INIT (data watch_or_edit)")
 
     # Rank-aware sharding is built into WeightsLabDataSampler (auto-detects rank/world);
     # we only read this rank's shard out for the partition check in the smoke report.
@@ -110,7 +129,12 @@ def _build_pipeline(cfg, device, rank, world_size):
     class _SmokeTrainer(DetectionTrainer):
         def __init__(self, *a, **kw):
             self.data_train_loader = kw.pop("train_loader")
-            self.device = kw.get("device", torch.device("cpu"))
+            # POP (not get) so the torch.device isn't forwarded to ultralytics'
+            # DetectionTrainer, which expects a str/int device. self.device drives
+            # the model placement below; without honoring it the model stayed on
+            # CPU even under WL_DDP_CUDA=1 (the override device= was for ultralytics
+            # only and never reached self.device).
+            self.device = kw.pop("device", torch.device("cpu"))
             super().__init__(*a, **kw)
             super().setup_model()
             self.model = self.model.to(self.device)
@@ -133,10 +157,15 @@ def _build_pipeline(cfg, device, rank, world_size):
                 PerSampleIoU(conf=0.25, iou_thres=0.5),
                 flag="metric", name="miou/train", per_sample=True, log=True)
 
+    # ultralytics device string ("0" for cuda:0, "cpu" otherwise); self.device
+    # (the torch.device) drives the actual model placement via .to() above.
+    _ul_dev = str(device.index if device.type == "cuda" else "cpu")
     trainer = _SmokeTrainer(
         overrides=dict(model=model_name, data=str(data_root), epochs=1, imgsz=_IMGSZ,
-                       batch=batch_size, resume=False, device="cpu", workers=0,
-                       cache=False, optimizer="SGD", lr0=0.01),
+                       batch=batch_size, resume=False, device=_ul_dev, workers=0,
+                       cache=False, optimizer="SGD", lr0=0.01, plots=False),
         train_loader=train_loader,
+        device=device,
     )
+    _lap("trainer/model build (ultralytics)")
     return trainer, train_loader, trainer.criterions, my_uids, all_uids

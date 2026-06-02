@@ -26,6 +26,15 @@ class _FakeDFM:
     def __init__(self, df):
         self._df = df.copy()
         self.upserts = []
+        self._outbox_dirty = set()
+
+    def mark_dirty(self, *sids):
+        self._outbox_dirty.update(str(s) for s in sids)
+
+    def drain_outbox_dirty(self):
+        d = self._outbox_dirty
+        self._outbox_dirty = set()
+        return d
 
     def get_combined_df(self, return_proxies=False):
         return self._df.copy()
@@ -65,20 +74,26 @@ class DeltaOutboxTests(unittest.TestCase):
         ledgers.get_logger = self._orig_get_logger
         ps.reset_outbox_state()
 
-    # -- 1. df delta -------------------------------------------------------
-    def test_df_writes_emits_only_changed_rows(self):
+    # -- 1. df delta (driven by the outbox-dirty set) ----------------------
+    def test_df_writes_emits_only_dirty_rows(self):
         df = pd.DataFrame({"sample_id": ["1", "2", "3"], "last_seen": [10, 20, 30]})
         fake = _FakeDFM(df)
         ledgers.get_dataframe = lambda: fake
 
-        first = ps.local_df_writes()
-        self.assertEqual(len(first), 3, "first flush sends all rows")
+        # Nothing marked dirty → nothing ships (no full-df scan).
+        self.assertIsNone(ps.local_df_writes(), "no dirty sids → no delta")
 
-        # Nothing changed → no delta.
-        self.assertIsNone(ps.local_df_writes(), "unchanged df yields no delta")
+        # Writers touched rows 1 and 3 → only those ship.
+        fake.mark_dirty("1", "3")
+        delta = ps.local_df_writes()
+        self.assertEqual({r["sample_id"] for r in delta}, {"1", "3"})
 
-        # Change one row → only that row ships.
+        # Drained — next flush with nothing new ships nothing.
+        self.assertIsNone(ps.local_df_writes(), "dirty set drained → no delta")
+
+        # A write to row 2 → only row 2 ships, with its current value.
         fake._df.loc[fake._df["sample_id"] == "2", "last_seen"] = 25
+        fake.mark_dirty("2")
         delta = ps.local_df_writes()
         self.assertEqual(len(delta), 1)
         self.assertEqual(delta[0]["sample_id"], "2")

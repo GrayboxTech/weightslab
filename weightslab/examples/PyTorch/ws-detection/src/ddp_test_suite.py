@@ -59,6 +59,21 @@ def _train_worker(rank, world, master_port, grpc_port):
     primitives-based loop (sync_step at the anchor, no bespoke ddp_guard_sync).
     Older yolo_pipeline-style worker is preserved in yolo_pipeline.worker for reference."""
     import main_ddp
+    # WL_DDP_SELFSPY=1: rank-0 samples ITSELF with py-spy from startup. Run the whole
+    # suite under sudo so this py-spy child (root) can ptrace its parent — this avoids
+    # the attach race entirely (no external PID-chasing of a fast/churning target).
+    if rank == 0 and os.environ.get("WL_DDP_SELFSPY") == "1":
+        import subprocess
+        spy = os.environ.get("WL_DDP_SELFSPY_BIN", "py-spy")
+        out = os.environ.get("WL_DDP_SELFSPY_OUT", "/tmp/scn.folded")
+        dur = os.environ.get("WL_DDP_SELFSPY_DUR", "180")
+        try:
+            subprocess.Popen([spy, "record", "--pid", str(os.getpid()),
+                              "--rate", "100", "--duration", dur,
+                              "--format", "raw", "-o", out],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
     main_ddp.train_worker(rank, world, master_port, grpc_port)
 
 
@@ -267,21 +282,40 @@ def _max_last_seen(m):
     return max(vals) if vals else -1
 
 
+_SCN_TIMING = os.environ.get("WL_DDP_SCN_TIMING") == "1"
+
+
+def _scn_lap(label, t0):
+    if _SCN_TIMING:
+        print(f"[scn_timing] {label:26s} {time.time()-t0:7.1f} s", flush=True)
+
+
 def _wait_until_paused(client, n, min_step, timeout=600.0, poll=5.0):
     """Poll last_seen-max until training has clearly stopped: value >= min_step
     (so ~an epoch happened) and unchanged across 2 consecutive polls (so the
     server is paused, not just mid-step). drop_last means the per-rank epoch is
     floor(shard/batch), so we don't require an exact step count."""
+    _t0 = time.time()
+    _last_change = _t0          # wall-time of the most recent last_seen-max change
     deadline = time.time() + timeout
     prev = None
     stable = 0
     while time.time() < deadline:
         cur = _max_last_seen(client.last_seen_map(n))
+        if cur != prev:
+            _last_change = time.time()
         stable = stable + 1 if cur == prev else 0
         if cur >= min_step and stable >= 2:
+            if _SCN_TIMING:
+                tot = time.time() - _t0
+                active = _last_change - _t0     # last_seen advancing = training/observed work
+                settle = time.time() - _last_change  # stable-confirm + snapshot-lag = observability
+                print(f"[scn_timing] wait_until_paused  total={tot:6.1f}s "
+                      f"active(train)={active:6.1f}s settle(obs)={settle:6.1f}s", flush=True)
             return cur
         prev = cur
         time.sleep(poll)
+    _scn_lap("wait_until_paused(TIMEOUT)", _t0)
     raise TimeoutError(f"epoch did not settle (>= {min_step}); last max={prev}")
 
 
@@ -291,16 +325,19 @@ def _settled_last_seen(client, n, timeout=60.0, poll=11.0):
     so the gather's upsert (done on pause) lags. Poll with interval > 10s — so each
     read crosses the throttle and forces a refresh — until the populated count stops
     growing. (poll < 10s could see two stale-equal reads and return the stale map.)"""
+    _t0 = time.time()
     m = client.last_seen_map(n)
     prev = -1
     deadline = time.time() + timeout
     while time.time() < deadline:
         cnt = sum(1 for v in m.values() if v is not None and v >= 0)
         if cnt == prev:
+            _scn_lap("settled_last_seen", _t0)
             return m
         prev = cnt
         time.sleep(poll)
         m = client.last_seen_map(n)
+    _scn_lap("settled_last_seen(TIMEOUT)", _t0)
     return m
 
 
@@ -1008,9 +1045,21 @@ def scenario_empty_shard_starvation(client, world, batch):
 
     # discard ~95% of populated → remaining sparse, likely one shard empty
     keep = max(2, int(0.05 * len(populated)))
-    to_discard = populated[:-keep]
+    _force = os.environ.get("WL_DDP_FORCE_KEEP")
+    keep = int(_force) if _force else keep
+    if _force:
+        # Deterministic repro: discard from the FULL universe (every sample_id, not
+        # just the populated ones) so TOTAL LIVE == keep exactly — otherwise the
+        # never-populated samples stay live and inflate per-rank counts, hiding
+        # starvation. keep=7 with batch=4/world=2 then GUARANTEES one rank ends with
+        # < batch_size live samples (both ranks >=4 needs >=8), so a rank is starved
+        # every run; drop_last=True turns its 1-3 stragglers into 0 batches.
+        all_ids = sorted(s1.keys(), key=lambda k: int(k))
+        to_discard = all_ids[:-keep] if 0 < keep < len(all_ids) else all_ids[:0]
+    else:
+        to_discard = populated[:-keep]
     client.discard(to_discard, origin)
-    print(f"[client] discarded {len(to_discard)}/{len(populated)} populated  (keep={keep})")
+    print(f"[client] discarded {len(to_discard)}  (keep={keep}, force={bool(_force)})")
 
     # Short post-discard train. Bounded timeout: if it hangs, assertion fires.
     K = min(epoch_steps, 8)
@@ -1032,6 +1081,117 @@ def scenario_empty_shard_starvation(client, world, batch):
     return advanced
 
 
+def scenario_progressive_resample(client, world, batch):
+    """Heavy discard THEN progressive un-discard (shrink then GROW). Exercises the
+    rebalance-on-discard/undiscard sampler path in both directions: shards stay
+    equal-length as the live set shrinks AND grows, so the loop never deadlocks.
+
+    Each phase trains ACTUAL live-epochs (steps = live//world//batch per epoch), so
+    wall-time scales with the live-set size and lets us sanity-check run-time
+    consistency. Rough expectation if per-step cost is stable across live sizes
+    (the rebalance adds no per-step cost): warmup(1 full epoch) ~= 5x the
+    post-discard phase(2 x 10%); post-readd(2 x 50%) is the heaviest. Per-step time
+    should be comparable across phases (a fixed snapshot-settle per epoch inflates
+    the tiny post-discard epochs, so treat the ratios as rough).
+
+    Asserts:
+      [1] after discarding to ~10% live, the live 10% advance over 2 epochs while
+          the discarded 90% stay FROZEN;
+      [2] after un-discarding up to ~50% live, the RE-ADDED samples start getting
+          fresh last_seen updates (loop rebalanced onto the growth) while the
+          still-discarded set stays frozen;
+      [3] no hang at any phase (bounded waits -> TimeoutError -> FAIL)."""
+    import time
+    n = client.universe_size()
+    full_epoch_steps = max(1, (n // world) // batch)
+    origin = client.train_origin()
+    print(f"[client] N={n} full_epoch_steps={full_epoch_steps} origin={origin}")
+
+    def _epoch_steps(live):
+        return max(1, (live // world) // batch)
+
+    def _ls(d, sid):                       # None-safe last_seen ( -1 == never seen )
+        v = d.get(sid)
+        return v if v is not None else -1
+
+    def _run_epochs(n_ep, steps_each, label, m_start):
+        """Train n_ep live-epochs, timing the whole phase. Returns (max_age, secs).
+
+        min_step must demand a REAL per-epoch age advance (~steps_each), not just
+        m+1: _wait_until_paused also returns on 2 stable polls, and the ~10s
+        DataService snapshot throttle can read stale-equal for 2 polls WHILE
+        training is still running -> a low threshold returns early and under-trains
+        the phase. Mirror the other scenarios' `steps_each - batch` margin."""
+        t0 = time.perf_counter()
+        m = m_start
+        for ep in range(n_ep):
+            client.train_steps(steps_each)
+            m = _wait_until_paused(client, n, min_step=m + max(1, steps_each - batch),
+                                   timeout=180.0, poll=3.0)
+        dt = time.perf_counter() - t0
+        total = n_ep * steps_each
+        print(f"[time] {label:24s} {n_ep}ep x {steps_each:>3}st = {total:>4} steps  "
+              f"{dt:6.1f}s  ({dt/max(1,total):.2f}s/step)")
+        return m, dt
+
+    # --- warm-up: 1 full epoch (100% live) ---
+    t0 = time.perf_counter()
+    client.train_steps(full_epoch_steps)
+    m0 = _wait_until_paused(client, n, min_step=max(1, full_epoch_steps - batch))
+    t_warm = time.perf_counter() - t0
+    print(f"[time] {'warmup (1 x 100%)':24s} 1ep x {full_epoch_steps:>3}st = {full_epoch_steps:>4} "
+          f"steps  {t_warm:6.1f}s  ({t_warm/full_epoch_steps:.2f}s/step)")
+    s0 = _settled_last_seen(client, n)
+    all_ids = sorted(s0.keys(), key=lambda k: int(k))
+    if sum(1 for k in all_ids if _ls(s0, k) >= 0) < 40:
+        print("[client] too few populated — cannot run"); return False
+
+    # --- shrink: discard from the FULL universe so live == keep_n exactly ---
+    keep_n = max(world * batch, int(0.10 * n))
+    keep = all_ids[:keep_n]
+    discard_ids = all_ids[keep_n:]
+    client.discard(discard_ids, origin)
+    print(f"[client] discarded {len(discard_ids)}/{n} -> live={keep_n} (~10%)")
+    try:
+        m1, t_lo = _run_epochs(2, _epoch_steps(keep_n), "post-discard (2 x 10%)", m0)
+    except TimeoutError:
+        print("[client] HUNG during post-discard -> FAIL"); return False
+    s1 = _settled_last_seen(client, n)
+
+    kept_adv = sum(1 for sid in keep if _ls(s1, sid) > _ls(s0, sid))
+    disc_frozen = sum(1 for sid in discard_ids if _ls(s1, sid) == _ls(s0, sid))
+    a1 = (kept_adv >= int(0.8 * len(keep)) and
+          disc_frozen >= int(0.95 * len(discard_ids)))
+    print(f"[1] DISCARD SHIFT   kept advanced {kept_adv}/{len(keep)} (>=80%), "
+          f"discarded frozen {disc_frozen}/{len(discard_ids)} (>=95%) -> {a1}")
+
+    # --- grow: un-discard up to ~50% live ---
+    re_add = discard_ids[: max(0, int(0.50 * n) - keep_n)]
+    still_disc = discard_ids[len(re_add):]
+    client.discard(re_add, origin, discarded=False)
+    live_hi = keep_n + len(re_add)
+    print(f"[client] re-added {len(re_add)} (un-discard) -> live={live_hi} (~50%)")
+    try:
+        m2, t_hi = _run_epochs(2, _epoch_steps(live_hi), "post-readd (2 x 50%)", m1)
+    except TimeoutError:
+        print("[client] HUNG during post-readd (growth not handled) -> FAIL"); return False
+    s2 = _settled_last_seen(client, n)
+
+    readd_adv = sum(1 for sid in re_add if _ls(s2, sid) > _ls(s1, sid))
+    still_frozen = sum(1 for sid in still_disc if _ls(s2, sid) == _ls(s1, sid))
+    a2 = ((not re_add or readd_adv >= int(0.8 * len(re_add))) and
+          (not still_disc or still_frozen >= int(0.95 * len(still_disc))))
+    print(f"[2] GROWTH HANDLED  re-added advanced {readd_adv}/{len(re_add)} (>=80%), "
+          f"still-discarded frozen {still_frozen}/{len(still_disc)} (>=95%) -> {a2}")
+
+    print(f"[time] SUMMARY  warmup={t_warm:.0f}s  post-discard(2x10%)={t_lo:.0f}s  "
+          f"post-readd(2x50%)={t_hi:.0f}s   (warmup/post-discard ~= "
+          f"{t_warm/max(0.1,t_lo):.1f}x, expect ~5x if per-step cost is flat)")
+    ok = a1 and a2
+    print(f"  -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 _SCENARIOS = [
     scenario_epoch_then_pause,
     scenario_discard_subset_freezes,
@@ -1043,6 +1203,7 @@ _SCENARIOS = [
     scenario_process_topology,
     scenario_multi_epoch_stability,
     scenario_empty_shard_starvation,
+    scenario_progressive_resample,
     scenario_seed_determinism,
     scenario_collective_budget,
     scenario_curate_lifecycle,
@@ -1082,8 +1243,14 @@ def _run_one(scn, batch):
 
 
 def main():
-    batch = int(yaml.safe_load(open(os.path.join(yolo_pipeline._HERE, "config.yaml")))
-                ["data"]["train_loader"]["batch_size"])
+    # Match the batch the DDP loader ACTUALLY trains with: yolo_pipeline builds the
+    # train loader at WL_DDP_BATCH (default 16), so the scenarios' epoch_steps must
+    # use the same value. Reading config.yaml's mono batch (4) here while the loader
+    # ran at 16 made every "epoch" cover WL_DDP_BATCH/cfg_batch real passes -> the
+    # suite silently over-trained ~4x. Fall back to config only when WL_DDP_BATCH unset.
+    _cfg_batch = yaml.safe_load(open(os.path.join(yolo_pipeline._HERE, "config.yaml"))
+                                )["data"]["train_loader"]["batch_size"]
+    batch = int(os.environ.get("WL_DDP_BATCH", _cfg_batch))
     only = os.environ.get("WL_DDP_ONLY")  # substring filter to run a single scenario
     scenarios = [s for s in _SCENARIOS if not only or only in s.__name__]
     results = {scn.__name__: _run_one(scn, batch) for scn in scenarios}

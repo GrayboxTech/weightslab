@@ -22,10 +22,12 @@ directions (see docs/ddp_design.md → "Mechanism, by direction"):
     rank 0 folds each via its `merge`.
     → `register_outbox(name, local_dump, merge)` + `flush_outbox()`.
 
-The per-step anchor `sync_step()` runs both (reconcile down, then flush up) and
-also rides the collective pause in the same reconcile bundle. Shared memory (in
-the dataframe manager, not here) carries the bool deny-list to data-loader
-workers, where collectives don't reach.
+The per-step anchor is split across the step's pre/post hooks: the guard's
+__enter__ calls `sync_step()` (the DOWN reconcile + collective pause spin, before
+the body), and the guard's __exit__ calls `flush_outbox()` (the UP gather, at the
+step's end) — so a step's writes publish with no one-step lag. The deny-list never
+reaches data-loader workers: it's enforced in the main-process sampler (a
+discarded id is simply never yielded), so workers need nothing extra.
 
 Call budget (hard constraint): collectives are concentrated — ~2 rendezvous/step
 (`reconcile_all` down + `flush_outbox` up) + the grad all-reduce. The budget caps
@@ -311,26 +313,30 @@ def _ensure_core_ddp_registered():
 # Per-step anchor: ONE bundled reconcile + collective-pause spin in one place.
 # ---------------------------------------------------------------------------
 def sync_step(spin_sleep=0.02):
-    """Per-step DDP anchor — call once per step on EVERY rank, BEFORE the body.
+    """Per-step DDP anchor — the DOWN half. Call once per step on EVERY rank at the
+    START of the step (guard __enter__), BEFORE the body consumes the state.
 
-    Does exactly one thing per loop iter: `reconcile_all` (a single bundled
-    broadcast of every registered state). `paused` is treated as just another
-    registered state, so its value rides in the same bundle. While the bundle
-    reports paused=True, every rank loops here in lockstep — async UI edits to
-    hparams / deny-list / discards that land on rank 0 *during* pause are
-    absorbed by the same reconcile loop (≤1 spin-tick latency), no extra
-    collective. When rank 0 clears the pause, the next bundle reports
-    paused=False and every rank returns to the step body together.
+    Does the rank-0 → rank-1+ reconcile: `reconcile_all` (a single bundled
+    broadcast of every registered state). `paused` rides in the same bundle, so
+    while it reports paused=True every rank loops here in lockstep — async UI edits
+    to hparams / deny-list / discards that land on rank 0 *during* pause are
+    absorbed by the same reconcile loop (≤1 spin-tick latency), no extra collective.
+    When rank 0 clears the pause, the next bundle reports paused=False and every
+    rank returns to the step body together.
 
-    Single-process / world<=1: no-op. Collective budget: 1 broadcast per spin
+    The UP half — `flush_outbox` (rank-1+ → rank-0 per-sample write deltas) — is a
+    SEPARATE call at the END of the step (guard __exit__), so a step's writes
+    publish at that step's end with no one-step lag. Together they keep the
+    ~2-collectives/step budget (1 broadcast here + 1 gather at __exit__).
+
+    Single-process / world<=1: no-op. Collective budget here: 1 broadcast per spin
     iter (1/step in the common unpaused case).
     """
     if not _active():
         return
-    reset_collectives()             # logs prior step's count, then resets
+    reset_collectives()             # logs prior step's count (down+up), then resets
     while True:
         bundle = reconcile_all()    # DOWN: 1 broadcast, ALL consistent states
         if not bundle or not bundle.get("paused", False):
-            flush_outbox()          # UP:   1 gather,   ALL per-sample write deltas
-            return                  # → step body runs; budget = 2 collectives/step
+            return                  # → step body runs; UP flush happens in __exit__
         time.sleep(spin_sleep)      # paused: brief breather, then re-reconcile

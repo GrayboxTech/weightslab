@@ -241,12 +241,18 @@ class GuardContext:
             except Exception as exc:
                 logger.debug("[GuardContext] ddp probe failed: %s", exc)
 
+        # Remember for __exit__: the UP outbox flush (rank-1+ → rank-0) is the
+        # END-of-step half of the anchor, so a step's per-sample writes publish at
+        # that step's end (no one-step lag). __enter__ does the DOWN reconcile;
+        # __exit__ does the UP flush. Splitting the anchor across the pre/post hooks
+        # is deliberate here despite the usual "spread state across hooks" smell.
+        self._in_ddp = in_ddp
         if in_ddp:
             from weightslab.components.parallel_primitives import (
                 _ensure_core_ddp_registered, sync_step,
             )
             _ensure_core_ddp_registered()          # idempotent; no-op after first
-            sync_step()                            # the ONE DDP-aware site
+            sync_step()                            # DOWN reconcile (+ pause spin)
         else:
             self._maybe_pause_at_step()
             pause_controller.wait_if_paused()
@@ -301,6 +307,18 @@ class GuardContext:
         Executed upon exiting the 'with' block (after user code runs).
         Reverts the model state.
         """
+        # UP half of the per-step anchor: gather this step's per-sample write
+        # deltas (rank-1+ → rank-0). Done FIRST and UNCONDITIONALLY — even if the
+        # body raised, every rank still runs __exit__, so all ranks reach this
+        # collective the same number of times; skipping it on one rank would
+        # desync/hang the group. No-op outside DDP / world<=1.
+        if getattr(self, "_in_ddp", False):
+            try:
+                from weightslab.components.parallel_primitives import flush_outbox
+                flush_outbox()                     # UP: 1 gather, all write deltas
+            except Exception as exc:
+                logger.debug("[GuardContext] outbox flush failed: %s", exc)
+
         # Revert the model state
         if self.model is not None and hasattr(self, '_prev_training_mode'):
             self.model.train(self._prev_training_mode)

@@ -12,7 +12,7 @@ from typing import Dict, Sequence, Any, List
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
-from weightslab.data.data_utils import _filter_columns_by_patterns, get_mask
+from weightslab.data.data_utils import _filter_columns_by_patterns
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -40,6 +40,13 @@ class LedgeredDataFrameManager:
         self._array_store: H5ArrayStore | None = None
         self._origin_revisions: Dict[str, int] = {}
         self._pending: set[int] = set()
+        # Sample-ids with per-sample UP writes (signals / last_seen) since the last
+        # DDP outbox drain. Populated ONLY by the per-sample writers (enqueue_batch,
+        # update_by_groups_bulk) — NOT by upsert_df (merge-back / DOWN reconcile),
+        # so it's exactly this rank's UP change-set with no re-ship loop. Drained
+        # by the outbox each flush (drain_outbox_dirty).
+        self._outbox_dirty: set = set()
+        self._outbox_dirty_lock = threading.Lock()
         self._force_flush = False
         self._flush_interval = flush_interval
         self._flush_max_rows = flush_max_rows
@@ -157,6 +164,15 @@ class LedgeredDataFrameManager:
     # check, which refreshes on the revision bump below). Invalidation is gated
     # on an ACTUAL value change — critical under DDP, where rank-N re-applies the
     # SAME deny-list snapshot every step and must not respawn workers each step.
+    def drain_outbox_dirty(self) -> set:
+        """Return and clear the set of sample-ids with fresh per-sample UP writes
+        since the last drain (the DDP outbox's change-set). O(changes). Empty set
+        means nothing changed → the outbox flush ships nothing this step."""
+        with self._outbox_dirty_lock:
+            dirty = self._outbox_dirty
+            self._outbox_dirty = set()
+        return dirty
+
     @staticmethod
     def _down_only_columns() -> set[str]:
         """Source of truth: weightslab.components.parallel_state.DOWN_ONLY. Lazy
@@ -423,10 +439,6 @@ class LedgeredDataFrameManager:
             if force_flush:
                 self._force_flush = True
 
-    def _is_array_column_to_norm(self, column_name: str, value: Any) -> bool:
-        """Check if a column should store arrays in separate H5 file."""
-        return column_name in self._array_columns and isinstance(value, (np.ndarray, ArrayH5Proxy))
-
     def _should_array_be_stored(self, array_name) -> bool:
         """Check if array storage is enabled."""
         return array_name in SAMPLES_STATS_TO_SAVE_TO_H5  # Regexed signals are not considered here
@@ -602,6 +614,10 @@ class LedgeredDataFrameManager:
             # Merge nested dicts: update existing sample_id records, add new ones
             for sample_id, record in records_to_add.items():
                 self._buffer.setdefault(sample_id, {}).update(record)
+        # Mark these sids as having fresh UP writes for the DDP outbox.
+        with self._outbox_dirty_lock:
+            self._outbox_dirty.update(str(s) for s in records_to_add)
+        with self._buffer_lock:
             logger.info(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
             should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
 
@@ -712,6 +728,8 @@ class LedgeredDataFrameManager:
 
             if affected_ids:
                 self.mark_dirty_batch(affected_ids)
+                with self._outbox_dirty_lock:
+                    self._outbox_dirty.update(str(s) for s in affected_ids)
 
     def get_tainted_group_ids(self, group_ids: List[Any], origin: str) -> set:
         """Return the subset of group_ids where at least one member is discarded.
@@ -754,52 +772,6 @@ class LedgeredDataFrameManager:
                 tainted = set(slice_df.loc[discarded_mask, group_col].unique())
 
         return tainted
-
-    def get_discarded_sample_ids(self, sample_ids: List[Any], origin: str) -> set:
-        """Return the subset of sample_ids that are marked as discarded.
-
-        Used by wl.get_active_sample_mask to exclude discarded samples from
-        per-sample loss computations (e.g. classification) during the current epoch.
-
-        Args:
-            sample_ids: The sample IDs (UIDs) to check (as strings/ints).
-            origin: The dataset split name (e.g. 'train_loader').
-
-        Returns:
-            A set of sample_id strings that are discarded.
-        """
-        discarded_ids = set()
-        from weightslab.data.sample_stats import SampleStatsEx
-        discard_col = SampleStatsEx.DISCARDED.value
-        origin_col = SampleStats.Ex.ORIGIN.value
-
-        with self._lock:
-            if self._df.empty or discard_col not in self._df.columns:
-                return discarded_ids
-
-            # Convert all sample_ids to strings for lookup
-            s_ids = [str(sid) for sid in sample_ids]
-
-            # Efficient lookup: only check samples existing in index
-            existing_mask = self._df.index.isin(s_ids)
-            if not existing_mask.any():
-                return discarded_ids
-
-            slice_df = self._df[existing_mask]
-
-            # Narrow by origin if present
-            if origin_col in slice_df.columns:
-                origin_mask = slice_df[origin_col] == origin
-                slice_df = slice_df[origin_mask]
-
-            if slice_df.empty:
-                return discarded_ids
-
-            # Find samples that are discarded
-            discarded = slice_df[slice_df[discard_col] == True].index.tolist()
-            discarded_ids = set(str(sid) for sid in discarded)
-
-        return discarded_ids
 
     def get_row(self, origin: str, sample_id: int) -> pd.Series | None:
         with self._lock:
@@ -857,48 +829,6 @@ class LedgeredDataFrameManager:
             drained = list(self._buffer.values())
             self._buffer = {}
         return drained
-
-    def _get_loader_by_origin(self, origin: str):
-        """Dynamically retrieve loader for a specific origin (on-demand).
-        Avoids maintaining persistent _loaders state; fetches only when needed.
-        """
-        try:
-            loader_names = get_dataloaders()
-            for loader_name in loader_names:
-                loader = get_dataloader(loader_name)
-                if loader is None:
-                    continue
-                tracked_ds = getattr(loader, "tracked_dataset", None)
-                if tracked_ds and hasattr(tracked_ds, "_dataset_split"):
-                    if tracked_ds._dataset_split == origin:
-                        return loader
-                # Fallback: match by loader name
-                elif origin in loader_name:
-                    return loader
-
-        except Exception as e:
-            logger.debug(f"[_get_loader_by_origin] Failed to retrieve loader for origin={origin}: {e}")
-
-        return None
-
-    def _normalize_arrays_for_storage(self, row: pd.Series) -> Any:
-        """Normalize array columns to use get_mask before H5 storage."""
-        dataset = None
-        for col in row.index:
-            value = row[col]
-
-            # Process and norm np array
-            if self._is_array_column_to_norm(col, value):
-                # GP: Not sure about this part - Maybe remove this and draw BB in WS
-                if dataset is None:
-                    loader = self._get_loader_by_origin(row.get("origin"))
-                    dataset = getattr(loader, "wrapped_dataset", None)
-                try:
-                    dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
-                    row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
-                except Exception as e:
-                    logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={row.name}: {e}")
-        return row
 
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
         if not records:
@@ -975,16 +905,12 @@ class LedgeredDataFrameManager:
         finally:
             self._lock.release()
 
-        # Det to seg conversion - pre-fetch dataset once for efficiency
-        if df_updates.index.size > 0:
-            normalized_rows = self._df.loc[df_updates.index].apply(
-                lambda row: self._normalize_arrays_for_storage(row),
-                axis=1
-            )
-            cols_to_update = df_updates.columns.intersection(self._df.columns)
-            self._df.loc[df_updates.index, cols_to_update] = normalized_rows[cols_to_update]
-
-        # Mark dirty outside lock
+        # Array-valued signals (prediction/prediction_raw/target) are stored RAW.
+        # We deliberately do NOT rasterize bbox predictions into segmentation maps
+        # here: it is meaningless for detection (consumers like trainer_tools read
+        # prediction_raw as boxes/class-ids) and it forced a full image decode per
+        # flush just to read (H, W). Callers that genuinely want a mask request one
+        # on demand via get_prediction_mask().
         self.mark_dirty_batch(sample_ids)
 
     def _flush_to_h5_if_needed(self, force: bool = False, blocking: bool = False):

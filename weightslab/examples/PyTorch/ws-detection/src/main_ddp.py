@@ -39,33 +39,66 @@ def train_worker(rank, world, master_port, grpc_port):
       * broadcast the freshly-built model so every replica starts identical.
       * a manual grad all-reduce in the loop body (until DDP wraps the model).
     """
+    import time as _time
+    _st = _time.perf_counter()
+    _stime = os.environ.get("WL_DDP_START_TIMING") == "1"
+    def _lap(label):
+        nonlocal _st
+        if _stime and rank == 0:
+            now = _time.perf_counter()
+            print(f"[start_timing] {label:32s} {1000*(now-_st):8.0f} ms", flush=True)
+            _st = now
+
     os.environ["MASTER_ADDR"] = _HOST
     os.environ["MASTER_PORT"] = str(master_port)
     os.environ["GRPC_BACKEND_PORT"] = str(grpc_port)
     dist.init_process_group(backend="gloo", rank=rank, world_size=world)
+    _lap("dist.init_process_group")
 
     import weightslab as wl
     from weightslab.utils.tools import seed_everything
     seed_everything(1234)
-    device = torch.device("cpu")
+    _lap("import weightslab + seed")
+    # Multi-rank on ONE GPU: keep gloo for the collectives (works multi-rank on a
+    # single host; gloo all_reduce/broadcast on CUDA tensors is supported and
+    # host-staged), but run the forward/backward on the shared GPU so the heavy
+    # compute is fast. Both ranks share cuda:0 (time-sliced; use CUDA MPS for real
+    # overlap). Opt in with WL_DDP_CUDA=1; default stays CPU so nothing changes
+    # unless asked. NCCL is intentionally NOT used — 2 nccl ranks on 1 device hang.
+    _use_cuda = torch.cuda.is_available() and os.environ.get("WL_DDP_CUDA", "0") == "1"
+    if _use_cuda:
+        torch.cuda.set_device(0)
+        device = torch.device("cuda:0")
+    else:
+        device = torch.device("cpu")
 
     cfg = yaml.safe_load(open(os.path.join(yolo_pipeline._HERE, "config.yaml")))
     cfg["compute_natural_sort"] = False
     cfg["data"]["train_loader"]["shuffle"] = True
 
+    _lap("cfg load")
     if rank != 0:
         dist.barrier()
     trainer, train_loader, criterions, _my_uids, _all_uids = \
         yolo_pipeline._build_pipeline(cfg, device, rank, world)
     if rank == 0:
         dist.barrier()
+    _lap("build_pipeline (+barriers)")
 
     model, optimizer = trainer.model, trainer.optimizer
+    # Flatten the initial weight sync into ONE broadcast (was one per parameter
+    # tensor — ~256 gloo collectives, ~11s startup; flattened → ~1s). Same
+    # per-tensor-collective antipattern as the grad reduce.
     with torch.no_grad():
-        for p in model.parameters():
-            dist.broadcast(p.data, src=0)
+        params = list(model.parameters())
+        flat = torch._utils._flatten_dense_tensors([p.data for p in params])
+        dist.broadcast(flat, src=0)
+        for p, s in zip(params, torch._utils._unflatten_dense_tensors(flat, [p.data for p in params])):
+            p.data.copy_(s)
+    _lap("model broadcast (flattened, 1 collective)")
 
     wl.serve(serving_grpc=True, serving_cli=False)
+    _lap("wl.serve (gRPC up)")
 
     cs = criterions
     miou = trainer.iou   # PerSampleIoU criterion, registered with flag="metric"
@@ -75,8 +108,18 @@ def train_worker(rank, world, master_port, grpc_port):
             yield from loader
     batches = _infinite(train_loader)
 
+    # DDP uneven inputs are handled at the SAMPLER, not here: the loader rebalances
+    # the live set across ranks (filter -> pad-to-multiple-of-world -> strided slice)
+    # so every rank's shard is EQUAL length -> identical batch count -> the grad
+    # all_reduce below always matches. A heavy mid-loop discard can therefore never
+    # starve one rank into yielding 0 batches while the other blocks (the old
+    # empty-shard deadlock). See dataloader_interface._ddp_rebalanced_shard.
+    _first_step = True
     while True:
         with wl.guard_training_context:
+            if _first_step:
+                _lap("serve->first step body (client wait_ready+train_steps+unpause)")
+                _first_step = False
             optimizer.zero_grad()
             inputs = next(batches)
             image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
@@ -88,22 +131,25 @@ def train_worker(rank, world, master_port, grpc_port):
                 + cs["clsf"](raw, batch, batch_ids=batch_ids)
                 + cs["dfl"](raw, batch, batch_ids=batch_ids)
             )
-            # Invoke the per-sample IoU metric — populates miou/train signals
-            # (was missing from the DDP loop, causing the metric to be silently
-            # absent from both per-sample and scalar logger paths).
+            # Per-sample IoU metric — populates miou/train signals.
             miou(raw, batch, batch_ids=batch_ids)
             loss = per_sample.mean()
             loss.backward()
 
-            # Reduce EVERY trainable param's grad (zero-fill missing) so the
-            # collective set + order is data-INdependent — else gloo desyncs.
-            for p in model.parameters():
-                if not p.requires_grad:
-                    continue
+            # Bucketed grad sync: ONE all_reduce over the FLATTENED grads (vs one
+            # collective per parameter tensor — ~256 for yolo11s; perf ~480→65ms).
+            # Zero-fill missing grads first so the flattened buffer has identical
+            # size/order on every rank (data-independent) — else gloo desyncs.
+            params = [p for p in model.parameters() if p.requires_grad]
+            for p in params:
                 if p.grad is None:
                     p.grad = torch.zeros_like(p.data)
-                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-                p.grad /= world
+            grads = [p.grad for p in params]
+            flat = torch._utils._flatten_dense_tensors(grads)
+            dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+            flat /= world
+            for g, s in zip(grads, torch._utils._unflatten_dense_tensors(flat, grads)):
+                g.copy_(s)
             optimizer.step()
 
 

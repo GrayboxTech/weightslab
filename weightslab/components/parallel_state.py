@@ -124,35 +124,44 @@ def _is_gather_safe_column(col: str, dtype) -> bool:
 # not the whole dataframe / whole signal history every step — otherwise per-step
 # cost scales with dataset size (df) and grows unboundedly (signals), which is
 # the real scaling wall behind the "~2 collectives/step" budget (the budget
-# counts rendezvous, not bytes). Both caches are process-local: each rank tracks
-# its OWN last-sent state and emits its OWN delta. On respawn/restore the cache
-# resets → one full resend → merge is idempotent, so that's safe.
-_LAST_SENT_DF: dict = {}                 # sample_id(str) -> tuple(sorted (col,val))
+# counts rendezvous, not bytes). The change-set is sourced from the dataframe
+# manager's outbox-dirty set (sids the per-sample writers touched since the last
+# flush) — NOT a snapshot diff — so building the delta is O(changes) and there is
+# no fragile signature comparison. The signal cursor is the same idea for the
+# append-only signal buffers.
 _SIGNAL_CURSOR: dict = {}               # (graph, exp_hash) -> count already sent
 
 
 def reset_outbox_state():
-    """Drop the per-rank delta caches so the next flush re-sends everything.
+    """Drop the per-rank delta cursors so the next flush re-sends everything.
     Called from clear_registry (tests) and safe to call on experiment reset."""
-    _LAST_SENT_DF.clear()
     _SIGNAL_CURSOR.clear()
 
 
 def local_df_writes():
-    """This rank's per-sample dataframe DELTA — gather-safe columns, changed rows
-    only (vs the last flush). Without deltas this dumps the WHOLE dataframe every
-    step and gathers it to rank-0, so per-step bytes scale with N_samples × world;
-    under sharding only ~batch_size rows actually change per step.
+    """This rank's per-sample dataframe DELTA — gather-safe columns, ONLY the rows
+    whose per-sample UP values changed since the last flush. The change-set comes
+    from the dataframe manager's outbox-dirty set (populated by the per-sample
+    writers: enqueue_batch / update_by_groups_bulk), so there's no whole-dataframe
+    snapshot diff — building the delta is O(changes), which is what keeps the
+    per-step gather small (the dataframe is pre-seeded with ALL sample_ids, so a
+    full scan would ship ~every row every step).
 
-    Schema-agnostic: no column NAMES baked in (the only column-name use is the
-    DOWN_ONLY filter + the object-allowlist). Tensors / dicts / arrays are
-    skipped — they don't reduce cleanly under our reducer table and would only
-    produce dtype-mismatch warnings on the rank-0 upsert. Reads `get_combined_df`
-    so the dataframe-manager's unflushed buffer is included.
+    Schema-agnostic: no column NAMES baked in (only the DOWN_ONLY filter + the
+    object-allowlist). Tensors / dicts / arrays are skipped — they don't reduce
+    cleanly under our reducer table. Reads `get_combined_df` so the manager's
+    unflushed buffer is included, then narrows to the dirty rows.
     """
     from weightslab.backend.ledgers import get_dataframe
     try:
-        df = get_dataframe().get_combined_df(return_proxies=False)
+        dfm = get_dataframe()
+        dirty = dfm.drain_outbox_dirty()
+    except Exception:
+        return None
+    if not dirty:
+        return None
+    try:
+        df = dfm.get_combined_df(return_proxies=False)
     except Exception:
         return None
     if df is None or getattr(df, "empty", True):
@@ -165,6 +174,9 @@ def local_df_writes():
             df["sample_id"] = df.index
     df["sample_id"] = df["sample_id"].astype(str)
     df = df.reset_index(drop=True)
+    df = df[df["sample_id"].isin(dirty)]      # only the changed rows
+    if df.empty:
+        return None
     # Drop DOWN-only columns (they flow ↓ not ↑) + any column whose cells are
     # tensors / dicts / arrays (would mangle the merge upsert).
     keep = ["sample_id"]
@@ -174,23 +186,7 @@ def local_df_writes():
         if _is_gather_safe_column(c, df[c].dtype):
             keep.append(c)
     df = df[keep]
-    records = df.to_dict(orient="records")
-    # Delta filter: emit only rows whose (col, value) signature changed since the
-    # last flush; update the cache for the ones we send. Rows that haven't moved
-    # (other ranks' shards, not-yet-seen samples) are skipped — rank-0 already
-    # holds their last value.
-    out = []
-    for rec in records:
-        sid = rec.get("sample_id")
-        sig = tuple(sorted(
-            (k, (tuple(v) if isinstance(v, (list, set)) else v))
-            for k, v in rec.items() if k != "sample_id"
-        ))
-        if _LAST_SENT_DF.get(sid) == sig:
-            continue
-        _LAST_SENT_DF[sid] = sig
-        out.append(rec)
-    return out or None
+    return df.to_dict(orient="records") or None
 
 
 # ----------------------------------------------------------------------------
