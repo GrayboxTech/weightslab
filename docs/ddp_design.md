@@ -1,159 +1,66 @@
-# WeightsLab DDP design notes (living draft)
+# WeightsLab DDP — design
 
-Scratchpad for the DDP refactor. Code home: `parallel_primitives.py` (primitives),
-`ddp_control.py` (current bespoke control plane — to be replaced by the primitives).
-Status tags: **[DECIDED]**, **[OPEN]**, **[CUT]**, **[DEFER]**, **[SEPARATE REALM]**.
+## Two spaces
 
----
+The runtime is split, like kernel/user-space:
 
-## 1. Core invariant  **[DECIDED]**
-**rank 0 is the single source of truth for all shared state** (dataframe, signal logger,
-hyperparam store, checkpoints). This is the "default to Centralized" conclusion from the
-original design matrix.
-- **Writes flow UP** to rank 0 (per-sample outputs: loss/metric/last_seen).
-- **Control/state flows DOWN** to children (hparams, discards/tags).
-- **Children hold only**: a model replica + their shard's transient compute + a *reconciled
-  copy* of the consistent control state (enough for their sampler/optimizer/loader to run).
-- **Grads** are orthogonal: handled by built-in DDP (or manual `all_reduce`). Not WL's job.
+- **train-space** — user code: the training loop (`next(loader); preds = model(batch); loss(preds, batch); [loss.backward();] optimizer.step()`).
+- **sdk-space** — WL wrappers embedded at well-known call sites (loss, metric, optimizer, dataloader, training guard).
 
-## 2. The two WL planes (+ the orthogonal grad plane)  **[DECIDED]**
-| plane | direction | primitive | carries |
-|---|---|---|---|
-| data (outputs) | children → rank 0 | `gather` (via outbox) | per-sample loss/metric, last_seen |
-| control/state | rank 0 → children | `broadcast` (reconcile) | hparams, deny-list, tags |
-| grads | all ↔ all | `all_reduce` | gradients (built-in DDP) |
+All WL synchronisation lives in sdk-space, so train-space stays unmodified across single-process and DDP.
 
-Control-plane and grad-plane are independent; neither needs the other.
+## SPMD with one privileged rank
 
-## 3. The lockstep contract  **[DECIDED — load-bearing]**
-SPMD: every rank runs the same program, so the same WL calls happen in the same order,
-re-synchronized by collectives. **Any collective must be reached by every rank, same count,
-same order, or the group deadlocks.** ⇒ collectives may sit ONLY at touchpoints every rank
-hits in lockstep (`next`, `forward`, `step`, guard entry). Never behind `if rank==0` / a
-data-dependent branch. (This is exactly why the `73728 vs 1152` gloo crash happened.)
+Every rank runs the same script. **Only rank-0** binds the gRPC port; UI/CLI commands enter the system there. There is no IPC to non-rank-0 — sync to other ranks goes exclusively through:
 
-## 4. Primitives
+- `torch.distributed` (broadcast / gather / all_reduce), and
+- shared memory (`mp.RawArray`), where collectives don't reach — notably gpu-worker → data-worker for the deny-list.
 
-### ③ reconcile (DOWN) — the workhorse  **[DECIDED]**
-Pull rank 0's authoritative STATE, children diff-and-apply. Idempotent. Absorbs async UI
-edits (they stage on rank 0; the next lockstep reconcile picks them up, ≤1-step latency).
-- `reconcile_down(snapshot, apply, version=)` — one state.
-- `register_consistent_state(...)` + `reconcile_all()` — many states in one shot.
-- Consistent states today: **hparam store** (lr, batch_size, pause_at_step, audit), **dataframe
-  deny-list** (discarded), **tags** (only if children filter by them).
+Data-loader workers stay simple: they decode samples from disk and do a fork-safe shm read to skip discarded ids — no collectives, no gRPC.
 
-### ① writes (UP) — via the OUTBOX, not a decorator  **[DECIDED]**
-- Per-sample loss/metric are computed **locally and returned** (children need the value for
-  `.backward()`), so we can't "rank 0 runs once, children return None".
-- Instead: `__call__` computes local, **stages** `{uid: value}` into a local outbox (no
-  collective), returns local. The **anchor** drains the outbox with ONE `gather` → rank 0
-  writes logger+dataframe for the whole step.
-- `aggregate_up` decorator still exists but is **redundant for the hot path** (it gathers per
-  call ≈4×/step; the outbox gathers once/step). Keep concept, prefer outbox.
-- **Skip big tensors** (raw preds / seg-masks): never gather; keep sharded-local. Wrap the
-  scalar SINK, not the loss `__call__` that holds the big tensors.
+## Two kinds of synchronisation
 
-### ② replicate-a-call (DOWN)  **[DEFER / rare]**
-Broadcast a call's *args* so every rank runs it with rank 0's args. Only consumer = train.py
-making an in-loop control call (`wl.discard(ids)` written in code). Most control is async UI
-→ handled by ③. Don't delete, don't over-invest.
-- NB: `next()`/`step()` syncing batch_size/lr is **③ (reconcile a state), not ②** — those
-  funcs read the value from the hparam store; they don't take it as a call arg.
+1. **Gradient reduction** — handled by `torch.distributed` (all_reduce around `optimizer.step()`); data-loader workers re-converge at each `batch_collate`. Off-the-shelf, untouched by WL.
+2. **Async UI state** — the hard part. UI events land on rank-0 at arbitrary times, but only rank-0 sees them, and we've ruled out non-collective IPC. **This is what WL adds.**
 
-## 5. Placement: anchor vs per-consumption-point  **[OPEN — pick per resource]**
-Reconcile (③) can live:
-- **(A) once at a central anchor** (guard `__enter__` / `zero_grad`): 1 collective/step,
-  makes ALL consistent state current for the whole step. Centralized but a god-point.
-- **(B) at each consumption point** (`next` reconciles batch_size, `step` reconciles lr):
-  N small collectives/step, but **better encapsulation** (each wrapper owns its resource's
-  consistency) and **tighter** (reconcile exactly when used, no start-of-step gap).
-- Cost gap between A and B shrinks with **version-gating** (broadcast a tiny token each step;
-  ship full snapshot only on change). **[DEFER version-gating until measured.]**
-- Leaning: **(B)** for the few hot states (lr@step, batch@next); fine to mix.
+## The transactional unit
 
-## 6. Wrapper prologue sketches  **[OPEN — sketch]**
+Each loop iteration is a transaction:
+
 ```python
-# ANCHOR (guard.__enter__ or optimizer.zero_grad) — the only place with collectives
-def __enter__(self):
-    reconcile_all()            # ③ DOWN: hparams + deny-list consistent before reads
-    flush_outbox_to_rank0()    # ① UP: gather staged per-sample scalars; rank0 writes; clear
-    ...                        # tracking mode; (pause = separate realm)
-
-# LOSS / METRIC __call__ — collective-free: compute local, stage, return local
-def __call__(self, raw_preds, batch, batch_ids, preds=None):
-    per_sample = self._fn(raw_preds, batch, batch_ids, preds)   # LOCAL (big tensors stay local)
-    outbox_append(self.name, {uid: float(v) for uid, v in zip(batch_ids, per_sample)},
-                  step=model_age())                              # "send to queue" — no collective
-    return per_sample                                            # children need this for backward
-
-# OPTIONAL per-consumption reconcile (placement B)
-def step(self):                       # OptimizerWrapper
-    reconcile_one("optimizer.lr")     # ③ pull rank0 lr, apply if different
-    return self._opt.step()
-def __next__(self):                   # DataLoaderInterface
-    reconcile_one("...batch_size")    # ③ pull rank0 batch_size, apply if different
-    return self._next_local()
-
-# MODEL forward — local age tick (lockstep ⇒ consistent), no collective
-def forward(self, *a, **k):
-    out = self._model(*a, **k); self.current_step += 1; return out
+batch = next(loader)
+preds = model(batch)
+loss(preds, batch)            # + per-sample metrics
+[loss.backward();] optimizer.step()
 ```
 
-## 7. main.py action → primitive map  **[DECIDED]**
-| train.py → WL action | primitive | notes |
-|---|---|---|
-| loss/metric `__call__` | ① outbox + anchor gather | compute local, stage scalars |
-| `next(loader)` | ③ reconcile (batch_size, deny-list) | or rely on anchor reconcile |
-| `optimizer.step()` | ③ reconcile (lr) | grads = built-in DDP |
-| `optimizer.zero_grad()` | anchor candidate | host reconcile_all + flush |
-| `model(x)` forward | none | age tick local; lockstep-consistent |
-| `model.get_age()` | none | read (consistent by lockstep) |
-| guard enter/exit | anchor + (pause separate) | reconcile_all + flush |
-| `serve`/`keep_serving` | rank-0-only | already done |
-| `pause_controller.resume` | writes checkpoint | rank-0-only (TODO gate) |
-| hparam read (`hparams.get`) | none | reads reconciled local copy |
+No async UI change propagates **mid-iteration**. Consistency is enforced exactly at the **train-space → sdk-space transition** — the first instruction WL controls each iteration (`guard_training_context.__enter__`). Every rank agrees on the consistent state before the loop body runs.
 
-## 8. Cut / shelve / defer
-- **[CUT] `DistributedCounter`** — steps are free (lockstep +1); samples-seen is derivable on
-  rank 0 (sum gathered batch sizes) or `age×global_batch`. No child needs per-rank
-  samples-seen. Reintroduce only if a *sample-keyed* schedule/pause appears.
-- **[DEFER] version-gating** on reconcile — add only when a plain full-snapshot broadcast is
-  measured to cost something.
-- **[DEFER] the registry** for >~2 states — two explicit reconciles are fine for now.
-- **[CUT-ish] `aggregate_up` decorator** — fold into the outbox for the hot path.
+## What needs to be consistent — and which way it flows
 
-## 9. Separate realms (do NOT force into the primitives)  **[SEPARATE REALM]**
-- **`pause_controller`** — a spin/block, not a one-shot reconcile. Needs the collective-pause
-  loop (all ranks spin on the broadcast while paused). To be separated out cleanly.
-- **`DistributedSampler` / sharding** — structural, decided at sampler construction
-  (rank/world). The only per-call thing is reading the reconciled deny-list.
-- **Checkpoints** — rank-0-only save AND load; children get reverted discards via ③. Model
-  weights = handled elsewhere (not WL).
+| State                                                          | Direction       | Why                                                |
+|----------------------------------------------------------------|-----------------|----------------------------------------------------|
+| hyperparams, `pause_at_step`, `paused`                         | rank-0 → rank-1+| UI authors them on rank-0; ranks read-only         |
+| dataframe `DOWN_ONLY` cols (`discarded`, `user_tags`)          | rank-0 → rank-1+| same — UI mutates, ranks consume                   |
+| per-sample signals, loss/metric scalars, `last_seen` writes    | rank-1+ → rank-0| each rank trains its shard; rank-0 holds the global view |
 
-## 10. Multi-node  **[DECIDED]**
-Lockstep holds across nodes (collectives ARE the sync, network or not), so per-point reconcile
-works multi-node. Only change = collective latency over the wire ⇒ that's when version-gating
-earns its keep. Shared-memory dataframe is a single-node-only fast path (see notes) — not the
-general mechanism.
+Rank-0 is the **single source of truth**; rank-1+ hold reconciled copies sufficient for their shard.
 
-## 11b. Collective budget — minimize calls  **[DECIDED — hard constraint]**
-The refactor touches MANY files (they import the primitives + inject a catch in their
-first instruction), but that must NOT multiply collectives. Rule:
-- **Collective-bearing sites are concentrated: ~2 rendezvous/step** — `reconcile_all()` (down)
-  + `flush_outbox()` (up) at the anchor, plus the grad `all_reduce`. That's the budget.
-- **Every other injection is LOCAL** (read already-reconciled state, stage to outbox, log) —
-  never a collective. So `next`/`step`/`save_signals`/... can each carry a catch + logging
-  across many files without adding a rendezvous.
-- This RESOLVES the A-vs-B placement (§5): the *collective* lives once at the anchor (A); the
-  per-touchpoint catches are just local reads of what the anchor already made consistent.
-- **Watchdog:** WL_DDP_LOG emits a per-step collective COUNT; if it climbs, a collective leaked
-  into a hot path — catch it immediately.
+## Mechanism, by direction
 
-## 11. Open questions to iterate
-- [ ] Anchor (A) vs per-consumption (B) — final call per resource?
-- [ ] Outbox lifecycle: flush at anchor `__enter__` (prev step) vs `__exit__` (this step)?
-- [ ] Where does the anchor live — `GuardContext.__enter__` or `optimizer.zero_grad`?
-- [ ] Tags: do children ever need them (eval-by-tag filtering on child samplers)? if not, tags
-      stay rank-0-only and out of the reconcile set.
-- [ ] backprop_units / encounter_timestamps — still wanted? if yes, who consumes it?
-- [ ] Checkpoint data-restore: DataService cache re-read after `load_state` (the open test bug).
+**DOWN — one broadcast, all consistent states.** Rank-0 builds a snapshot of every registered consistent state and broadcasts it; children diff-apply. One collective per step regardless of how many states are registered.
+→ API: `register_consistent_state(name, snapshot, apply)` + `reconcile_all()`.
+
+**UP — one gather, all per-sample writes.** Rank-1+ stages call-time parameters (e.g. `metric.update(sid, value)`) into a local **outbox**, never touching its own dataframe. The anchor gathers the lot once per step; rank-0 then re-issues the "consolidated call" with everyone's parameters as if it ran once globally. From the caller's view it's a normal function call; under DDP it accumulates locally and is re-issued on rank-0.
+→ API: `register_outbox(name, local_dump, merge)` + `flush_outbox()`.
+
+**Shared memory — for gpu-worker → data-worker.** Data-loader workers need `discarded` / `user_tags` at `__getitem__` time, before the next collective fires. So the dataframe manager mirrors `DOWN_ONLY` cols into `mp.RawArray`; workers fast-path-read these without IPC.
+
+## Anchor + budget
+
+The whole sync runs once per step at `guard_training_context.__enter__` → `sync_step()`:
+
+1. `reconcile_all()` — 1 broadcast carrying every consistent state.
+2. `flush_outbox()` — 1 gather carrying every per-sample write.
+
+**Collective budget: ~2 rendezvous/step (+ grad all_reduce).** Everything else in WL stays local — read the reconciled value, stage to the outbox, log. A collective leaking into a hot path is a regression: `WL_DDP_LOG=1` traces who-did-what; `WL_DDP_COLLECTIVE_LOG=<path>` records per-step counts so the invariant can be asserted in tests (`scenario_collective_budget`).
