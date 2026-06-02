@@ -308,13 +308,12 @@ class WeightsLabDataSampler(Sampler):
     def _iter_filtered_indices(self, indices):
         """Yield indices lazily so new discards are respected mid-epoch.
 
-        Two-layer deny-list check:
-          (1) shm fast-path — bool read from the dataframe-manager's shared-memory
-              mirror of DOWN_ONLY columns. Visible across fork, so a discard
-              landing on the rank-main process is seen IMMEDIATELY by DataLoader
-              workers (no IPC). Solves the "stale deny-list in workers" bug.
-          (2) pandas cache (existing) — covers non-numeric uids and acts as a
-              backup before the shm has populated.
+        The deny-list is enforced here, in the main-process sampler: a discarded
+        sample is simply never yielded. The pandas deny-list cache is refreshed
+        whenever the origin's deny-list revision bumps (a discard bumps it), so a
+        live discard is reflected within one index. Samples already yielded into a
+        worker prefetch queue are dropped separately by iterator invalidation
+        (dataframe_manager → loader._invalidate_iter → worker teardown).
         """
         skipped = 0
         unique_ids = getattr(self.tracked_dataset, "unique_ids", None)
@@ -326,16 +325,6 @@ class WeightsLabDataSampler(Sampler):
         deny_listed_uids = self._refresh_deny_list_cache()
         deny_list_revision = self._deny_list_revision
         polled_since_refresh = 0
-
-        # shm fast-path setup: cache the manager + origin so the per-idx check
-        # below is one attribute lookup + one array read.
-        df_manager = get_dataframe()
-        shm_origin = getattr(self.tracked_dataset, "_dataset_split", None)
-        shm_check = (
-            df_manager.is_in_down_only_shm
-            if df_manager is not None and hasattr(df_manager, "is_in_down_only_shm")
-            else None
-        )
 
         for idx in indices:
             if uid_source is not None:
@@ -355,14 +344,6 @@ class WeightsLabDataSampler(Sampler):
 
                 try:
                     uid_str = str(uid_source[idx])
-                    # (1) shm fast-path — fork-safe, no IPC
-                    if shm_check is not None and shm_origin is not None:
-                        try:
-                            if shm_check(shm_origin, "discarded", int(uid_str)):
-                                continue
-                        except (TypeError, ValueError):
-                            pass  # non-int uid → fall through to pandas check
-                    # (2) pandas cache — non-int uids + early-startup fallback
                     if uid_str in deny_listed_uids:
                         continue
                     # Evaluation allow-list: skip samples not in the set

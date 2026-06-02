@@ -11,12 +11,9 @@ All WL synchronisation lives in sdk-space, so train-space stays unmodified acros
 
 ## SPMD with one privileged rank
 
-Every rank runs the same script. **Only rank-0** binds the gRPC port; UI/CLI commands enter the system there. There is no IPC to non-rank-0 — sync to other ranks goes exclusively through:
+Every rank runs the same script. **Only rank-0** binds the gRPC port; UI/CLI commands enter the system there. There is no IPC to non-rank-0 — sync to other ranks goes exclusively through `torch.distributed` (broadcast / gather / all_reduce).
 
-- `torch.distributed` (broadcast / gather / all_reduce), and
-- shared memory (`mp.RawArray`), where collectives don't reach — notably gpu-worker → data-worker for the deny-list.
-
-Data-loader workers stay simple: they decode samples from disk and do a fork-safe shm read to skip discarded ids — no collectives, no gRPC.
+Data-loader workers stay simple: they only decode the indices the (main-process) sampler hands them — no collectives, no gRPC. The deny-list never reaches workers: a discarded sample is simply never yielded to them (see below).
 
 ## Two kinds of synchronisation
 
@@ -56,7 +53,7 @@ Rank-0 is the **single source of truth**; rank-1+ hold reconciled copies suffici
 
 Each outbox dumps a **delta**, not a full snapshot — only what changed on this rank since the last flush (changed dataframe rows; signal triples past a per-`(graph, exp_hash)` cursor). Otherwise the per-step gather carries the whole dataframe + whole signal history every step, so payload scales with `N_samples × world` and grows unboundedly — the budget below caps the *count* of collectives, not their *bytes*, so the delta is what keeps the bytes bounded too. The cache is process-local (each rank ships its own delta); on respawn/restore it resets to a one-time full resend, which is safe because every `merge` is idempotent. Delta merges seed rank-0's current value first so `MAX`/`UNION` never regress and `LATEST` still resolves to the newest write.
 
-**Shared memory — for gpu-worker → data-worker.** Data-loader workers need the **deny-list** (`discarded`) at `__getitem__` time, before the next collective fires — it gates *which* samples are yielded. So the dataframe manager mirrors that bool `DOWN_ONLY` column into `mp.RawArray`; workers fast-path-read it across fork without IPC. The other `DOWN_ONLY` column, `user_tags`, reconciles to children's dataframes via the DOWN broadcast but is *not* read at `__getitem__` (tags don't gate yielding), so the shm fast-path is the deny-list only.
+**Deny-list enforcement — sampler-side, no extra channel.** The `discarded` column gates *which* samples train, and it's enforced entirely in the main-process sampler: a discarded sample is never yielded, so workers never receive it. The sampler's pandas deny-list cache refreshes whenever the origin's deny-list revision bumps (a discard bumps it), so a live discard is reflected within one index. A sample already handed to a worker's prefetch queue is dropped by **iterator invalidation**: when a `DOWN_ONLY` value actually changes, `dataframe_manager` flags every loader, and the next step tears the workers down and respawns them (so a since-discarded queued sample never reaches the model). The change is gated on an *actual* value diff — essential under DDP, where rank-1+ re-apply the same reconciled deny-list every step and must not respawn workers each step. (`user_tags` reconciles to children via the DOWN broadcast but doesn't gate yielding.)
 
 ## Anchor + budget
 
