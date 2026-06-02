@@ -139,7 +139,16 @@ class WeightsLabDataSampler(Sampler):
         # with deny-list and eval allow-list in _iter_filtered_indices.
         self._ddp_rank, self._ddp_world_size = ddp_info()
         self._ddp_seed = int(os.environ.get("WL_DDP_SEED", "0"))
-        self._epoch = 0
+        # Reshuffle generation — NOT an epoch/dataset-pass count. The per-rank
+        # shard permutation is a pure function of (ddp_seed, reshuffle_seq, rank,
+        # world). It advances ONLY when a pass genuinely completes, never on the
+        # iterator resets that a mid-loop discard/tag triggers — otherwise every
+        # discard would reshuffle the whole shard (curation is discard-heavy, so
+        # "epoch" loses meaning here). A discard instead re-filters the SAME
+        # permutation. Reproducibility across resets = (ddp_seed, reshuffle_seq,
+        # samples-yielded offset, deny-list snapshot); the deny-list rides in the
+        # checkpoint dataframe, so a restore reproduces the exact filtered stream.
+        self._reshuffle_seq = 0
         self._dist_sampler: Optional[DistributedSampler] = None
 
     def _get_deny_listed_uids(self) -> set:
@@ -243,22 +252,36 @@ class WeightsLabDataSampler(Sampler):
         return self._dist_sampler
 
     def set_epoch(self, epoch: int) -> None:
-        """DDP per-epoch reshuffle hook (mirrors DistributedSampler.set_epoch).
+        """Back-compat alias for set_reshuffle_seq (mirrors DistributedSampler's
+        set_epoch name). Sets the reshuffle generation directly."""
+        self._reshuffle_seq = int(epoch)
 
-        Optional: WL auto-advances the epoch on each fresh iteration, so a thin
-        training script need not call this. Provided for parity with code that
-        drives DistributedSampler explicitly.
-        """
-        self._epoch = int(epoch)
+    def advance_reshuffle(self) -> None:
+        """Bump the reshuffle generation so the NEXT generated pass uses a new
+        permutation. Called by the loader ONLY on a genuine epoch-completion
+        reset — never on a discard/tag invalidation reset (which must keep the
+        same permutation and merely re-filter)."""
+        self._reshuffle_seq += 1
+
+    def restore_reshuffle_seq(self, seq: int, seed=None) -> None:
+        """Restore the reshuffle generation from a checkpoint so the next pass
+        reproduces the exact per-rank permutation that was live at save time.
+        No-op outside DDP. Warns on a seed mismatch — the permutation is a
+        function of (seed, reshuffle_seq), so a different seed can't reproduce."""
+        if self._ddp_world_size <= 1:
+            return
+        if seed is not None and int(seed) != int(self._ddp_seed):
+            logger.warning(
+                "[ddp] restore seed mismatch (saved=%s current=%s); per-rank "
+                "shard order will NOT reproduce the saved run.", seed, self._ddp_seed)
+        self._reshuffle_seq = int(seq)
 
     def _rank_indices_snapshot(self):
-        """This rank's base indices for the current epoch, WITHOUT advancing it.
-
-        Used by __len__ so counting never reshuffles the live iteration order.
-        """
+        """This rank's base indices for the current reshuffle generation, WITHOUT
+        advancing it. Used by __len__ so counting never reshuffles iteration."""
         if self._ddp_world_size > 1:
             ds = self._get_dist_sampler()
-            ds.set_epoch(self._epoch)
+            ds.set_epoch(self._reshuffle_seq)
             return list(ds)
         return list(range(len(self.data_source)))
 
@@ -266,13 +289,14 @@ class WeightsLabDataSampler(Sampler):
         """Generate base indices (shuffled or sequential).
 
         Under DDP (world_size > 1) the index universe is this rank's shard from
-        the stock DistributedSampler, reshuffled per epoch; the epoch counter is
-        auto-advanced so a thin script need not call set_epoch.
+        the stock DistributedSampler for the CURRENT reshuffle generation. It
+        does NOT auto-advance: the generation moves only on a real pass-end reset
+        (loader calls advance_reshuffle), so a mid-loop discard re-filters the
+        same permutation instead of reshuffling the whole shard.
         """
         if self._ddp_world_size > 1:
             ds = self._get_dist_sampler()
-            ds.set_epoch(self._epoch)
-            self._epoch += 1
+            ds.set_epoch(self._reshuffle_seq)
             return list(ds)
         n = len(self.data_source)
         if self.shuffle:
@@ -925,9 +949,15 @@ class DataLoaderInterface:
             logger.debug("[DataLoaderInterface] iter invalidated by DOWN_ONLY change; resetting workers")
             self._reset_iterator()
 
-        # If the previous epoch ended, reset for the next one
+        # If the previous epoch ended, reset for the next one. THIS is the only
+        # place the DDP shard reshuffles — a genuine pass completion advances the
+        # reshuffle generation so the next pass gets a new permutation. (The
+        # invalidation reset above deliberately does NOT advance it.)
         if getattr(self, '_epoch_exhausted', False):
             logger.debug("Auto-resetting iterator for next epoch")
+            s = getattr(self, '_mutable_batch_sampler', None)
+            if s is not None and hasattr(s, 'advance_reshuffle'):
+                s.advance_reshuffle()
             self._reset_iterator()
             self._epoch_exhausted = False
 
@@ -1117,10 +1147,21 @@ class DataLoaderInterface:
         boundary. Works with and without shuffling. When shuffling, ensure
         RNG state is also captured/restored before calling `restore_iteration_state`.
         """
-        return {
+        state = {
             "samples_yielded": int(self._samples_yielded),
             "batch_size": self.batch_size or 1
         }
+        # DDP: save the reshuffle generation + seed so restore reproduces the
+        # exact per-rank permutation (DistributedSampler shuffles from (seed,
+        # reshuffle_seq), which global RNG capture/restore does NOT cover). The
+        # deny-list that filters the permutation is checkpointed separately (a
+        # DOWN_ONLY df column), so (seed, reshuffle_seq, samples_yielded,
+        # deny-list) together reproduce the filtered stream across a reset.
+        s = getattr(self, "_mutable_batch_sampler", None)
+        if s is not None and getattr(s, "_ddp_world_size", 1) > 1:
+            state["ddp_reshuffle_seq"] = int(getattr(s, "_reshuffle_seq", 0))
+            state["ddp_seed"] = int(getattr(s, "_ddp_seed", 0))
+        return state
 
     def restore_iteration_state(self, state: dict) -> None:
         """Restore iteration position efficiently without reprocessing skipped data.
@@ -1140,6 +1181,15 @@ class DataLoaderInterface:
 
         # Calculate sample offset (how many individual samples to skip)
         sample_offset = samples_yielded
+
+        # DDP: restore the reshuffle generation onto the LIVE sampler now, so even
+        # the no-rebuild path (offset == 0, pass boundary) reproduces the saved
+        # per-rank permutation. The rebuild branch re-applies it to its new sampler.
+        ddp_seq = state.get("ddp_reshuffle_seq")
+        if ddp_seq is not None:
+            live = getattr(self, "_mutable_batch_sampler", None)
+            if live is not None and hasattr(live, "restore_reshuffle_seq"):
+                live.restore_reshuffle_seq(ddp_seq, state.get("ddp_seed"))
 
         # If we own the dataloader construction, rebuild with offset sampler
         if getattr(self, "_dl_build_kwargs", None) is not None and sample_offset > 0:
@@ -1165,6 +1215,9 @@ class DataLoaderInterface:
                     batch_size=batch_size,
                     drop_last=drop_last,
                 )
+                # Carry the restored reshuffle generation onto the new sampler.
+                if ddp_seq is not None and hasattr(sampler, "restore_reshuffle_seq"):
+                    sampler.restore_reshuffle_seq(ddp_seq, state.get("ddp_seed"))
                 self._mutable_batch_sampler = sampler
                 self._sample_offset = 0
                 num_workers = _resolve_safe_num_workers(
