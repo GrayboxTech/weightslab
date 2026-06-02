@@ -42,6 +42,20 @@ class ShmCapTests(unittest.TestCase):
                         "array must not be allocated to the huge sample_id")
         self.assertIn("train", mgr._shm_cap_warned, "over-cap id should warn once")
 
+    def test_user_tags_list_column_not_mirrored(self):
+        mgr = self._mgr()
+        df = pd.DataFrame(
+            {"discarded": [True], "user_tags": [["a", "b"]], "origin": ["train"]},
+            index=[3],
+        )
+        df.index.name = "sample_id"
+        mgr._propagate_to_shm(df, {"train"})
+        # discarded (bool) is mirrored ...
+        self.assertTrue(mgr.is_in_down_only_shm("train", "discarded", 3))
+        # ... but user_tags (a list column) gets NO shm array — bool(list) would
+        # be a meaningless bit nothing reads.
+        self.assertNotIn(("train", "user_tags"), mgr._shm_down_only)
+
     def test_undiscard_clears_cell(self):
         mgr = self._mgr()
         df = pd.DataFrame({"discarded": [True], "origin": ["train"]}, index=[7])

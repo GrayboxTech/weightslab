@@ -187,6 +187,25 @@ class LedgeredDataFrameManager:
         except Exception:
             return {"discarded", "user_tags"}  # safe default; matches planes
 
+    @staticmethod
+    def _shm_bool_eligible(series: pd.Series) -> bool:
+        """True iff a column's values are a boolean deny-list (so the bool shm
+        mirror is meaningful). Bool dtype qualifies directly; an object column
+        qualifies only if every non-null cell is a bool / 0-1 scalar. List/str
+        columns (e.g. `user_tags`) are rejected — they aren't a bitmap."""
+        if pd.api.types.is_bool_dtype(series.dtype):
+            return True
+        non_null = series.dropna()
+        if non_null.empty:
+            return False
+        for v in non_null:
+            if isinstance(v, (bool, np.bool_)):
+                continue
+            if isinstance(v, (int, np.integer)) and int(v) in (0, 1):
+                continue
+            return False
+        return True
+
     def _ensure_shm_capacity(self, origin: str, col: str, min_capacity: int) -> None:
         """Allocate / grow the (origin, col) shm vec so int(sample_id)<min_capacity
         always indexes a live cell. Growing copies prior values; readers in
@@ -226,7 +245,13 @@ class LedgeredDataFrameManager:
         and respawn every step, completely freezing throughput.
         """
         down_only = self._down_only_columns()
-        present = [c for c in df_norm.columns if c in down_only]
+        # The shm vec is a bool array (a deny-list bitmap). Only mirror DOWN_ONLY
+        # columns that are genuinely boolean — `discarded`. A list/object column
+        # like `user_tags` is in DOWN_ONLY (it reconciles to children via the DOWN
+        # broadcast) but is NOT a deny-list and bool(list) would store a
+        # meaningless bit that nothing reads — so it's excluded here.
+        present = [c for c in df_norm.columns
+                   if c in down_only and self._shm_bool_eligible(df_norm[c])]
         if not present:
             return False
         # Determine the origin each row belongs to: prefer the row's "origin"
