@@ -588,6 +588,13 @@ class LedgeredDataFrameManager:
                 existing_idx = df_norm.index.intersection(self._df.index)
                 all_cols = df_norm.columns
                 if len(existing_idx) > 0:
+                    # Widen any categorical target columns to object before assigning:
+                    # writing a value outside a Categorical's category list raises
+                    # "Cannot setitem on a Categorical with a new category". The
+                    # _optimize_dataframe_memory pass below re-applies categorical dtypes.
+                    for col in all_cols:
+                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                            self._df[col] = self._df[col].astype(object)
                     self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
                 # Append rows that do not exist yet
@@ -927,6 +934,12 @@ class LedgeredDataFrameManager:
                         mask = (self._df.index == idx)
 
                 if mask.any():
+                    # Widen categorical target columns to object before assignment so a
+                    # new value (e.g. a fresh categorical-tag category) doesn't raise
+                    # "Cannot setitem on a Categorical with a new category".
+                    for col in updates.keys():
+                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                            self._df[col] = self._df[col].astype(object)
                     if len(updates) == 1:
                         values = np.asanyarray(list(updates.values())[0])
                         if values.ndim == 0:
