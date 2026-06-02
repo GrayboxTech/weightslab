@@ -30,6 +30,7 @@ import logging
 import tempfile
 
 import torch
+import torch.nn as nn
 import yaml
 
 import weightslab as wl
@@ -44,6 +45,15 @@ logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
 
 
+class _Sink(nn.Module):
+    """Pass-through. Routes a pre-computed tensor through WL's signal-logging
+    pipeline via `wl.watch_or_edit(_Sink(), flag="loss"|"metric", ...)`. Used
+    when the per-sample (or scalar) value already exists from a hook capture
+    and we just want it logged."""
+    def forward(self, x):
+        return x
+
+
 class WLCompatibleDetTrainer(DetectionTrainer):
     """Thin DetectionTrainer subclass. Installs WL callbacks at `__init__`.
     Does NOT override `train()` or `do_validate()` — UL's natural training
@@ -52,6 +62,33 @@ class WLCompatibleDetTrainer(DetectionTrainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # Closure-shared state. Populated in on_train_start; read in batch callbacks.
+        state = {"bce": None, "channels": {}}
+
+        # --- Hook-only signal capture (no UL method gets overridden):
+        # * forward_hook on criterion.bce  → per-anchor cls tensor → per-sample cls.
+        # * wl.watch_or_edit(_Sink) channels → route values through WL's signal pipe.
+        # * trainer.loss_items                → batch-level box/cls/dfl scalars.
+        # * validator.metrics.results_dict    → aggregated val scalars at on_val_end.
+
+        def _hook_bce(module, inputs, output):
+            state["bce"] = output  # shape (bs, num_anchors, num_classes)
+
+        def _register_channels():
+            ch = state["channels"]
+            ch["train/cls_per_sample"] = wl.watch_or_edit(
+                _Sink(), flag="loss", name="train/cls_per_sample",
+                per_sample=True, log=True,
+            )
+            for n in ("box", "cls", "dfl"):
+                ch[f"train/{n}"] = wl.watch_or_edit(
+                    _Sink(), flag="loss", name=f"train/{n}", log=True,
+                )
+            for key in ("precision", "recall", "mAP50", "mAP50-95", "fitness"):
+                ch[f"val/{key}"] = wl.watch_or_edit(
+                    _Sink(), flag="metric", name=f"val/{key}", log=True,
+                )
 
         def _on_train_start(trainer):
             # UL has built train_loader, test_loader, optimizer, model by now.
@@ -66,6 +103,9 @@ class WLCompatibleDetTrainer(DetectionTrainer):
                     preload_labels=True, preload_metadata=True,
                 )
 
+            # Save underlying BEFORE wrap — criterion hook needs the raw model.
+            underlying = trainer.model
+
             trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
             # `forced_model_wrapping=True` ensures a fresh wrap (avoids a stale
             # Proxy from a prior run silently hosting weights on the wrong device).
@@ -74,12 +114,13 @@ class WLCompatibleDetTrainer(DetectionTrainer):
                 trainer.model, flag="model", forced_model_wrapping=True,
             )
 
-            # Per-sample loss / IoU / det-metric emission TBD. We have the
-            # plumbing (forward-patch for preds, preprocess-patch for batch)
-            # but the PerSample* classes were built for main.py's manual loop
-            # and don't slot onto UL 8.4.51's training-mode pred format
-            # (dict with boxes/scores/feats) — v8DetectionLoss internals
-            # crash on the per-sample sliced batch. Needs a re-think.
+            # Force criterion creation now (normally lazy on first .loss() call)
+            # so we can hook .bce before any training batch fires.
+            if getattr(underlying, "criterion", None) is None:
+                underlying.criterion = underlying.init_criterion()
+            underlying.criterion.bce.register_forward_hook(_hook_bce)
+
+            _register_channels()
 
             @wl.eval_fn
             def _validate(loader):
@@ -91,6 +132,18 @@ class WLCompatibleDetTrainer(DetectionTrainer):
             wl.guard_training_context.__enter__()
 
         def _on_train_batch_end(trainer):
+            ch = state["channels"]
+            # Per-sample cls loss from the bce hook capture (no recomputation).
+            bce = state["bce"]
+            if bce is not None and ch:
+                per_sample_cls = bce.sum(dim=(1, 2)).detach()
+                batch_ids = torch.arange(per_sample_cls.shape[0], device=per_sample_cls.device)
+                ch["train/cls_per_sample"](per_sample_cls, batch_ids=batch_ids)
+            # Batch-level scalars straight from UL's existing loss_items.
+            li = getattr(trainer, "loss_items", None)
+            if li is not None and ch:
+                for i, n in enumerate(("box", "cls", "dfl")):
+                    ch[f"train/{n}"](li[i:i+1].detach())
             wl.guard_training_context.__exit__(None, None, None)
 
         def _on_val_batch_start(validator):
@@ -99,11 +152,29 @@ class WLCompatibleDetTrainer(DetectionTrainer):
         def _on_val_batch_end(validator):
             wl.guard_testing_context.__exit__(None, None, None)
 
+        def _on_val_end(validator):
+            # Aggregated val metrics — read UL's own results_dict, never recompute.
+            ch = state["channels"]
+            md = getattr(validator, "metrics", None)
+            rd = getattr(md, "results_dict", None) if md is not None else None
+            if not rd or not ch:
+                return
+            for ul_key, wl_key in (
+                ("metrics/precision(B)", "val/precision"),
+                ("metrics/recall(B)",    "val/recall"),
+                ("metrics/mAP50(B)",     "val/mAP50"),
+                ("metrics/mAP50-95(B)",  "val/mAP50-95"),
+                ("fitness",              "val/fitness"),
+            ):
+                if ul_key in rd and wl_key in ch:
+                    ch[wl_key](torch.tensor([float(rd[ul_key])]))
+
         self.add_callback("on_train_start",       _on_train_start)
         self.add_callback("on_train_batch_start", _on_train_batch_start)
         self.add_callback("on_train_batch_end",   _on_train_batch_end)
         self.add_callback("on_val_batch_start",   _on_val_batch_start)
         self.add_callback("on_val_batch_end",     _on_val_batch_end)
+        self.add_callback("on_val_end",           _on_val_end)
 
 
 def main():
