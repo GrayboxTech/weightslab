@@ -68,10 +68,13 @@ def _r_union(s):
 
 REDUCERS = {"MAX": _r_max, "LATEST": _r_latest, "UNION": _r_union}
 
-# The ONLY place column names appear in the cross-rank plumbing.
-# Columns listed here are DOWN-only: rank-0 sets, broadcast reconciles to children,
-# children's value is never read back UP (the UP-merge would risk overriding).
-DOWN_ONLY = {"discarded", "user_tags"}
+# The ONLY place column names appear in the cross-rank plumbing. DOWN-only: rank-0
+# sets it, the reconcile broadcasts it to children, children never read it back UP.
+# Just the deny-list: rank-1+ need `discarded` to derive the SAME live shard as rank-0
+# (else shards desync -> grad all_reduce deadlock). Tags don't ride — they're rank-0
+# UI/curation state (the tag->label override is vestigial); tag queries gather signals
+# UP and filter on rank-0. ("user_tags" used to sit here but was never a real column.)
+DOWN_ONLY = {"discarded"}
 
 
 def policy_for(col, dtype):
@@ -195,10 +198,12 @@ def local_df_writes():
 # a new DOWN-only column is a single DOWN_ONLY entry, zero plumbing.
 # ----------------------------------------------------------------------------
 def rank0_df_down_state():
-    """Rank-0's authoritative values for DOWN_ONLY columns, packaged as
-    {col: {sample_id: value}}. Single source of truth — children mirror this
-    in apply_df_down_state. Non-null values only (so default-False rows still
-    ride, but truly-unset cells don't pollute children)."""
+    """Rank-0's DOWN_ONLY values as {col: {sample_id: value}} for children to mirror
+    (apply_df_down_state). DELTA: ships only sample-ids changed since the last
+    reconcile (drain_down_delta), with one full snapshot on first reconcile / post-
+    restore so children converge before deltas — keeps the broadcast O(changed),
+    not O(N). Non-null values only (an un-discard rides as False; truly-unset cells
+    don't pollute children)."""
     from weightslab.backend.ledgers import get_dataframe
     try:
         dfm = get_dataframe()
@@ -210,17 +215,24 @@ def rank0_df_down_state():
     cols = [c for c in DOWN_ONLY if c in df.columns]
     if not cols:
         return None
+    full, dirty = dfm.drain_down_delta()
     if "sample_id" in df.columns:
-        sids = df["sample_id"].tolist()
+        sids = [str(s) for s in df["sample_id"].tolist()]
     elif isinstance(df.index, pd.MultiIndex):
-        sids = [t[-1] for t in df.index]
+        sids = [str(t[-1]) for t in df.index]
     else:
-        sids = list(df.index)
-    sids = [str(s) for s in sids]
+        sids = [str(s) for s in df.index]
+    if full:
+        want = None                       # everything
+    elif not dirty:
+        return None                       # nothing changed this step
+    else:
+        want = set(str(s) for s in dirty)
     out = {}
     for col in cols:
         vals = df[col].tolist()
-        out[col] = {sid: v for sid, v in zip(sids, vals) if pd.notna(v)}
+        out[col] = {sid: v for sid, v in zip(sids, vals)
+                    if (want is None or sid in want) and pd.notna(v)}
     return out if any(out.values()) else None
 
 
@@ -378,20 +390,23 @@ def _rank0_existing_seed(sample_ids, cols):
         return None
     if df is None or getattr(df, "empty", True):
         return None
-    df = df.copy()
-    if "sample_id" not in df.columns:
-        if isinstance(df.index, pd.MultiIndex):
-            df["sample_id"] = [t[-1] for t in df.index]
-        else:
-            df["sample_id"] = df.index
-    df["sample_id"] = df["sample_id"].astype(str)
-    df = df.reset_index(drop=True)
+    # Index the wanted sids directly and copy ONLY those ~batch rows + delta cols —
+    # the old df.copy() duplicated the WHOLE frame every flush (O(N) per step, the
+    # same hidden scaling cost as the DOWN reconcile had).
+    if "sample_id" in df.columns:
+        sid_idx = pd.Index(df["sample_id"].astype(str))
+    elif isinstance(df.index, pd.MultiIndex):
+        sid_idx = pd.Index([str(t[-1]) for t in df.index])
+    else:
+        sid_idx = df.index.astype(str)
     want = set(str(s) for s in sample_ids)
-    df = df[df["sample_id"].isin(want)]
-    if df.empty:
+    mask = sid_idx.isin(want)
+    if not mask.any():
         return None
-    keep = ["sample_id"] + [c for c in cols if c in df.columns]
-    return df[keep].to_dict(orient="records")
+    keep = [c for c in cols if c in df.columns]
+    sub = df.loc[mask, keep].copy()
+    sub.insert(0, "sample_id", sid_idx[mask].to_numpy())
+    return sub.to_dict(orient="records")
 
 
 def merge_df_writes(parts):
@@ -423,23 +438,23 @@ def merge_df_writes(parts):
     )
     big = big.set_index("sample_id")
 
-    reduced = []
+    # Vectorized fold: MAX->groupby.max(), LATEST->groupby.last() (both skipna,
+    # matching _r_max/_r_latest). One groupby.agg instead of a python reducer call
+    # per group per column — each group is <=2 rows (seed + the owning rank's write).
+    # policy_for only ever yields MAX/LATEST here (UNION is tags, which are DOWN-only).
+    agg = {}
     for col in big.columns:
         try:
-            policy = policy_for(col, big[col].dtype)
+            agg[col] = "max" if policy_for(col, big[col].dtype) == "MAX" else "last"
         except Exception:
-            policy = "LATEST"
-        reducer = REDUCERS.get(policy)
-        if reducer is None:
-            continue
-        try:
-            reduced.append(big.groupby(level=0)[col].apply(reducer).rename(col))
-        except Exception as exc:
-            logger.debug("[df outbox] reducer failed col=%s policy=%s: %s",
-                         col, policy, exc)
-    if not reduced:
+            agg[col] = "last"
+    if not agg:
         return
-    merged = pd.concat(reduced, axis=1)
+    try:
+        merged = big.groupby(level=0).agg(agg)
+    except Exception as exc:
+        logger.debug("[df outbox] vectorized reduce failed: %s", exc)
+        return
     try:
         get_dataframe().upsert_df(merged, force_flush=True)
     except Exception as exc:

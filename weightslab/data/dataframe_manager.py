@@ -47,6 +47,13 @@ class LedgeredDataFrameManager:
         # by the outbox each flush (drain_outbox_dirty).
         self._outbox_dirty: set = set()
         self._outbox_dirty_lock = threading.Lock()
+        # DOWN-plane delta: sample-ids whose DOWN_ONLY cells (discarded/tags) changed
+        # since the last reconcile, so rank-0 broadcasts only the change-set, not the
+        # whole deny-list every step. _down_full_pending forces ONE full snapshot
+        # (first reconcile / after a restore) so children converge before deltas.
+        self._down_dirty: set = set()
+        self._down_dirty_lock = threading.Lock()
+        self._down_full_pending = True
         self._force_flush = False
         self._flush_interval = flush_interval
         self._flush_max_rows = flush_max_rows
@@ -285,6 +292,9 @@ class LedgeredDataFrameManager:
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
 
         if not loaded_df.empty:
+            # A restore/reload changes DOWN_ONLY state wholesale -> force one full DOWN
+            # reconcile so children re-converge before deltas resume.
+            self.mark_down_full_resend()
             # Ensure single-level index on sample_id
             if "sample_id" in loaded_df.columns:
                 try:
@@ -418,10 +428,35 @@ class LedgeredDataFrameManager:
             # invalidated unconditionally, workers would respawn every step and
             # throughput would collapse.
             if down_only_changed:
+                # DOWN-plane delta: these sample-ids' deny-list/tags changed, so the
+                # next reconcile ships just them (not the whole table). Marked after
+                # the merge so the drain reads the committed values.
+                with self._down_dirty_lock:
+                    self._down_dirty.update(str(s) for s in df_norm.index.tolist())
                 try:
                     self._invalidate_loader_iters_on_down_only_change(df_norm)
                 except Exception as exc:
                     logger.debug("[invalidate iter] failed: %s", exc)
+
+    def drain_down_delta(self):
+        """For the DOWN reconcile. Returns (full, sids): full=True -> rank-0 should
+        broadcast the WHOLE DOWN_ONLY state once (first reconcile / post-restore);
+        else `sids` is the set of sample-ids whose DOWN_ONLY cells changed since the
+        last drain (empty -> nothing to broadcast). Drains both."""
+        with self._down_dirty_lock:
+            if self._down_full_pending:
+                self._down_full_pending = False
+                self._down_dirty = set()
+                return True, None
+            sids = self._down_dirty
+            self._down_dirty = set()
+            return False, sids
+
+    def mark_down_full_resend(self):
+        """Force the next DOWN reconcile to be a full snapshot (call on restore /
+        wholesale df reload so children re-converge before deltas resume)."""
+        with self._down_dirty_lock:
+            self._down_full_pending = True
 
     def mark_dirty(self, sample_id: int):
         with self._lock:
