@@ -57,6 +57,13 @@ def _build_pipeline(cfg, device, rank, world_size):
     # (config.yaml batch_size is left as-is for the mono main.py example.)
     batch_size = int(os.environ.get("WL_DDP_BATCH", "16"))
     num_workers = int(os.environ.get("WL_DDP_WORKERS", "0"))
+    # Push the DDP batch into the in-memory cfg too: the hyperparam ledger is built
+    # from cfg, and _sync_batch_size_from_ledger re-applies the ledger's batch to the
+    # loader every iteration — so without this the loader silently reverts to config's
+    # mono batch (4) and WL_DDP_BATCH only ever touched the DataLoader ctor. (On-disk
+    # config.yaml is untouched; this mutates the loaded dict for this DDP run only.)
+    cfg["data"]["train_loader"]["batch_size"] = batch_size
+    train_cfg["batch_size"] = batch_size
 
     # Clean slate each run: no checkpoint resume + start empty.
     cfg = dict(cfg)

@@ -166,6 +166,12 @@ class PauseController:
     def is_paused(self):
         return not self._event.is_set()
 
+    def wait_for_resume(self, timeout=None):
+        """Block until resumed (the resume Event is set), waking the instant the
+        gRPC resume handler fires. Returns True if resumed, False on timeout. Lets
+        the DDP pause-anchor wait on the resume signal instead of busy-polling."""
+        return self._event.wait(timeout)
+
     def _get_checkpoint_manager(self):
         if self.checkpoint_manager is None:
             self.checkpoint_manager = get_checkpoint_manager()

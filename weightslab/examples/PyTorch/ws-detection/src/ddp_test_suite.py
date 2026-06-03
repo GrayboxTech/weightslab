@@ -1252,7 +1252,12 @@ def main():
                                 )["data"]["train_loader"]["batch_size"]
     batch = int(os.environ.get("WL_DDP_BATCH", _cfg_batch))
     only = os.environ.get("WL_DDP_ONLY")  # substring filter to run a single scenario
-    scenarios = [s for s in _SCENARIOS if not only or only in s.__name__]
+    # WL_DDP_SKIP: comma-separated substrings to EXCLUDE — lets a killed run resume
+    # by skipping the scenarios that already passed (the suite has no checkpoint).
+    skip = [s.strip() for s in os.environ.get("WL_DDP_SKIP", "").split(",") if s.strip()]
+    scenarios = [s for s in _SCENARIOS
+                 if (not only or only in s.__name__)
+                 and not any(sk in s.__name__ for sk in skip)]
     results = {scn.__name__: _run_one(scn, batch) for scn in scenarios}
 
     print("\n" + "=" * 64)

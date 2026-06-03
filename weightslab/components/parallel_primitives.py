@@ -312,7 +312,7 @@ def _ensure_core_ddp_registered():
 # ---------------------------------------------------------------------------
 # Per-step anchor: ONE bundled reconcile + collective-pause spin in one place.
 # ---------------------------------------------------------------------------
-def sync_step(spin_sleep=0.02):
+def sync_step(spin_wait=0.5):
     """Per-step DDP anchor — the DOWN half. Call once per step on EVERY rank at the
     START of the step (guard __enter__), BEFORE the body consumes the state.
 
@@ -334,9 +334,22 @@ def sync_step(spin_sleep=0.02):
     """
     if not _active():
         return
+    rank, _ = ddp_info()
     reset_collectives()             # logs prior step's count (down+up), then resets
     while True:
         bundle = reconcile_all()    # DOWN: 1 broadcast, ALL consistent states
         if not bundle or not bundle.get("paused", False):
             return                  # → step body runs; UP flush happens in __exit__
-        time.sleep(spin_sleep)      # paused: brief breather, then re-reconcile
+        # Paused: NO busy-sleep. Rank 0 blocks on the resume Event — it wakes the
+        # instant the gRPC handler fires (zero resume latency). Rank-1+ skip the wait
+        # and loop straight into reconcile_all, blocking inside that broadcast until
+        # rank 0 returns. Children wait in the collective, rank 0 waits on the Event —
+        # neither spins. NB: this is cheap ONLY on gloo (its TCP transport socket-waits);
+        # NCCL would busy-spin a core/SM the whole pause (needs NCCL_BLOCKING_WAIT).
+        # The bounded timeout is NOT a poll — it lets the interpreter service signals
+        # (SIGINT/SIGTERM) during a long pause, and rank 0's periodic re-broadcast lets
+        # rank-1+ surface from gloo to check theirs too (same reason wait_if_paused
+        # uses a 0.5s wait). timeout=None would be 2 broadcasts/cycle but kills Ctrl-C.
+        if rank == 0:
+            from weightslab.components.global_monitoring import pause_controller
+            pause_controller.wait_for_resume(timeout=spin_wait)
