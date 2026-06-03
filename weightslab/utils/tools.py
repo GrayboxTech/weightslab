@@ -696,24 +696,32 @@ def is_main_process():
     return ddp_info()[0] == 0
 
 
-def all_reduce_sum_scalar(value):
-    """Return the sum of ``value`` across all ranks (identity in single-process).
+def all_reduce_scalar(value, reduction="sum"):
+    """Reduce a scalar ``value`` across all ranks (identity in single-process).
 
-    One tiny scalar all_reduce when a torch.distributed group is live; otherwise
-    returns ``value`` unchanged. Backend-aware: moves to CUDA for nccl, stays on
-    CPU for gloo.
+    ``reduction``: "sum" (default) or "avg". One tiny scalar all_reduce when a
+    torch.distributed group is live; otherwise returns ``value`` unchanged.
+    Backend-aware: CUDA tensor for nccl, CPU for gloo. gloo has no ReduceOp.AVG,
+    so "avg" is computed as sum / world_size (correct on every backend).
     """
-    value = int(value)
     try:
         import torch.distributed as dist
         if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-            t = torch.tensor([value], dtype=torch.long)
+            world = dist.get_world_size()
+            t = torch.tensor([float(value)], dtype=torch.float64)
             if dist.get_backend() == "nccl":
                 t = t.cuda()
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
-            return int(t.item())
+            total = t.item()
+            return total / world if reduction == "avg" else total
     except Exception:
         pass
     return value
+
+
+def all_reduce_sum_scalar(value):
+    """Back-compat: integer sum of ``value`` across ranks. Prefer
+    ``all_reduce_scalar(value, "sum")``."""
+    return int(all_reduce_scalar(int(value), reduction="sum"))
 
 
