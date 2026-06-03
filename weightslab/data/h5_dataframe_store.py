@@ -227,6 +227,22 @@ class H5DataFrameStore:
                 logger.debug(f"[H5DataFrameStore] Failed to apply registry categories to {col}: {e}")
         return df
 
+    def _decategorize_for_storage(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert any Categorical columns to plain STRING before HDF write.
+
+        pandas' HDF `table` reader raises "operands could not be broadcast
+        together" when reading back a categorical column that contains NaN
+        (code == -1) — which happens for tag/discarded columns that are NaN on
+        instance rows. We store the string form (NaN → "nan", restored on read)
+        so PyTables serializes cleanly and the buggy categorical read path is
+        never hit. Categorical dtype / bools / NaN are reconstructed in memory
+        on read (_normalize_for_read).
+        """
+        cat_cols = [c for c in df.columns if isinstance(df[c].dtype, pd.CategoricalDtype)]
+        for col in cat_cols:
+            df[col] = df[col].astype(str)
+        return df
+
     def _optimize_categorical_tags(self, df: pd.DataFrame) -> pd.DataFrame:
         """Convert tag columns to categorical dtype for memory efficiency.
 
@@ -342,7 +358,8 @@ class H5DataFrameStore:
         df.columns = [str(col).replace('__SLASH__', '/') for col in df.columns]
 
         # Handle multi-index (sample_id, annotation_id) or single-level index
-        if isinstance(df.index, pd.MultiIndex) and df.index.nlevels >= 2:
+        is_multi = isinstance(df.index, pd.MultiIndex) and df.index.nlevels >= 2
+        if is_multi:
             # Multi-index: restore both levels as columns for UI/downstream use
             df["sample_id"] = df.index.get_level_values(0)
             df["annotation_id"] = df.index.get_level_values(1)
@@ -355,7 +372,14 @@ class H5DataFrameStore:
             elif isinstance(df, pd.Series):
                 df = df.reset_index().rename(columns={df.name: "sample_id"})
 
+        # Origin is a SAMPLE-level field: keep it only on the sample row (instance_id 0).
+        # Instance rows (instance_id >= 1) stay clean — they carry only their own
+        # per-instance data (target + signals), matching the in-memory layout.
+        # NB: assign the string then null instances via .loc — np.where(bool, str, nan)
+        # would coerce to a string array and turn NaN into the literal "nan".
         df["origin"] = origin
+        if is_multi:
+            df.loc[df.index.get_level_values(1) != 0, "origin"] = np.nan
 
         # Handle deserialization of nested objects (lists, dicts) stored as JSON strings
         cols_to_deserialize = [col for col in SampleStats.MODEL_INOUT_LIST if col in df.columns]
@@ -376,7 +400,36 @@ class H5DataFrameStore:
             for col in cols_to_deserialize:
                 df[col] = df[col].apply(deserialize_value)
 
-        # Restore categorical dtypes for tag columns (HDF5 preserves categorical, but ensure it's applied)
+        # Everything was persisted as plain strings (see upsert). Reconstruct the
+        # in-memory representation for tag/discarded columns:
+        #   1. missing tokens ("nan"/"none"/"") → real NaN
+        #   2. boolean columns ("True"/"False") → real bool  (bool('False') is truthy,
+        #      so this MUST run before any bool checks)
+        # String categorical tags keep their string values here; their categorical
+        # dtype + full category set is restored by _optimize_categorical_tags below.
+        _BOOL_TOKENS = {"true": True, "false": False, "1": True, "0": False}
+        _MISSING_TOKENS = {"nan", "none", "<na>", "none", ""}
+        for col in df.columns:
+            name = str(col)
+            if not (name == "discarded" or name.startswith("tag:") or name.startswith("TAG:")):
+                continue
+            s = df[col]
+            if s.dtype != object:
+                continue
+            lowered = s.astype(str).str.strip().str.lower()
+            # 1) missing tokens → NaN
+            missing_mask = lowered.isin(_MISSING_TOKENS)
+            if missing_mask.any():
+                s = s.where(~missing_mask, np.nan)
+                lowered = s.astype(str).str.strip().str.lower()
+            # 2) boolean columns → bool
+            non_null = lowered[s.notna()]
+            if not non_null.empty and set(non_null.unique()).issubset(set(_BOOL_TOKENS)):
+                df[col] = s.where(s.isna(), lowered.map(_BOOL_TOKENS))
+            else:
+                df[col] = s
+
+        # Restore categorical dtypes for tag columns (registry-aware) in memory.
         self._optimize_categorical_tags(df)
 
         return df
@@ -572,12 +625,16 @@ class H5DataFrameStore:
                     with pd.HDFStore(str(self._path), mode="a") as store:
                         existing = pd.DataFrame()
 
-                        # Try to load existing data
+                        # Try to load existing data. A ValueError can surface from a
+                        # pandas categorical-read bug ("operands could not be broadcast")
+                        # on legacy files that stored a categorical column with NaN — catch
+                        # broadly so an unreadable key is recovered (dropped) rather than
+                        # crashing the whole upsert. A backup was taken above.
                         if key in store:
                             try:
                                 existing = store.select(key)
-                            except (TypeError, KeyError) as exc:
-                                logger.warning(f"[H5DataFrameStore] Detected corrupted key {key} during upsert: {exc}")
+                            except Exception as exc:
+                                logger.warning(f"[H5DataFrameStore] Detected unreadable/corrupted key {key} during upsert ({type(exc).__name__}: {exc}); dropping it.")
                                 existing = pd.DataFrame()
                                 try:
                                     store.remove(key)
@@ -648,31 +705,20 @@ class H5DataFrameStore:
 
                         existing = existing[~existing.index.duplicated(keep='last')]
 
-                        # Final safety pass: force any remaining scalar object columns to string
-                        # to prevent PyTables serialization errors caused by merging different dtypes
-                        # (e.g. initializing a new column with bool False, then updating with string 'True')
-                        registered_cat = set(self._tag_registry.keys())
+                        # Persist EVERYTHING as plain strings (no categorical dtype on disk).
+                        #
+                        # Why: pandas' HDF `table` reader has a bug converting a categorical
+                        # column that contains NaN (code == -1) — it raises "operands could
+                        # not be broadcast together". With clean instance rows, tag/discarded
+                        # columns are NaN on instance rows, which triggers exactly that.
+                        # A NaN-sentinel category doesn't help either (mixed-type categories
+                        # are not serializable). So we store plain strings and reconstruct
+                        # categorical dtype / bools / NaN in memory on read
+                        # (_normalize_for_read → bool-restore + _optimize_categorical_tags),
+                        # with the full category set preserved separately in the tag registry.
+                        existing = self._decategorize_for_storage(existing)
                         for col in existing.select_dtypes(include=['object']).columns:
-                            name = str(col)
-                            is_tagish = name.startswith("tag:") or name.startswith("TAG:") or name == "discarded"
-                            # Don't stringify boolean tag/discarded columns — that would turn
-                            # True/False into the strings "True"/"False" and break astype(bool)
-                            # semantics on read. Keep them as boolean categoricals (legacy behavior).
-                            if is_tagish:
-                                tag_name = name.split(":", 1)[1] if ":" in name else name
-                                if tag_name in registered_cat:
-                                    continue  # categorical tag → handled by _apply_registry_categories
-                                non_null = existing[col].dropna()
-                                if not non_null.empty and all(isinstance(v, (bool, np.bool_)) for v in non_null):
-                                    existing[col] = pd.Categorical(existing[col], categories=[False, True])
-                                    continue
                             existing[col] = existing[col].astype(str)
-
-                        # Re-apply categorical tag dtypes (with the full registered
-                        # category set) AFTER the string pass so the complete set of
-                        # allowed categories is persisted by PyTables — and "nan"
-                        # strings produced above collapse back to proper NaN (unset).
-                        existing = self._apply_registry_categories(existing)
 
                         # Remove old key
                         if key in store:

@@ -162,18 +162,29 @@ class WeighlabsWatchdog:
 
         for name, lock in list(self._monitored_locks.items()):
             duration = lock.held_duration()
+            tid = lock.holder_tid()
+
             if duration is None:
+                # Lock is free — log at DEBUG so the heartbeat is always visible.
+                logger.debug("[Watchdog] Lock '%-30s' FREE", name)
                 continue
+
+            lock_timeout = lock.get_timeout()
+            effective_threshold = self._stuck_threshold_s if lock_timeout is None else lock_timeout
+
+            # Always emit a DEBUG heartbeat so every poll cycle is traceable.
+            pct = duration / effective_threshold * 100 if effective_threshold > 0 else 0
+            logger.debug(
+                "[Watchdog] Lock '%-30s' held %.2fs / %.1fs (%.0f%%) by tid=%s",
+                name, duration, effective_threshold, pct, tid,
+            )
 
             # Skip timeout enforcement during evaluation — evaluation duration is variable
             # (from seconds to 30+ minutes) and the user can cancel from the UI.
             if in_evaluation:
                 continue
 
-            lock_timeout = lock.get_timeout()
-            effective_threshold = self._stuck_threshold_s if lock_timeout is None else lock_timeout
             if duration >= effective_threshold:
-                tid = lock.holder_tid()
                 logger.watchdog(  # type: ignore[attr-defined]
                     "[Watchdog] Lock '%s' held for %.1fs by tid=%s — sending interrupt",
                     name, duration, tid,

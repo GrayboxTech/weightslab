@@ -218,8 +218,24 @@ class DataService:
 
     def __init__(self, ctx):
         self._ctx = ctx
-        self._lock = threading.RLock()
+        # Use MonitoredRLock so the gRPC watchdog can observe the holder thread
+        # and how long the lock has been held, and interrupt it if needed.
+        from weightslab.watchdog.lock_monitor import MonitoredRLock
+        self._lock = MonitoredRLock()
+
+        # -- _slowUpdateInternals concurrency primitives -----------------------
+        # Only ONE gRPC worker performs the expensive pull+reindex at a time.
+        # All other workers that arrive while an update is in progress WAIT for
+        # that update to finish (via _update_done Event), then reuse its result
+        # rather than queuing to redo the same work.
+        #
+        # Protocol:
+        #   1. try_acquire(_update_lock, blocking=False)
+        #      → won: clear _update_done, do the update, release, set _update_done
+        #      → lost: _update_done.wait() then return (result already fresh)
         self._update_lock = threading.Lock()
+        self._update_done = threading.Event()
+        self._update_done.set()   # "done" initially so the very first call proceeds
         self._df_manager = get_dataframe()
 
         # init references to the context components
@@ -689,185 +705,6 @@ class DataService:
         except Exception:
             return True
 
-    def _collapse_annotations_to_samples(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
-
-        The shared dataframe manager now expands every sample into one row per
-        instance/annotation using a ``(sample_id, annotation_id)`` MultiIndex.
-        The studio UI and the agent, however, are sample-centric: they expect a
-        single row per sample.  This helper folds the annotation rows back down:
-
-        - Sample-level columns (metadata, target, prediction, tags, ...) are
-          duplicated identically on every annotation row, so we keep the first.
-        - Per-instance columns (those whose value varies between annotations of
-          the same sample, e.g. per-bbox losses written by
-          ``enqueue_instance_batch`` under the ``signals//`` prefix) are:
-            * aggregated to a per-sample scalar on the column itself using the
-              configured method (``self._instance_aggregation`` — "mean" or "max"),
-              so sorting/filtering by that column stays meaningful, and
-            * preserved in full in an ``_instance_signals`` dict column shaped as
-              ``{annotation_id: {column: value, ...}, ...}`` so the user keeps
-              access to every per-instance value.
-        - An ``annotation_count`` column records how many instances each sample has.
-
-        Performance: this is optimised for the common case where most samples have a
-        single instance and only a few are multi-instance. Singletons take the cheap
-        first-occurrence row directly (their single instance value *is* the sample
-        value); the per-instance dict + mean/max aggregation run only over the rows of
-        multi-instance samples. Consequently ``_instance_signals`` is present only for
-        multi-instance samples — for a single-instance sample the value already lives in
-        the collapsed column, so no per-instance information is lost.
-
-        Returns a single-level ``sample_id``-indexed dataframe (origin stays a
-        column). Dataframes that are not annotation-expanded are returned as-is.
-        """
-        if df is None or df.empty:
-            return df
-
-        ANNOT = SampleStatsEx.INSTANCE_ID.value
-        SID = SampleStatsEx.SAMPLE_ID.value
-
-        has_annot_index = isinstance(df.index, pd.MultiIndex) and ANNOT in (df.index.names or [])
-        has_annot_col = ANNOT in df.columns
-
-        if not has_annot_index and not has_annot_col:
-            # Not annotation-expanded (legacy single-instance layout) — nothing to do.
-            return df
-
-        try:
-            # ``get_combined_df`` already hands us a fresh copy, so we never deep-copy
-            # the full annotation-expanded frame. Per-row sample/annotation ids are read
-            # straight off the index (or columns) as numpy arrays — no reindex of ``df``.
-            if has_annot_index:
-                if SID not in (df.index.names or []):
-                    return df  # Cannot locate the sample level — leave untouched.
-                sid_arr = df.index.get_level_values(SID).to_numpy()
-                annot_arr = df.index.get_level_values(ANNOT).to_numpy()
-            else:
-                annot_arr = np.asarray(df[ANNOT].to_numpy())
-                if SID in df.columns:
-                    sid_arr = np.asarray(df[SID].to_numpy())
-                else:
-                    sid_arr = np.asarray(df.index.to_numpy())
-
-            # One row per sample = first occurrence of each sample_id (vectorized in C).
-            # fancy-indexing returns a fresh reduced frame (one row per sample), so the
-            # subsequent column assignments are safe and cheap.
-            first_mask = ~pd.Index(sid_arr).duplicated()
-            base = df.iloc[np.flatnonzero(first_mask)]
-            if has_annot_index:
-                base = base.droplevel(ANNOT)
-            else:
-                base = base.copy()
-                base.index = pd.Index(sid_arr[first_mask], name=SID)
-
-            # Per-sample annotation counts (single O(n) pass, aligned by reindex).
-            counts = pd.Series(sid_arr).value_counts()
-            base["annotation_count"] = counts.reindex(base.index).fillna(1).astype(int)
-
-            if int(counts.max()) > 1:
-                # Optimised for the common case where the overwhelming majority of
-                # samples have a single instance and only a few are multi-instance.
-                # All the per-instance work (variation detection, dict build, mean/max
-                # aggregation) is restricted to the rows of multi-instance samples; the
-                # singleton majority already has its correct value in the first-occurrence
-                # `base` row (a single instance's value *is* the sample value), so it
-                # needs no merging. This keeps the python dict loop proportional to the
-                # number of exceptional rows, not the whole dataset.
-                multi_sids = counts.index[counts.to_numpy() > 1]
-                # pandas' hashtable-backed .isin is O(n); np.isin on object/string
-                # arrays falls back to an O(n*m) python scan and dominates runtime.
-                multi_mask = pd.Index(sid_arr).isin(multi_sids)
-                multi_pos = np.flatnonzero(multi_mask)
-
-                sub = df.iloc[multi_pos]
-                sub_sid = sid_arr[multi_mask]
-                sub_annot = annot_arr[multi_mask]
-
-                # Per-instance columns vary across a sample's annotation rows. They are
-                # the numeric per-annotation signals (floats written by
-                # ``enqueue_instance_batch``); restricting to numeric dtypes lets us run
-                # a single vectorized ``nunique`` pass and skips unhashable array columns.
-                exclude = {
-                    SampleStatsEx.TARGET.value,
-                    SampleStatsEx.PREDICTION.value,
-                    SampleStatsEx.PREDICTION_RAW.value,
-                    SampleStatsEx.ORIGIN.value,
-                    SampleStatsEx.TASK_TYPE.value,
-                    ANNOT, SID, "_instance_signals", "annotation_count",
-                }
-                candidate_cols = [
-                    c for c in df.columns
-                    if c not in exclude and pd.api.types.is_numeric_dtype(df[c].dtype)
-                ]
-
-                per_instance_cols = []
-                if candidate_cols:
-                    # Single groupby over the numeric subset of *multi-instance rows only*.
-                    nun = sub[candidate_cols].groupby(sub_sid, sort=False).nunique()
-                    per_instance_cols = [c for c in candidate_cols if int(nun[c].max()) > 1]
-
-                if per_instance_cols:
-                    # Build {annotation_id: {col: value}} for the multi-instance samples in
-                    # a single pass over the exceptional rows only. Everything the loop
-                    # touches is precomputed as native python lists: ``.tolist()`` yields
-                    # json-serializable, dtype-preserving scalars (no per-cell .item()), the
-                    # NaN test is the float ``v != v`` idiom (no per-cell pd.isna), and
-                    # annotation keys/sample ids are stringified once up front.
-                    # Single-instance samples are not included — their per-instance value is
-                    # already the collapsed column value, so nothing is lost.
-                    col_lists = {c: sub[c].tolist() for c in per_instance_cols}
-                    sub_sid_list = sub_sid.tolist()
-                    try:
-                        aid_keys = [str(int(a)) for a in sub_annot.tolist()]
-                    except (TypeError, ValueError):
-                        aid_keys = [str(a) for a in sub_annot.tolist()]
-
-                    signals_map: dict = {}
-                    for i in range(len(sub_sid_list)):
-                        vals = None
-                        for c in per_instance_cols:
-                            v = col_lists[c][i]
-                            if v is None or v != v:  # None or NaN
-                                continue
-                            if vals is None:
-                                vals = {}
-                            vals[c] = v
-                        if vals:
-                            sid = sub_sid_list[i]
-                            per_sample = signals_map.get(sid)
-                            if per_sample is None:
-                                per_sample = signals_map[sid] = {}
-                            per_sample[aid_keys[i]] = vals
-
-                    if signals_map:
-                        base["_instance_signals"] = pd.Series(signals_map).reindex(base.index)
-
-                    # Fold each per-instance column to a per-sample scalar (mean or max,
-                    # per self._instance_aggregation) for sort/filter — only for the
-                    # multi-instance samples. Singletons keep their first-occurrence value
-                    # (== their single instance value), so we overwrite via `where` only
-                    # where the aggregate exists. The full breakdown stays in
-                    # _instance_signals. One vectorized groupby-agg pass over the sub-frame.
-                    agg_method = getattr(self, "_instance_aggregation", "mean")
-                    try:
-                        aggregated = sub[per_instance_cols].groupby(sub_sid, sort=False).agg(
-                            "max" if agg_method == "max" else "mean"
-                        )
-                        for c in per_instance_cols:
-                            agg_c = aggregated[c].reindex(base.index)
-                            base[c] = agg_c.where(agg_c.notna(), base[c])
-                    except Exception as agg_err:
-                        logger.debug(f"[_collapse_annotations_to_samples] {agg_method} aggregation skipped: {agg_err}")
-
-            if ANNOT in base.columns:
-                base = base.drop(columns=[ANNOT])
-
-            return base
-        except Exception as e:
-            logger.debug(f"[_collapse_annotations_to_samples] collapse failed, returning raw df: {e}")
-            return df
-
     def _pull_into_all_data_view_df(self):
             """Stream stats from the global in-memory dataframe (ledger manager).
 
@@ -884,7 +721,7 @@ class DataService:
                 # The manager now expands samples into one row per (sample_id, annotation_id)
                 # instance. Collapse back to one row per sample for the sample-centric UI/agent
                 # view, nesting per-instance signals into a dict column.
-                df = self._collapse_annotations_to_samples(df)
+                df = self._df_manager.get_collapse_annotations_to_samples_df()
 
                 # Ensure sample_id is a column if it was the index
                 df = safe_reset_index(df)
@@ -1441,14 +1278,8 @@ class DataService:
                         )
                     )
                 # Handle segmentation task type
-                else:
+                elif label_raw is not None:
                     label_arr = to_numpy_safe(label_raw)
-                    if label_arr is None:
-                        try:
-                            label_arr = np.asarray(label_raw)
-                        except Exception:
-                            label_arr = np.array([])
-
                     label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
                     t_label_convert = time.time() - t0_gt_conv
 
@@ -1473,13 +1304,13 @@ class DataService:
                     row.get('num_classes')
                     or (getattr(dataset, "num_classes", None) if dataset else None)
                 )
-                if num_classes is None:
+                if num_classes is None and label_raw is not None:
                     # Fallback: infer from this label
                     if label_arr.size > 0:
                         max_id = int(label_arr.max())
-                        num_classes = max(1, max_id + 1)
+                        num_classes = max(1, max_id) + 1
                     else:
-                        num_classes = 1
+                        num_classes = 2  # Always at least 2 classes for segmentation (foreground/background)
 
                 data_stats.append(
                     create_data_stat(
@@ -2488,25 +2319,131 @@ class DataService:
 
         return "No operation applied"
 
-    def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
-        """
-            This method is responsible for updating the internal dataframe view with the latest data from the manager.
-            It uses a dedicated update lock to ensure only one thread performs the expensive update at a time,
-            while allowing other threads to read the existing dataframe without blocking.
+    # ------------------------------------------------------------------
+    # Lock watchdog helpers
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Lock watchdog helpers  (build on MonitoredRLock from watchdog/)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lock_caller() -> str:
+        """Return 'file:function:line' of the nearest non-data_service frame.
 
-            Args:
-                force (bool): If True, bypass throttling and force an update. Use for critical updates.
-                reset_view (bool): If True, reset any user/agent-applied filters/sorts to show the full dataset. Use when we know the underlying data structure has changed significantly (e.g. new columns added) that could break the current view.
+        Used to identify WHICH gRPC handler (or other caller) is waiting on /
+        holding a lock — visible in DEBUG logs as '[LockWatchdog]' lines.
+        """
+        import traceback
+        frames = traceback.extract_stack()[:-1]
+        for f in reversed(frames):
+            if "data_service" not in f.filename:
+                name = f.filename.rsplit("/", 1)[-1].rsplit(chr(92), 1)[-1]
+                return f"{name}:{f.name}:{f.lineno}"
+        if frames:
+            f = frames[-2]
+            return f"{f.name}:{f.lineno}"
+        return "unknown"
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _watched_lock(self, lock_name: str = "_lock"):
+        """Acquire self._lock (a MonitoredRLock) with caller-identity logging.
+
+        On acquisition: logs thread name, caller, and wait time.
+        On release: logs thread name and hold duration; warns when > 1 s.
+        The MonitoredRLock itself exposes holder_tid() / held_duration() to
+        the existing gRPC watchdog for stuck-lock detection and recovery.
+        """
+        thread = threading.current_thread().name
+        caller = self._lock_caller()
+        t0 = time.time()
+        self._lock.acquire()
+        waited_ms = (time.time() - t0) * 1000
+        logger.debug(
+            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            lock_name, thread, caller, waited_ms,
+        )
+        t_held = time.time()
+        try:
+            yield
+        finally:
+            held_ms = (time.time() - t_held) * 1000
+            self._lock.release()
+            if held_ms > 1000:
+                logger.warning(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    lock_name, thread, held_ms,
+                )
+            else:
+                logger.debug(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    lock_name, thread, held_ms,
+                )
+
+    # ------------------------------------------------------------------
+    # Main update method
+    # ------------------------------------------------------------------
+    def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
+        """Update the internal dataframe view with the latest data from the manager.
+
+        Concurrency model (thundering-herd prevention):
+          • Only ONE gRPC worker runs the expensive pull+reindex at a time
+            (_update_lock, non-blocking acquire).
+          • Workers that lose the race WAIT for the in-progress update to finish
+            (_update_done Event) and then return immediately, reusing the fresh
+            result — they do NOT queue up to redo the same work.
+          • _update_done stays SET when idle so the very first caller always
+            proceeds without waiting.
+
+        Lock watchdog:
+          Every acquisition / release of _update_lock is logged with the holding
+          thread name, caller function, wait time, and hold duration so stuck
+          workers are immediately visible in the logs.
+
+        Args:
+            force: If True, bypass the 10-second throttle and force an update.
+            reset_view: If True, reset user/agent filters and show the full dataset.
         """
         current_time = time.time()
 
-        # Fast throttling check
-        if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+        # Fast throttle — avoids even trying to acquire the lock when data is fresh.
+        if not force and self._last_internals_update_time is not None and \
+                current_time - self._last_internals_update_time <= 10:
             return
 
-        with self._update_lock:
-            # Re-check throttling inside lock to avoid redundant updates
-            if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+        # --- Try to become the single updater ---
+        t_wait_start = time.time()
+        acquired = self._update_lock.acquire(blocking=False)
+
+        if not acquired:
+            # Another worker is already updating.  Wait for it to finish (bounded),
+            # then return — the caller will read the already-refreshed view.
+            thread = threading.current_thread().name
+            logger.debug(
+                "[LockWatchdog] _update_lock CONTENDED — %s waiting for in-progress update",
+                thread,
+            )
+            self._update_done.wait(timeout=15)
+            logger.debug("[LockWatchdog] _update_lock WAIT DONE — %s continuing with fresh view", thread)
+            return
+
+        # We won the race.
+        waited_ms = (time.time() - t_wait_start) * 1000
+        thread = threading.current_thread().name
+        caller = self._lock_caller()
+        logger.debug(
+            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            "_update_lock[_slowUpdateInternals]", thread, caller, waited_ms,
+        )
+        # Signal to latecomers that an update is now in progress.
+        self._update_done.clear()
+        t_held_start = time.time()
+
+        try:
+            # Re-check throttle now that we hold the lock (avoids double work when two
+            # workers raced and the first already updated while the second was acquiring).
+            if not force and self._last_internals_update_time is not None and \
+                    time.time() - self._last_internals_update_time <= 10:
                 return
 
             updated_df = self._pull_into_all_data_view_df()
@@ -2523,66 +2460,79 @@ class DataService:
 
             # Ensure default columns exist
             if self._compute_natural_sort and "signals.defaults.natural" not in updated_df.columns:
-                 updated_df["signals.defaults.natural"] = np.nan
+                updated_df["signals.defaults.natural"] = np.nan
 
             if SampleStatsEx.DISCARDED.value not in updated_df.columns:
-                 updated_df[SampleStatsEx.DISCARDED.value] = False
+                updated_df[SampleStatsEx.DISCARDED.value] = False
 
             if is_filtered and current_all_df is not None:
                 # The user has applied a custom view (Filter, Sort, or Aggregation).
                 try:
-                    # Use intersection to detect rows we are currently watching in the filtered view
                     common_indices = current_all_df.index.intersection(updated_df.index)
-
                     if len(common_indices) > 0:
-                         # Force the new data to conform to the USER'S current view (rows/order).
-                         target_order = current_all_df.index
-                         updated_df = updated_df.reindex(target_order)
+                        target_order = current_all_df.index
+                        updated_df = updated_df.reindex(target_order)
                     else:
-                         # Aggregation/Transformation - skip auto-update.
-                         return
+                        # Aggregation/Transformation — skip auto-update.
+                        return
                 except Exception as e:
                     logger.debug(f"[_slowUpdateInternals] Error matching indices for filtered view: {e}")
                     return
 
             elif current_all_df is not None and not current_all_df.empty:
-                # Standard/Unfiltered View.
-                # Preserves sticky sort and appends new samples.
+                # Standard/Unfiltered View: preserve sticky sort, append new samples.
                 if not current_all_df.index.is_monotonic_increasing:
-                     try:
-                         key_cols = [SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value]
+                    try:
+                        key_cols = [SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value]
 
-                         old_df_keys = safe_reset_index(current_all_df)
-                         new_df_keys = safe_reset_index(updated_df)
+                        old_df_keys = safe_reset_index(current_all_df)
+                        new_df_keys = safe_reset_index(updated_df)
 
-                         if not all(col in old_df_keys.columns for col in key_cols) or not all(col in new_df_keys.columns for col in key_cols):
-                             raise KeyError(f"Missing key columns for reindex: required={key_cols}")
+                        if not all(col in old_df_keys.columns for col in key_cols) or \
+                                not all(col in new_df_keys.columns for col in key_cols):
+                            raise KeyError(f"Missing key columns for reindex: required={key_cols}")
 
-                         old_keys = list(old_df_keys[key_cols].itertuples(index=False, name=None))
-                         new_keys = list(new_df_keys[key_cols].itertuples(index=False, name=None))
+                        old_keys = list(old_df_keys[key_cols].itertuples(index=False, name=None))
+                        new_keys = list(new_df_keys[key_cols].itertuples(index=False, name=None))
 
-                         new_key_set = set(new_keys)
-                         kept_keys = [key for key in old_keys if key in new_key_set]
+                        new_key_set = set(new_keys)
+                        kept_keys = [key for key in old_keys if key in new_key_set]
 
-                         old_key_set = set(old_keys)
-                         newly_added_keys = [key for key in new_keys if key not in old_key_set]
+                        old_key_set = set(old_keys)
+                        newly_added_keys = [key for key in new_keys if key not in old_key_set]
 
-                         full_order = kept_keys + newly_added_keys
-                         unique_order = pd.MultiIndex.from_tuples(full_order, names=key_cols).unique()
+                        full_order = kept_keys + newly_added_keys
+                        unique_order = pd.MultiIndex.from_tuples(full_order, names=key_cols).unique()
 
-                         keyed_updated = new_df_keys.set_index(key_cols, drop=True)
-                         updated_df = keyed_updated.reindex(unique_order)
-                     except Exception as e:
-                         logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
-                         return
+                        keyed_updated = new_df_keys.set_index(key_cols, drop=True)
+                        updated_df = keyed_updated.reindex(unique_order)
+                    except Exception as e:
+                        logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
+                        return
 
             # Deduplicate before saving back to prevent index corruption
             if updated_df.index.has_duplicates:
-                 updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
+                updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
 
             # Atomic swap to make the new view available to readers
             self._all_datasets_df = updated_df
             self._last_internals_update_time = current_time
+
+        finally:
+            held_ms = (time.time() - t_held_start) * 1000
+            self._update_lock.release()
+            if held_ms > 1000:
+                logger.warning(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
+                )
+            else:
+                logger.debug(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
+                )
+            # Unblock all workers that were waiting on this update.
+            self._update_done.set()
 
     def _is_metadata_only_request(self, request) -> bool:
         """True when caller requests metadata columns only, without image payloads."""
@@ -2848,7 +2798,7 @@ class DataService:
                 )
 
             # Handle multi-instance signal merging if needed
-            df_slice, signal_dict_mapping = self._merge_multi_instance_signals(df_slice)
+            df_slice, _ = self._merge_multi_instance_signals(df_slice)
 
             logger.debug(
                 "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)
@@ -3098,7 +3048,7 @@ class DataService:
 
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
-            with self._lock:
+            with self._watched_lock("_lock[ApplyDataQuery/counts]"):
                  df = self._all_datasets_df
                  return self._build_success_response(
                     df=df,
@@ -3118,7 +3068,7 @@ class DataService:
                 operations = self._parse_direct_query(request.query)
 
                 # Apply operations with lock
-                with self._lock:
+                with self._watched_lock("_lock[ApplyDataQuery/ops]"):
                     # If this is JUST a view-sort for a specific page, DO NOT force an internal refresh
                     # as that wipes out the existing slice/sort state before we try to modify the next slice.
                     is_only_view_sort = len(operations) == 1 and operations[0].get("function") == "df.sort_view_slice"
@@ -3356,38 +3306,12 @@ class DataService:
                     if hasattr(checkpoint_manager, "update_experiment_hash"):
                         checkpoint_manager.update_experiment_hash()
                 snapshot_path = checkpoint_manager.save_data_snapshot(force_new_state=True)
+                logger.info(f"[EditDataSample] Data snapshot saved to: {snapshot_path}")
                 snapshot_saved = snapshot_path is not None
             except Exception as snapshot_error:
                 logger.warning(f"[EditDataSample] Manual save snapshot failed: {snapshot_error}")
 
         self._slowUpdateInternals(force=True)
-
-        # Force sync of all registered signals AFTER data has been dumped
-        if force_enable_h5:
-            try:
-                from weightslab import _REGISTERED_SIGNALS
-                if _REGISTERED_SIGNALS and self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                    logger.info(f"[Manual Save] Data dumped successfully. Force-syncing {len(_REGISTERED_SIGNALS)} registered signals...")
-                    from weightslab import compute_signals
-                    # Get unique origins/splits from the dataframe
-                    try:
-                        if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
-                            splits = self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist()
-                        elif isinstance(self._all_datasets_df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
-                            splits = self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist()
-                        else:
-                            splits = []
-
-                        for split_name in splits:
-                            try:
-                                compute_signals(dataset_or_loader=split_name, origin=split_name, signals=list(_REGISTERED_SIGNALS.keys()))
-                                logger.info(f"[Manual Save] Force-synced {len(_REGISTERED_SIGNALS)} signals for split: {split_name}")
-                            except Exception as sig_error:
-                                logger.warning(f"[Manual Save] Failed to sync signals for split '{split_name}': {sig_error}")
-                    except Exception as origin_error:
-                        logger.warning(f"[Manual Save] Could not extract splits from dataframe: {origin_error}")
-            except Exception as sync_error:
-                logger.warning(f"[Manual Save] Signal sync after dump failed: {sync_error}")
 
         if snapshot_saved:
             return pb2.DataEditsResponse(
@@ -3440,7 +3364,7 @@ class DataService:
                     message="Missing source metadata name to copy.",
                 )
 
-            with self._lock:
+            with self._watched_lock("_lock[EditDataSample/__copy_metadata__]"):
                 try:
                     self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
@@ -3511,7 +3435,7 @@ class DataService:
                     message="Missing metadata name to delete.",
                 )
 
-            with self._lock:
+            with self._watched_lock("_lock[EditDataSample/delete-col]"):
                 try:
                     self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
@@ -3570,7 +3494,7 @@ class DataService:
         # =====================================================================
         # Process tag edits using the new column-based tag system
         # =====================================================================
-        with self._lock:
+        with self._watched_lock("_lock[EditDataSample/tag-discard]"):
             try:
                 if request.samples_ids and self._df_manager is not None:
                     updates_by_origin = {}

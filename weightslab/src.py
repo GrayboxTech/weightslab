@@ -33,8 +33,8 @@ from weightslab.utils.tools import detach_to_cpu
 from weightslab.utils.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
-from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
+from weightslab.components.global_monitoring import pause_controller as pause_ctrl
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
@@ -464,13 +464,19 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     fwd_params = _fwd_params(original_forward)
     wl_kw = {k: kw.pop(k) for k in _WL_KWARGS if k in kw and k not in fwd_params}
 
+    # Extract torch function parameters
     _ = wl_kw.get('flag')
     preds_raw = a[0] if len(a) > 0 else None
+
+    # User parameters
     batch_ids = wl_kw.get('batch_ids')
     group_ids = wl_kw.get('group_id')
     batch_scalar = wl_kw.get('signals')
     preds = wl_kw.get('preds')
     targets = wl_kw.get('targets') if 'targets' in wl_kw else None
+
+    # Make sure we always have targets if they are passed positionally (for backward compatibility), but allow them to be overridden by keyword if both are present
+    targets = a[1] if len(a) > 1 and targets is None else targets
 
     # Original forward of the signal
     out = original_forward(*a, **kw)
@@ -516,6 +522,8 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                 break
         if instance_batch_idx is None and 'batch_idx' in kw:
             instance_batch_idx = kw['batch_idx']
+        elif targets is not None:
+            instance_batch_idx = [i for i, tars in enumerate(targets) for _ in tars]  # Auto determine batch_idx from targets if not explicitly provided (assumes targets is list of lists of annotations)
 
     # If output is a dict (from PerInstanceDetectionLoss), pick 'sample'
     # for downstream per-sample logging while keeping the original dict for
@@ -545,6 +553,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                 signals={reg_name: instance_values},
                 batch_ids=batch_ids,
                 batch_idx=instance_batch_idx,
+                targets=targets,
                 step=step,
                 origin=origin_resolved,
                 log=False,  # already logged sample-level above
@@ -1052,6 +1061,18 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 # ##############################################################################################################
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
+
+def start_training(timeout: int = None) -> None:
+    """Start WeightsLab training mode with optional background services.
+
+    Args:
+        timeout: Maximum number of seconds to keep running. If ``None``, runs
+            until interrupted.
+    """
+    if timeout is not None and isinstance(timeout, int) and timeout > 0:
+        logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
+        time.sleep(timeout)
+    pause_ctrl.resume()  # Ensure we're not paused if start_training is called after serve
 
 def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """Start WeightsLab services.
@@ -1563,7 +1584,7 @@ def save_signals(
     targets: th.Tensor | np.ndarray | dict = None,
     preds: th.Tensor | np.ndarray | dict = None,
     step: int | None = None,
-    log: bool = True
+    log: bool = False
 ):
     """
         Save data statistics to the tracked dataset.
@@ -1630,7 +1651,9 @@ def save_signals(
     def normalize(x):
         if x is None:
             return None
-        if isinstance(x, list):
+        if isinstance(x, list) and isinstance(x[0], list):
+            return [np.max(np.array([to_numpy(t) for t in row]), axis=0) for row in x]
+        elif isinstance(x, list):
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):
             return to_numpy(x)
@@ -1651,15 +1674,15 @@ def save_signals(
     # Processing signals
     if isinstance(signals, dict):
         losses_data = {
-            'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
-                v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v)
+            'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
+                v.detach().cpu().numpy() if hasattr(v, 'detach') else normalize(v)
             )
             for k, v in signals.items()
         }
     elif signals is not None and isinstance(signals, (th.Tensor, np.ndarray, list)):
         losses_data = {
-            "signals//default": (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
-                signals.detach().cpu().numpy() if hasattr(signals, 'detach') else np.asarray(signals)
+            "signals//default": (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
+                signals.detach().cpu().numpy() if hasattr(signals, 'detach') else normalize(signals)
             )
         }
     else:
@@ -1695,7 +1718,8 @@ def save_instance_signals(
     batch_idx: th.Tensor | np.ndarray | list,
     step: int | None = None,
     origin: str | None = None,
-    log: bool = True,
+    targets: th.Tensor | np.ndarray | dict = None,
+    log: bool = False,
 ):
     """Save per-instance (per-annotation) signals to the dataframe.
 
@@ -1711,6 +1735,7 @@ def save_instance_signals(
             (length num_instances_total, values in [0, B)).
         step: Current training step (optional).
         origin: Dataset split (e.g. 'train', 'val').
+        targets: Target values for each instance (optional).
         log: Whether to also push to the logger (per-sample aggregated mean).
     """
     global DATAFRAME_M
@@ -1734,7 +1759,9 @@ def save_instance_signals(
     if len(batch_idx_np) == 0:
         return
 
-    # Build per-instance sample_ids and annotation_ids
+    # Build per-instance sample_ids and annotation_ids.
+    # Annotation ids are 1-based: instance_id 0 is reserved for the per-sample row,
+    # so the k-th instance of a sample is stored at annotation_id k+1 (1, 2, ...).
     instance_sample_ids: list[str] = []
     instance_annotation_ids: list[int] = []
     counters: Dict[int, int] = {}
@@ -1742,10 +1769,10 @@ def save_instance_signals(
         pos = int(pos)
         if pos < 0 or pos >= len(batch_ids_list):
             continue
-        aid = counters.get(pos, 0)
+        aid = counters.get(pos, 0) + 1  # 1-based (instance_id 0 = sample row)
         instance_sample_ids.append(batch_ids_list[pos])
         instance_annotation_ids.append(aid)
-        counters[pos] = aid + 1
+        counters[pos] = aid
 
     if not instance_sample_ids:
         return
@@ -1791,6 +1818,7 @@ def save_instance_signals(
         annotation_ids=instance_annotation_ids,
         losses=losses_data,
         step=step,
+        targets=targets,
         origin=active_origin,
     )
 
@@ -2595,6 +2623,10 @@ def run_pending_evaluation(
     logger.info(f"{'='*70}")
     logger.info(f"  Split:        {split_name}")
     logger.info(f"  Model Step:   {model_age}")
+    logger.info(f"  Tags:         {tags}")
+    logger.info(f"  Total Samples: {filtered_count if filtered_count is not None else 'unknown'}")
+    logger.info(f"  Total Batches: {total_batches}")
+    logger.info(f"  Eval Hash:    {eval_hash}")
 
     if result:
         logger.info(f"  Metrics:\n")
@@ -2685,12 +2717,8 @@ def _build_eval_allow_list(loader_if, tags: list, split_name: str) -> set:
             # Try to filter by origin matching split_name (either exact or prefix match)
             origin_level = filtered.index.get_level_values(SampleStatsEx.ORIGIN.value) \
                 if SampleStatsEx.ORIGIN.value in filtered.index.names else \
-                filtered.index.get_level_values(0)
-            origin_mask = origin_level == split_name
-            if not origin_mask.any():
-                # Try prefix: "train" matches "train_loader"
-                origin_mask = pd.Series(origin_level).str.startswith(split_name.replace("_loader", "")).values
-            sub = filtered[origin_mask]
+                filtered[filtered[SampleStatsEx.ORIGIN.value] == split_name].index.get_level_values(0)
+            sub = filtered.loc[origin_level]
             # Extract sample_id level
             sid_level_name = SampleStatsEx.SAMPLE_ID.value \
                 if SampleStatsEx.SAMPLE_ID.value in sub.index.names else None

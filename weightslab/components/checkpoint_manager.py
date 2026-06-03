@@ -163,10 +163,9 @@ class CheckpointManager:
             collected_tags = {}
 
             # Collect discarded series
+            df_view = dfm.get_df_view().xs(0, level='annotation_id')
             collected_discarded.update(
-                dfm.get_df_view(
-                    SampleStatsEx.DISCARDED.value
-                ).to_dict()
+                df_view[SampleStatsEx.DISCARDED.value].to_dict()
             )
 
             # Collect tag series (main tag column + prefixed columns)
@@ -174,7 +173,7 @@ class CheckpointManager:
             tag_cols_to_capture = [col for col in df_columns if col == SampleStatsEx.TAG.value or col.startswith(f"{SampleStatsEx.TAG.value}:")]
 
             for col in tag_cols_to_capture:
-                 col_data = dfm.get_df_view(col)
+                 col_data = df_view[col]
                  if isinstance(col_data, pd.Series):
                      collected_tags[col] = col_data.to_dict()
                  elif isinstance(col_data, pd.DataFrame) and col in col_data.columns:
@@ -1117,6 +1116,7 @@ class CheckpointManager:
             available_cols = [
                 col for col in df.columns if col in [
                     SampleStatsEx.SAMPLE_ID.value,
+                    SampleStatsEx.INSTANCE_ID.value,
                     SampleStatsEx.DISCARDED.value
                 ] or col.startswith(SampleStatsEx.TAG.value)
             ]

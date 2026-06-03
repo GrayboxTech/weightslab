@@ -43,6 +43,7 @@ def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
         # All levels already present as columns — nothing to promote.
         return df
     return df.reset_index(level=missing)
+
 def _random_preds_like_batch(batch, batch_size, device=None):
     """Generate random (N, 6) predictions in [x1,y1,x2,y2,cls,score] normalized format.
 

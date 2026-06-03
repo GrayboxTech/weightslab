@@ -73,6 +73,107 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         self.assertEqual(mgr._buffer["10"][SampleStats.Ex.LAST_SEEN.value], 4)
 
 
+    def test_enqueue_instance_batch_buffers_records(self):
+        """enqueue_instance_batch should enqueue per-instance records into the SAME
+        buffer (keyed by (sample_id, annotation_id)) without touching the df."""
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        with patch.object(mgr, "flush_async") as flush_async:
+            # Instances live at annotation_id >= 1 (instance_id 0 is the sample row).
+            mgr.enqueue_instance_batch(
+                sample_ids=["7", "7", "9"],
+                annotation_ids=[1, 2, 1],
+                losses={"signal:bbox_loss": np.array([0.1, 0.2, 0.3])},
+                targets=[np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8]), np.array([9, 10, 11, 12])],
+                step=3,
+                origin="train",
+            )
+
+        self.assertTrue(flush_async.called)
+        # Buffered under composite keys, NOT mutating the dataframe yet.
+        self.assertEqual(len(mgr._buffer), 3)
+        self.assertIn(("7", 1), mgr._buffer)
+        self.assertIn(("7", 2), mgr._buffer)
+        self.assertIn(("9", 1), mgr._buffer)
+        rec = mgr._buffer[("7", 2)]
+        self.assertEqual(rec[SampleStats.Ex.INSTANCE_ID.value], 2)
+        self.assertEqual(rec["signal:bbox_loss"], 0.2)
+        self.assertEqual(rec[SampleStats.Ex.LAST_SEEN.value], 3)
+        self.assertIn(SampleStats.Ex.TARGET.value, rec)
+        self.assertTrue(mgr._df.empty)  # df untouched until flush
+
+    def test_flush_applies_instance_records(self):
+        """Flushing instance records writes per-(sample_id, annotation_id) values."""
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        # 3-instance sample → 4 rows: instance_id 0 (sample) + 1,2,3 (instances).
+        target = [np.array([10, 20, 30, 40]), np.array([50, 60, 70, 80]), np.array([90, 100, 110, 120])]
+        df = pd.DataFrame([{"sample_id": 1, "origin": "train", SampleStats.Ex.TARGET.value: target}]).set_index("sample_id")
+        mgr.upsert_df(df, origin="train")
+
+        mgr.enqueue_instance_batch(
+            sample_ids=["1", "1", "1"],
+            annotation_ids=[1, 2, 3],
+            losses={"signal:il": np.array([0.5, 0.6, 0.7])},
+            step=2,
+            origin="train",
+        )
+        mgr.flush()
+
+        result = mgr.get_df_view()
+        self.assertEqual(len(result), 4)  # sample row (0) + 3 instance rows
+        self.assertAlmostEqual(float(result.loc[("1", 1), "signal:il"]), 0.5)
+        self.assertAlmostEqual(float(result.loc[("1", 2), "signal:il"]), 0.6)
+        self.assertAlmostEqual(float(result.loc[("1", 3), "signal:il"]), 0.7)
+
+    def test_mixed_sample_and_instance_buffer_flush(self):
+        """The flush must apply BOTH per-sample (instance_id 0) and per-instance records."""
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        # 2-instance sample → 3 rows: instance_id 0 (sample) + 1,2 (instances).
+        target = [np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8])]
+        df = pd.DataFrame([{"sample_id": 1, "origin": "train", SampleStats.Ex.TARGET.value: target}]).set_index("sample_id")
+        mgr.upsert_df(df, origin="train")
+
+        # Per-sample signal → lands on the canonical sample row (instance_id 0).
+        mgr.enqueue_batch(
+            sample_ids=["1"], preds_raw=None, preds=None,
+            losses={"loss": np.array([0.9])}, step=5,
+        )
+        # Per-instance signal → one value per instance row (instance_id >= 1).
+        mgr.enqueue_instance_batch(
+            sample_ids=["1", "1"], annotation_ids=[1, 2],
+            losses={"signal:il": np.array([0.2, 0.8])}, step=5, origin="train",
+        )
+        mgr.flush()
+
+        result = mgr.get_df_view()
+        self.assertEqual(len(result), 3)
+        # Per-sample value on instance_id 0 only (not broadcast to instance rows).
+        self.assertAlmostEqual(float(result.loc[("1", 0), "loss"]), 0.9)
+        self.assertTrue(pd.isna(result.loc[("1", 1), "loss"]))
+        # Per-instance values on their specific instance rows.
+        self.assertAlmostEqual(float(result.loc[("1", 1), "signal:il"]), 0.2)
+        self.assertAlmostEqual(float(result.loc[("1", 2), "signal:il"]), 0.8)
+
+    def test_get_combined_df_surfaces_buffered_instance(self):
+        """Buffered (unflushed) per-instance values are visible via get_combined_df."""
+        mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
+
+        target = [np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8])]
+        df = pd.DataFrame([{"sample_id": 1, "origin": "train", SampleStats.Ex.TARGET.value: target}]).set_index("sample_id")
+        mgr.upsert_df(df, origin="train")
+
+        with patch.object(mgr, "flush_async"):
+            mgr.enqueue_instance_batch(
+                sample_ids=["1", "1"], annotation_ids=[1, 2],
+                losses={"signal:il": np.array([0.11, 0.22])}, origin="train",
+            )
+        # Still buffered (flush_async patched out), but should be merged into the view.
+        combined = mgr.get_combined_df()
+        self.assertAlmostEqual(float(combined.loc[("1", 1), "signal:il"]), 0.11)
+        self.assertAlmostEqual(float(combined.loc[("1", 2), "signal:il"]), 0.22)
+
     def test_multi_instance_expansion(self):
         mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
 
@@ -93,9 +194,9 @@ class TestDataFrameManagerUnit(unittest.TestCase):
 
         mgr.upsert_df(df, origin="train")
 
-        # Should have 3 rows in the dataframe (one per instance)
+        # 3 instances → 4 rows: instance_id 0 (sample row) + 1,2,3 (the instances).
         result_df = mgr.get_df_view()
-        self.assertEqual(len(result_df), 3)
+        self.assertEqual(len(result_df), 4)
 
         # Check multi-index structure
         self.assertTrue(isinstance(result_df.index, pd.MultiIndex))
@@ -106,18 +207,19 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         sample_ids = result_df.index.get_level_values(0)
         self.assertTrue((sample_ids == "1").all())
 
-        # Check that annotation_ids are 0, 1, 2
+        # annotation_ids: 0 (sample) then 1, 2, 3 (instances)
         annotation_ids = result_df.index.get_level_values(1)
-        np.testing.assert_array_equal(annotation_ids, [0, 1, 2])
+        np.testing.assert_array_equal(annotation_ids, [0, 1, 2, 3])
 
-        # Check that sample-level metadata is duplicated on all rows
-        self.assertEqual(result_df["metadata"].iloc[0], "scene_urban")
-        self.assertEqual(result_df["metadata"].iloc[1], "scene_urban")
-        self.assertEqual(result_df["metadata"].iloc[2], "scene_urban")
-
-        self.assertEqual(result_df["brightness"].iloc[0], 0.75)
-        self.assertEqual(result_df["brightness"].iloc[1], 0.75)
-        self.assertEqual(result_df["brightness"].iloc[2], 0.75)
+        # Sample-level metadata lives ONLY on the sample row (instance_id 0);
+        # instance rows (1..N) carry only their target, everything else empty.
+        self.assertEqual(result_df.loc[("1", 0), "metadata"], "scene_urban")
+        self.assertEqual(result_df.loc[("1", 0), "brightness"], 0.75)
+        for k in (1, 2, 3):
+            self.assertTrue(pd.isna(result_df.loc[("1", k), "metadata"]))
+            self.assertTrue(pd.isna(result_df.loc[("1", k), "brightness"]))
+            # ...but the instance's target IS present.
+            self.assertIsNotNone(result_df.loc[("1", k), SampleStats.Ex.TARGET.value])
 
     def test_multi_instance_different_counts(self):
         mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
@@ -139,29 +241,28 @@ class TestDataFrameManagerUnit(unittest.TestCase):
 
         result_df = mgr.get_df_view()
 
-        # Total rows: 2 + 3 + 1 = 6
-        self.assertEqual(len(result_df), 6)
+        # Multi-instance samples get a sample row (instance_id 0) + one row per instance;
+        # a single-array target is the sample's own target (instance_id 0 only).
+        # Total rows: (1+2) + (1+3) + 1 = 3 + 4 + 1 = 8
+        self.assertEqual(len(result_df), 8)
 
-        # Check sample 1 has annotation_ids 0, 1
+        # Sample 1 (2 instances): instance_id 0 (sample) + 1, 2
         sample1 = result_df.loc["1"]
-        if isinstance(sample1, pd.Series):
-            # Only 1 row for sample 1 (shouldn't happen here, but handle it)
-            pass
-        else:
-            self.assertEqual(len(sample1), 2)
-            np.testing.assert_array_equal(sample1.index.tolist(), [0, 1])
+        self.assertEqual(len(sample1), 3)
+        np.testing.assert_array_equal(sample1.index.tolist(), [0, 1, 2])
 
-        # Check sample 2 has annotation_ids 0, 1, 2
+        # Sample 2 (3 instances): instance_id 0 + 1, 2, 3
         sample2 = result_df.loc["2"]
-        self.assertEqual(len(sample2), 3)
-        np.testing.assert_array_equal(sample2.index.tolist(), [0, 1, 2])
+        self.assertEqual(len(sample2), 4)
+        np.testing.assert_array_equal(sample2.index.tolist(), [0, 1, 2, 3])
 
-        # Check sample 3 has annotation_id 0
+        # Sample 3 (single-array target): only the sample row (instance_id 0)
         sample3 = result_df.loc["3"]
         if isinstance(sample3, pd.Series):
             self.assertEqual(sample3.name, 0)
         else:
             self.assertEqual(len(sample3), 1)
+            np.testing.assert_array_equal(sample3.index.tolist(), [0])
 
 
     def test_categorical_memory_optimization(self):
@@ -242,14 +343,14 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         # All index entries must be tuples (no mixed types)
         self.assertTrue(all(isinstance(idx, tuple) for idx in result.index))
 
-        # Per-sample value is broadcast to every annotation of each sample
+        # Per-sample value lands on the canonical sample row (instance_id 0) only.
         col = "signals//train/clsf_sample"
         self.assertIn(col, result.columns)
         self.assertAlmostEqual(result.loc[("1", 0), col], 0.42)
-        self.assertAlmostEqual(result.loc[("1", 1), col], 0.42)
-        self.assertAlmostEqual(result.loc[("1", 2), col], 0.42)
         self.assertAlmostEqual(result.loc[("2", 0), col], 0.73)
-        self.assertAlmostEqual(result.loc[("2", 1), col], 0.73)
+        # Instance rows (>=1) are NOT written by the per-sample path.
+        self.assertTrue(pd.isna(result.loc[("1", 1), col]))
+        self.assertTrue(pd.isna(result.loc[("1", 2), col]))
 
         # Second flush should not crash with "cannot reindex on an axis with duplicate labels"
         mgr.enqueue_batch(
@@ -261,8 +362,6 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         mgr.flush()  # Would raise if bug regressed
         result = mgr.get_df_view()
         self.assertAlmostEqual(result.loc[("1", 0), col], 0.99)
-        self.assertAlmostEqual(result.loc[("1", 1), col], 0.99)
-        self.assertAlmostEqual(result.loc[("1", 2), col], 0.99)
 
     def test_normalize_arrays_for_storage_handles_multi_index_row(self):
         """_normalize_arrays_for_storage must extract sample_id from MultiIndex tuples.
@@ -295,7 +394,8 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         self.assertEqual(captured.get('sid'), "12")
 
     def test_enqueue_instance_batch_writes_per_annotation(self):
-        """enqueue_instance_batch writes one signal value per (sample_id, annotation_id)."""
+        """enqueue_instance_batch buffers one signal value per (sample_id, annotation_id);
+        the flush writes them to the correct rows."""
         mgr = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=False)
 
         # Seed multi-instance dataframe: sample 1 has 3 instances, sample 2 has 2
@@ -307,23 +407,24 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         ]).set_index("sample_id")
         mgr.upsert_df(df, origin="train")
 
-        # Write per-instance IoU signals
+        # Enqueue per-instance IoU signals at instance_id >= 1 (0 = sample row), then flush.
         mgr.enqueue_instance_batch(
             sample_ids=["1", "1", "1", "2", "2"],
-            annotation_ids=[0, 1, 2, 0, 1],
+            annotation_ids=[1, 2, 3, 1, 2],
             losses={"signals//train/iou_instance": np.array([0.9, 0.8, 0.7, 0.5, 0.6])},
             step=5,
             origin="train",
         )
+        mgr.flush()
 
         result = mgr.get_df_view()
         self.assertIn("signals//train/iou_instance", result.columns)
-        # Each instance should have its IoU value at (sample_id, annotation_id)
-        self.assertAlmostEqual(result.loc[("1", 0), "signals//train/iou_instance"], 0.9)
-        self.assertAlmostEqual(result.loc[("1", 1), "signals//train/iou_instance"], 0.8)
-        self.assertAlmostEqual(result.loc[("1", 2), "signals//train/iou_instance"], 0.7)
-        self.assertAlmostEqual(result.loc[("2", 0), "signals//train/iou_instance"], 0.5)
-        self.assertAlmostEqual(result.loc[("2", 1), "signals//train/iou_instance"], 0.6)
+        # Each instance has its IoU value at (sample_id, annotation_id >= 1).
+        self.assertAlmostEqual(result.loc[("1", 1), "signals//train/iou_instance"], 0.9)
+        self.assertAlmostEqual(result.loc[("1", 2), "signals//train/iou_instance"], 0.8)
+        self.assertAlmostEqual(result.loc[("1", 3), "signals//train/iou_instance"], 0.7)
+        self.assertAlmostEqual(result.loc[("2", 1), "signals//train/iou_instance"], 0.5)
+        self.assertAlmostEqual(result.loc[("2", 2), "signals//train/iou_instance"], 0.6)
 
 
 if __name__ == "__main__":

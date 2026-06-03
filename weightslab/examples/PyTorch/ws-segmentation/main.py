@@ -1,21 +1,18 @@
 import os
 import time
+import numpy as np
+import tqdm
+import yaml
+import torch
 import logging
 import tempfile
 import itertools
 
-import tqdm
-import yaml
-import torch
-import numpy as np
+import weightslab as wl
 
 from torch import nn, optim
-from torchvision import transforms
-from torchmetrics import JaccardIndex
-from torch.utils.data import Dataset
-from PIL import Image
 
-import weightslab as wl
+from torchmetrics import JaccardIndex
 
 from weightslab.utils.logger import LoggerQueue
 from weightslab.components.global_monitoring import (
@@ -23,6 +20,13 @@ from weightslab.components.global_monitoring import (
     guard_testing_context,
 )
 
+from utils.data import BDD100kSegDataset, seg_collate
+from utils.model import SmallUNet
+from utils.criterions import (
+    custom_signals,
+    PerSampleDice, PerInstanceDice,
+    PerSampleBCE, PerInstanceBCE,
+)
 
 # Setup loggers
 logging.basicConfig(level=logging.ERROR)
@@ -30,294 +34,114 @@ logging.getLogger("PIL").setLevel(logging.INFO)
 
 
 # =============================================================================
-# Small UNet-ish segmentation model
-# =============================================================================
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-class DoubleConv(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-
-class SmallUNet(nn.Module):
-    def __init__(self, in_channels=3, num_classes=6, image_size=256):
-        super().__init__()
-        # For WeightsLab
-        self.task_type = "segmentation"
-        self.num_classes = num_classes
-        self.class_names = ["Background", "Ego Road", "Driveable Area", "Lane Line 1", "Lane Line 2", "Lane Line 3"]
-        self.input_shape = (1, in_channels, image_size, image_size)
-
-        self.enc1 = DoubleConv(in_channels, 32)
-        self.pool1 = nn.MaxPool2d(2)
-        self.enc2 = DoubleConv(32, 64)
-        self.pool2 = nn.MaxPool2d(2)
-
-        self.bottleneck = DoubleConv(64, 128)
-
-        self.up2 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-        self.dec2 = DoubleConv(64 + 64, 64)
-        self.up1 = nn.ConvTranspose2d(64, 32, 2, stride=2)
-        self.dec1 = DoubleConv(32 + 32, 32)
-
-        self.head = nn.Conv2d(32, num_classes, 1)
-
-    def forward(self, x):
-        # Encoder
-        e1 = self.enc1(x)
-        p1 = self.pool1(e1)
-
-        e2 = self.enc2(p1)
-        p2 = self.pool2(e2)
-
-        # Bottleneck
-        b = self.bottleneck(p2)
-
-        # Decoder
-        u2 = self.up2(b)
-        # ⚠️ Important: no `if` on shapes; always interpolate
-        u2 = F.interpolate(u2, size=e2.shape[-2:], mode="bilinear", align_corners=False)
-        d2 = self.dec2(torch.cat([u2, e2], dim=1))
-
-        u1 = self.up1(d2)
-        u1 = F.interpolate(u1, size=e1.shape[-2:], mode="bilinear", align_corners=False)
-        d1 = self.dec1(torch.cat([u1, e1], dim=1))
-
-        logits = self.head(d1)  # [B, C, H, W]
-        return logits
-
-
-# =============================================================================
-# BDD100k segmentation dataset
-# =============================================================================
-class BDD100kSegDataset(Dataset):
-    """
-    Uses your existing layout:
-
-      data/BDD100k_reduced/
-        images_1280x720/
-          train/
-          val/
-        bdd100k_labels_dac_daa_lls_lld_curbs/
-          train/
-          val/
-
-    Assumes image & label share basename (e.g. 0001.jpg / 0001.png).
-    """
-
-    def __init__(
-        self,
-        root,
-        split="train",
-        num_classes=6,
-        ignore_index=255,
-        image_size=256,
-        max_samples=None
-    ):
-        super().__init__()
-        self.root = root
-        self.split = split
-        self.num_classes = num_classes
-        self.ignore_index = ignore_index
-        self.task_type = "segmentation"
-
-        img_dir = os.path.join(root, "images", split)
-        lbl_dir = os.path.join(root, "labels", split)
-
-        image_files = [
-            f
-            for f in os.listdir(img_dir)
-            if f.lower().endswith((".jpg", ".jpeg", ".png"))
-        ]
-        image_files = sorted(set(image_files))[:max_samples] if max_samples is not None else sorted(set(image_files))  # Optionally limit number of samples for faster testing
-
-        self.images = []
-        self.masks = []
-        for fname in image_files:
-            img_path = os.path.join(img_dir, fname)
-            base, _ = os.path.splitext(fname)
-            lbl_name = base + ".png"
-            lbl_path = os.path.join(lbl_dir, lbl_name)
-            if os.path.exists(lbl_path):
-                self.images.append(img_path)
-                self.masks.append(lbl_path)
-
-        if len(self.images) == 0:
-            raise RuntimeError(f"No image/label pairs found in {img_dir} / {lbl_dir}")
-
-        # This is used by load_raw_image in DataService / trainer_tools
-        # so exposing .images is enough.
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    size=image_size,
-                    interpolation=Image.BILINEAR
-                ),
-                transforms.ToTensor(),
-            ]
-        )
-        self.mask_resize = transforms.Resize(
-            size=image_size,
-            interpolation=Image.NEAREST
-        )
-
-    def __len__(self):
-        return len(self.images)
-
-    def __getitem__(self, idx):
-        """
-            IMPORTANT: returns (item, uid, target) only.
-                - item: transformed input (e.g. image tensor)
-                - uid: unique identifier for the sample (e.g. filename)
-                - target: transformed label/target (e.g. mask tensor)
-        """
-        img_path = self.images[idx]
-        mask_path = self.masks[idx]
-        uid = os.path.basename(img_path)
-
-        img = Image.open(img_path).convert("RGB")
-        mask = Image.open(mask_path)
-
-        img_t = self.image_transform(img)
-
-        mask_r = self.mask_resize(mask)
-        mask_np = np.array(mask_r, dtype=np.int64)
-        mask_t = torch.from_numpy(mask_np)  # [H, W] int64
-
-        return img_t, uid, mask_t
-
-
-# =============================================================================
 # Train / Test loops (segmentation, using watcher-wrapped loaders)
 # =============================================================================
-def train(loader, model, optimizer, criterion_mlt, device):
+
+def _instance_batch_idx(labels):
+    """Flat instance→sample map (sample-major) matching the PerInstance* ordering."""
+    return torch.tensor(
+        [s for s, insts in enumerate(labels) for _ in insts],
+        dtype=torch.long,
+    )
+
+
+def _run_instance_signals(sig, outputs, labels, ids, preds, return_metric=False):
+    """Compute + log/save the per-sample AND per-instance Dice (metric) and BCE (loss)."""
+    bce_sample = sig["bce_sample"](outputs, labels, batch_ids=ids, preds=preds)
+    dice_sample = sig["dice_sample"](outputs, labels, batch_ids=ids)  # Register processed predictions one time only
+
+    sig["dice_instance"](outputs, labels, batch_ids=ids)  # Register processed predictions one time only
+    sig["bce_instance"](outputs, labels, batch_ids=ids)
+
+    avg_loss = 0.5 * dice_sample + 0.5 * bce_sample
+    wl.save_signals({"combined_bce_dice_per_sample": avg_loss}, ids)  # Save the per-sample aggregate loss for backward step
+    if return_metric:
+        return avg_loss, dice_sample
+    return avg_loss
+
+
+def _user_custom_signals(preds, labels):
+    """Example of user-defined custom signals to save additional info to WL."""
+    return {
+        "preds_classes_per_sample": [
+            preds[i].unique() for i in range(preds.shape[0])
+        ],
+        "target_classes_per_sample": [
+            torch.unique(torch.cat(labels[i])) for i in range(len(labels))
+        ],
+        "tp_classes_per_sample": [
+            torch.tensor([c for c in torch.unique(torch.cat(labels[i])) if c in preds[i].unique()])
+            for i in range(len(labels))
+        ],
+        "fp_classes_per_sample": [
+            torch.tensor([c for c in preds[i].unique() if c not in torch.unique(torch.cat(labels[i]))])
+            for i in range(len(labels))
+        ],
+        "fn_classes_per_sample": [
+            torch.tensor([c for c in torch.unique(torch.cat(labels[i])) if c not in preds[i].unique()])
+            for i in range(len(labels))
+        ],
+    }
+
+
+def train(loader, model, optimizer, sig, device):
     """
     Single training step using the tracked dataloader + watched loss.
 
-    loader yields (inputs, ids, labels) because of DataSampleTrackingWrapper.
+    loader yields (inputs, ids, labels, metadata) because of DataSampleTrackingWrapper.
+    `labels` is per sample a LIST of instance masks (see utils/data.seg_collate).
     """
     with guard_training_context:
-        (inputs, ids, labels) = next(loader)
+        (inputs, ids, labels, _) = next(loader)
         inputs = inputs.to(device)
-        labels = labels.to(device)  # [B,H,W]
+        labels = [[m.to(device) for m in insts] for insts in labels]  # per-sample list of instances
 
         optimizer.zero_grad()
         outputs = model(inputs)  # [B,C,H,W]
-
         preds = outputs.argmax(dim=1)  # [B,H,W]
 
-        loss_batch = criterion_mlt(
-            outputs.float(),
-            labels.long(),
-            batch_ids=ids,
-            preds=preds,
-        )  # CrossEntropyLoss(reduction="none") → [B,H,W]
-        loss = loss_batch.mean()
+        # Per-instance + per-sample Dice/BCE (tracked & saved at annotation level).
+        loss_per_sample = _run_instance_signals(sig, outputs, labels, ids, preds=preds)
+
+        # Backward loss: per-sample CrossEntropy over the merged semantic mask.
+        loss = loss_per_sample.mean()
 
         loss.backward()
         optimizer.step()
 
+        # I want to see in the UI the per-sample classes predicted by the model and what classes are missing compared to the target (for error analysis)
+        wl.save_signals(
+            _user_custom_signals(preds, labels),
+            ids
+        )  # Save the per-sample predictions for visualization
+
     return float(loss.detach().cpu().item())
 
 
-def test(loader, model, criterion_mlt, metric_mlt, device, test_loader_len):
+def test(loader, model, sig, device, test_loader_len):
     """Full evaluation pass over the val loader."""
     losses = 0.0
-    metric_mlt.reset()
-
+    dices = 0.0
     with guard_testing_context, torch.no_grad():
-        for inputs, ids, labels in loader:
+        for inputs, ids, labels, _ in loader:
             inputs = inputs.to(device)
-            labels = labels.to(device)
+            labels = [[m.to(device) for m in insts] for insts in labels]  # per-sample list of instances
 
             outputs = model(inputs)
             preds = outputs.argmax(dim=1)  # [B,H,W]
 
-            loss_batch = criterion_mlt(
-                outputs.float(),
-                labels.long(),
-                batch_ids=ids,
-                preds=preds,
-            )
-            losses += torch.mean(loss_batch)
+            # Per-instance + per-sample Dice/BCE (tracked & saved at annotation level).
+            loss_per_sample, dice_sample = _run_instance_signals(sig, outputs, labels, ids, preds=preds, return_metric=True)
 
-            metric_mlt.update(preds, labels)
+            losses += torch.mean(loss_per_sample)  # Average over the batch and accumulate
+            dices += torch.mean(dice_sample)  # Average over the batch and accumulate
+
+            # I want to see in the UI the per-sample classes predicted by the model
+            wl.save_signals(_user_custom_signals(preds, labels), ids)  # Save the per-sample predictions for visualization
 
     loss = float((losses / test_loader_len).detach().cpu().item())
-    miou = float(metric_mlt.compute().detach().cpu().item() * 100.0)
-    return loss, miou
-
-
-# =============================================================================
-# Signal Definitions
-# =============================================================================
-
-"""
-The ctx (SignalContext) object contains:
-1. data: Raw input sample (image/tensor). [Used in STATIC mode]
-2. image: Automatically converted HWC uint8 numpy image. [Used in STATIC mode]
-3. subscribed_value: Live metric/loss value from the training loop. [Used in DYNAMIC mode]
-4. sample_id: Unique identifier for the sample. [Available in BOTH]
-5. dataframe: Proxy to query previously computed signals. [Available in BOTH]
-6. origin: The dataset split name (e.g. 'train_loader'). [Available in BOTH]
-7. is_static / is_dynamic: Helper flags for mode detection.
-"""
-
-@wl.signal(name="blue_pixels")
-def compute_blue_pixels(ctx: wl.SignalContext) -> int:
-    """
-    Static signal counting pixels where Blue channel is dominant.
-
-    Context Attributes Used:
-        ctx.image
-    """
-    img_np = ctx.image
-    if img_np is None or img_np.ndim != 3: return 0
-
-    # R, G, B
-    r, g, b = img_np[:,:,0], img_np[:,:,1], img_np[:,:,2]
-
-    # Blue is dominant and bright
-    blue_mask = (b > 150) & (b > r) & (b > g)
-    return int(np.sum(blue_mask))
-
-
-@wl.signal(name="blue_weighted_loss", subscribe_to="train_mlt_loss/CE", compute_every_n_steps=1)
-def compute_blue_weighted_loss(ctx: wl.SignalContext) -> float:
-    """
-    Dynamic signal combining current loss with static blue pixel count.
-
-    Context Attributes Used:
-        ctx.subscribed_value: The current 'train_mlt_loss/CE' value for this sample.
-        ctx.sample_id: Unique identifier used to link the loss to historical data.
-        ctx.dataframe: Used to look up the pre-computed 'blue_pixels' signal.
-        ctx.origin: The dataset split (train/val) needed for the dataframe query.
-    """
-    loss = ctx.subscribed_value
-
-    # Note: origin is typically 'train_loader' or 'test_loader' in this script
-    origin = ctx.origin or "train_loader"
-    blue_val = ctx.dataframe.get_value(origin, ctx.sample_id, "signals_blue_pixels")
-
-    if blue_val is None or (isinstance(blue_val, float) and np.isnan(blue_val)):
-        blue_val = 0.0
-
-    norm_blue = float(blue_val) / (128 * 128)
-    return loss * norm_blue
+    dice = float((dices / test_loader_len).detach().cpu().item())
+    return loss, dice * 100.0  # Return average Dice as percentage
 
 
 # =============================================================================
@@ -417,7 +241,8 @@ if __name__ == "__main__":
         array_autoload_arrays=False,
         array_return_proxies=True,
         array_use_cache=True,
-        preload_labels = False,
+        preload_labels=False,
+        collate_fn=seg_collate,
     )
     test_loader = wl.watch_or_edit(
         _val_dataset,
@@ -430,7 +255,8 @@ if __name__ == "__main__":
         array_autoload_arrays=False,
         array_return_proxies=True,
         array_use_cache=True,
-        preload_labels = False
+        preload_labels=True,
+        collate_fn=seg_collate,
     )
 
     # --- 6) Model, optimizer, losses, metric ---
@@ -449,42 +275,61 @@ if __name__ == "__main__":
         flag="optimizer",
     )
 
-    # --- Compute class weights to handle class imbalance ---
-    print("\n" + "=" * 60)
-    print("Computing class weights to address class imbalance...")
-    print("=" * 60)
+    # --- Per-instance + per-sample Dice (metric) and BCE (loss) signals ---
+    # Each instance mask is scored against the model's per-class probability map.
+    # per_instance=True auto-saves one value per (sample_id, annotation_id);
+    # per_sample=True logs the per-sample aggregate (mean over the sample's instances).
+    def _make_seg_signals(split: str, weights: dict = None) -> dict:
+        return {
+            "dice_sample": wl.watch_or_edit(
+                PerSampleDice(), flag="metric",
+                name=f"{split}_dice/sample", per_sample=True, log=True,
+            ),
+            "dice_instance": wl.watch_or_edit(
+                PerInstanceDice(), flag="metric",
+                name=f"{split}_dice/instance", per_instance=True, log=True,
+            ),
+            "bce_sample": wl.watch_or_edit(
+                PerSampleBCE(weights=weights), flag="loss",
+                name=f"{split}_bce/sample", per_sample=True, log=True,
+            ),
+            "bce_instance": wl.watch_or_edit(
+                PerInstanceBCE(weights=weights), flag="loss",
+                name=f"{split}_bce/instance", per_instance=True, log=True,
+            ),
+        }
 
-    # Create weighted loss functions
-    train_criterion_mlt = wl.watch_or_edit(
-        nn.CrossEntropyLoss(
-            reduction="none",
-            ignore_index=ignore_index,
-        ),
-        flag="loss",
-        name="train_mlt_loss/CE",
-        per_sample=True,
-        log=True,
-    )
-    test_criterion_mlt = wl.watch_or_edit(
-        nn.CrossEntropyLoss(
-            reduction="none",
-            ignore_index=ignore_index,
-        ),
-        flag="loss",
-        name="test_mlt_loss/CE",
-        per_sample=True,
-        log=True,
-    )
-    test_metric_mlt = wl.watch_or_edit(
-        JaccardIndex(
-            task="multiclass",
-            num_classes=num_classes,
-            ignore_index=ignore_index,
-        ).to(device),
-        flag="metric",
-        name="test_metric/JaccardIndex",
-        log=True,
-    )
+    # Compute class weights firstg
+    def compute_class_weights(dataset, num_classes, ignore_index=255, max_samples=100):
+        print("\n" + "=" * 60, flush=True)
+        print(f"Computing class weights for {num_classes} classes (max {max_samples} samples)...", flush=True)
+        class_counts = np.zeros(num_classes, dtype=np.float64)
+        num_samples = min(len(dataset), max_samples)
+
+        for idx in tqdm.tqdm(range(num_samples), desc="📊 Analyzing Distribution"):
+            _, _, label, _ = dataset.get_items(idx, include_labels=True)  # Get the label/mask for this sample
+            label_np = label.numpy() if hasattr(label, 'numpy') else np.array(label)
+            for c in range(num_classes):
+                class_counts[c] += (label_np == c).sum()
+
+        class_counts = np.maximum(class_counts, 1) # Avoid div by zero
+        total_pixels = class_counts.sum()
+        class_weights = total_pixels / (num_classes * class_counts)
+        class_weights = class_weights / class_weights.mean() # Normalize
+
+        print("\nClass distribution and weights:", flush=True)
+        for c in range(num_classes):
+            pct = (class_counts[c] / total_pixels) * 100
+            print(f"Class {c}: {pct:6.2f}% -> weight: {class_weights[c]:.3f}", flush=True)
+        print("=" * 60 + "\n", flush=True)
+        return torch.FloatTensor(class_weights).to(device)
+
+    weights = compute_class_weights(_train_dataset, num_classes)
+
+    train_sig = _make_seg_signals("train", weights=weights)
+    test_sig = _make_seg_signals("test", weights=weights)
+
+    custom_signals()  # Register custom signals defined in utils/criterions.py
 
     # --- 7) Start WeightsLab services ---
     wl.serve(
@@ -502,6 +347,9 @@ if __name__ == "__main__":
 
     # ================
     # 7. Training Loop
+    # wl.start_training(timeout=None)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
+
+    # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loss, test_metric = None, None
     start_time = time.time()
@@ -509,13 +357,13 @@ if __name__ == "__main__":
         age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
 
         # Train
-        train_loss = train(train_loader, model, optimizer, train_criterion_mlt, device)
+        train_loss = train(train_loader, model, optimizer, train_sig, device)
 
         # Test
         if age == 0 or age % eval_every == 0:
             test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
             test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
-            test_loss, test_metric = test(test_loader_it, model, test_criterion_mlt, test_metric_mlt, device, test_loader_len)
+            test_loss, test_metric = test(test_loader_it, model, test_sig, device, test_loader_len)
 
         # Verbose
         if verbose and not tqdm_display:

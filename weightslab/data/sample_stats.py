@@ -58,12 +58,12 @@ class SampleStats:
 
     # None are not accepted by PD H5 storage
     DEFAULTS: Dict[str, Any] = {
-        Ex.SAMPLE_ID.value: -1,
-        Ex.INSTANCE_ID.value: -1,
+        Ex.SAMPLE_ID.value: 0,
+        Ex.INSTANCE_ID.value: 0,
 
-        Ex.PREDICTION.value: None, #[],
-        Ex.PREDICTION_RAW.value: None, #[],
-        Ex.TARGET.value: None, #[],
+        Ex.PREDICTION.value: None,
+        Ex.PREDICTION_RAW.value: None,
+        Ex.TARGET.value: None,
 
         Ex.DISCARDED.value: False,
 
@@ -74,9 +74,11 @@ class SampleStats:
         Ex.MEMBER_RANK.value: 0,
     }
 
+    # What are np arrays, tensor here ?
     MODEL_INOUT_LIST = [
         Ex.PREDICTION.value,
         Ex.PREDICTION_RAW.value,
+        Ex.TARGET.value,
     ]
 
     @classmethod
