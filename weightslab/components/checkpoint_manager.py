@@ -416,8 +416,13 @@ class CheckpointManager:
 
         return self.current_exp_hash
 
+    # Experiment-STATE keys: runtime state, not config. Excluded from the saved HP
+    # snapshot so a restore's register_hyperparams(saved_config) can't resurrect them
+    # (e.g. overwrite the live is_training). Same set excluded from the experiment hash.
+    _STATE_ONLY_HP = ("is_training", "pause_at_step", "root_log_dir")
+
     def get_HP_snapshot(self) -> Dict[str, Any]:
-        """Get current hyperparameters snapshot from ledger."""
+        """Get current hyperparameters snapshot from ledger (excluding experiment state)."""
         try:
             hp_name = ledgers.resolve_hp_name()
             hp = ledgers.get_hyperparams(hp_name)
@@ -426,11 +431,14 @@ class CheckpointManager:
             if isinstance(hp, ledgers.Proxy) and hasattr(hp, 'get') and callable(hp.get):
                 hp = hp.get()
             if isinstance(hp, dict):
-                return hp
+                snap = dict(hp)
             elif hasattr(hp, '__dict__'):
-                return vars(hp)
+                snap = dict(vars(hp))
             else:
                 return {}
+            for k in self._STATE_ONLY_HP:        # copy first, then strip — never mutate the ledger
+                snap.pop(k, None)
+            return snap
         except Exception:
             return {}
 

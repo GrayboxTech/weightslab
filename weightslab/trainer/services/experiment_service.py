@@ -343,13 +343,10 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
-                # Re-pause after restore: load_state's "Apply config" branch
-                # calls register_hyperparams(saved_config), which OVERWRITES
-                # is_training with whatever was saved (typically True, since
-                # save was triggered during a resume). That undoes the pause
-                # we set before load_state, and the user's subsequent
-                # train_steps(K) gets ignored. Force is_training=False so the
-                # user explicitly drives the next train cycle.
+                # Pause after restore so the user explicitly drives the next train
+                # cycle. get_HP_snapshot now strips is_training from the saved config,
+                # so register_hyperparams no longer resurrects a stale is_training=True
+                # on restore — this is the intentional pause, not a workaround for that.
                 if trainer:
                     try:
                         trainer.pause()
