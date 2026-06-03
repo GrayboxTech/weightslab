@@ -108,12 +108,9 @@ def train_worker(rank, world, master_port, grpc_port):
             yield from loader
     batches = _infinite(train_loader)
 
-    # DDP uneven inputs are handled at the SAMPLER, not here: the loader rebalances
-    # the live set across ranks (filter -> pad-to-multiple-of-world -> strided slice)
-    # so every rank's shard is EQUAL length -> identical batch count -> the grad
-    # all_reduce below always matches. A heavy mid-loop discard can therefore never
-    # starve one rank into yielding 0 batches while the other blocks (the old
-    # empty-shard deadlock). See dataloader_interface._ddp_rebalanced_shard.
+    # Uneven inputs are handled at the sampler (equal-length rebalanced shards ->
+    # matched batch counts), so the grad all_reduce below can't deadlock on a
+    # discard-starved rank. See dataloader_interface._ddp_rebalanced_shard.
     _first_step = True
     while True:
         with wl.guard_training_context:

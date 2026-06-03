@@ -905,12 +905,9 @@ class LedgeredDataFrameManager:
         finally:
             self._lock.release()
 
-        # Array-valued signals (prediction/prediction_raw/target) are stored RAW.
-        # We deliberately do NOT rasterize bbox predictions into segmentation maps
-        # here: it is meaningless for detection (consumers like trainer_tools read
-        # prediction_raw as boxes/class-ids) and it forced a full image decode per
-        # flush just to read (H, W). Callers that genuinely want a mask request one
-        # on demand via get_prediction_mask().
+        # Array signals (prediction/prediction_raw/target) stored RAW — no bbox->segmap
+        # rasterize here (meaningless for detection, and it decoded an image per flush
+        # just to read H,W). Masks are produced on demand via get_prediction_mask().
         self.mark_dirty_batch(sample_ids)
 
     def _flush_to_h5_if_needed(self, force: bool = False, blocking: bool = False):

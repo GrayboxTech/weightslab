@@ -314,23 +314,12 @@ def _ensure_core_ddp_registered():
 # ---------------------------------------------------------------------------
 def sync_step(spin_wait=0.5):
     """Per-step DDP anchor — the DOWN half. Call once per step on EVERY rank at the
-    START of the step (guard __enter__), BEFORE the body consumes the state.
+    START (guard __enter__), before the body consumes the state.
 
-    Does the rank-0 → rank-1+ reconcile: `reconcile_all` (a single bundled
-    broadcast of every registered state). `paused` rides in the same bundle, so
-    while it reports paused=True every rank loops here in lockstep — async UI edits
-    to hparams / deny-list / discards that land on rank 0 *during* pause are
-    absorbed by the same reconcile loop (≤1 spin-tick latency), no extra collective.
-    When rank 0 clears the pause, the next bundle reports paused=False and every
-    rank returns to the step body together.
-
-    The UP half — `flush_outbox` (rank-1+ → rank-0 per-sample write deltas) — is a
-    SEPARATE call at the END of the step (guard __exit__), so a step's writes
-    publish at that step's end with no one-step lag. Together they keep the
-    ~2-collectives/step budget (1 broadcast here + 1 gather at __exit__).
-
-    Single-process / world<=1: no-op. Collective budget here: 1 broadcast per spin
-    iter (1/step in the common unpaused case).
+    reconcile_all() broadcasts every registered state rank-0 -> rank-1+; `paused`
+    rides in the same bundle, so while paused all ranks loop here in lockstep (and
+    mid-pause UI edits get absorbed). The UP half (flush_outbox) is a separate call
+    at __exit__ — together ~2 collectives/step. No-op single-process.
     """
     if not _active():
         return
@@ -340,16 +329,10 @@ def sync_step(spin_wait=0.5):
         bundle = reconcile_all()    # DOWN: 1 broadcast, ALL consistent states
         if not bundle or not bundle.get("paused", False):
             return                  # → step body runs; UP flush happens in __exit__
-        # Paused: NO busy-sleep. Rank 0 blocks on the resume Event — it wakes the
-        # instant the gRPC handler fires (zero resume latency). Rank-1+ skip the wait
-        # and loop straight into reconcile_all, blocking inside that broadcast until
-        # rank 0 returns. Children wait in the collective, rank 0 waits on the Event —
-        # neither spins. NB: this is cheap ONLY on gloo (its TCP transport socket-waits);
-        # NCCL would busy-spin a core/SM the whole pause (needs NCCL_BLOCKING_WAIT).
-        # The bounded timeout is NOT a poll — it lets the interpreter service signals
-        # (SIGINT/SIGTERM) during a long pause, and rank 0's periodic re-broadcast lets
-        # rank-1+ surface from gloo to check theirs too (same reason wait_if_paused
-        # uses a 0.5s wait). timeout=None would be 2 broadcasts/cycle but kills Ctrl-C.
+        # Paused: no busy-spin. Rank 0 blocks on the resume Event (wakes on the gRPC
+        # resume); rank-1+ block inside the next reconcile_all broadcast. Cheap only on
+        # gloo (socket-wait); NCCL would spin (NCCL_BLOCKING_WAIT). The bounded timeout
+        # isn't a poll — it lets the interpreter service SIGINT/SIGTERM during a pause.
         if rank == 0:
             from weightslab.components.global_monitoring import pause_controller
             pause_controller.wait_for_resume(timeout=spin_wait)

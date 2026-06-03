@@ -1082,25 +1082,12 @@ def scenario_empty_shard_starvation(client, world, batch):
 
 
 def scenario_progressive_resample(client, world, batch):
-    """Heavy discard THEN progressive un-discard (shrink then GROW). Exercises the
-    rebalance-on-discard/undiscard sampler path in both directions: shards stay
-    equal-length as the live set shrinks AND grows, so the loop never deadlocks.
-
-    Each phase trains ACTUAL live-epochs (steps = live//world//batch per epoch), so
-    wall-time scales with the live-set size and lets us sanity-check run-time
-    consistency. Rough expectation if per-step cost is stable across live sizes
-    (the rebalance adds no per-step cost): warmup(1 full epoch) ~= 5x the
-    post-discard phase(2 x 10%); post-readd(2 x 50%) is the heaviest. Per-step time
-    should be comparable across phases (a fixed snapshot-settle per epoch inflates
-    the tiny post-discard epochs, so treat the ratios as rough).
-
-    Asserts:
-      [1] after discarding to ~10% live, the live 10% advance over 2 epochs while
-          the discarded 90% stay FROZEN;
-      [2] after un-discarding up to ~50% live, the RE-ADDED samples start getting
-          fresh last_seen updates (loop rebalanced onto the growth) while the
-          still-discarded set stays frozen;
-      [3] no hang at any phase (bounded waits -> TimeoutError -> FAIL)."""
+    """Heavy discard THEN progressive un-discard (shrink then GROW) — exercises the
+    rebalance path both ways; shards stay equal-length so the loop never deadlocks.
+    Each phase trains real live-epochs (steps = live//world//batch) + prints per-phase
+    timing. Asserts: [1] after ->10% live, the 10% advance and the 90% stay FROZEN;
+    [2] after un-discarding ->50%, the re-added advance while still-discarded stay
+    frozen; [3] no hang (bounded waits -> TimeoutError -> FAIL)."""
     import time
     n = client.universe_size()
     full_epoch_steps = max(1, (n // world) // batch)
@@ -1115,13 +1102,9 @@ def scenario_progressive_resample(client, world, batch):
         return v if v is not None else -1
 
     def _run_epochs(n_ep, steps_each, label, m_start):
-        """Train n_ep live-epochs, timing the whole phase. Returns (max_age, secs).
-
-        min_step must demand a REAL per-epoch age advance (~steps_each), not just
-        m+1: _wait_until_paused also returns on 2 stable polls, and the ~10s
-        DataService snapshot throttle can read stale-equal for 2 polls WHILE
-        training is still running -> a low threshold returns early and under-trains
-        the phase. Mirror the other scenarios' `steps_each - batch` margin."""
+        """Train n_ep live-epochs, timing the phase. Returns (max_age, secs). min_step
+        demands a real ~steps_each advance (not m+1): a low threshold lets
+        _wait_until_paused return early on stale-equal snapshot polls and under-train."""
         t0 = time.perf_counter()
         m = m_start
         for ep in range(n_ep):
