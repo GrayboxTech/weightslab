@@ -1,17 +1,19 @@
-"""DDP ablation: attribute the WeightsLab SDK tax (time + memory) by layer.
+"""DDP ablation: WeightsLab's TRUE internal tax, against the honest baseline.
 
-Same model / batch / imgsz / data on every mode (WL_ABLATE), so deltas are purely WL:
-  ul        — pure ultralytics + gloo flattened grad all_reduce, NO weightslab.
-  wlimport  — identical loop, but `import weightslab` up front (pays init/RAM, idle).
+The fair baseline isn't "no logging" — anyone wanting per-sample signals must decode
+preds, compute per-sample loss/metrics, and store them. So we compare two modes with
+identical model / batch / imgsz / data:
+  ulmanual  — ultralytics + a HAND-ROLLED minimal per-sample logger: decode + per-sample
+              loss/IoU + append the scalars to a plain list. The "classic" way.
   wl        — full WL pipeline: wrapped model/loss/loader, save_signals, anchor
               (reconcile DOWN + flush UP), decode-for-logging.
 
-Deltas: (wl-ul)=total tax, (wlimport-ul)=loaded-idle tax, (wl-wlimport)=active-use tax.
-Per mode it prints per-section ms/step + rank-0 RSS; `wl` also prints the global
-dataframe RAM + H5 store sizes (WL-only memory).
+(wl - ulmanual) = WL's internal machinery (dataframe upserts + ledger/H5 + the DDP
+anchor) ABOVE doing it by hand. The decode + per-sample loss are computed in BOTH, so
+they cancel in the delta — what's left is purely WL. Per mode it prints per-section
+ms/step + rank-0 RSS; `wl` also prints the global dataframe RAM + H5 store sizes.
 
-  WL_ABLATE=ul       WL_DDP_CUDA=1 python ddp_ablation.py
-  WL_ABLATE=wlimport WL_DDP_CUDA=1 python ddp_ablation.py
+  WL_ABLATE=ulmanual WL_DDP_CUDA=1 python ddp_ablation.py
   WL_ABLATE=wl       WL_DDP_CUDA=1 python ddp_ablation.py
 """
 import os
@@ -24,12 +26,17 @@ os.environ.setdefault("WL_DDP_IMGSZ", "96")
 os.environ.setdefault("WEIGHTSLAB_DISABLE_WATCHDOGS", "1")
 os.environ.setdefault("WL_ENABLE_HP_SYNC", "0")
 
-import socket, time, statistics, gc
+import sys, socket, time, statistics, gc
 import yaml, torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+# This harness lives under tests/ but drives the ws-detection usecase: put the usecase
+# src on the path (for yolo_pipeline / utils.*) and resolve config/data/ddp_run vs IT.
+_USECASE_SRC = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "../../../../examples/PyTorch/ws-detection/src"))
+sys.path.insert(0, _USECASE_SRC)
+_HERE = _USECASE_SRC
 _HOST = "127.0.0.1"
 _WARMUP = 5
 _STEPS = int(os.environ.get("WL_ABLATE_STEPS", "25"))
@@ -118,9 +125,6 @@ def _worker(rank, world, master_port):
     os.environ["MASTER_PORT"] = str(master_port)
     dist.init_process_group(backend="gloo", rank=rank, world_size=world)
 
-    if MODE == "wlimport":
-        import weightslab as _wl   # paid for, never used  # noqa: F401
-
     use_cuda = torch.cuda.is_available() and os.environ.get("WL_DDP_CUDA", "0") == "1"
     if use_cuda:
         torch.cuda.set_device(0)
@@ -130,7 +134,7 @@ def _worker(rank, world, master_port):
     batch_size = int(os.environ.get("WL_DDP_BATCH", "16"))
     num_workers = int(os.environ.get("WL_DDP_WORKERS", "0"))
 
-    is_wl = MODE == "wl"
+    is_wl = MODE == "wl"                 # else: ulmanual (the hand-rolled classic baseline)
     if is_wl:
         import yolo_pipeline
         cfg["compute_natural_sort"] = False
@@ -149,6 +153,8 @@ def _worker(rank, world, master_port):
         decode = yolo_pipeline._decode_preds_to_6col
     else:
         model, loader, crit, iou, optimizer = _build_ul(cfg, device, batch_size, num_workers)
+        from yolo_pipeline import _decode_preds_to_6col as decode
+    _manual_store = []                   # the "classic" sink: a plain in-memory list
 
     # identical initial weights on every rank (flattened broadcast)
     with torch.no_grad():
@@ -165,6 +171,22 @@ def _worker(rank, world, master_port):
     t = T()
     io0 = None
     grad_bytes = 0
+
+    # WL_DDP_SELFSPY=1 (run under sudo): rank-0 samples ITSELF with py-spy across the
+    # steady-state loop -> folded stacks. Aggregate with ownership rules to get the
+    # exact % of wall time the instruction pointer is in WL SDK code (vs model/loss/
+    # decode/torch) — no A/B attribution guessing.
+    if rank == 0 and os.environ.get("WL_DDP_SELFSPY") == "1":
+        import subprocess
+        try:
+            subprocess.Popen(
+                [os.environ.get("WL_DDP_SELFSPY_BIN", "py-spy"), "record",
+                 "--pid", str(os.getpid()), "--rate", "200",
+                 "--duration", os.environ.get("WL_DDP_SELFSPY_DUR", "120"),
+                 "--format", "raw", "-o", os.environ.get("WL_DDP_SELFSPY_OUT", "/tmp/wl_ablation.folded")],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
     for step in range(_WARMUP + _STEPS):
         timed = step >= _WARMUP
@@ -185,14 +207,24 @@ def _worker(rank, world, master_port):
         _sync(device); t2 = time.perf_counter()
 
         if is_wl:
+            # decode (NMS) is USECASE compute — it produces predictions; WL only stores
+            # them. Timed separately so it's NOT charged to the WL SDK tax.
             preds = decode(raw, image, conf=0.1, cls_thresh=0.1, device=device)
+            _sync(device); t_dec = time.perf_counter()
             per = (crit["bbxs"](raw, batch, batch_ids=batch_ids, preds={'bboxes': preds})
                    + crit["clsf"](raw, batch, batch_ids=batch_ids)
                    + crit["dfl"](raw, batch, batch_ids=batch_ids))
             iou(raw, batch, batch_ids=batch_ids)
         else:
+            # ulmanual: the irreducible cost of the GOAL done by hand — decode preds,
+            # compute per-sample loss/IoU, write the scalars to a plain list (one CPU
+            # transfer). Same decode + loss as wl, so they cancel in (wl - ulmanual).
+            preds = decode(raw, image, conf=0.1, cls_thresh=0.1, device=device)
+            _sync(device); t_dec = time.perf_counter()
             per = crit["bbxs"](raw, batch) + crit["clsf"](raw, batch) + crit["dfl"](raw, batch)
             iou(raw, batch)
+            vals = per.detach().cpu().tolist()
+            _manual_store.extend((step, i, v) for i, v in enumerate(vals))
         _sync(device); t3 = time.perf_counter()
 
         loss = per.mean()
@@ -222,7 +254,8 @@ def _worker(rank, world, master_port):
 
         if timed:
             t.add("data", t1 - t0); t.add("forward", t2 - t1)
-            t.add("criterions+log", t3 - t2); t.add("backward", t4 - t3)
+            t.add("decode(usecase)", t_dec - t2)
+            t.add("criterions+save", t3 - t_dec); t.add("backward", t4 - t3)
             t.add("grad_allreduce", t5 - t4); t.add("anchor(WL)", t6 - t5)
             t.add("optimizer", t7 - t6)
 
@@ -244,7 +277,7 @@ def _worker(rank, world, master_port):
         except Exception:
             pass
 
-    order = ["data", "forward", "criterions+log", "backward",
+    order = ["data", "forward", "decode(usecase)", "criterions+save", "backward",
              "grad_allreduce", "anchor(WL)", "optimizer"]
     # Each rank prints its OWN per-rank line (no gather collective — it was flaky on
     # gloo+CUDA; per-process I/O reads are independent anyway).

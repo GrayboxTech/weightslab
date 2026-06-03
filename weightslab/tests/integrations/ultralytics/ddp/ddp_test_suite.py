@@ -42,6 +42,11 @@ import torch.multiprocessing as mp
 import yaml
 import grpc
 
+import sys
+# Harness lives under tests/ — put the ws-detection usecase src on the path so the
+# usecase modules (yolo_pipeline, utils.*) and its config/data/ddp_run resolve.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "../../../../examples/PyTorch/ws-detection/src")))
 import yolo_pipeline  # reuse _build_pipeline / _decode_preds_to_6col / _HERE / _LOSS_PARTS
 
 import weightslab.proto.experiment_service_pb2 as pb2
