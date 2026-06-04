@@ -24,7 +24,7 @@ from typing import Any, Iterator, Optional
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
-from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
+from weightslab.utils import filter_kwargs_for_callable, restore_rng_state, ddp_info
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
@@ -134,6 +134,15 @@ class WeightsLabDataSampler(Sampler):
         # Evaluation-mode allow-list: when set, only samples whose uid is in
         # this set are yielded.  None = no filter (normal behaviour).
         self._eval_allow_list: Optional[set] = None
+        # DDP sharding: per-rank shard = rebalanced live set (see _ddp_rebalanced_shard).
+        # (0, 1) when not under DDP -> single-process path unchanged.
+        self._ddp_rank, self._ddp_world_size = ddp_info()
+        self._ddp_seed = int(os.environ.get("WL_DDP_SEED", "0"))
+        # Reshuffle generation: shard permutation = f(ddp_seed, reshuffle_seq, rank,
+        # world). Advances only on a genuine pass-end, never on a discard's iterator
+        # reset (a discard re-filters the SAME permutation, no reshuffle). Restore
+        # reproduces the stream from (seed, seq, offset, checkpointed deny-list).
+        self._reshuffle_seq = 0
 
     def _get_deny_listed_uids(self) -> set:
         """Get set of deny-listed UIDs from tracked dataset."""
@@ -208,18 +217,89 @@ class WeightsLabDataSampler(Sampler):
 
         return uid in self._refresh_deny_list_cache()
 
-    def _generate_indices(self):
-        """Generate base indices (shuffled or sequential)."""
+    def set_epoch(self, epoch: int) -> None:
+        """Back-compat alias for set_reshuffle_seq (mirrors DistributedSampler's
+        set_epoch name). Sets the reshuffle generation directly."""
+        self._reshuffle_seq = int(epoch)
+
+    def advance_reshuffle(self) -> None:
+        """Bump the reshuffle generation so the NEXT generated pass uses a new
+        permutation. Called by the loader ONLY on a genuine epoch-completion
+        reset — never on a discard/tag invalidation reset (which must keep the
+        same permutation and merely re-filter)."""
+        self._reshuffle_seq += 1
+
+    def restore_reshuffle_seq(self, seq: int, seed=None) -> None:
+        """Restore the reshuffle generation from a checkpoint so the next pass
+        reproduces the exact per-rank permutation that was live at save time.
+        No-op outside DDP. Warns on a seed mismatch — the permutation is a
+        function of (seed, reshuffle_seq), so a different seed can't reproduce."""
+        if self._ddp_world_size <= 1:
+            return
+        if seed is not None and int(seed) != int(self._ddp_seed):
+            logger.warning(
+                "[ddp] restore seed mismatch (saved=%s current=%s); per-rank "
+                "shard order will NOT reproduce the saved run.", seed, self._ddp_seed)
+        self._reshuffle_seq = int(seq)
+
+    def _ddp_rebalanced_shard(self):
+        """This rank's live shard: filter the fixed permutation (f(ddp_seed,
+        reshuffle_seq)) to the non-discarded set, pad to a multiple of world, then
+        stride `live[rank::world]`. Equal-length shards by construction -> matched
+        batch counts -> no empty-shard grad-allreduce deadlock. Order-preserving,
+        deterministic, non-advancing (so __len__/snapshots may call it freely).
+
+        TRAINING ONLY: this shards eval loaders too, which is wrong under DDP (the
+        per-step anchor is training-only, so a sharded eval undercounts). Resolve
+        the eval sharding/aggregation policy before adding a DDP eval loop.
+        TODO(ddp-eval).
+        """
         n = len(self.data_source)
         if self.shuffle:
-            indices = torch.randperm(n).tolist()
+            g = torch.Generator()
+            g.manual_seed(int(self._ddp_seed) + int(self._reshuffle_seq))
+            full = torch.randperm(n, generator=g).tolist()
         else:
-            indices = list(range(n))
-        return indices
+            full = list(range(n))
+        live = list(self._iter_filtered_indices(full))
+        world = int(self._ddp_world_size)
+        if live:                                   # pad so len % world == 0
+            live = live + live[:(-len(live)) % world]
+        return live[int(self._ddp_rank)::world]
+
+    def _rank_indices_snapshot(self):
+        """This rank's indices for the current reshuffle generation, WITHOUT
+        advancing it. Used by __len__ and yolo_pipeline's ownership snapshot."""
+        if self._ddp_world_size > 1:
+            return self._ddp_rebalanced_shard()
+        return list(range(len(self.data_source)))
+
+    def _generate_indices(self):
+        """Base indices for a pass. Under DDP this is the rank's filtered +
+        balanced shard (see _ddp_rebalanced_shard); it does NOT auto-advance the
+        reshuffle generation (advance_reshuffle, called only on a genuine pass
+        end, does), so a mid-loop discard rebuilds onto the SAME permutation
+        re-balanced over the new live set, never a reshuffle."""
+        if self._ddp_world_size > 1:
+            return self._ddp_rebalanced_shard()
+        n = len(self.data_source)
+        if self.shuffle:
+            return torch.randperm(n).tolist()
+        return list(range(n))
 
     def _iter_filtered_indices(self, indices):
-        """Yield indices lazily so new discards are respected mid-epoch."""
+        """Yield indices lazily so new discards are respected mid-epoch.
+
+        The deny-list is enforced here, in the main-process sampler: a discarded
+        sample is simply never yielded. The pandas deny-list cache is refreshed
+        whenever the origin's deny-list revision bumps (a discard bumps it), so a
+        live discard is reflected within one index. Samples already yielded into a
+        worker prefetch queue are dropped separately by iterator invalidation
+        (dataframe_manager → loader._invalidate_iter → worker teardown).
+        """
         skipped = 0
+        _shard_dbg = os.environ.get("WL_DDP_SHARD_DEBUG") == "1"
+        _yielded = 0
         unique_ids = getattr(self.tracked_dataset, "unique_ids", None)
         # Prefer physical_uids: after grouped indexing __len__ returns
         # len(physical_uids) so idx is a physical index; unique_ids is the
@@ -264,58 +344,61 @@ class WeightsLabDataSampler(Sampler):
                 skipped += 1
                 continue
 
+            _yielded += 1
             yield idx
+
+        if _shard_dbg:
+            print(f"[shard_dbg r{self._ddp_rank}/{self._ddp_world_size}] epoch "
+                  f"shard_in={len(indices)} -> yielded={_yielded} "
+                  f"deny={len(deny_listed_uids)}", flush=True)
 
     def __iter__(self):
         """Iterate over indices or batches of indices."""
         indices = self._generate_indices()
-        filtered_indices = self._iter_filtered_indices(indices)
+        if self._ddp_world_size > 1:
+            # Already this rank's filtered+balanced shard; iterate directly (re-filtering
+            # could shrink it mid-pass and desync batch counts — a discard rebuilds instead).
+            idx_source = iter(indices)
+        else:
+            idx_source = self._iter_filtered_indices(indices)
 
         if self.batch_size is None:
-            yield from filtered_indices
+            yield from idx_source
         else:
             batch = []
-            for idx in filtered_indices:
+            for idx in idx_source:
                 batch.append(idx)
                 if len(batch) >= int(self.batch_size):
                     yield list(batch)
                     batch = []
 
-            if batch and not self.drop_last:
+            # Under DDP always emit the final partial: shards are equal length so it's the
+            # same size on every rank, and dropping it would stall a tiny live set.
+            if batch and (self._ddp_world_size > 1 or not self.drop_last):
                 yield list(batch)
 
     def __len__(self):
         """Return the number of samples or batches."""
-        # In evaluation mode with an allow-list, compute the exact filtered
-        # cardinality so progress/timeout logic uses the real bounded set size.
-        if self._eval_allow_list is not None:
-            total = sum(1 for _ in self._iter_filtered_indices(list(range(len(self.data_source)))))
+        # When a filter bounds the set (eval allow-list or a DDP shard), count the
+        # exact filtered cardinality over a non-advancing snapshot.
+        if self._ddp_world_size > 1:
+            # already filtered+balanced; count directly (re-filtering would double-skip)
+            total = len(self._rank_indices_snapshot())
+        elif self._eval_allow_list is not None:
+            total = sum(1 for _ in self._iter_filtered_indices(self._rank_indices_snapshot()))
+        else:
+            # Start with total dataset size, subtract deny-listed and offset.
+            total = len(self.data_source)
+            total -= len(self._refresh_deny_list_cache())
+            total = max(0, total - self.offset)
 
-            if self.batch_size is not None:
-                b = max(1, int(self.batch_size))
-                if self.drop_last:
-                    return total // b
-                return (total + b - 1) // b
-
-            return total
-
-        # Start with total dataset size
-        total = len(self.data_source)
-
-        # Subtract deny-listed samples
-        deny_listed_uids = self._refresh_deny_list_cache()
-        total -= len(deny_listed_uids)
-
-        # Subtract offset
-        total = max(0, total - self.offset)
-
-        # If batching, return number of batches
+        # If batching, return number of batches. Under DDP we always keep the
+        # final partial batch (see __iter__), so count it with ceil there too.
         if self.batch_size is not None:
             b = max(1, int(self.batch_size))
-            if self.drop_last:
+            if self.drop_last and self._ddp_world_size <= 1:
                 return total // b
-            else:
-                return (total + b - 1) // b
+            return (total + b - 1) // b
 
         return total
 
@@ -494,6 +577,12 @@ class DataLoaderInterface:
             )
             num_workers = _resolve_safe_num_workers(self.tracked_dataset, num_workers, loader_name)
 
+            # persistent_workers: reuse workers across iterator resets so a
+            # discard/undiscard rebalance is a cheap re-iter (drains stale prefetch),
+            # not a fork. Safe because the deny-list+rebalance live in the main-process
+            # sampler — workers just fetch by index. Requires num_workers > 0.
+            persistent_workers = num_workers > 0 and bool(kwargs.pop("persistent_workers", True))
+
             # Finally, construct dataloader using our batch_sampler
             self.dataloader = DataLoader(
                 self.tracked_dataset,
@@ -501,6 +590,7 @@ class DataLoaderInterface:
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 collate_fn=collate_fn,
+                persistent_workers=persistent_workers,
                 **filter_kwargs_for_callable(DataLoader, kwargs)
             )
             self._mutable_batch_sampler = batch_sampler
@@ -513,6 +603,7 @@ class DataLoaderInterface:
                 "drop_last": drop_last,
                 "pin_memory": pin_memory,
                 "collate_fn": collate_fn,
+                "persistent_workers": persistent_workers,
             }
             self._dl_build_kwargs.update(kwargs or {})
 
@@ -534,6 +625,12 @@ class DataLoaderInterface:
         self._samples_yielded: int = 0
         self._sample_offset: int = 0
         self._skipped = []
+        # Flag set by dataframe_manager.upsert_df whenever a DOWN_ONLY column changes
+        # (UI discard / tag). The next __next__ call resets the iterator BEFORE
+        # pulling — workers + their prefetched-but-not-yet-consumed batches are
+        # shut down. Without this, a sample yielded by the sampler PRE-discard
+        # but still sitting in a worker's queue gets trained on POST-discard.
+        self._iter_invalidated: bool = False
 
         # Optionally register in the global ledger for cross-thread access.
         # If no explicit `loader_name` is provided, try to infer a friendly loader_name from
@@ -828,9 +925,26 @@ class DataLoaderInterface:
         """
         self._sync_batch_size_from_ledger()
 
-        # If the previous epoch ended, reset for the next one
+        # DOWN_ONLY-change invalidation: a UI discard / tag wrote a column that
+        # affects WHICH samples are valid to train on. Any indices already
+        # yielded by the sampler and sitting in worker prefetch queues are now
+        # stale — they were chosen against the OLD deny-list. Reset first so
+        # the model never trains on a since-discarded sample. (Real fix, not a
+        # post-hoc filter: the forward pass on the discarded sample never runs.)
+        if getattr(self, '_iter_invalidated', False):
+            self._iter_invalidated = False
+            logger.debug("[DataLoaderInterface] iter invalidated by DOWN_ONLY change; resetting workers")
+            self._reset_iterator()
+
+        # If the previous epoch ended, reset for the next one. THIS is the only
+        # place the DDP shard reshuffles — a genuine pass completion advances the
+        # reshuffle generation so the next pass gets a new permutation. (The
+        # invalidation reset above deliberately does NOT advance it.)
         if getattr(self, '_epoch_exhausted', False):
             logger.debug("Auto-resetting iterator for next epoch")
+            s = getattr(self, '_mutable_batch_sampler', None)
+            if s is not None and hasattr(s, 'advance_reshuffle'):
+                s.advance_reshuffle()
             self._reset_iterator()
             self._epoch_exhausted = False
 
@@ -841,6 +955,17 @@ class DataLoaderInterface:
             # Mark that epoch is exhausted; next __next__ call will reset
             self._epoch_exhausted = True
             raise
+
+    def _invalidate_iter(self) -> None:
+        """Mark the active iterator as stale. Called from dataframe_manager
+        whenever a DOWN_ONLY column changes (the sampler-time filter only
+        protects FUTURE yields; this drops the prefetched queue too).
+
+        Safe to call repeatedly: only flips a flag — the actual worker shutdown
+        happens inside the next __next__ call's _reset_iterator() (via the
+        existing del + gc.collect() path which the iter destructor uses to kill
+        worker subprocesses cleanly)."""
+        self._iter_invalidated = True
 
     # -------------------------------------------------------------------------
     # Ledger / pause helpers
@@ -950,20 +1075,26 @@ class DataLoaderInterface:
         import gc
         import time
 
-        # Explicitly delete old iterator to allow worker processes to be cleaned up
-        if hasattr(self, '_iterator') and self._iterator is not None:
-            try:
-                del self._iterator
-                logger.debug("Deleted old iterator for cleanup")
-            except Exception as e:
-                logger.debug(f"Failed to delete old iterator: {e}")
+        # persistent_workers own the worker processes across resets, so skip the
+        # del+gc+settle teardown (PyTorch's re-iter resets them and drops stale
+        # prefetch) -> a rebalance is a cheap reset, not a fork. Else tear down to
+        # avoid leaking subprocesses.
+        _persistent = bool(getattr(self.dataloader, "persistent_workers", False)) \
+            and getattr(self.dataloader, "num_workers", 0) > 0
+        if not _persistent:
+            # Explicitly delete old iterator to allow worker processes to be cleaned up
+            if hasattr(self, '_iterator') and self._iterator is not None:
+                try:
+                    del self._iterator
+                    logger.debug("Deleted old iterator for cleanup")
+                except Exception as e:
+                    logger.debug(f"Failed to delete old iterator: {e}")
 
-        # Force garbage collection to ensure worker processes are terminated
-        # This is especially important when num_workers > 0
-        try:
-            gc.collect()
-        except Exception:
-            pass
+            # Force garbage collection to ensure worker processes are terminated
+            try:
+                gc.collect()
+            except Exception:
+                pass
 
         # Reset sampler's offset for new epoch (important: prevents skipping samples on subsequent epochs)
         if hasattr(self, '_mutable_batch_sampler') and self._mutable_batch_sampler is not None:
@@ -973,13 +1104,19 @@ class DataLoaderInterface:
                 if old_offset > 0:
                     logger.debug(f"Reset sampler offset from {old_offset} to 0")
 
-        # Give worker processes time to fully terminate (especially important with num_workers > 0)
-        # Short delay to avoid race conditions when spawning new workers
-        if hasattr(self.dataloader, 'num_workers') and self.dataloader.num_workers > 0:
+        # Give worker processes time to fully terminate before respawning (only when
+        # we actually tore them down — persistent workers are reused, no settle needed).
+        if not _persistent and getattr(self.dataloader, 'num_workers', 0) > 0:
             time.sleep(0.01)  # 10ms delay for worker cleanup
 
-        # Create new iterator
+        # Create new iterator (persistent: reuses workers + resets; else: respawns)
         self._iterator = iter(self.dataloader)
+        # Clear the invalidate flag — this reset just satisfied it. Without this,
+        # the next __next__ would do a SECOND reset (load_state calls reset_iterator
+        # explicitly, AND our upsert hook may have set _iter_invalidated during the
+        # snapshot apply — so without clearing here, we'd shut down + restart workers
+        # twice back-to-back. Costly under num_workers>0).
+        self._iter_invalidated = False
         logger.debug(f"Created new iterator (num_workers={getattr(self.dataloader, 'num_workers', 'unknown')}, sampler_len={len(self._mutable_batch_sampler) if self._mutable_batch_sampler else 'N/A'})")
 
     def reset_iterator(self) -> None:
@@ -1007,10 +1144,21 @@ class DataLoaderInterface:
         boundary. Works with and without shuffling. When shuffling, ensure
         RNG state is also captured/restored before calling `restore_iteration_state`.
         """
-        return {
+        state = {
             "samples_yielded": int(self._samples_yielded),
             "batch_size": self.batch_size or 1
         }
+        # DDP: save the reshuffle generation + seed so restore reproduces the
+        # exact per-rank permutation (DistributedSampler shuffles from (seed,
+        # reshuffle_seq), which global RNG capture/restore does NOT cover). The
+        # deny-list that filters the permutation is checkpointed separately (a
+        # DOWN_ONLY df column), so (seed, reshuffle_seq, samples_yielded,
+        # deny-list) together reproduce the filtered stream across a reset.
+        s = getattr(self, "_mutable_batch_sampler", None)
+        if s is not None and getattr(s, "_ddp_world_size", 1) > 1:
+            state["ddp_reshuffle_seq"] = int(getattr(s, "_reshuffle_seq", 0))
+            state["ddp_seed"] = int(getattr(s, "_ddp_seed", 0))
+        return state
 
     def restore_iteration_state(self, state: dict) -> None:
         """Restore iteration position efficiently without reprocessing skipped data.
@@ -1030,6 +1178,15 @@ class DataLoaderInterface:
 
         # Calculate sample offset (how many individual samples to skip)
         sample_offset = samples_yielded
+
+        # DDP: restore the reshuffle generation onto the LIVE sampler now, so even
+        # the no-rebuild path (offset == 0, pass boundary) reproduces the saved
+        # per-rank permutation. The rebuild branch re-applies it to its new sampler.
+        ddp_seq = state.get("ddp_reshuffle_seq")
+        if ddp_seq is not None:
+            live = getattr(self, "_mutable_batch_sampler", None)
+            if live is not None and hasattr(live, "restore_reshuffle_seq"):
+                live.restore_reshuffle_seq(ddp_seq, state.get("ddp_seed"))
 
         # If we own the dataloader construction, rebuild with offset sampler
         if getattr(self, "_dl_build_kwargs", None) is not None and sample_offset > 0:
@@ -1055,6 +1212,9 @@ class DataLoaderInterface:
                     batch_size=batch_size,
                     drop_last=drop_last,
                 )
+                # Carry the restored reshuffle generation onto the new sampler.
+                if ddp_seq is not None and hasattr(sampler, "restore_reshuffle_seq"):
+                    sampler.restore_reshuffle_seq(ddp_seq, state.get("ddp_seed"))
                 self._mutable_batch_sampler = sampler
                 self._sample_offset = 0
                 num_workers = _resolve_safe_num_workers(
@@ -1062,6 +1222,9 @@ class DataLoaderInterface:
                     num_workers,
                     getattr(self, "_ledger_name", None),
                 )
+                # Keep persistent_workers consistent with the resolved worker count
+                # (persistent_workers=True requires num_workers>0, else DataLoader raises).
+                kwargs["persistent_workers"] = num_workers > 0 and bool(kwargs.get("persistent_workers", False))
 
                 # Rebuild dataloader with offset sampler
                 self.dataloader = DataLoader(
@@ -1138,6 +1301,9 @@ class DataLoaderInterface:
                     num_workers,
                     getattr(self, "_ledger_name", None),
                 )
+                # Keep persistent_workers consistent with the resolved worker count
+                # (persistent_workers=True requires num_workers>0, else DataLoader raises).
+                kwargs["persistent_workers"] = num_workers > 0 and bool(kwargs.get("persistent_workers", False))
 
                 # Rebuild sampler & dataloader if we had one
                 if getattr(self, "_mutable_batch_sampler", None) is not None:

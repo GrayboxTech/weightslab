@@ -31,6 +31,7 @@ from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
 from weightslab.utils.tools import detach_to_cpu
 from weightslab.utils.logger import LoggerQueue
+from weightslab.utils.tools import ddp_info, is_main_process
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.backend.ledgers import register_signal
@@ -471,7 +472,6 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # User parameters
     batch_ids = wl_kw.get('batch_ids')
-    group_ids = wl_kw.get('group_id')
     batch_scalar = wl_kw.get('signals')
     preds = wl_kw.get('preds')
     targets = wl_kw.get('targets') if 'targets' in wl_kw else None
@@ -482,24 +482,14 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Original forward of the signal
     out = original_forward(*a, **kw)
 
-    # discarded samples/tainted groups from the loss tensor.
-    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
-
-    if origin and batch_ids is not None and hasattr(out, 'device') and out.ndim > 0:
-        try:
-            # Multi-sample Group Masking
-            if group_ids is not None:
-                mask = get_active_group_mask(group_ids, origin).to(out.device)
-                if len(mask) == len(out):
-                    out = out * mask
-
-            # Per-sample Individual Masking
-            else:
-                mask = get_active_sample_mask(batch_ids, origin).to(out.device)
-                if len(mask) == len(out):
-                    out = out * mask
-        except Exception as e:
-            logger.debug(f"Automatic backend discard masking failed: {e}")
+    # NO post-hoc discard masking here. Discard is a TRANSACTION-BOUNDARY event
+    # (see docs/ddp_design.md): batch membership is fixed when the batch is built
+    # from the current deny-list (sampler filter), and a discard takes effect at
+    # the NEXT boundary — the prefetch queue is flushed by iterator invalidation
+    # so no since-discarded sample reaches a later batch. So whatever is in this
+    # batch was valid at its boundary; zeroing its loss after the fact (the old
+    # get_active_sample_mask / get_active_group_mask) was a symptom fix that
+    # actually violated the transactional model. Removed.
 
     # Per-instance handling: extract instance values + batch_idx mapping
     # and save per-annotation to dataframe. `out` may be a dict
@@ -1084,7 +1074,17 @@ def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> No
         serving_cli: Start the interactive CLI server.
         serving_grpc: Start the gRPC server.
         **kwargs: Extra server options passed to underlying backends.
+
+    Under DDP this is a no-op on non-zero ranks: the gRPC backend binds one
+    fixed port over this process's global ledger, so a second backend on a
+    child rank would only collide on the port and serve that rank's shard. The
+    studio talks to rank 0. Single-process (world_size == 1) is rank 0 -> serves
+    as before, so callers can write ``wl.serve()`` unconditionally.
     """
+    rank, world_size = ddp_info()
+    if not is_main_process():
+        logger.info("[serve] rank %d/%d is not the main process; skipping serve (rank 0 owns the UI backend).", rank, world_size)
+        return
 
     if serving_grpc:
         grpc_serve(**kwargs)
@@ -1101,7 +1101,17 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
             until interrupted.
         release_gpu: If ``True``, move tracked torch objects to CPU and release
             CUDA cached memory before entering the wait loop.
+
+    Under DDP this is a no-op on non-zero ranks: only rank 0 holds the process
+    alive to serve the UI. A child must NOT release its GPU / idle here (it is
+    still a live training replica), so it returns immediately and proceeds to
+    its own clean shutdown.
     """
+    if not is_main_process():
+        rank, world_size = ddp_info()
+        logger.info("[keep_serving] rank %d/%d is not the main process; returning (only rank 0 holds the UI backend alive).", rank, world_size)
+        return
+
     if release_gpu:
         _release_gpu_resources()
         logger.info("WeightsLab switched to CPU idle mode for serving.")
@@ -1753,6 +1763,12 @@ def save_signals(
     )
 
 
+# NOTE: get_active_group_mask / get_active_sample_mask were removed. They
+# post-hoc zeroed the loss of discarded samples/tainted groups still present in a
+# batch — a symptom fix that contradicted the transactional-discard model (a
+# discard takes effect at the next batch boundary via the sampler filter +
+# prefetch-flush, so no since-discarded sample reaches a later batch, and nothing
+# needs masking). See docs/ddp_design.md and wrappered_fwd.
 def save_instance_signals(
     signals: dict,
     batch_ids: th.Tensor | np.ndarray | list,

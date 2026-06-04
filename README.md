@@ -28,8 +28,7 @@
 
 </pred>
 </pred style="font-style: italic;">
-WeightsLab — Inspect, Edit, and Evolve Neural Networks
-By Graybx.
+WeightsLab — Inspect Data, Edit and Evolve Neural Networks, by Graybx.
 </pre>
 </div>
 

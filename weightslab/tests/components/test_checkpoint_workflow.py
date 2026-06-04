@@ -863,8 +863,20 @@ class CheckpointSystemTests(unittest.TestCase):
         uids_A_original = self.state['uids_a']  # Before model change
 
         print(f"Reloading state A (before model change) for verification: {hash_A_original[:16]}...")
+        # Regression guard for same-arch restore: load_state must preserve the
+        # WRAPPED model object's identity. A trainer / DataLoaderInterface that
+        # captured `model = trainer.model` at startup holds a direct reference
+        # to the wrapped object — replacing it would orphan that reference.
+        # (The Proxy returned by ledgers.get_model() is kept stable by design;
+        # the bug was in what the Proxy wrapped, so we resolve via `.get()`.)
+        def _wrapped(p):
+            return p.get() if hasattr(p, "get") and callable(getattr(p, "get")) else p
+        pre_restore_wrapped = _wrapped(ledgers.get_model())
         success = self.chkpt_manager.load_state(exp_hash=hash_A_original)
         self.assertTrue(success, "State A should load successfully")
+        self.assertIs(pre_restore_wrapped, _wrapped(ledgers.get_model()),
+                      "load_state must preserve wrapped model identity on same-arch restore "
+                      "(see feedback_restore_identity_preserving memory)")
 
         # Verify HP and data are from checkpoint A
         hp_reloaded = ledgers.get_hyperparams()
