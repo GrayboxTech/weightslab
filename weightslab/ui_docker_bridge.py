@@ -9,7 +9,6 @@ import socket
 import time
 import logging
 from pathlib import Path
-from importlib.resources import files
 
 from weightslab.security import CertAuthManager
 

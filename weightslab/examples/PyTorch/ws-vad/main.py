@@ -1,11 +1,6 @@
 import os
 import yaml
-import time
 import logging
-import tempfile
-import itertools
-import random
-import numpy as np
 from tqdm import tqdm
 from PIL import Image
 
@@ -13,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from torchvision import transforms
 from torchmetrics.classification import BinaryAccuracy
 

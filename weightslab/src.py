@@ -16,7 +16,6 @@ import threading
 import traceback
 import numpy as np
 import torch as th
-import weightslab as wl
 
 from tqdm import tqdm
 from typing import Callable, Optional, Any, Dict
@@ -63,7 +62,6 @@ def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
     except Exception:
         pass
 from weightslab.backend.ledgers import list_models, get_model as _gm
-from weightslab.components import global_monitoring
 from tqdm import tqdm
 
 

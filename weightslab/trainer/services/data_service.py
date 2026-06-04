@@ -40,8 +40,6 @@ from weightslab.data.data_utils import load_raw_image_array
 from weightslab.trainer.services.data_image_utils import (
     rle_encode_mask,
     create_data_stat,
-    generate_thumbnail,
-    encode_image_webp,
     resize_mask_nearest,
 )
 
@@ -121,9 +119,7 @@ def detect_bbox_format(bboxes: np.ndarray) -> str:
         return 'xyxy'
 
     x1_or_x = coords[..., 0]
-    y1_or_y = coords[..., 1]
     x2_or_w = coords[..., 2]
-    y2_or_h = coords[..., 3]
 
     x1_or_x_max = np.max(x1_or_x)
     x1_or_x_min = np.min(x1_or_x)

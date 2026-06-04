@@ -1,7 +1,6 @@
 import argparse
 import os
 import unittest
-import logging
 from unittest.mock import patch, MagicMock
 
 from weightslab.ui_docker_bridge import (
@@ -126,7 +125,6 @@ class TestUiSecureEnvironment(unittest.TestCase):
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
     def test_ui_secure_environment_success(self, mock_gen_certs, mock_cert_manager):
         """Test successful secure environment setup."""
-        from pathlib import Path
         from unittest.mock import MagicMock
 
         mock_manager_instance = MagicMock()

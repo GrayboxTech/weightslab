@@ -7,7 +7,6 @@ from weightslab.components.global_monitoring import (
     get_current_context,
     set_current_context,
 )
-from weightslab.components.tracking import TrackingMode
 
 
 class _DummyModel:

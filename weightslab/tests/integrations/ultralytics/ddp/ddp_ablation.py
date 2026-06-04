@@ -26,7 +26,7 @@ os.environ.setdefault("WL_DDP_IMGSZ", "96")
 os.environ.setdefault("WEIGHTSLAB_DISABLE_WATCHDOGS", "1")
 os.environ.setdefault("WL_ENABLE_HP_SYNC", "0")
 
-import sys, socket, time, statistics, gc
+import sys, socket, time, statistics
 import yaml, torch
 import torch.distributed as dist
 import torch.multiprocessing as mp

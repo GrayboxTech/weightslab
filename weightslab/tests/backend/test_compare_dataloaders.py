@@ -4,7 +4,6 @@ Tests single vs multiple workers and compares throughput and correctness.
 """
 import time
 import torch
-import numpy as np
 import unittest
 
 import weightslab.data.data_samples_with_ops as _dso
@@ -73,7 +72,7 @@ class TestDataLoaderComparison(unittest.TestCase):
             num_workers=num_workers,
             persistent_workers=(num_workers > 0)
         )
-        wl_d = DataLoaderInterface(
+        DataLoaderInterface(
             torch_loader,
             loader_name=f"test_loader_nw{num_workers}",
             register=True,

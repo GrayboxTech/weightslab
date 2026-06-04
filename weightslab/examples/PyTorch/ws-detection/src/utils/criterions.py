@@ -158,11 +158,11 @@ class PerSampleDetectionLoss(nn.Module):
         # pred can be dict / tuple / tensor — derive batch size and device once.
         if isinstance(pred, dict):
             first = next(iter(pred.values()))
-            pred_bs, device = first.shape[0], first.device
+            pred_bs, _ = first.shape[0], first.device
         elif isinstance(pred, (tuple, list)):
-            pred_bs, device = pred[0].shape[0], pred[0].device
+            pred_bs, _ = pred[0].shape[0], pred[0].device
         else:
-            pred_bs, device = pred.shape[0], pred.device
+            pred_bs, _ = pred.shape[0], pred.device
 
         batch_idx_flat = batch_idx.flatten().long()
         sample_losses = []

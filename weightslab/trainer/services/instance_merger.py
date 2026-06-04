@@ -243,7 +243,6 @@ def group_instances_by_sample(df_slice, target_column: str, task_type: str):
                 ]
                 # Sort by annotation_id (second index level)
                 instance_values_sorted = sorted(instance_values, key=lambda x: int(x[0]))
-                values = [val for _, val in instance_values_sorted]
 
                 # Merge based on task type
                 merged_data[sample_id] = merge_instances_by_task_type(

@@ -12,7 +12,6 @@ Keep this file free of heavy domain logic.  It is the right place for:
 import logging
 from typing import TypeVar, Callable, Any
 
-import grpc
 
 logger = logging.getLogger(__name__)
 

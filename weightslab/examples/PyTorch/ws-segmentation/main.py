@@ -10,9 +10,8 @@ import itertools
 
 import weightslab as wl
 
-from torch import nn, optim
+from torch import optim
 
-from torchmetrics import JaccardIndex
 
 from weightslab.utils.logger import LoggerQueue
 from weightslab.components.global_monitoring import (

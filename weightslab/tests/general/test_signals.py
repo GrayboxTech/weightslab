@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from unittest.mock import MagicMock, patch
 import weightslab as wl
-from weightslab.src import _REGISTERED_SIGNALS, signal, compute_signals, wrappered_fwd
+from weightslab.src import _REGISTERED_SIGNALS, compute_signals, wrappered_fwd
 
 class TestSignals(unittest.TestCase):
     def setUp(self):

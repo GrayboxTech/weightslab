@@ -38,10 +38,8 @@ a collective. `WL_DDP_LOG=1` traces who-did-what and counts collectives/step.
 Skip (do NOT ship): big-tensor args (raw preds / masks — keep sharded-local; wrap
 the scalar sink, not the compute) and non-serializable args.
 """
-import functools
 import logging
 import os
-import time
 
 from weightslab.utils import ddp_info   # single source of truth for (rank, world)
 

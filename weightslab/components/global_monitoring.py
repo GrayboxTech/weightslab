@@ -2,9 +2,8 @@ import os
 from typing import Any, Optional
 from enum import Enum
 import contextvars
-import traceback
 
-from threading import Event, Lock
+from threading import Event
 import threading
 import time
 import logging

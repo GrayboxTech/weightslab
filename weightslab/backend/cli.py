@@ -26,7 +26,7 @@ import time
 from typing import Optional, Any
 
 from weightslab.backend.ledgers import GLOBAL_LEDGER, resolve_hp_name, Proxy, set_hyperparam, list_hyperparams
-from weightslab.components.global_monitoring import weightslab_rlock, pause_controller
+from weightslab.components.global_monitoring import pause_controller
 
 
 # Get global logger

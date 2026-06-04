@@ -1,6 +1,5 @@
 import time
 import logging
-import numpy as np
 
 from weightslab.components.global_monitoring import pause_controller
 

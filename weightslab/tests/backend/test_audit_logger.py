@@ -2,7 +2,6 @@ import json
 import csv
 import tempfile
 import threading
-import pytest
 from pathlib import Path
 from datetime import datetime
 import time
@@ -107,7 +106,6 @@ class TestAuditLoggerFormat:
 
     def test_format_from_environment_variable(self, monkeypatch):
         """Test that format can be set via AUDIT_LOG_FORMAT environment variable."""
-        import os
         with tempfile.TemporaryDirectory() as tmpdir:
             # Test CSV from env var
             monkeypatch.setenv("AUDIT_LOG_FORMAT", "csv")
