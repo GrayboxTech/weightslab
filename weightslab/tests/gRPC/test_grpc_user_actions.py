@@ -38,6 +38,9 @@ class _MockContext:
     def is_active(self):
         return True
 
+    def peer(self):
+        return "ipv4:127.0.0.1:0"
+
 
 class _FakeCtx:
     def __init__(self, components=None):
@@ -57,6 +60,12 @@ class _FakeDFManager:
 
     def get_df_view(self):
         return self.df.reset_index().copy()\
+
+    def get_collapse_annotations_to_samples_df(self):
+        # This fixture is already one row per sample (no instance rows), so the
+        # per-sample collapsed view is just the frame with its index restored to
+        # (origin, sample_id) columns — matching what the real manager returns.
+        return self.df.reset_index().copy()
 
     def flush(self):
         return None
@@ -267,6 +276,10 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         ds._ctx = ctx
         ds._lock = threading.RLock()
         ds._update_lock = threading.Lock()
+        # Event-based de-duplication of _slowUpdateInternals: "done" initially so
+        # the first call proceeds (mirrors DataService.__init__).
+        ds._update_done = threading.Event()
+        ds._update_done.set()
         ds._df_manager = df_manager
         ds._all_datasets_df = df.copy()
         ds._compute_natural_sort = False
@@ -386,6 +399,55 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         if hasattr(response, "available"):
             self.assertTrue(response.available)
         self.assertIn("available", response.message.lower())
+
+    # --- UI read RPCs (simulating the Studio fetching splits/samples) ---
+
+    def test_grpc_get_data_splits_returns_origins(self):
+        """GetDataSplits must surface the dataset origins to the UI split selector."""
+        data_service, _ = self._make_real_data_service()
+        servicer = self._make_servicer_with_real_data_service(data_service)
+
+        response = servicer.GetDataSplits(pb2.Empty(), _MockContext())
+
+        self.assertTrue(response.success)
+        self.assertEqual(list(response.split_names), ["test"])
+
+    def test_grpc_apply_data_query_direct_filter_reduces_view(self):
+        """A direct (non-NL) filter query must shrink the working view to matching rows."""
+        data_service, _ = self._make_real_data_service()
+        servicer = self._make_servicer_with_real_data_service(data_service)
+
+        # df has loss = [0.2, 0.8, 0.5] for samples 1, 2, 3 → loss > 0.4 keeps 2 and 3.
+        request = pb2.DataQueryRequest(query="loss > 0.4", is_natural_language=False)
+        response = servicer.ApplyDataQuery(request, _MockContext())
+
+        self.assertTrue(response.success)
+        # The working view is filtered to the two matching rows.
+        kept = [idx[1] for idx in data_service._all_datasets_df.index.tolist()]
+        self.assertEqual(sorted(kept), ["2", "3"])
+
+    def test_grpc_get_data_samples_returns_scalar_stats(self):
+        """GetDataSamples must stream per-sample records with requested scalar stats
+        (no raw images needed for this path)."""
+        data_service, _ = self._make_real_data_service()
+        servicer = self._make_servicer_with_real_data_service(data_service)
+
+        request = pb2.DataSamplesRequest(
+            start_index=0,
+            records_cnt=10,
+            include_raw_data=False,
+            stats_to_retrieve=["loss"],
+        )
+        response = servicer.GetDataSamples(request, _MockContext())
+
+        self.assertTrue(response.success)
+        self.assertEqual(len(response.data_records), 3)
+        returned_ids = {r.sample_id for r in response.data_records}
+        self.assertEqual(returned_ids, {"1", "2", "3"})
+        # The requested 'loss' stat is present on each record.
+        for rec in response.data_records:
+            names = {s.name for s in rec.data_stats}
+            self.assertIn("loss", names)
 
 
 class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):

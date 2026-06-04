@@ -224,6 +224,16 @@ Data and Cache
      - Synchronise hyperparameters with the UI on every training step.
        Set to ``0`` to reduce IPC overhead (hyperparameters are still readable
        on demand via the CLI).
+   * - ``WL_INSTANCE_AGGREGATION``
+     - ``mean``
+     - How per-instance (per-annotation) numeric columns are folded into a
+       single per-sample scalar when the ``(sample_id, annotation_id)``
+       multi-index view is collapsed to one row per sample. Accepts ``mean``
+       or ``max`` (e.g. ``max`` surfaces the worst-scoring instance of each
+       sample). The full per-instance breakdown is always preserved separately
+       in the ``_instance_signals`` dict column, regardless of this setting.
+       Can also be set per-experiment via the ``instance_aggregation``
+       hyperparameter.
    * - ``WL_MAX_POINTS_PER_SAMPLE``
      - ``200``
      - Maximum number of points returned **per curve** in the *break-by-slices*

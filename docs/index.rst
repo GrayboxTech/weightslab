@@ -95,6 +95,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    hyperparameters
    logger
    usecases
+   segmentation_usecase
    pytorch_lightning
    weights_studio
 

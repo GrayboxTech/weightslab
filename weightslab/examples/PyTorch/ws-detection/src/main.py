@@ -14,41 +14,32 @@ warnings.filterwarnings(
 
 import logging
 import tempfile
-
 import torch
 import yaml
 
 import weightslab as wl
+
 from weightslab.utils.logger import LoggerQueue
-from weightslab.components.global_monitoring import pause_controller
+
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.cfg import get_cfg
 from ultralytics.data.utils import check_det_dataset
 
-from utils.data import YOLODatasetWL, _wl_yolo_collate
-from utils.criterions import PerSampleDetectionLoss, PerSampleIoU, _decode_predictions
+from utils.data import YOLODatasetWL, _wl_yolo_collate as collate_fn
+from utils.criterions import (
+    PerSampleDetectionLoss, PerSampleIoU,
+    PerInstanceDetectionLoss, PerInstanceIoU,
+    _decode_predictions
+)
 
 logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
 
 
-_LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
-
-
-def _decode_preds_to_6col(raw_preds, image, conf, cls_thresh, device=None):
-    if isinstance(raw_preds, (tuple, list)):
-        raw_preds = raw_preds[1]
-    img_h, img_w = image[0].shape[-2:]
-    pred = torch.cat([raw_preds['boxes'], raw_preds['scores']], dim=1)
-    preds_bboxes, preds_cls = _decode_predictions(pred, img_h, img_w, conf=conf, iou_thres=cls_thresh)
-    imgsz = float(image.shape[-1])
-    return [
-        torch.cat([b.detach() / imgsz, c[:, 1:2], c[:, 0:1]], dim=-1).to(device) if b.numel() > 0
-        else torch.zeros((0, 6), device=device)
-        for b, c in zip(preds_bboxes, preds_cls)
-    ]
-
+# ==================
+# Trainer Definition
+# ==================
 
 class WLCompatileDetTrainer(DetectionTrainer):
     def __init__(self, *a, **kw):
@@ -78,49 +69,87 @@ class WLCompatileDetTrainer(DetectionTrainer):
     def _init_training_loss(self):
         if not hasattr(self.model, "args"):
             self.model.args = get_cfg()
+        _LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
         self.criterions = {"train": {}, "val": {}}
+        self.criterions_per_instance = {"train": {}, "val": {}}
         self.iou = {}
+        self.iou_per_instance = {}
         for split in ("train", "val"):
+            # Per-sample metrics (aggregated)
             for t, n in _LOSS_PARTS:
                 self.criterions[split][n] = wl.watch_or_edit(
                     PerSampleDetectionLoss(self.model, loss_type=t),
-                    flag="loss", name=f"{split}/{n}", per_sample=True, log=True,
+                    flag="loss", name=f"{split}/{n}_sample", per_sample=True, log=True,
                 )
             self.iou[split] = wl.watch_or_edit(
                 PerSampleIoU(conf=0.25, iou_thres=0.5),
-                flag="metric", name=f"miou/{split}", per_sample=True, log=True,
+                flag="metric", name=f"iou/{split}_sample", per_sample=True, log=True,
             )
+
+            # Per-instance metrics (per annotation) — auto-saved by WL with annotation_id
+            for t, n in _LOSS_PARTS:
+                self.criterions_per_instance[split][n] = wl.watch_or_edit(
+                    PerInstanceDetectionLoss(self.model, loss_type=t),
+                    flag="loss", name=f"{split}/{n}_instance", per_instance=True, log=True,
+                )
+            self.iou_per_instance[split] = wl.watch_or_edit(
+                PerInstanceIoU(conf=0.25, iou_thres=0.5),
+                flag="metric", name=f"iou/{split}_instance", per_instance=True, log=True,
+            )
+
+    def process_predictions(self, pred_raw, image, conf=0.25, cls_thresh=0.5):
+        img_h, img_w = image[0].shape[-2:]
+
+        # Process check for eval mode
+        if isinstance(pred_raw, (tuple, list)):
+            pred_raw = pred_raw[1]
+
+        # Gen. bounding boxes
+        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
+        # Convert to raw model predictions format [batch, 64+nc, 8400]
+        preds_bboxes, preds_cls = _decode_predictions(
+            pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
+
+        return preds_bboxes, preds_cls
 
     def train(self):
         cs, m = self.criterions["train"], self.iou["train"]
-
-        # `yield from loader` re-iterates each pass, re-invoking the sampler — so
-        # shuffle=True re-shuffles each epoch instead of recycling order.
-        def _infinite(loader):
-            while True:
-                yield from loader
-        batches = _infinite(self.data_train_loader)
+        cs_inst, m_inst = self.criterions_per_instance["train"], self.iou_per_instance["train"]
 
         while True:
             with wl.guard_training_context:
                 self.optimizer.zero_grad()
-                inputs = next(batches)
+                inputs = next(self.data_train_loader)
                 image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
 
                 raw_preds = self.model(image.to(self.device))
-                preds_by_batch = _decode_preds_to_6col(raw_preds, image, conf=0.1, cls_thresh=0.1)
+                if not isinstance(raw_preds, dict):
+                    raw_preds = raw_preds[1]  # For audit mode, we are in evaluation so model also output the bb
+                preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
+                imgsz = float(image.shape[-1])
+                preds_by_batch = [
+                    torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
+                    if b.numel() > 0 else torch.zeros((0, 6))
+                    for b, c in zip(preds_bboxes, preds_cls)
+                ]
 
+                # Per-sample signals — used for backward pass
                 per_sample = (
                     cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
                     + cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
                     + cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
                 )
-                loss = per_sample.mean()
                 m(raw_preds, batch, batch_ids=batch_ids)
 
+                # Per-instance signals (per annotation) — auto-saved with annotation_id
+                cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids)
+                cs_inst["clsf"](raw_preds, batch, batch_ids=batch_ids)
+                cs_inst["dfl"](raw_preds, batch, batch_ids=batch_ids)
+                m_inst(raw_preds, batch, batch_ids=batch_ids)
+
+                loss = per_sample.mean()
                 loss.backward()
                 self.optimizer.step()
-                self.scheduler.step()
 
             if self.model.get_age() % self.val_every == 0:
                 with wl.guard_testing_context:
@@ -128,16 +157,29 @@ class WLCompatileDetTrainer(DetectionTrainer):
 
     def do_validate(self, loader):
         cs, m = self.criterions["val"], self.iou["val"]
+        cs_inst, m_inst = self.criterions_per_instance["val"], self.iou_per_instance["val"]
         for inputs in loader:
             image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
             raw_preds = self.model(image.to(self.device))[1]
-            preds_by_batch = _decode_preds_to_6col(
-                raw_preds, image, conf=0.25, cls_thresh=0.5, device=self.device)
+            preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
+            imgsz = float(image.shape[-1])
+            preds_by_batch = [
+                torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
+                if b.numel() > 0 else torch.zeros((0, 6))
+                for b, c in zip(preds_bboxes, preds_cls)
+            ]
 
+            # Per-sample metrics (aggregated per sample)
             cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
             cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
             cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
             m(raw_preds, batch, batch_ids=batch_ids)
+
+            # Per-instance metrics (per annotation) — auto-saved with annotation_id
+            cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
+            cs_inst["clsf"](raw_preds, batch, batch_ids=batch_ids)
+            cs_inst["dfl"](raw_preds, batch, batch_ids=batch_ids)
+            m_inst(raw_preds, batch, batch_ids=batch_ids)
 
 
 def main():
@@ -158,7 +200,7 @@ def main():
     data_root = parameters["data_root"]
     model_name = parameters["model"]["name"]
     train_cfg = dict(parameters["data"]["train_loader"])
-    test_cfg = dict(parameters["data"]["test_loader"])
+    val_cfg = dict(parameters["data"]["val_loader"])
     batch_size = train_cfg["batch_size"]
     serving_grpc = parameters.get("serving_grpc", True)
     serving_cli = parameters.get("serving_cli", False)
@@ -194,15 +236,16 @@ def main():
         return ds
 
     def _build_loader(ds, split):
-        c = train_cfg if split == "train" else test_cfg
+        c = train_cfg if split == "train" else val_cfg
         return wl.watch_or_edit(
             ds, flag="data", loader_name=f"{split}_loader",
             batch_size=c["batch_size"], shuffle=c["shuffle"],
             num_workers=2,
             drop_last=False, compute_hash=False,
             is_training=(split == "train"),
-            collate_fn=_wl_yolo_collate,
-            preload_labels=True, preload_metadata=True,
+            collate_fn=collate_fn,
+            preload_labels=True,
+            preload_metadata=True,
         )
 
     train_loader = _build_loader(_build_dataset("train"), "train")
@@ -229,7 +272,9 @@ def main():
     def _wl_validate(loader):
         trainer.do_validate(loader)
 
-    pause_controller.resume(force=True)
+    # ================
+    # 7. Training Loop
+    wl.start_training(timeout=None)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
     trainer.train()
     wl.keep_serving()
 

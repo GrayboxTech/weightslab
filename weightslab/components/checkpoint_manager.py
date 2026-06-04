@@ -28,6 +28,7 @@ Manifest tracks hash chronology for loading most recent experiments.
 
 import os
 import json
+import traceback
 import yaml
 import logging
 import time
@@ -56,7 +57,7 @@ from weightslab.backend.ledgers import (
 from weightslab.backend import ledgers
 from weightslab.utils.logger import LoggerQueue
 from weightslab.data.sample_stats import SampleStatsEx
-from weightslab.utils.tools import capture_rng_state, restore_rng_state, recursive_update, normalize_config
+from weightslab.utils.tools import capture_rng_state, restore_rng_state, recursive_update, normalize_config, safe_reset_index
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl
 
 # Init logger
@@ -162,10 +163,9 @@ class CheckpointManager:
             collected_tags = {}
 
             # Collect discarded series
+            df_view = dfm.get_df_view().xs(0, level='annotation_id')
             collected_discarded.update(
-                dfm.get_df_view(
-                    SampleStatsEx.DISCARDED.value
-                ).to_dict()
+                df_view[SampleStatsEx.DISCARDED.value].to_dict()
             )
 
             # Collect tag series (main tag column + prefixed columns)
@@ -173,7 +173,7 @@ class CheckpointManager:
             tag_cols_to_capture = [col for col in df_columns if col == SampleStatsEx.TAG.value or col.startswith(f"{SampleStatsEx.TAG.value}:")]
 
             for col in tag_cols_to_capture:
-                 col_data = dfm.get_df_view(col)
+                 col_data = df_view[col]
                  if isinstance(col_data, pd.Series):
                      collected_tags[col] = col_data.to_dict()
                  elif isinstance(col_data, pd.DataFrame) and col in col_data.columns:
@@ -1110,12 +1110,13 @@ class CheckpointManager:
                 return None
 
             if 'sample_id' not in df.columns:
-                df = df.reset_index()
+                df = safe_reset_index(df)
 
             # Keep only checkpoint-specific columns
             available_cols = [
                 col for col in df.columns if col in [
                     SampleStatsEx.SAMPLE_ID.value,
+                    SampleStatsEx.INSTANCE_ID.value,
                     SampleStatsEx.DISCARDED.value
                 ] or col.startswith(SampleStatsEx.TAG.value)
             ]
@@ -1204,6 +1205,8 @@ class CheckpointManager:
             return json_file
 
         except Exception as e:
+            if os.getenv("WEIGHTSLAB_DEBUG"):
+                traceback.print_exc()
             logger.error(f"Failed to save data snapshot: {e}")
         return None
 
@@ -1785,7 +1788,7 @@ class CheckpointManager:
                     # Extract RNG state from data snapshot if available
                     rng_state = snapshot_data.get('rng_state', {})
                     if load_data_snapshot:
-                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index('sample_id') if 'data' in snapshot_data else pd.DataFrame()
+                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value]) if 'data' in snapshot_data else pd.DataFrame()
                         if not snapshot_df.empty:
                             result['data_state'] = {'snapshot': snapshot_df}
                             result['loaded_components'].add('data')
@@ -1971,10 +1974,10 @@ class CheckpointManager:
 
                 if snapshot_df is not None and not snapshot_df.empty:
                     dfm = ledgers.get_dataframe()
-                    if dfm is not None:
+                    if dfm != None:
                         # Set index if needed
                         if 'sample_id' in snapshot_df.columns:
-                            snapshot_df = snapshot_df.set_index('sample_id')
+                            snapshot_df = snapshot_df.set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value])
 
                         # Merge only the checkpoint-specific columns (tags, discarded)
                         # This updates existing rows without replacing all data
