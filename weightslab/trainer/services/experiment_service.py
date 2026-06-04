@@ -12,6 +12,7 @@ from weightslab.components.global_monitoring import weightslab_rlock, try_acquir
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
 from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name, get_hyperparams
 from weightslab.backend import ledgers
+from weightslab.backend.audit_logger import AuditLogger
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 from weightslab.trainer.services.agent_service import AgentService
@@ -80,7 +81,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     # Limit concurrent GetLatestLoggerData calls to 3 to avoid piling up under slow I/O
     _logger_data_semaphore = threading.Semaphore(3)
 
-    def __init__(self, ctx):
+    def __init__(self, ctx, root_log_dir: str = None):
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
@@ -88,6 +89,33 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         # Per-instance in-flight counter for GetLatestLoggerData
         self._logger_data_in_flight = 0
         self._logger_data_counter_lock = threading.Lock()
+
+        # Initialize audit logger
+        self.audit_logger = None
+        if root_log_dir:
+            try:
+                self.audit_logger = AuditLogger(root_log_dir, ctx.exp_name or "default")
+            except Exception as e:
+                logger.warning(f"Failed to initialize audit logger: {e}")
+
+    def _log_audit(
+        self,
+        action_type: str,
+        status: str,
+        details: dict = None,
+        error: str = None,
+    ) -> None:
+        """Helper to log audit events if logger is available."""
+        if self.audit_logger:
+            try:
+                self.audit_logger.log_event(
+                    action_type=action_type,
+                    status=status,
+                    details=details,
+                    error=error,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to log audit event: {e}")
 
     def _kick_eval_worker(self) -> None:
         """Best-effort trigger of backend-thread evaluation execution."""
@@ -405,6 +433,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
+                self._log_audit(
+                    "checkpoint_restore",
+                    "success",
+                    {
+                        "checkpoint_id": experiment_hash,
+                        "checkpoint_step": target_step,
+                        "weights_only": load_weights_only,
+                    },
+                )
                 return pb2.RestoreCheckpointResponse(
                     success=True,
                     message=(
@@ -415,12 +452,24 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 )
             else:
                 logger.warning(f"Failed to restore checkpoint: {experiment_hash}")
+                self._log_audit(
+                    "checkpoint_restore",
+                    "failed",
+                    {"checkpoint_id": experiment_hash},
+                    error=f"Failed to restore checkpoint {experiment_hash}",
+                )
                 return pb2.RestoreCheckpointResponse(
                     success=False,
                     message=f"Failed to restore checkpoint {experiment_hash}"
                 )
         except Exception as e:
             logger.error(f"Error during checkpoint restore: {str(e)}")
+            self._log_audit(
+                "checkpoint_restore",
+                "failed",
+                {"checkpoint_id": experiment_hash},
+                error=str(e),
+            )
             return pb2.RestoreCheckpointResponse(
                 success=False,
                 message=f"Error: {str(e)}"
@@ -440,6 +489,11 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         use_full_set = bool(request.use_full_set)
 
         if not split_name:
+            self._log_audit(
+                "evaluation_start",
+                "failed",
+                error="split_name is required",
+            )
             return pb2.TriggerEvaluationResponse(
                 success=False,
                 message="split_name is required",
@@ -457,11 +511,25 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 "[ExperimentService] TriggerEvaluation accepted: split=%s tags=%s full=%s",
                 split_name, tags, use_full_set,
             )
+            self._log_audit(
+                "evaluation_start",
+                "success",
+                {
+                    "eval_mode": split_name,
+                    "tags": tags,
+                    "use_full_set": use_full_set,
+                },
+            )
             return pb2.TriggerEvaluationResponse(
                 success=True,
                 message=f"Evaluation on '{split_name}' requested",
             )
         else:
+            self._log_audit(
+                "evaluation_start",
+                "failed",
+                error="Evaluation already in progress",
+            )
             return pb2.TriggerEvaluationResponse(
                 success=False,
                 message="Evaluation already in progress",
@@ -582,6 +650,18 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 except Exception:
                     logger.debug("Could not persist logger snapshot after note update", exc_info=True)
 
+            # Log to audit trail
+            self._log_audit_event(
+                "note_write",
+                "success",
+                {
+                    "metric_name": metric_name,
+                    "model_age": model_age,
+                    "note_text": note_text,
+                    "note_action": "saved" if note_text.strip() else "cleared",
+                },
+            )
+
             return pb2.CommandResponse(
                 success=True,
                 message=(
@@ -616,53 +696,70 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # Update HP
             try:
                 hp_now = None
+                hp_changes = {}
                 if hyper_parameters.HasField("training_steps_to_do"):
+                    hp_changes["training_steps_to_do"] = hyper_parameters.training_steps_to_do
                     set_hyperparam(
                         name=hp_name,
                         key_path="training_steps_to_do",
                         value=hyper_parameters.training_steps_to_do
                     )
                 if hyper_parameters.HasField("learning_rate"):
+                    hp_changes["learning_rate"] = hyper_parameters.learning_rate
                     set_hyperparam(
                         name=hp_name,
                         key_path="optimizer.lr",
                         value=hyper_parameters.learning_rate
                     )
                 if hyper_parameters.HasField("batch_size"):
+                    hp_changes["batch_size"] = hyper_parameters.batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.train_loader.batch_size",
                         value=hyper_parameters.batch_size
                     )
                 if hasattr(hyper_parameters, 'val_batch_size') and hyper_parameters.HasField("val_batch_size"):
+                    hp_changes["val_batch_size"] = hyper_parameters.val_batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.val_loader.batch_size",
                         value=hyper_parameters.val_batch_size
                     )
                 elif hasattr(hyper_parameters, 'eval_batch_size') and hyper_parameters.HasField("eval_batch_size"):
+                    hp_changes["val_batch_size"] = hyper_parameters.eval_batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.val_loader.batch_size",
                         value=hyper_parameters.eval_batch_size
                     )
                 if hyper_parameters.HasField("test_batch_size"):
+                    hp_changes["test_batch_size"] = hyper_parameters.test_batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.test_loader.batch_size",
                         value=hyper_parameters.test_batch_size
                     )
                 if hyper_parameters.HasField("full_eval_frequency"):
+                    hp_changes["full_eval_frequency"] = hyper_parameters.full_eval_frequency
                     set_hyperparam(
                         name=hp_name,
                         key_path="eval_full_to_train_steps_ratio",
                         value=hyper_parameters.full_eval_frequency
                     )
                 if hyper_parameters.HasField("checkpont_frequency"):
+                    hp_changes["checkpont_frequency"] = hyper_parameters.checkpont_frequency
                     set_hyperparam(
                         name=hp_name,
                         key_path="experiment_dump_to_train_steps_ratio",
                         value=hyper_parameters.checkpont_frequency
+                    )
+
+                # Log HP changes if any
+                if hp_changes:
+                    self._log_audit(
+                        "hp_change",
+                        "success",
+                        {"changed_params": hp_changes},
                     )
 
                 # Process evaluation_mode toggle (UI button switch)
@@ -673,6 +770,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                             name=hp_name,
                             key_path="evaluation_mode",
                             value=incoming_eval,
+                        )
+                        self._log_audit(
+                            "mode_switch",
+                            "success",
+                            {
+                                "from_mode": "train",
+                                "to_mode": "evaluation" if incoming_eval else "train",
+                                "evaluation_mode": incoming_eval,
+                            },
                         )
                         if incoming_eval:
                             # Switching to eval mode implies pausing training
@@ -734,6 +840,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                                 set_hyperparam(name=hp_name, key_path="is_training", value=False)
                             mode_label = "AUDIT" if incoming_audit else "TRAIN"
                             logger.info(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode")
+                            self._log_audit(
+                                "mode_switch",
+                                "success",
+                                {
+                                    "from_mode": "audit" if current_audit else "train",
+                                    "to_mode": "audit" if incoming_audit else "train",
+                                    "auditor_mode": incoming_audit,
+                                },
+                            )
 
                         # Always update the stored value (harmless no-op if unchanged)
                         set_hyperparam(
@@ -771,9 +886,19 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         if desired_is_training:
                             logger.info("\n[WeightsLab] UI Command: RESUME")
                             trainer.resume()
+                            self._log_audit(
+                                "resume",
+                                "success",
+                                {"trainer_state": "running"},
+                            )
                         else:
                             logger.info("\n[WeightsLab] UI Command: PAUSE")
                             trainer.pause()
+                            self._log_audit(
+                                "pause",
+                                "success",
+                                {"trainer_state": "paused"},
+                            )
 
                         # Set training state and pause/resume accordingly
                         set_hyperparam(

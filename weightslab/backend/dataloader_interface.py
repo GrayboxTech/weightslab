@@ -882,8 +882,12 @@ class DataLoaderInterface:
         With num_workers > 0, cleanup of worker processes happens during reset
         (which is called by __next__).
         """
-        if self._iterator is None:
+        if not hasattr(self, '_iterator') or self._iterator is None:
             self._reset_iterator()
+
+        # Check if iterator is empty, i.e., everything discarded
+        if len(self.dataloader) == 0:
+            raise StopIteration
 
         # Generate batch - will raise StopIteration if epoch is exhausted
         try:
