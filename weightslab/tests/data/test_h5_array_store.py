@@ -78,12 +78,9 @@ class TestH5ArrayStore(unittest.TestCase):
         tgt_ref = self.store.save_array(5, "target", tgt, preserve_original=True)
 
         df = pd.DataFrame(
-            {
-                "sample_id": [5],
-                "prediction": [pred_ref],
-                "target": [tgt_ref],
-            }
-        ).set_index("sample_id")
+            {"prediction": [pred_ref], "target": [tgt_ref]},
+            index=pd.MultiIndex.from_arrays([[5], [0]], names=["sample_id", "annotation_id"]),
+        )
 
         # Autoload only prediction; target stays proxy
         df_out = convert_dataframe_to_proxies(
@@ -94,10 +91,10 @@ class TestH5ArrayStore(unittest.TestCase):
             return_proxies=True,
         )
 
-        self.assertIsInstance(df_out.loc[5, "prediction"], np.ndarray)
-        self.assertIsInstance(df_out.loc[5, "target"], ArrayH5Proxy)
+        self.assertIsInstance(df_out.loc[(5, 0), "prediction"], np.ndarray)
+        self.assertIsInstance(df_out.loc[(5, 0), "target"], ArrayH5Proxy)
         # Accessing the proxy should load the array transparently
-        np.testing.assert_array_equal(df_out.loc[5, "target"], tgt)
+        np.testing.assert_array_equal(df_out.loc[(5, 0), "target"], tgt)
 
 
 # ---------------------------------------------------------------------------

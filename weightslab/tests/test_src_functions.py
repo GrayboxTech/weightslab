@@ -24,10 +24,14 @@ class TestSrcTagAndDiscardFunctions(unittest.TestCase):
         df_update = df_manager.upsert_df.call_args.args[0]
         kwargs = df_manager.upsert_df.call_args.kwargs
 
-        self.assertEqual(list(df_update.index), [1, 2])
+        # tag_samples must hand upsert a (sample_id, annotation_id) multi-index,
+        # with the sample-level tag on the canonical row (annotation_id == 0).
+        self.assertIsInstance(df_update.index, pd.MultiIndex)
+        self.assertEqual(list(df_update.index.names), ["sample_id", "annotation_id"])
+        self.assertEqual(list(df_update.index), [(1, 0), (2, 0)])
         self.assertIn("tag:difficult", df_update.columns)
-        self.assertTrue(bool(df_update.loc[1, "tag:difficult"]))
-        self.assertTrue(bool(df_update.loc[2, "tag:difficult"]))
+        self.assertTrue(bool(df_update.loc[(1, 0), "tag:difficult"]))
+        self.assertTrue(bool(df_update.loc[(2, 0), "tag:difficult"]))
         self.assertTrue(kwargs.get("force_flush"))
 
     def test_tag_samples_remove_mode(self):
@@ -38,8 +42,9 @@ class TestSrcTagAndDiscardFunctions(unittest.TestCase):
 
         self.assertTrue(ok)
         df_update = df_manager.upsert_df.call_args.args[0]
-        self.assertFalse(bool(df_update.loc[3, "tag:outlier"]))
-        self.assertFalse(bool(df_update.loc[4, "tag:outlier"]))
+        self.assertIsInstance(df_update.index, pd.MultiIndex)
+        self.assertFalse(bool(df_update.loc[(3, 0), "tag:outlier"]))
+        self.assertFalse(bool(df_update.loc[(4, 0), "tag:outlier"]))
 
     def test_tag_samples_invalid_mode_returns_false(self):
         df_manager = MagicMock()
@@ -65,9 +70,10 @@ class TestSrcTagAndDiscardFunctions(unittest.TestCase):
         self.assertTrue(ok)
         df_update = df_manager.upsert_df.call_args.args[0]
 
+        self.assertIsInstance(df_update.index, pd.MultiIndex)
         self.assertIn(SampleStatsEx.DISCARDED.value, df_update.columns)
-        self.assertTrue(bool(df_update.loc[10, SampleStatsEx.DISCARDED.value]))
-        self.assertTrue(bool(df_update.loc[11, SampleStatsEx.DISCARDED.value]))
+        self.assertTrue(bool(df_update.loc[(10, 0), SampleStatsEx.DISCARDED.value]))
+        self.assertTrue(bool(df_update.loc[(11, 0), SampleStatsEx.DISCARDED.value]))
 
     def test_get_samples_by_tag_filters_true_values(self):
         df_manager = MagicMock()

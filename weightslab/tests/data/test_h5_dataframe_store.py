@@ -44,13 +44,15 @@ class TestH5DataFrameStore(unittest.TestCase):
         self.assertEqual(set(loaded["origin"].unique()), {"train", "eval"})
         self.assertIn("sample_id", loaded.columns)
         self.assertEqual(len(loaded), 3)
-        # Ensure values are preserved
-        train_rows = loaded[loaded["origin"] == "train"].set_index("sample_id")
-        self.assertTrue(train_rows.loc[2, SampleStatsEx.DISCARDED.value])
+        # Ensure values are preserved (re-index on both levels — every row is multi-indexed).
+        train_rows = loaded[loaded["origin"] == "train"].set_index(["sample_id", "annotation_id"])
+        self.assertTrue(train_rows.loc[(2, 0), SampleStatsEx.DISCARDED.value])
 
-    def test_single_level_backward_compatibility(self):
-        """Verify single-level indices still work with new code."""
-        # Create single-level indexed dataframe (old behavior)
+    def test_single_level_input_is_promoted_to_multi_index(self):
+        """A bare single-level (sample_id) frame must be PROMOTED to the
+        (sample_id, annotation_id=0) multi-index on write — no dataframe is ever
+        persisted/loaded with only sample_id as its index."""
+        # Create single-level indexed dataframe (legacy / convenience input)
         df = pd.DataFrame({
             'sample_id': [10, 11, 12],
             'brightness': [0.75, 0.82, 0.65],
@@ -63,11 +65,17 @@ class TestH5DataFrameStore(unittest.TestCase):
         # Read
         loaded = self.store.load('train')
 
-        # Verify single-level index behavior preserved
+        # The store restores both index levels as columns; annotation_id must exist
+        # and be all-zero (the canonical sample rows).
         self.assertIn('sample_id', loaded.columns)
-        self.assertNotIsInstance(loaded.index, pd.MultiIndex)
+        self.assertIn('annotation_id', loaded.columns)
+        self.assertEqual(list(loaded['annotation_id']), [0, 0, 0])
         self.assertEqual(len(loaded), 3)
-        self.assertEqual(list(loaded['sample_id']), [10, 11, 12])
+        self.assertEqual(sorted(loaded['sample_id'].astype(int)), [10, 11, 12])
+        # Re-indexing on both levels yields a proper 2-level MultiIndex.
+        mi = loaded.set_index(['sample_id', 'annotation_id'])
+        self.assertIsInstance(mi.index, pd.MultiIndex)
+        self.assertEqual(mi.index.nlevels, 2)
 
     def test_multi_index_write_read_round_trip(self):
         """Verify multi-index (sample_id, annotation_id) is preserved through write/read."""

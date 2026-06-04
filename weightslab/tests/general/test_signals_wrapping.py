@@ -321,7 +321,9 @@ class TestSignalWrappingWithDetection(unittest.TestCase):
             self.assertTrue(mock_df.enqueue_instance_batch.called)
             call_kwargs = mock_df.enqueue_instance_batch.call_args[1]
             self.assertEqual(call_kwargs["sample_ids"], ["1", "1", "2", "2", "2"])
-            self.assertEqual(call_kwargs["annotation_ids"], [0, 1, 0, 1, 2])
+            # 1-based annotation ids: instance_id 0 is reserved for the sample row,
+            # so sample 1's two instances are 1,2 and sample 2's three are 1,2,3.
+            self.assertEqual(call_kwargs["annotation_ids"], [1, 2, 1, 2, 3])
             self.assertEqual(call_kwargs["origin"], "train")
             # Signal name should be prefixed with "signals//"
             sig_key = next(iter(call_kwargs["losses"]))
