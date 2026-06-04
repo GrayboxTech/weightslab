@@ -224,6 +224,17 @@ Data and Cache
      - Synchronise hyperparameters with the UI on every training step.
        Set to ``0`` to reduce IPC overhead (hyperparameters are still readable
        on demand via the CLI).
+   * - ``WL_MAX_POINTS_PER_SAMPLE``
+     - ``200``
+     - Maximum number of points returned **per curve** in the *break-by-slices*
+       plot. In this view the backend aggregates the matching samples into a single
+       **mean curve per experiment** (mean of the metric across the tagged samples
+       at each step) rather than streaming one curve per sample — so a long run
+       (e.g. 10k tagged samples × 10k steps) sends one curve instead of millions of
+       points. If that mean curve still has more steps than this cap, it is
+       uniformly downsampled — keeping the first and last point and an evenly-spaced
+       subset in between (no values are interpolated/invented). Set to ``0`` to
+       disable the cap and return every step of the mean curve.
 
 
 Evaluation Mode

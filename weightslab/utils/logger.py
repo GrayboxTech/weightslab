@@ -515,14 +515,15 @@ class LoggerQueue:
             exp_hash: Specific experiment hash to query. If None, queries all hashes.
 
         Returns:
-            Dict mapping sample_id (str) → list of {'model_age': int, 'signal_value': float} dicts.
+            List of (sample_id, step, value, experiment_hash) tuples.
         """
         if graph_name not in self._signal_history_per_sample:
             return {}
 
         exps = self._signal_history_per_sample[graph_name]
         hashes = [exp_hash] if exp_hash is not None else list(exps.keys())
-        sid_set = set(str(s) for s in sample_ids) if sample_ids is not None else None
+        # Stored ids are ints; callers pass str (df index is str-normalized) — compare as str.
+        sid_set = {str(s) for s in sample_ids} if sample_ids is not None else None
 
         results = {}
         for h in hashes:
@@ -530,14 +531,8 @@ class LoggerQueue:
             if buf is None:
                 continue
             for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
-                sid_str = str(sid)
-                if sid_set is None or sid_str in sid_set:
-                    if sid_str not in results:
-                        results[sid_str] = []
-                    results[sid_str].append({
-                        "model_age": step,
-                        "signal_value": float(val)
-                    })
+                if sid_set is None or str(sid) in sid_set:
+                    results.append((sid, step, float(val), h))
 
         return results
 
