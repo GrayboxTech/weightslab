@@ -1,4 +1,6 @@
+import os
 import time
+import traceback
 import threading
 import logging
 import traceback
@@ -607,16 +609,6 @@ class LedgeredDataFrameManager:
         # Normalize incoming frame
         df_norm = df_local if isinstance(df_local, pd.DataFrame) else pd.DataFrame(df_local)
 
-        # If origin not specified, infer from existing dataframe or use default
-        if origin is None:
-            if not self._df.empty and "origin" in self._df.columns:
-                # Get most common origin from existing dataframe
-                origin_values = self._df["origin"].dropna().unique()
-                if len(origin_values) > 0:
-                    origin = str(origin_values[0])
-            if origin is None:
-                origin = "unknown"
-
         # Check if already multi-indexed or needs expansion
         if isinstance(df_norm.index, pd.MultiIndex):
             # Already has multi-index (sample_id, annotation_id)
@@ -641,10 +633,6 @@ class LedgeredDataFrameManager:
             except Exception as e:
                 logger.debug(f"[LedgeredDataFrameManager] Failed to expand dataframe with annotations: {e}")
 
-        # Ensure origin column
-        if origin is not None and "origin" not in df_norm.columns:
-            df_norm["origin"] = origin
-
         # Normalize sample_id values in multi-index
         if isinstance(df_norm.index, pd.MultiIndex) and df_norm.index.nlevels >= 1:
             level_0_normalized = pd.Index([self._normalize_sample_id(v) for v in df_norm.index.get_level_values(0)])
@@ -663,7 +651,7 @@ class LedgeredDataFrameManager:
         # df_norm = self._repair_duplicate_annotation_ids(df_norm)
 
         with self._lock:
-            affected_origins = self._collect_affected_origins(df_norm, origin=origin) if not isinstance(df_norm.index, pd.MultiIndex) else {str(origin)}
+            affected_origins = self._collect_affected_origins(df_norm, origin=origin)
 
             # Align columns
             missing_cols = df_norm.columns.difference(self._df.columns)
@@ -757,18 +745,38 @@ class LedgeredDataFrameManager:
         """Check if array storage is enabled."""
         return array_name in SAMPLES_STATS_TO_SAVE_TO_H5  # Regexed signals are not considered here
 
+    @staticmethod
+    def _is_bbox_array(value: Any) -> bool:
+        """True if ``value`` looks like bounding-box COORDINATES rather than a dense
+        mask / feature map.
+
+        Box rows are ``(x1, y1, x2, y2[, conf][, cls])`` → a 2-D array whose last
+        dim is 4..6. Dense masks are ``(H, W)`` with large trailing dims, so they
+        never collide with this shape. Used to keep detection targets/predictions
+        as raw coordinates (not rasterized to a mask, not spilled to the array H5).
+        """
+        try:
+            arr = np.asanyarray(value)
+        except Exception:
+            return False
+        return arr.ndim == 2 and arr.shape[0] >= 1 and arr.shape[-1] in (4, 5, 6)
+
     def _should_store_array_separately(self, value: Any) -> bool:
         """Determine if a value should be stored in array H5."""
         if value is None:
             return False
         try:
             arr = np.asanyarray(value)
+            # Keep bounding-box coordinates inline in the dataframe — they are small,
+            # meaningful as-is, and must NOT be spilled to the array H5 as a proxy.
+            if self._is_bbox_array(arr):
+                return False
             # Store arrays with size > 1 separately
             return arr.size > 1 and (arr.ndim >= 1 and (arr.shape[0] >= 28 or arr.shape[-1] >= 28))
         except Exception:
             return False
 
-    def _extract_arrays_for_storage(self, sample_id: int, data: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    def _extract_arrays_for_storage(self, sample_id: int, data: pd.DataFrame) -> Dict[str, np.ndarray]:
         """
         Extract arrays that should be stored separately.
 
@@ -781,13 +789,42 @@ class LedgeredDataFrameManager:
             if col not in data:
                 continue
 
-            value = data[col]
+            inst_values = data[col]
+            for value in inst_values:
+                if self._should_array_be_stored(col) and self._should_store_array_separately(value):
+                    try:
+                        arrays_to_store[col] = np.asanyarray(value)
+                    except Exception as e:
+                        logger.warning(f"[LedgeredDataFrameManager] Failed to convert {col} to array for sample {sample_id}: {e}")
+
+        return arrays_to_store
+
+    def _extract_arrays_from_row(self, row_key: Any, row: pd.Series) -> Dict[str, np.ndarray]:
+        """Extract the array-valued cells of a SINGLE row to store separately.
+
+        Unlike :meth:`_extract_arrays_for_storage` (which collapses a whole
+        sample's annotation rows and so loses per-instance arrays), this works on
+        one ``(sample_id, annotation_id)`` row at a time — required for multi-index
+        frames where each instance row carries its own ``target`` array.
+
+        Cells already holding an :class:`ArrayH5Proxy` are skipped: their array is
+        already persisted, so the caller just reuses ``proxy.path_ref``.
+
+        Returns:
+            Dict of {column_name: ndarray} for arrays to store in the array H5.
+        """
+        arrays_to_store: Dict[str, np.ndarray] = {}
+        for col in self._array_columns:
+            if col not in row:
+                continue
+            value = row[col]
+            if isinstance(value, ArrayH5Proxy):
+                continue
             if self._should_array_be_stored(col) and self._should_store_array_separately(value):
                 try:
                     arrays_to_store[col] = np.asanyarray(value)
                 except Exception as e:
-                    logger.warning(f"[LedgeredDataFrameManager] Failed to convert {col} to array for sample {sample_id}: {e}")
-
+                    logger.warning(f"[LedgeredDataFrameManager] Failed to convert {col} to array for {row_key}: {e}")
         return arrays_to_store
 
     def _safe_array_value(self, value: Any) -> Any:
@@ -880,7 +917,7 @@ class LedgeredDataFrameManager:
                 return False
             try:
                 return not np.isnan(v)
-            except (TypeError, ValueError):
+            except (RuntimeError, TypeError, ValueError):
                 return True
 
         def index_batch(obj, batch_index, rec=False):
@@ -890,6 +927,8 @@ class LedgeredDataFrameManager:
                 return obj[batch_index]
             if isinstance(obj, (torch.Tensor, np.ndarray)) and obj.shape[0] == 0:
                 return obj[batch_index]
+            if obj is None:
+                return obj
             return obj[batch_index]
 
         # Build all records BEFORE acquiring lock (faster)
@@ -903,14 +942,30 @@ class LedgeredDataFrameManager:
             # Process data to store
             ## Prediction
             if preds is not None:
-                pred = index_batch(preds, batch_index)
+                pred = None
+                # Match batch formating in targets (dict) - ul formating
+                if isinstance(preds, dict) and 'bboxes' in preds:
+                    pred = preds['bboxes']
+                    pred = index_batch(pred, batch_index)
+                else:
+                    pred = index_batch(preds, batch_index)
                 pred = pred if is_meaningful(pred) else None  # Replace nan by None
                 if pred is not None:
                     rec[SampleStats.Ex.PREDICTION.value] = self._normalize_preds_raw_uint16(pred)  # Not normalized as already integer
             ## Target
             if targets is not None:
-                target = index_batch(targets, batch_index)
-                target = target if is_meaningful(target) else None  # Replace nan by None
+                target = None
+                # Match batch formating in targets (dict) - ul formating
+                if isinstance(targets, dict) and 'batch_idx' in targets:
+                    if batch_index in targets['batch_idx']:
+                        mask = targets['batch_idx'].ravel()==batch_index
+                        if 'bboxes' in targets:
+                            target = targets['bboxes'][mask]
+                        if 'cls' in targets:
+                            target = torch.cat((target, targets['cls'][mask]), -1)
+                else:
+                    target = index_batch(targets, batch_index)
+                    target = target if is_meaningful(target) else None  # Replace nan by None
                 if target is not None:
                     rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
             ## Step
@@ -943,7 +998,6 @@ class LedgeredDataFrameManager:
         losses: Dict[str, Any] | None,
         step: int | None = None,
         targets: np.ndarray | dict | None = None,
-        origin: str | None = None,
     ):
         """Enqueue per-instance signals indexed by (sample_id, annotation_id).
 
@@ -1002,8 +1056,20 @@ class LedgeredDataFrameManager:
         # them into the SAME buffer as enqueue_batch. Only the flush path mutates the
         # dataframe — it handles sample-wise and instance-wise records together.
         records_to_add: Dict[Any, Dict[str, Any]] = {}
-        targets_rav = [tar for _targets in targets for tar in _targets] if targets is not None else None
+        if targets is not None and isinstance(targets, dict):
+            # If targets is a dict, we assume it's a dict of arrays (e.g. {'bboxes': [...], 'cls': [...]}) for detection
+            targets_rav = None
+        else:
+            targets_rav = [tar for _targets in targets for tar in _targets] if targets is not None else None
+        batch_index_d, batch_index = {}, -1
         for i, (sid, aid) in enumerate(zip(sample_ids, annotation_ids)):
+            # Skip first aid as it s the whole signal, not per instance
+            if aid == 0:
+                continue
+
+            if sid not in batch_index_d:
+                batch_index += 1
+                batch_index_d[sid] = batch_index
             sid_n = self._normalize_sample_id(sid)
             aid_i = int(aid)
             rec: Dict[str, Any] = {
@@ -1014,7 +1080,11 @@ class LedgeredDataFrameManager:
             # rows (instance_id >= 1) hold only their per-instance target + signals.
             # The flush derives each row's origin from its sample's IID 0 row for routing.
 
-            # Per-instance scalar signals (losses/metrics).
+            # Per-instance scalar signals (losses/metrics) are a FLAT, sample-major
+            # vector aligned 1:1 with the (sample_id, annotation_id) iteration order,
+            # so the i-th value belongs to this i-th instance — regardless of whether
+            # `targets` is a dict (detection) or a nested list (segmentation). Index
+            # strictly by i; never by the per-sample counter.
             for name, arr in normalized_losses.items():
                 if i < len(arr):
                     try:
@@ -1024,10 +1094,33 @@ class LedgeredDataFrameManager:
 
             # Per-instance target (e.g. one mask / box per annotation).
             # if inst_target := _index_target(targets_rav, i):
-            inst_target = _index_target(targets_rav, i)
-            if _meaningful(inst_target):
-                rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(inst_target)
+            if targets_rav is None:
+                target = None
 
+                # Match batch formating in targets (dict) - ul formating
+                if isinstance(targets, dict) and 'batch_idx' in targets:
+                    if batch_index in targets['batch_idx']:
+                        mask = targets['batch_idx'].numpy().ravel()==batch_index
+                        if mask.any():
+                            usid = list(dict.fromkeys(sample_ids))
+                            if targets['batch_idx'][mask].ravel().shape[0] > 0:
+                                bid = int(targets['batch_idx'][mask].ravel()[0].item())
+                            if sid == usid[bid]:
+                                if 'bboxes' in targets:
+                                    target = targets['bboxes'][mask][aid_i-1]  # aid start to 1 for instance rows
+                                if 'cls' in targets:
+                                    target = torch.cat((target, targets['cls'][mask][aid_i-1]), -1)  # aid start to 1 for instance rows
+                if target is not None:
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
+            else:
+                # Nested-list targets are flattened sample-major (targets_rav), so the
+                # i-th flat entry is this i-th instance's target — index by i, not the
+                # per-sample counter.
+                inst_target = _index_target(targets_rav, i)
+                if _meaningful(inst_target):
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(inst_target)
+
+            # Update last seen for every sample
             if step is not None:
                 rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
 
@@ -1376,6 +1469,11 @@ class LedgeredDataFrameManager:
 
             # Process and norm np array
             if self._is_array_column_to_norm(col, value):
+                # Keep bounding-box coordinates as-is: do NOT rasterize them into a
+                # segmentation mask here (boxes are drawn in Weights Studio from the
+                # raw coordinates). Only dense arrays go through get_mask.
+                if self._is_bbox_array(value):
+                    continue
                 # GP: Not sure about this part - Maybe remove this and draw BB in WS
                 if dataset is None:
                     loader = self._get_loader_by_origin(row.get("origin"))
@@ -1384,6 +1482,7 @@ class LedgeredDataFrameManager:
                     dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset is not None else None
                     row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
                 except Exception as e:
+                    traceback.print_exc() if os.environ['WEIGHTSLAB_LOG_LEVEL'] == 'DEBUG' else None
                     logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={sample_id}: {e}")
         return row
 
@@ -1596,6 +1695,8 @@ class LedgeredDataFrameManager:
                 self._ensure_multi_index_locked()
                 self._apply_updates_frame_locked(instance_df, broadcast=False)
             self._apply_updates_frame_locked(sample_df, broadcast=True)
+            # Keep newly-added signal columns float32 and empty object cells as None.
+            self._df = self._optimize_dataframe_memory(self._df)
 
         # Mark all as pending for h5 flush (outside lock)
         self.mark_dirty_batch(sample_ids)
@@ -1632,6 +1733,8 @@ class LedgeredDataFrameManager:
             written_s = self._apply_updates_frame_locked(sample_df, broadcast=True)
             applied_index = written_s.append(written_i) if len(written_i) else written_s
             update_cols = sample_df.columns.union(instance_df.columns)
+            # Keep newly-added signal columns float32 and empty object cells as None.
+            self._df = self._optimize_dataframe_memory(self._df)
         finally:
             self._lock.release()
 
@@ -1703,41 +1806,60 @@ class LedgeredDataFrameManager:
         if data_snapshot is None or data_snapshot.empty:
             return
 
-        # Array processing (no locks)
+        # Array processing (no locks).
+        #
+        # Each row is handled INDIVIDUALLY (per (sample_id, annotation_id)) so that
+        # a multi-index frame's per-instance arrays don't collide: instance rows
+        # (annotation_id >= 1) get a composite array-store key "sample_id__annot",
+        # while the canonical sample row (annotation_id 0) keeps the bare sample_id
+        # key for backward compatibility with single-index data.
         if self._array_store is not None and self._enable_h5_persistence:
-            arrays_to_store = {}
-            for sample_id in work:
-                if sample_id not in data_snapshot.index:
-                    continue
-                row_data = data_snapshot.loc[sample_id].to_dict() if isinstance(data_snapshot.loc[sample_id], pd.Series) else data_snapshot.loc[sample_id]
-                arrays = self._extract_arrays_for_storage(sample_id, row_data)
+            is_multi = isinstance(data_snapshot.index, pd.MultiIndex)
+            arrays_to_store: Dict[str, Dict[str, np.ndarray]] = {}
+            rowkey_to_index: Dict[str, Any] = {}
+
+            for idx, row in data_snapshot.iterrows():
+                if is_multi:
+                    sample_id, annot = idx[0], int(idx[1])
+                else:
+                    sample_id, annot = idx, 0
+                row_key = str(sample_id) if annot == 0 else f"{sample_id}__{annot}"
+
+                # A cell already holding an ArrayH5Proxy is already persisted —
+                # reuse its path_ref string for the H5 snapshot instead of
+                # re-storing the array (and never write a proxy object to H5).
+                for col in self._array_columns:
+                    if col in data_snapshot.columns and isinstance(row[col], ArrayH5Proxy):
+                        data_snapshot.at[idx, col] = row[col].path_ref
+
+                arrays = self._extract_arrays_from_row(row_key, row)
                 if arrays:
-                    arrays_to_store[sample_id] = arrays
+                    arrays_to_store[row_key] = arrays
+                    rowkey_to_index[row_key] = idx
 
             if arrays_to_store:
                 path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
                 if path_refs:
-                    # === FOR H5 FILE: Store path references (strings for lightweight persistence) ===
-                    # Update snapshot with path refs strings so H5 gets lightweight references
-                    for sample_id in path_refs:
-                        for col_name, path_ref in path_refs[sample_id].items():
-                            if sample_id in data_snapshot.index and col_name in data_snapshot.columns and path_ref is not None:
-                                data_snapshot.loc[sample_id, col_name] = path_ref
+                    # === FOR H5 FILE: store path reference strings (lightweight) at the exact row ===
+                    for row_key, col_refs in path_refs.items():
+                        idx = rowkey_to_index.get(row_key)
+                        if idx is None:
+                            continue
+                        for col_name, path_ref in col_refs.items():
+                            if path_ref is not None and col_name in data_snapshot.columns:
+                                data_snapshot.at[idx, col_name] = path_ref
 
-                    # === FOR IN-MEMORY DF: Store ArrayH5Proxy objects (lazy-loaded access) ===
-                    # Update main df with ArrayH5Proxy objects instead of strings
-                    # This allows users to access arrays on-demand via proxy.load()
+                    # === FOR IN-MEMORY DF: store ArrayH5Proxy objects (lazy-loaded access) at the exact row ===
                     if self._lock.acquire(timeout=0.001):
                         try:
-                            for sample_id in path_refs:
-                                for col_name, path_ref in path_refs[sample_id].items():
-                                    if col_name in self._df.columns and path_ref is not None:
-                                        # Create ArrayH5Proxy for lazy loading
-                                        proxy = ArrayH5Proxy(path_ref, array_store=self._array_store)
-                                        # Use .at for scalar assignment to avoid pandas array broadcasting issues
-                                        mask = self._df.index == sample_id
-                                        for idx in self._df.index[mask]:
-                                            self._df.at[idx, col_name] = proxy
+                            for row_key, col_refs in path_refs.items():
+                                idx = rowkey_to_index.get(row_key)
+                                if idx is None or idx not in self._df.index:
+                                    continue
+                                for col_name, path_ref in col_refs.items():
+                                    if path_ref is not None and col_name in self._df.columns:
+                                        # .at scalar assignment to the precise (sample_id, annotation_id) row.
+                                        self._df.at[idx, col_name] = ArrayH5Proxy(path_ref, array_store=self._array_store)
                         except Exception as e:
                             logger.warning(f"[LedgeredDataFrameManager] Error updating array proxies: {e}")
                         finally:
@@ -1796,6 +1918,41 @@ class LedgeredDataFrameManager:
         if categorical_tags is None:
             categorical_tags = self._categorical_tags
 
+        # === 1) Downcast float64 signal columns to float32 ===
+        # Per-sample / per-instance signal scalars (loss & metric values) don't need
+        # float64 precision, so this halves the cost of every ``signals//*`` column
+        # with no practical loss for monitoring. Numeric dtype is preserved (NaNs
+        # stay NaN). Done before categorical conversion below.
+        for col in df.columns:
+            if str(col).startswith("signals") and df[col].dtype == np.float64:
+                try:
+                    df[col] = df[col].astype(np.float32)
+                except Exception as e:
+                    logger.debug(f"[LedgeredDataFrameManager] float32 downcast failed for '{col}': {e}")
+
+        # === 2) Replace NaN with None in OBJECT columns ONLY ===
+        # This never changes a column's dtype (object stays object) and is skipped
+        # for numeric/bool/categorical columns — replacing NaN in a float column
+        # would force it to object (8-byte pointers + broken numeric ops), which
+        # costs MORE memory, so we deliberately don't touch those. On object columns
+        # it just turns empty cells into the None singleton instead of a stray
+        # float('nan'). isna() treats both as missing, so NA semantics are unchanged.
+        #
+        # Vectorized boolean assignment: ``df.loc[na_mask, col] = None`` writes the
+        # None singleton into every NaN cell of an object column in one shot (works
+        # even when other cells hold arrays / ArrayH5Proxy objects, since isna()
+        # treats those as non-missing).
+        #
+        # MUST run before the categorical conversion below: once a column is frozen
+        # into a Categorical, its missing cells are stuck as NaN (categorical code
+        # -1) and can no longer be set to a plain None — so we clean object cells to
+        # None here first, while they are still plain object dtype.
+        for col in df.columns:
+            na_mask = df[col].isna()
+            if na_mask.any():
+                df.loc[na_mask, col] = None
+
+        # === 3) Categorical conversion (LAST step) ===
         # Columns that are typically repetitive (good candidates for categorical)
         categorical_candidates = [
             SampleStats.Ex.ORIGIN.value,  # Alias for origin (if different column name)

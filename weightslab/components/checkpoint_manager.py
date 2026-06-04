@@ -1788,7 +1788,7 @@ class CheckpointManager:
                     # Extract RNG state from data snapshot if available
                     rng_state = snapshot_data.get('rng_state', {})
                     if load_data_snapshot:
-                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index('sample_id') if 'data' in snapshot_data else pd.DataFrame()
+                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value]) if 'data' in snapshot_data else pd.DataFrame()
                         if not snapshot_df.empty:
                             result['data_state'] = {'snapshot': snapshot_df}
                             result['loaded_components'].add('data')
@@ -1974,10 +1974,10 @@ class CheckpointManager:
 
                 if snapshot_df is not None and not snapshot_df.empty:
                     dfm = ledgers.get_dataframe()
-                    if dfm is not None:
+                    if dfm != None:
                         # Set index if needed
                         if 'sample_id' in snapshot_df.columns:
-                            snapshot_df = snapshot_df.set_index('sample_id')
+                            snapshot_df = snapshot_df.set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value])
 
                         # Merge only the checkpoint-specific columns (tags, discarded)
                         # This updates existing rows without replacing all data
@@ -1995,7 +1995,7 @@ class CheckpointManager:
                 for loader_name in ledgers.get_dataloaders():
                     loader = ledgers.get_dataloader(loader_name)
 
-                    if loader is not None:
+                    if loader != None:
                         # Resume loader state
                         if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
                             loader.reset_iterator()

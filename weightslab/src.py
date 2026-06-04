@@ -513,17 +513,13 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
         else:
             instance_values = out
 
-        # Locate batch_idx that maps each instance to a sample position.
-        # Convention: detection tasks pass `batch` dict (with 'batch_idx') as
-        # positional arg #2; we also accept it via kwargs.
-        for arg in a:
-            if isinstance(arg, dict) and 'batch_idx' in arg:
-                instance_batch_idx = arg['batch_idx']
-                break
         if instance_batch_idx is None and 'batch_idx' in kw:
             instance_batch_idx = kw['batch_idx']
-        elif targets is not None:
+        elif instance_batch_idx is None and targets is not None and isinstance(targets, list):
             instance_batch_idx = [i for i, tars in enumerate(targets) for _ in tars]  # Auto determine batch_idx from targets if not explicitly provided (assumes targets is list of lists of annotations)
+        else:
+            instance_batch_idx = ledgers.get_dataframe()._df.loc[batch_ids].index.get_level_values(1).tolist()  # Query directly instance_ids related and ordered to the samples_ids in the batch
+            batch_ids = ledgers.get_dataframe()._df.loc[batch_ids].index.get_level_values(0).tolist()
 
     # If output is a dict (from PerInstanceDetectionLoss), pick 'sample'
     # for downstream per-sample logging while keeping the original dict for
@@ -1357,7 +1353,12 @@ def tag_samples(
             logger.error(f"Invalid mode '{mode}'. Use 'add', 'remove', or 'set'")
             return False
 
-        df_update = pd.DataFrame(rows).set_index("sample_id")
+        # Build directly on the (sample_id, annotation_id=0) multi-index: tags and
+        # the discarded flag are SAMPLE-LEVEL, so they live on the canonical sample
+        # row (annotation_id 0). Never hand upsert a bare single-level frame.
+        df_update = pd.DataFrame(rows)
+        df_update["annotation_id"] = 0
+        df_update = df_update.set_index(["sample_id", "annotation_id"])
         df_manager.upsert_df(df_update, force_flush=True)
 
         logger.info(f"Tagged {len(sample_ids)} samples with '{tag}' (mode={mode})")
@@ -1433,7 +1434,12 @@ def set_categorical_tag(sample_ids: list[int], name: str, value: str) -> bool:
         if cleaned is not None:
             df_manager.register_categorical_tag(tag_name, [cleaned])
         rows = [{"sample_id": sid, tag_col: cleaned} for sid in sample_ids]
-        df_update = pd.DataFrame(rows).set_index("sample_id")
+        # Build directly on the (sample_id, annotation_id=0) multi-index: tags and
+        # the discarded flag are SAMPLE-LEVEL, so they live on the canonical sample
+        # row (annotation_id 0). Never hand upsert a bare single-level frame.
+        df_update = pd.DataFrame(rows)
+        df_update["annotation_id"] = 0
+        df_update = df_update.set_index(["sample_id", "annotation_id"])
         df_manager.upsert_df(df_update, force_flush=True)
         logger.info(f"Set categorical tag '{tag_name}'={cleaned!r} on {len(sample_ids)} samples")
         return True
@@ -1475,7 +1481,12 @@ def discard_samples(
         rows = [{"sample_id": sid, SampleStatsEx.DISCARDED.value: bool(discarded)}
                 for sid in sample_ids]
 
-        df_update = pd.DataFrame(rows).set_index("sample_id")
+        # Build directly on the (sample_id, annotation_id=0) multi-index: tags and
+        # the discarded flag are SAMPLE-LEVEL, so they live on the canonical sample
+        # row (annotation_id 0). Never hand upsert a bare single-level frame.
+        df_update = pd.DataFrame(rows)
+        df_update["annotation_id"] = 0
+        df_update = df_update.set_index(["sample_id", "annotation_id"])
         df_manager.upsert_df(df_update, force_flush=True)
 
         action = "Discarded" if discarded else "Restored"
@@ -1586,33 +1597,62 @@ def save_signals(
     step: int | None = None,
     log: bool = False
 ):
-    """
-        Save data statistics to the tracked dataset.
+    """Save **per-sample** statistics to the tracked dataset.
 
-        Args:
-            signals (th.Tensor): The batch losses.
-            preds_raw (th.Tensor, ...etc, optional): The raw batch predictions. Defaults to None.
-            targets (th.Tensor, ...etc, optional): The batch targets. Defaults to None.
-            batch_ids (th.Tensor, optional): The batch ids. Defaults to None.
-            preds (th.Tensor, optional): The batch predictions. Defaults to None.
-            step (int, optional): The current training step. Defaults to 0.
-            log (bool, optional): Whether to log the signals. Defaults to True.
+    This is the *one-value-per-sample* path: every array you pass is indexed by
+    ``batch_ids`` and written onto that sample's canonical row — the
+    ``(sample_id, annotation_id=0)`` row of the multi-index. Use this for losses,
+    metrics, predictions and targets that describe the whole sample (e.g. the
+    classification loss of an image, the per-image mAP, the predicted mask).
 
-        Examples:
-            >>> # In your training loop, after computing losses and predictions:
-            >>> for batch in train_loader:
-            ...     inputs, targets = batch
-            ...     preds = model(inputs)
-            ...     loss = loss_fn(preds, targets)
-            ...     batch_ids = batch['sample_id']  # Assuming your dataloader provides sample IDs
-            ...     wl.save_signals(
-            ...         signals={'train_loss': loss},
-            ...         batch_ids=batch_ids,
-            ...         preds_raw=preds,  # Optionally save raw predictions. Not useful if already saved by loss wrapper.
-            ...         targets=targets,  # Optionally save target predictions. Not useful if already saved by loss wrapper.
-            ...         step=current_step,  # Optionally save step. If not provided, will attempt to infer from training loop context.
-            ...         log=True  # Should we log the signals also or only save to sample metadata.
-            ...     )
+    For tasks where a single sample has *several* instances (detection boxes,
+    segmentation masks, ...) and you want one value **per instance**, use
+    :func:`save_instance_signals` instead — it writes to ``annotation_id >= 1``.
+
+    Shapes / formats:
+        - ``signals`` values: shape ``(B,)`` (one scalar per sample) or
+          ``(B, ...)`` — extra dims are mean-reduced to ``(B,)`` before storage.
+        - ``batch_ids``: length ``B``; the i-th entry names the sample the i-th
+          row of every other array belongs to. Coerced to ``str`` internally.
+        - ``preds`` / ``preds_raw`` / ``targets``: array of length ``B`` (or a
+          ``dict`` of such arrays, or a ``list`` of length ``B`` for
+          inhomogeneous per-sample shapes). 1-D arrays get a trailing axis.
+
+    Args:
+        signals (dict | th.Tensor): ``{name: values}`` where ``values`` is a
+            length-``B`` tensor/array (or a bare tensor → stored as
+            ``signals//default``). Each becomes a ``signals//<name>`` column.
+        batch_ids (th.Tensor | np.ndarray | list): Sample IDs, length ``B``.
+        preds_raw (optional): Raw model outputs (e.g. logits), length ``B``.
+            Skip it if a watched loss wrapper already saved it.
+        targets (optional): Ground-truth targets, length ``B``.
+        preds (optional): Post-processed predictions, length ``B``.
+        step (int, optional): Training step. Inferred from the training context
+            when omitted.
+        log (bool, optional): Also push the (mean) scalar to the dashboard
+            logger, not only to the per-sample row. Defaults to False.
+
+    Examples:
+        Classification — one loss scalar per image::
+
+            for inputs, targets, ids in train_loader:   # ids: sample IDs, len B
+                logits = model(inputs)                   # (B, num_classes)
+                loss = loss_fn(logits, targets)          # (B,) per-sample loss
+                wl.save_signals(
+                    signals={"train_loss": loss},        # (B,) -> signals//train_loss
+                    batch_ids=ids,
+                    preds_raw=logits,                    # (B, num_classes)
+                    targets=targets,                     # (B,)
+                    step=current_step,
+                    log=True,
+                )
+
+        Several named per-sample metrics at once::
+
+            wl.save_signals(
+                signals={"iou": iou_per_image, "dice": dice_per_image},  # each (B,)
+                batch_ids=ids,
+            )
     """
 
     global DATAFRAME_M
@@ -1721,22 +1761,94 @@ def save_instance_signals(
     targets: th.Tensor | np.ndarray | dict = None,
     log: bool = False,
 ):
-    """Save per-instance (per-annotation) signals to the dataframe.
+    """Save **per-instance** (per-annotation) signals to the dataframe.
 
-    Each value in `signals` is a flat tensor of length `num_instances_total`,
-    where `batch_idx[i]` identifies which sample (by position in `batch_ids`)
-    the i-th instance belongs to. The annotation_id is assigned by order
-    within each sample (0, 1, 2, ...).
+    This is the *one-value-per-instance* counterpart of :func:`save_signals`.
+    A sample can own several instances (detection boxes, segmentation masks,
+    keypoints, ...); their values are stored on the instance rows
+    ``(sample_id, annotation_id)`` with ``annotation_id >= 1`` (``annotation_id 0``
+    stays reserved for the per-sample row written by :func:`save_signals`).
+
+    **Flat, sample-major (Ultralytics) format**
+
+    Instances are passed *flattened across the whole batch*, exactly the layout
+    Ultralytics/YOLO uses for a detection batch: all targets of all images are
+    concatenated into one ``(num_instances_total, ...)`` tensor, and a companion
+    ``batch_idx`` tensor says which image each row belongs to. So you pass the
+    Ultralytics ``batch["batch_idx"]`` straight through here:
+
+        - ``signals[name]``: flat tensor of length ``num_instances_total``
+          (one scalar per instance, in sample-major order).
+        - ``batch_idx``: flat tensor of length ``num_instances_total``; entry
+          ``i`` is the *position in* ``batch_ids`` (i.e. the image index within
+          the batch, in ``[0, B)``) that instance ``i`` belongs to.
+        - ``batch_ids``: the ``B`` sample IDs for the batch (one per image).
+
+    The ``annotation_id`` is derived automatically: instances are numbered in the
+    order they appear per sample → the first instance of a sample becomes
+    ``annotation_id 1``, the second ``2``, and so on (1-based, since ``0`` is the
+    sample row).
+
+    Worked example — ``batch_ids = ["img7", "img3"]`` (B = 2), 5 boxes total::
+
+        # box:        0      1      2      3      4
+        batch_idx = [ 0,     0,     1,     1,     1 ]   # boxes 0-1 -> img7, 2-4 -> img3
+        ious      = [0.91,  0.62,  0.50,  0.74,  0.30]  # one IoU per box
+
+        wl.save_instance_signals(
+            signals={"iou_instance": ious},   # -> signals//iou_instance
+            batch_ids=["img7", "img3"],
+            batch_idx=batch_idx,
+            origin="train",
+        )
+        # writes:
+        #   ("img7", 1)=0.91  ("img7", 2)=0.62
+        #   ("img3", 1)=0.50  ("img3", 2)=0.74  ("img3", 3)=0.30
+
+    Typical detection loop using the Ultralytics batch dict directly::
+
+        image, batch_ids, batch = inputs[0], inputs[1], inputs[3]["batch"]
+        raw_preds = model(image)
+        iou_per_box = compute_iou(raw_preds, batch)            # flat [total_instances]
+        wl.save_instance_signals(
+            signals={"iou_instance": iou_per_box},
+            batch_ids=batch_ids,
+            batch_idx=batch["batch_idx"],                      # Ultralytics flat index
+            step=current_step,
+        )
+
+    Persisting per-instance ground truth — pass ``targets`` as a **nested**
+    per-sample list (``targets[s]`` = sample ``s``'s list of instance targets),
+    in the same per-sample order ``batch_idx`` implies. It is flattened
+    sample-major to align with the instances::
+
+        targets = [                       # batch_ids = ["img7", "img3"]
+            [box7_0, box7_1],             # img7's two boxes  -> annotation_id 1, 2
+            [box3_0, box3_1, box3_2],     # img3's three boxes -> annotation_id 1, 2, 3
+        ]
+        wl.save_instance_signals(signals={"iou_instance": ious},
+                                 batch_ids=["img7", "img3"],
+                                 batch_idx=[0, 0, 1, 1, 1],
+                                 targets=targets)
 
     Args:
-        signals: {signal_name: tensor of shape (num_instances_total,)}.
-        batch_ids: Sample IDs for each position in the batch (length B).
-        batch_idx: For each instance, which batch position it belongs to
-            (length num_instances_total, values in [0, B)).
-        step: Current training step (optional).
-        origin: Dataset split (e.g. 'train', 'val').
-        targets: Target values for each instance (optional).
-        log: Whether to also push to the logger (per-sample aggregated mean).
+        signals (dict): ``{name: values}`` with ``values`` a flat tensor/array of
+            shape ``(num_instances_total,)`` (extra dims are mean-reduced). Each
+            becomes a ``signals//<name>`` column on the instance rows.
+        batch_ids (th.Tensor | np.ndarray | list): The ``B`` sample IDs of the
+            batch (one per image). Coerced to ``str`` internally.
+        batch_idx (th.Tensor | np.ndarray | list): Flat instance→image map of
+            length ``num_instances_total``, values in ``[0, B)`` — the Ultralytics
+            ``batch_idx``. Out-of-range entries are skipped.
+        step (int, optional): Training step. Inferred from context when omitted.
+        origin (str, optional): Dataset split (``"train"``, ``"val"``, ...). When
+            omitted, the active training origin is used (fallback ``"train"``).
+        targets (optional): Per-instance ground truth to persist alongside the
+            signals — a **nested** ``list[B]`` where ``targets[s]`` is sample
+            ``s``'s list of instance targets (or a ``dict`` of such). Flattened
+            sample-major to match ``batch_idx``.
+        log (bool, optional): Also push the per-sample aggregated mean of each
+            signal to the dashboard logger. Defaults to False.
     """
     global DATAFRAME_M
     if DATAFRAME_M is None:
@@ -1759,21 +1871,27 @@ def save_instance_signals(
     if len(batch_idx_np) == 0:
         return
 
-    # Build per-instance sample_ids and annotation_ids.
+    # Build per-instance sample_ids and annotation_ids from the flat batch_idx map.
+    # batch_idx[i] is the image position (in batch_ids) that instance i belongs to.
     # Annotation ids are 1-based: instance_id 0 is reserved for the per-sample row,
-    # so the k-th instance of a sample is stored at annotation_id k+1 (1, 2, ...).
-    instance_sample_ids: list[str] = []
-    instance_annotation_ids: list[int] = []
-    counters: Dict[int, int] = {}
-    for pos in batch_idx_np:
-        pos = int(pos)
-        if pos < 0 or pos >= len(batch_ids_list):
-            continue
-        aid = counters.get(pos, 0) + 1  # 1-based (instance_id 0 = sample row)
-        instance_sample_ids.append(batch_ids_list[pos])
-        instance_annotation_ids.append(aid)
-        counters[pos] = aid
-
+    # so the k-th instance of a sample is stored at annotation_id k (1, 2, ...).
+    # NOTE: both lists are length num_instances_total and ALIGNED with the flat
+    # signal/target order — enqueue_instance_batch requires len(sample_ids) ==
+    # len(annotation_ids), so passing the raw batch_ids (length B) would make it
+    # silently no-op for any batch with more instances than images.
+    # instance_sample_ids: list[str] = []
+    # instance_annotation_ids: list[int] = []
+    # counters: Dict[int, int] = {}
+    # for pos in batch_idx_np:
+    #     pos = int(pos)
+    #     if pos < 0 or pos >= len(batch_ids_list):
+    #         continue
+    #     aid = counters.get(pos, 0) + 1  # 1-based (instance_id 0 = sample row)
+    #     instance_sample_ids.append(batch_ids_list[pos])
+    #     instance_annotation_ids.append(aid)
+    #     counters[pos] = aid
+    instance_sample_ids: list[str] = batch_ids
+    instance_annotation_ids: list[int] = batch_idx
     if not instance_sample_ids:
         return
 
@@ -1818,8 +1936,7 @@ def save_instance_signals(
         annotation_ids=instance_annotation_ids,
         losses=losses_data,
         step=step,
-        targets=targets,
-        origin=active_origin,
+        targets=targets
     )
 
 

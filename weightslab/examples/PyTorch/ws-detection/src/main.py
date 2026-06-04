@@ -200,7 +200,7 @@ def main():
     data_root = parameters["data_root"]
     model_name = parameters["model"]["name"]
     train_cfg = dict(parameters["data"]["train_loader"])
-    test_cfg = dict(parameters["data"]["test_loader"])
+    val_cfg = dict(parameters["data"]["val_loader"])
     batch_size = train_cfg["batch_size"]
     serving_grpc = parameters.get("serving_grpc", True)
     serving_cli = parameters.get("serving_cli", False)
@@ -236,7 +236,7 @@ def main():
         return ds
 
     def _build_loader(ds, split):
-        c = train_cfg if split == "train" else test_cfg
+        c = train_cfg if split == "train" else val_cfg
         return wl.watch_or_edit(
             ds, flag="data", loader_name=f"{split}_loader",
             batch_size=c["batch_size"], shuffle=c["shuffle"],
@@ -244,7 +244,8 @@ def main():
             drop_last=False, compute_hash=False,
             is_training=(split == "train"),
             collate_fn=collate_fn,
-            preload_labels=True, preload_metadata=True,
+            preload_labels=True,
+            preload_metadata=True,
         )
 
     train_loader = _build_loader(_build_dataset("train"), "train")
@@ -271,6 +272,9 @@ def main():
     def _wl_validate(loader):
         trainer.do_validate(loader)
 
+    # ================
+    # 7. Training Loop
+    wl.start_training(timeout=None)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
     trainer.train()
     wl.keep_serving()
 

@@ -309,6 +309,17 @@ class H5DataFrameStore:
         elif df.index.name is None:
             df.index.name = "sample_id"
 
+        # Enforce the (sample_id, annotation_id) invariant: never persist a bare
+        # single-level (sample_id) frame. A single-level frame is the canonical
+        # per-sample view, so it is promoted to annotation_id == 0. This also
+        # migrates legacy single-level data to the multi-index layout on re-write.
+        if not isinstance(df.index, pd.MultiIndex):
+            df = df.copy()
+            df.index = pd.MultiIndex.from_arrays(
+                [df.index, [0] * len(df)],
+                names=["sample_id", "annotation_id"],
+            )
+
         # Sanitize column names: HDF5 doesn't allow '/' in object names
         df.columns = [str(col).replace('/', '__SLASH__') for col in df.columns]
 

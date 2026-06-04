@@ -1280,24 +1280,25 @@ class DataService:
                 # Handle segmentation task type
                 elif label_raw is not None:
                     label_arr = to_numpy_safe(label_raw)
-                    label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
-                    t_label_convert = time.time() - t0_gt_conv
+                    if label_arr is not None:
+                        label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
+                        t_label_convert = time.time() - t0_gt_conv
 
-                    t0_rle = time.time()
-                    rle_bytes = rle_encode_mask(label_u8.ravel()) if label_u8.size > 0 else b""
-                    t_mask_encode += time.time() - t0_rle
+                        t0_rle = time.time()
+                        rle_bytes = rle_encode_mask(label_u8.ravel()) if label_u8.size > 0 else b""
+                        t_mask_encode += time.time() - t0_rle
 
-                    data_stats.append(
-                        create_data_stat(
-                            name='target',
-                            stat_type='rle_mask',
-                            shape=list(label_u8.shape) if label_u8.size > 0 else [],
-                            value=[],
-                            thumbnail=rle_bytes
+                        data_stats.append(
+                            create_data_stat(
+                                name='target',
+                                stat_type='rle_mask',
+                                shape=list(label_u8.shape) if label_u8.size > 0 else [],
+                                value=[],
+                                thumbnail=rle_bytes
+                            )
                         )
-                    )
-                    target_mask_stat_index = len(data_stats) - 1
-                    target_mask_u8 = label_u8
+                        target_mask_stat_index = len(data_stats) - 1
+                        target_mask_u8 = label_u8
 
                 # Prefer row attribute if available, fallback to dataset, then model
                 num_classes = (
@@ -2219,49 +2220,60 @@ class DataService:
                     return "Applied operation: drop"
 
                 if func_name == "sort_values":
-                    # Params are already cleaned by the Agent's SortHandler
-                    try:
-                        # tmp fix for sample_id index sorting when sample_id is not a column (legacy datasets). We want to sort by sample_id as numeric if possible, but it may be in the index.
-                        try:
-                            df.reset_index(inplace=True)
-                            if 'level_0' in df.columns:
-                                df.pop('level_0')
-                            if 'index' in df.columns:
-                                df.pop('index')
-                            df['sample_id'] = df['sample_id'].astype(int)
-                            df.sort_values(inplace=True, **params)
-                            df['sample_id'] = df['sample_id'].astype(str)
-                            df.set_index(['origin', 'sample_id'], inplace=True)
-                        except:
-                            pass
-                    except (TypeError, ValueError, KeyError) as e:
-                        # Fallback for ambiguity or missing column (if it's in the index)
-                        if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
-                             # If ambiguous or missing from columns, and it's a simple sort by one field, try sorting index level
-                             by = params.get("by")
-                             if isinstance(by, str) and by in getattr(df.index, 'names', []):
-                                 ascending = params.get("ascending", True)
-                                 if by == SampleStatsEx.SAMPLE_ID.value and params.get("key") is None:
-                                     df.sort_index(
-                                         level=by,
-                                         inplace=True,
-                                         ascending=ascending,
-                                         key=self._sample_id_sortable_series,
-                                     )
-                                 else:
-                                     df.sort_index(level=by, inplace=True, ascending=ascending)
-                             elif isinstance(e, KeyError):
-                                 # It's actually missing, raise the original error
-                                 raise e
-                             else:
-                                 # Multi-column sort or other ambiguity, fallback to converting columns
-                                 df.sort_values(inplace=True, **params, key=lambda x: x)
+                    # sample_id may live in the index (single 'sample_id' or the
+                    # ('origin', 'sample_id') multi-index). We reset it to a column to
+                    # sort it numerically, then ALWAYS restore the SAME index we started
+                    # with. Critically, we must NEVER leave the frame on a bare
+                    # RangeIndex: self._all_datasets_df is keyed by sample identity, and
+                    # a positional index desyncs it from updated_df in
+                    # _slowUpdateInternals (intersection() becomes empty → the view
+                    # silently stops refreshing).
+                    orig_index_names = [n for n in df.index.names if n is not None]
 
-                        # Fallback for mixed types (e.g. lists vs strings/floats): sort by string representation
+                    def _restore_index():
+                        cols = [n for n in orig_index_names if n in df.columns]
+                        if cols and not isinstance(df.index, pd.MultiIndex):
+                            df.set_index(cols, inplace=True)
+                        elif cols and list(df.index.names) != orig_index_names:
+                            df.set_index(cols, inplace=True)
+
+                    try:
+                        df.reset_index(inplace=True)
+                        for junk in ('level_0', 'index'):
+                            if junk in df.columns:
+                                df.pop(junk)
+                        if 'sample_id' in df.columns:
+                            df['sample_id'] = df['sample_id'].astype(int)
+                        df.sort_values(inplace=True, **params)
+                        if 'sample_id' in df.columns:
+                            df['sample_id'] = df['sample_id'].astype(str)
+                        _restore_index()
+                    except (TypeError, ValueError, KeyError) as e:
+                        # Restore the index BEFORE retrying so the index-level fallbacks
+                        # below operate on the real (sample_id) index, never a RangeIndex.
+                        _restore_index()
+                        by = params.get("by")
+                        if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
+                            if isinstance(by, str) and by in getattr(df.index, 'names', []):
+                                ascending = params.get("ascending", True)
+                                if by == SampleStatsEx.SAMPLE_ID.value and params.get("key") is None:
+                                    df.sort_index(level=by, inplace=True, ascending=ascending,
+                                                  key=self._sample_id_sortable_series)
+                                else:
+                                    df.sort_index(level=by, inplace=True, ascending=ascending)
+                            elif by in df.columns:
+                                df.sort_values(inplace=True, **params, key=lambda x: x)
+                            else:
+                                raise e
                         elif "key" not in params and isinstance(e, TypeError):
                             logger.warning(f"Sort failed due to type mismatch ({e}). Retrying with string conversion...")
                             params["key"] = lambda x: x.astype(str)
-                            df.sort_values(inplace=True, **params)
+                            try:
+                                df.sort_values(inplace=True, **params)
+                            except Exception:
+                                if isinstance(by, str) and by in getattr(df.index, 'names', []):
+                                    df.sort_index(level=by, inplace=True,
+                                                  ascending=params.get("ascending", True))
                         else:
                             raise e
                     return "Applied operation: sort_values"
@@ -2468,9 +2480,27 @@ class DataService:
             if is_filtered and current_all_df is not None:
                 # The user has applied a custom view (Filter, Sort, or Aggregation).
                 try:
-                    common_indices = current_all_df.index.intersection(updated_df.index)
+                    # Fast path: the view (current_all_df) and the fresh pull (updated_df)
+                    # are normally keyed identically (string sample_id), so a plain
+                    # intersection is O(n) and cheap.
+                    target_order = current_all_df.index
+                    common_indices = target_order.intersection(updated_df.index)
+
+                    # Defensive lazy fallback (only when the fast path finds nothing):
+                    # if some operation left the view on a mismatched index dtype
+                    # (e.g. an int RangeIndex vs string sample_ids), intersection()
+                    # is falsely empty. Retry once with string-normalized keys before
+                    # giving up. This extra O(n) pass runs only in that rare case.
+                    if len(common_indices) == 0 and len(target_order) and len(updated_df.index):
+                        cur_str = target_order.map(str)
+                        upd_str = updated_df.index.map(str)
+                        if len(cur_str.intersection(upd_str)) > 0:
+                            updated_df = updated_df.copy()
+                            updated_df.index = upd_str
+                            target_order = cur_str
+                            common_indices = cur_str.intersection(upd_str)
+
                     if len(common_indices) > 0:
-                        target_order = current_all_df.index
                         updated_df = updated_df.reindex(target_order)
                     else:
                         # Aggregation/Transformation — skip auto-update.

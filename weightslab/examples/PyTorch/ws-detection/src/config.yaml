@@ -1,7 +1,7 @@
 # Global configuration
 device: auto
 experiment_name: det_YOLO_usecase
-training_steps_to_do: null  # Set to null for infinite training until manually stopped
+training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
 # root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
 
 # Checkppoint Manager
@@ -38,12 +38,11 @@ ledger_flush_interval: 60.0
 # Data
 num_classes: 2
 image_size: 320
-# data_root: ./data/data.yaml  # Uncomment and set the path to your data.yaml file.
-data_root: C:\Users\GuillaumePELLUET\Documents\Codes\weightslab_kitchen\guillaume_playground\ws-detection\data\data.yaml
+data_root: ./data/data.yaml  # Uncomment and set the path to your data.yaml file.
 data:
   train_loader:
     batch_size: 4
     shuffle: true
-  test_loader:
+  val_loader:
     batch_size: 2
     shuffle: false

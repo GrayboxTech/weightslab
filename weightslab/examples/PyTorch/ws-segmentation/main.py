@@ -23,7 +23,6 @@ from weightslab.components.global_monitoring import (
 from utils.data import BDD100kSegDataset, seg_collate
 from utils.model import SmallUNet
 from utils.criterions import (
-    custom_signals,
     PerSampleDice, PerInstanceDice,
     PerSampleBCE, PerInstanceBCE,
 )
@@ -329,8 +328,6 @@ if __name__ == "__main__":
     train_sig = _make_seg_signals("train", weights=weights)
     test_sig = _make_seg_signals("test", weights=weights)
 
-    custom_signals()  # Register custom signals defined in utils/criterions.py
-
     # --- 7) Start WeightsLab services ---
     wl.serve(
         serving_grpc=parameters.get("serving_grpc", True),
@@ -347,7 +344,7 @@ if __name__ == "__main__":
 
     # ================
     # 7. Training Loop
-    # wl.start_training(timeout=None)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
+    wl.start_training(timeout=None)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
 
     # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()

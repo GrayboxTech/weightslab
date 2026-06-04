@@ -3,6 +3,7 @@ import types
 import logging
 import threading
 import grpc
+import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
@@ -133,7 +134,10 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     if mask is not None:
                         filtered_df = df[mask]
                         # Normalize to strings because logger sample_id is serialized as text.
-                        sample_ids = {str(sid) for sid in filtered_df.index.tolist()}
+                        if isinstance(filtered_df.index, pd.MultiIndex):
+                            sample_ids = {str(sid) for sid in filtered_df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value).tolist()}
+                        else:
+                            sample_ids = {str(sid) for sid in filtered_df.index.tolist()}
 
             # Get per-sample history from signal_logger
             history_per_sample = signal_logger.get_signal_history_per_sample()
