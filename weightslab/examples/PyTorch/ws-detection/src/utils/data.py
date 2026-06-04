@@ -37,17 +37,28 @@ class YOLODatasetWL(YOLODataset):
         # Unified 6-col bbox: [x1, y1, x2, y2, class_id, confidence]; GT confidence = 1.0.
         n = bboxes_lb.shape[0]
         cls = lab["cls"].reshape(-1, 1).astype(np.float32)
-        target = (
+        target = list(
             np.concatenate([bboxes_lb.astype(np.float32), cls, np.ones((n, 1), dtype=np.float32)], axis=1)
             if n > 0 else np.zeros((0, 6), dtype=np.float32)
         )
-        return None, str(i), target, {"img_path": lab["im_file"], "cls": lab["cls"]}
+        brightness = th.rand(1).item()  # Dummy brightness for demo purposes.
+        metad = {
+            "img_path": lab["im_file"],
+            "cls": lab["cls"],
+            "weather": "sunny" if brightness > 0.5 else "cloudy",
+        }
+        return None, str(i), target, metad
 
     def get_items(self, i, include_metadata=False, include_labels=False, include_images=False):
         data = super().__getitem__(i)
         image = data['img'] if include_images else None
         metadata = (
-            {'img_path': data['im_file'], 'cls': data['cls'], 'batch': data}
+            {
+                'img_path': data['im_file'],
+                'cls': data['cls'],
+                'batch': data,
+                'weather': "sunny" if th.rand(1).item() > 0.5 else "cloudy"
+            }
             if include_metadata else {}
         )
         labels = None

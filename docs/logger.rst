@@ -29,13 +29,6 @@ Use the signal decorator for static or dynamic signals.
    import numpy as np
    import weightslab as wl
 
-   @wl.signal(name="brightness")
-   def brightness(ctx):
-       image = ctx.image
-       if image is None:
-           return 0.0
-       return float(np.mean(image))
-
    @wl.signal(name="weighted_train_loss", subscribe_to="train_loss/CE", compute_every_n_steps=10)
    def weighted_train_loss(ctx):
        if ctx.subscribed_value is None:

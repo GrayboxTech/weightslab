@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
+from weightslab.backend.audit_logger import AuditLogger
 
 from PIL import Image
 from tqdm import tqdm
@@ -25,6 +26,7 @@ except ImportError:
     DictConfig = dict # type: ignore
 
 from weightslab.data.sample_stats import SampleStatsEx
+from weightslab.utils.tools import safe_reset_index
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.proto.experiment_service_pb2 import SampleEditType
 from weightslab.components.global_monitoring import pause_controller
@@ -217,8 +219,24 @@ class DataService:
 
     def __init__(self, ctx):
         self._ctx = ctx
-        self._lock = threading.RLock()
+        # Use MonitoredRLock so the gRPC watchdog can observe the holder thread
+        # and how long the lock has been held, and interrupt it if needed.
+        from weightslab.watchdog.lock_monitor import MonitoredRLock
+        self._lock = MonitoredRLock()
+
+        # -- _slowUpdateInternals concurrency primitives -----------------------
+        # Only ONE gRPC worker performs the expensive pull+reindex at a time.
+        # All other workers that arrive while an update is in progress WAIT for
+        # that update to finish (via _update_done Event), then reuse its result
+        # rather than queuing to redo the same work.
+        #
+        # Protocol:
+        #   1. try_acquire(_update_lock, blocking=False)
+        #      → won: clear _update_done, do the update, release, set _update_done
+        #      → lost: _update_done.wait() then return (result already fresh)
         self._update_lock = threading.Lock()
+        self._update_done = threading.Event()
+        self._update_done.set()   # "done" initially so the very first call proceeds
         self._df_manager = get_dataframe()
 
         # init references to the context components
@@ -229,11 +247,29 @@ class DataService:
         self._h5_path = self._resolve_h5_path()
         self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
 
+        # Initialize audit logger using root_log_dir
+        self.audit_logger = None
+        if self._root_log_dir:
+            try:
+                self.audit_logger = AuditLogger(self._root_log_dir, ctx.exp_name or "default")
+            except Exception as e:
+                logger.warning(f"Failed to initialize audit logger in DataService: {e}")
+
         # Check hyperparameters for compute_natural_sort flag (default: False)
         # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
         hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})  # is it already a proxy ?
         self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
+
+        # How per-instance (per-annotation) numeric columns are folded to a single
+        # per-sample scalar when collapsing the (sample_id, annotation_id) view.
+        # Supported: "mean" (default) or "max". The full per-instance breakdown is
+        # always preserved separately in the `_instance_signals` dict column.
+        agg = str(
+            (hp_dict or {}).get("instance_aggregation",
+                                os.environ.get("WL_INSTANCE_AGGREGATION", "mean"))
+        ).strip().lower()
+        self._instance_aggregation = agg if agg in ("mean", "max") else "mean"
 
         # In-memory dataframe view of all datasets combined (streamed to UI)
         self._all_datasets_df = self._pull_into_all_data_view_df()
@@ -263,7 +299,6 @@ class DataService:
         if self._compute_natural_sort:
            self._compute_natural_sort_stats()
 
-        # self._compute_custom_signals()
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         # =====================================================================
@@ -645,6 +680,25 @@ class DataService:
             pass
         return data_dir / "data_with_ops.h5"
 
+    def _log_audit(
+        self,
+        action_type: str,
+        status: str,
+        details: dict = None,
+        error: str = None,
+    ) -> None:
+        """Helper to log audit events if logger is available."""
+        if self.audit_logger:
+            try:
+                self.audit_logger.log_event(
+                    action_type=action_type,
+                    status=status,
+                    details=details,
+                    error=error,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to log audit event: {e}")
+
     def _is_agent_available(self) -> bool:
         """
         Check if the agent (Ollama) is available for natural language queries.
@@ -691,9 +745,13 @@ class DataService:
                     logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
                     return df
 
+                # The manager now expands samples into one row per (sample_id, annotation_id)
+                # instance. Collapse back to one row per sample for the sample-centric UI/agent
+                # view, nesting per-instance signals into a dict column.
+                df = self._df_manager.get_collapse_annotations_to_samples_df()
+
                 # Ensure sample_id is a column if it was the index
-                if df.index.name == SampleStatsEx.SAMPLE_ID.value:
-                    df = df.reset_index()
+                df = safe_reset_index(df)
 
                 # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
                 # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
@@ -793,7 +851,7 @@ class DataService:
 
     def _compute_natural_sort_stats(self):
         """
-        Compute natural sort statistics (brightness, hue, saturation, entropy) for all samples
+        Compute hardcoded natural sort statistics (brightness, hue, saturation, entropy) for all samples
         and update the dataframe.
 
         Includes 'signals.defaults.natural' (the weighted composite) for sorting.
@@ -937,7 +995,7 @@ class DataService:
 
         # Prepare tasks
         tasks = []
-        for idx, row in self._all_datasets_df.reset_index().iterrows():
+        for idx, row in safe_reset_index(self._all_datasets_df).iterrows():
              tasks.append((idx, row))
 
         logger.info(f"[DataService] Computing sort stats for {len(tasks)} samples...")
@@ -1123,6 +1181,8 @@ class DataService:
                 SampleStatsEx.TARGET.value if not skip_label_for_request else None,
                 SampleStatsEx.PREDICTION.value,
                 SampleStatsEx.TASK_TYPE.value,
+                '_instance_signals',  # Special handling for multi-instance signals
+                'annotation_id',       # Internal multi-index tracking
             }
 
             if not stats_to_retrieve:
@@ -1245,45 +1305,40 @@ class DataService:
                         )
                     )
                 # Handle segmentation task type
-                else:
+                elif label_raw is not None:
                     label_arr = to_numpy_safe(label_raw)
-                    if label_arr is None:
-                        try:
-                            label_arr = np.asarray(label_raw)
-                        except Exception:
-                            label_arr = np.array([])
+                    if label_arr is not None:
+                        label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
+                        t_label_convert = time.time() - t0_gt_conv
 
-                    label_u8 = label_arr.astype(np.uint8) if label_arr.size > 0 else label_arr
-                    t_label_convert = time.time() - t0_gt_conv
+                        t0_rle = time.time()
+                        rle_bytes = rle_encode_mask(label_u8.ravel()) if label_u8.size > 0 else b""
+                        t_mask_encode += time.time() - t0_rle
 
-                    t0_rle = time.time()
-                    rle_bytes = rle_encode_mask(label_u8.ravel()) if label_u8.size > 0 else b""
-                    t_mask_encode += time.time() - t0_rle
-
-                    data_stats.append(
-                        create_data_stat(
-                            name='target',
-                            stat_type='rle_mask',
-                            shape=list(label_u8.shape) if label_u8.size > 0 else [],
-                            value=[],
-                            thumbnail=rle_bytes
+                        data_stats.append(
+                            create_data_stat(
+                                name='target',
+                                stat_type='rle_mask',
+                                shape=list(label_u8.shape) if label_u8.size > 0 else [],
+                                value=[],
+                                thumbnail=rle_bytes
+                            )
                         )
-                    )
-                    target_mask_stat_index = len(data_stats) - 1
-                    target_mask_u8 = label_u8
+                        target_mask_stat_index = len(data_stats) - 1
+                        target_mask_u8 = label_u8
 
                 # Prefer row attribute if available, fallback to dataset, then model
                 num_classes = (
                     row.get('num_classes')
                     or (getattr(dataset, "num_classes", None) if dataset else None)
                 )
-                if num_classes is None:
+                if num_classes is None and label_raw is not None:
                     # Fallback: infer from this label
                     if label_arr.size > 0:
                         max_id = int(label_arr.max())
-                        num_classes = max(1, max_id + 1)
+                        num_classes = max(1, max_id) + 1
                     else:
-                        num_classes = 1
+                        num_classes = 2  # Always at least 2 classes for segmentation (foreground/background)
 
                 data_stats.append(
                     create_data_stat(
@@ -1650,6 +1705,22 @@ class DataService:
                 )
             )
 
+            # ====== Step 11: Handle multi-instance signals ======
+            instance_signals = row.get('_instance_signals')
+            if instance_signals and isinstance(instance_signals, dict):
+                # Convert signals dictionary to JSON for UI display
+                # Format: {annotation_id: {signal_name: value, ...}}
+                signals_json = json.dumps(instance_signals)
+                data_stats.append(
+                    create_data_stat(
+                        name='_instance_signals',
+                        stat_type='string',
+                        shape=[1],
+                        value_string=signals_json,
+                        thumbnail=b""
+                    )
+                )
+
             record = pb2.DataRecord(sample_id=str(sample_id), data_stats=data_stats)
 
             return record
@@ -1659,24 +1730,45 @@ class DataService:
             logger.error(f"[Sample {row.get(SampleStatsEx.SAMPLE_ID.value, -1)}] X Error after {total_time:.3f}s: {e}", exc_info=True)
             return None
 
-    def _get_unique_tags(self) -> List[str]:
-        """Collect all unique tags currently present in the tracked datasets.
+    def _get_categorical_tag_names(self) -> set:
+        """Return the set of registered categorical tag names (without prefix)."""
+        try:
+            if self._df_manager is not None:
+                return set(self._df_manager.get_categorical_tags().keys())
+        except Exception:
+            pass
+        return set()
 
-        Tags are stored as individual boolean columns with prefix "tags_".
-        This method extracts all tag names from the column names.
+    def _get_unique_tags(self) -> List[str]:
+        """Collect unique BOOLEAN tag names present in the tracked datasets.
+
+        Tags are stored as individual columns with prefix "tag:". Categorical
+        (multi-value) tags are reported separately via ``categorical_tags`` and
+        excluded here so the UI doesn't render them as boolean toggles.
         """
         tags = set()
         try:
-            # Extract tags from individual tag columns (tags_<tagname>)
+            categorical = self._get_categorical_tag_names()
             if self._all_datasets_df is not None and not self._all_datasets_df.empty:
                 for col in self._all_datasets_df.columns:
                     if col.startswith(f"{SampleStatsEx.TAG.value}:"):
-                        # Extract tag name by removing "tags_" prefix
-                        tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]  # len("tags_") == 5
-                        tags.add(tag_name)
+                        tag_name = col[len(f"{SampleStatsEx.TAG.value}:"):]
+                        if tag_name not in categorical:
+                            tags.add(tag_name)
         except Exception as e:
             logger.warning(f"Error collecting unique tags: {e}")
         return sorted(list(tags))
+
+    def _get_categorical_tag_defs(self) -> List["pb2.CategoricalTagDef"]:
+        """Build CategoricalTagDef protos from the manager's tag registry."""
+        defs = []
+        try:
+            if self._df_manager is not None:
+                for name, categories in self._df_manager.get_categorical_tags().items():
+                    defs.append(pb2.CategoricalTagDef(name=str(name), categories=[str(c) for c in categories]))
+        except Exception as e:
+            logger.debug(f"Error building categorical tag defs: {e}")
+        return defs
 
     def _build_success_response(
         self,
@@ -1701,6 +1793,19 @@ class DataService:
         in_loop_count = total_count - discarded_count
         unique_tags = self._get_unique_tags()
 
+        # Log query execution
+        self._log_audit(
+            "query_execute",
+            "success",
+            {
+                "query_type": "pandas" if intent_type == pb2.INTENT_FILTER else "analysis",
+                "results_count": in_loop_count,
+                "all_samples_count": total_count,
+                "discarded_count": discarded_count,
+                "message": message[:100],
+            },
+        )
+
         return pb2.DataQueryResponse(
             success=True,
             message=message,
@@ -1708,6 +1813,7 @@ class DataService:
             number_of_samples_in_the_loop=in_loop_count,
             number_of_discarded_samples=discarded_count,
             unique_tags=unique_tags,
+            categorical_tags=self._get_categorical_tag_defs(),
             agent_intent_type=intent_type,
             analysis_result=analysis_result
         )
@@ -1971,7 +2077,7 @@ class DataService:
                     origin_series = pd.Series(df.index, index=df.index)
 
                 # Provide both indexed and reset_index versions for flexibility
-                df_reset = df.reset_index()
+                df_reset = safe_reset_index(df)
                 eval_globals = {"df": df, "df_reset": df_reset, "np": np, "pd": pd}
                 if origin_series is not None:
                     eval_globals[SampleStatsEx.ORIGIN.value] = origin_series
@@ -2106,7 +2212,7 @@ class DataService:
                                           try:
                                               # Save index names to restore later
                                               orig_index_names = sub_df.index.names
-                                              temp_df = sub_df.reset_index()
+                                              temp_df = safe_reset_index(sub_df)
 
                                               # Adjust 'by' if needed (e.g. if 'index' was used, it's now 'sample_id' etc)
                                               # but here columns usually match.
@@ -2154,49 +2260,60 @@ class DataService:
                     return "Applied operation: drop"
 
                 if func_name == "sort_values":
-                    # Params are already cleaned by the Agent's SortHandler
-                    try:
-                        # tmp fix for sample_id index sorting when sample_id is not a column (legacy datasets). We want to sort by sample_id as numeric if possible, but it may be in the index.
-                        try:
-                            df.reset_index(inplace=True)
-                            if 'level_0' in df.columns:
-                                df.pop('level_0')
-                            if 'index' in df.columns:
-                                df.pop('index')
-                            df['sample_id'] = df['sample_id'].astype(int)
-                            df.sort_values(inplace=True, **params)
-                            df['sample_id'] = df['sample_id'].astype(str)
-                            df.set_index(['origin', 'sample_id'], inplace=True)
-                        except:
-                            pass
-                    except (TypeError, ValueError, KeyError) as e:
-                        # Fallback for ambiguity or missing column (if it's in the index)
-                        if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
-                             # If ambiguous or missing from columns, and it's a simple sort by one field, try sorting index level
-                             by = params.get("by")
-                             if isinstance(by, str) and by in getattr(df.index, 'names', []):
-                                 ascending = params.get("ascending", True)
-                                 if by == SampleStatsEx.SAMPLE_ID.value and params.get("key") is None:
-                                     df.sort_index(
-                                         level=by,
-                                         inplace=True,
-                                         ascending=ascending,
-                                         key=self._sample_id_sortable_series,
-                                     )
-                                 else:
-                                     df.sort_index(level=by, inplace=True, ascending=ascending)
-                             elif isinstance(e, KeyError):
-                                 # It's actually missing, raise the original error
-                                 raise e
-                             else:
-                                 # Multi-column sort or other ambiguity, fallback to converting columns
-                                 df.sort_values(inplace=True, **params, key=lambda x: x)
+                    # sample_id may live in the index (single 'sample_id' or the
+                    # ('origin', 'sample_id') multi-index). We reset it to a column to
+                    # sort it numerically, then ALWAYS restore the SAME index we started
+                    # with. Critically, we must NEVER leave the frame on a bare
+                    # RangeIndex: self._all_datasets_df is keyed by sample identity, and
+                    # a positional index desyncs it from updated_df in
+                    # _slowUpdateInternals (intersection() becomes empty → the view
+                    # silently stops refreshing).
+                    orig_index_names = [n for n in df.index.names if n is not None]
 
-                        # Fallback for mixed types (e.g. lists vs strings/floats): sort by string representation
+                    def _restore_index():
+                        cols = [n for n in orig_index_names if n in df.columns]
+                        if cols and not isinstance(df.index, pd.MultiIndex):
+                            df.set_index(cols, inplace=True)
+                        elif cols and list(df.index.names) != orig_index_names:
+                            df.set_index(cols, inplace=True)
+
+                    try:
+                        df.reset_index(inplace=True)
+                        for junk in ('level_0', 'index'):
+                            if junk in df.columns:
+                                df.pop(junk)
+                        if 'sample_id' in df.columns:
+                            df['sample_id'] = df['sample_id'].astype(int)
+                        df.sort_values(inplace=True, **params)
+                        if 'sample_id' in df.columns:
+                            df['sample_id'] = df['sample_id'].astype(str)
+                        _restore_index()
+                    except (TypeError, ValueError, KeyError) as e:
+                        # Restore the index BEFORE retrying so the index-level fallbacks
+                        # below operate on the real (sample_id) index, never a RangeIndex.
+                        _restore_index()
+                        by = params.get("by")
+                        if "ambiguous" in str(e).lower() or isinstance(e, KeyError):
+                            if isinstance(by, str) and by in getattr(df.index, 'names', []):
+                                ascending = params.get("ascending", True)
+                                if by == SampleStatsEx.SAMPLE_ID.value and params.get("key") is None:
+                                    df.sort_index(level=by, inplace=True, ascending=ascending,
+                                                  key=self._sample_id_sortable_series)
+                                else:
+                                    df.sort_index(level=by, inplace=True, ascending=ascending)
+                            elif by in df.columns:
+                                df.sort_values(inplace=True, **params, key=lambda x: x)
+                            else:
+                                raise e
                         elif "key" not in params and isinstance(e, TypeError):
                             logger.warning(f"Sort failed due to type mismatch ({e}). Retrying with string conversion...")
                             params["key"] = lambda x: x.astype(str)
-                            df.sort_values(inplace=True, **params)
+                            try:
+                                df.sort_values(inplace=True, **params)
+                            except Exception:
+                                if isinstance(by, str) and by in getattr(df.index, 'names', []):
+                                    df.sort_index(level=by, inplace=True,
+                                                  ascending=params.get("ascending", True))
                         else:
                             raise e
                     return "Applied operation: sort_values"
@@ -2254,25 +2371,132 @@ class DataService:
 
         return "No operation applied"
 
-    def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
-        """
-            This method is responsible for updating the internal dataframe view with the latest data from the manager.
-            It uses a dedicated update lock to ensure only one thread performs the expensive update at a time,
-            while allowing other threads to read the existing dataframe without blocking.
+    # ------------------------------------------------------------------
+    # Lock watchdog helpers
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Lock watchdog helpers  (build on MonitoredRLock from watchdog/)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lock_caller() -> str:
+        """Return 'file:function:line' of the nearest non-data_service frame.
 
-            Args:
-                force (bool): If True, bypass throttling and force an update. Use for critical updates.
-                reset_view (bool): If True, reset any user/agent-applied filters/sorts to show the full dataset. Use when we know the underlying data structure has changed significantly (e.g. new columns added) that could break the current view.
+        Used to identify WHICH gRPC handler (or other caller) is waiting on /
+        holding a lock — visible in DEBUG logs as '[LockWatchdog]' lines.
+        """
+        import traceback
+        frames = traceback.extract_stack()[:-1]
+        for f in reversed(frames):
+            if "data_service" not in f.filename:
+                name = f.filename.rsplit("/", 1)[-1].rsplit(chr(92), 1)[-1]
+                return f"{name}:{f.name}:{f.lineno}"
+        if frames:
+            f = frames[-2]
+            return f"{f.name}:{f.lineno}"
+        return "unknown"
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _watched_lock(self, lock_name: str = "_lock"):
+        """Acquire self._lock (a MonitoredRLock) with caller-identity logging.
+
+        On acquisition: logs thread name, caller, and wait time.
+        On release: logs thread name and hold duration; warns when > 1 s.
+        The MonitoredRLock itself exposes holder_tid() / held_duration() to
+        the existing gRPC watchdog for stuck-lock detection and recovery.
+        """
+        thread = threading.current_thread().name
+        caller = self._lock_caller()
+        t0 = time.time()
+        self._lock.acquire()
+        waited_ms = (time.time() - t0) * 1000
+        logger.debug(
+            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            lock_name, thread, caller, waited_ms,
+        )
+        t_held = time.time()
+        try:
+            yield
+        finally:
+            held_ms = (time.time() - t_held) * 1000
+            self._lock.release()
+            if held_ms > 1000:
+                logger.warning(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    lock_name, thread, held_ms,
+                )
+            else:
+                logger.debug(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    lock_name, thread, held_ms,
+                )
+
+    # ------------------------------------------------------------------
+    # Main update method
+    # ------------------------------------------------------------------
+    def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
+        """Update the internal dataframe view with the latest data from the manager.
+
+        Concurrency model (thundering-herd prevention):
+          • Only ONE gRPC worker runs the expensive pull+reindex at a time
+            (_update_lock, non-blocking acquire).
+          • Workers that lose the race WAIT for the in-progress update to finish
+            (_update_done Event) and then return immediately, reusing the fresh
+            result — they do NOT queue up to redo the same work.
+          • _update_done stays SET when idle so the very first caller always
+            proceeds without waiting.
+
+        Lock watchdog:
+          Every acquisition / release of _update_lock is logged with the holding
+          thread name, caller function, wait time, and hold duration so stuck
+          workers are immediately visible in the logs.
+
+        Args:
+            force: If True, bypass the 10-second throttle and force an update.
+            reset_view: If True, reset user/agent filters and show the full dataset.
         """
         current_time = time.time()
+        logger.debug(f"[_slowUpdateInternals] Called with force={force}, reset_view={reset_view}. Last update at {self._last_internals_update_time}, current time {current_time}")
 
-        # Fast throttling check
-        if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+        # Fast throttle — avoids even trying to acquire the lock when data is fresh.
+        if not force and self._last_internals_update_time is not None and \
+                current_time - self._last_internals_update_time <= 10:
             return
 
-        with self._update_lock:
-            # Re-check throttling inside lock to avoid redundant updates
-            if not force and self._last_internals_update_time is not None and current_time - self._last_internals_update_time <= 10:
+        # --- Try to become the single updater ---
+        t_wait_start = time.time()
+        acquired = self._update_lock.acquire(blocking=False)
+
+        if not acquired:
+            # Another worker is already updating.  Wait for it to finish (bounded),
+            # then return — the caller will read the already-refreshed view.
+            thread = threading.current_thread().name
+            logger.debug(
+                "[LockWatchdog] _update_lock CONTENDED — %s waiting for in-progress update",
+                thread,
+            )
+            self._update_done.wait(timeout=15)
+            logger.debug("[LockWatchdog] _update_lock WAIT DONE — %s continuing with fresh view", thread)
+            return
+
+        # We won the race.
+        waited_ms = (time.time() - t_wait_start) * 1000
+        thread = threading.current_thread().name
+        caller = self._lock_caller()
+        logger.debug(
+            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            "_update_lock[_slowUpdateInternals]", thread, caller, waited_ms,
+        )
+        # Signal to latecomers that an update is now in progress.
+        self._update_done.clear()
+        t_held_start = time.time()
+
+        try:
+            # Re-check throttle now that we hold the lock (avoids double work when two
+            # workers raced and the first already updated while the second was acquiring).
+            if not force and self._last_internals_update_time is not None and \
+                    time.time() - self._last_internals_update_time <= 10:
                 return
 
             updated_df = self._pull_into_all_data_view_df()
@@ -2289,66 +2513,97 @@ class DataService:
 
             # Ensure default columns exist
             if self._compute_natural_sort and "signals.defaults.natural" not in updated_df.columns:
-                 updated_df["signals.defaults.natural"] = np.nan
+                updated_df["signals.defaults.natural"] = np.nan
 
             if SampleStatsEx.DISCARDED.value not in updated_df.columns:
-                 updated_df[SampleStatsEx.DISCARDED.value] = False
+                updated_df[SampleStatsEx.DISCARDED.value] = False
 
             if is_filtered and current_all_df is not None:
                 # The user has applied a custom view (Filter, Sort, or Aggregation).
                 try:
-                    # Use intersection to detect rows we are currently watching in the filtered view
-                    common_indices = current_all_df.index.intersection(updated_df.index)
+                    # Fast path: the view (current_all_df) and the fresh pull (updated_df)
+                    # are normally keyed identically (string sample_id), so a plain
+                    # intersection is O(n) and cheap.
+                    target_order = current_all_df.index
+                    common_indices = target_order.intersection(updated_df.index)
+
+                    # Defensive lazy fallback (only when the fast path finds nothing):
+                    # if some operation left the view on a mismatched index dtype
+                    # (e.g. an int RangeIndex vs string sample_ids), intersection()
+                    # is falsely empty. Retry once with string-normalized keys before
+                    # giving up. This extra O(n) pass runs only in that rare case.
+                    if len(common_indices) == 0 and len(target_order) and len(updated_df.index):
+                        cur_str = target_order.map(str)
+                        upd_str = updated_df.index.map(str)
+                        if len(cur_str.intersection(upd_str)) > 0:
+                            updated_df = updated_df.copy()
+                            updated_df.index = upd_str
+                            target_order = cur_str
+                            common_indices = cur_str.intersection(upd_str)
 
                     if len(common_indices) > 0:
-                         # Force the new data to conform to the USER'S current view (rows/order).
-                         target_order = current_all_df.index
-                         updated_df = updated_df.reindex(target_order)
+                        updated_df = updated_df.reindex(target_order)
                     else:
-                         # Aggregation/Transformation - skip auto-update.
-                         return
+                        # Aggregation/Transformation — skip auto-update.
+                        return
                 except Exception as e:
                     logger.debug(f"[_slowUpdateInternals] Error matching indices for filtered view: {e}")
                     return
 
             elif current_all_df is not None and not current_all_df.empty:
-                # Standard/Unfiltered View.
-                # Preserves sticky sort and appends new samples.
+                # Standard/Unfiltered View: preserve sticky sort, append new samples.
                 if not current_all_df.index.is_monotonic_increasing:
-                     try:
-                         key_cols = [SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value]
+                    try:
+                        key_cols = [SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value]
 
-                         old_df_keys = current_all_df.reset_index()
-                         new_df_keys = updated_df.reset_index()
+                        old_df_keys = safe_reset_index(current_all_df)
+                        new_df_keys = safe_reset_index(updated_df)
 
-                         if not all(col in old_df_keys.columns for col in key_cols) or not all(col in new_df_keys.columns for col in key_cols):
-                             raise KeyError(f"Missing key columns for reindex: required={key_cols}")
+                        if not all(col in old_df_keys.columns for col in key_cols) or \
+                                not all(col in new_df_keys.columns for col in key_cols):
+                            raise KeyError(f"Missing key columns for reindex: required={key_cols}")
 
-                         old_keys = list(old_df_keys[key_cols].itertuples(index=False, name=None))
-                         new_keys = list(new_df_keys[key_cols].itertuples(index=False, name=None))
+                        old_keys = list(old_df_keys[key_cols].itertuples(index=False, name=None))
+                        new_keys = list(new_df_keys[key_cols].itertuples(index=False, name=None))
 
-                         new_key_set = set(new_keys)
-                         kept_keys = [key for key in old_keys if key in new_key_set]
+                        new_key_set = set(new_keys)
+                        kept_keys = [key for key in old_keys if key in new_key_set]
 
-                         old_key_set = set(old_keys)
-                         newly_added_keys = [key for key in new_keys if key not in old_key_set]
+                        old_key_set = set(old_keys)
+                        newly_added_keys = [key for key in new_keys if key not in old_key_set]
 
-                         full_order = kept_keys + newly_added_keys
-                         unique_order = pd.MultiIndex.from_tuples(full_order, names=key_cols).unique()
+                        full_order = kept_keys + newly_added_keys
+                        unique_order = pd.MultiIndex.from_tuples(full_order, names=key_cols).unique()
 
-                         keyed_updated = new_df_keys.set_index(key_cols, drop=True)
-                         updated_df = keyed_updated.reindex(unique_order)
-                     except Exception as e:
-                         logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
-                         return
+                        keyed_updated = new_df_keys.set_index(key_cols, drop=True)
+                        updated_df = keyed_updated.reindex(unique_order)
+                    except Exception as e:
+                        logger.warning(f"[_slowUpdateInternals] Reindex failed: {e}. Falling back to previous order.")
+                        return
 
             # Deduplicate before saving back to prevent index corruption
             if updated_df.index.has_duplicates:
-                 updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
+                updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
 
             # Atomic swap to make the new view available to readers
             self._all_datasets_df = updated_df
             self._last_internals_update_time = current_time
+
+        finally:
+            held_ms = (time.time() - t_held_start) * 1000
+            self._update_lock.release()
+            if held_ms > 1000:
+                logger.warning(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
+                )
+            else:
+                logger.debug(
+                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
+                )
+            # Unblock all workers that were waiting on this update.
+            self._update_done.set()
 
     def _is_metadata_only_request(self, request) -> bool:
         """True when caller requests metadata columns only, without image payloads."""
@@ -2437,16 +2692,27 @@ class DataService:
                         _DataStat(name=col, type="string", shape=[1], value_string=v)
                     )
 
+        categorical_names = self._get_categorical_tag_names()
         for col in tag_cols:
-            bools = df_slice[col].astype(bool).tolist()
-            # Pre-build a single shared DataStat for this tag column –
-            # protobuf messages are mutable so we need one per row, but
-            # the tag "1" stat is tiny so construction is cheap.
-            for i, b in enumerate(bools):
-                if b:
-                    row_stats[i].append(
-                        _DataStat(name=col, type="string", shape=[1], value_string="1")
-                    )
+            tag_name = col[len(tag_prefix):]
+            series = df_slice[col]
+            if tag_name in categorical_names:
+                # Categorical tag: send the actual category value (string), skip unset.
+                str_vals = series.astype(str).tolist()
+                nan_mask = series.isna()
+                for i, v in enumerate(str_vals):
+                    if not nan_mask.iloc[i] and v not in ("", "nan", "None"):
+                        row_stats[i].append(
+                            _DataStat(name=col, type="string", shape=[1], value_string=v)
+                        )
+            else:
+                # Boolean tag: presence indicator "1" when True.
+                bools = series.astype(bool).tolist()
+                for i, b in enumerate(bools):
+                    if b:
+                        row_stats[i].append(
+                            _DataStat(name=col, type="string", shape=[1], value_string="1")
+                        )
 
         # -- Build DataRecord list in one comprehension -----------------------
         _DataRecord = pb2.DataRecord
@@ -2460,6 +2726,77 @@ class DataService:
             message=f"Retrieved {len(data_records)} metadata records (columns: {', '.join(metadata_cols)})",
             data_records=data_records,
         )
+
+    def _merge_multi_instance_signals(self, df_slice):
+        """Merge per-instance signals into dictionaries for multi-index dataframes.
+
+        When dataframe has (sample_id, annotation_id) multi-index, group instances
+        by sample_id and merge per-instance signal columns into dictionaries:
+        {annotation_id_0: signal_value_0, annotation_id_1: signal_value_1, ...}
+
+        This allows UI to display all instance signals for a sample while maintaining
+        per-sample analysis view.
+
+        Args:
+            df_slice: Dataframe slice with potential multi-index
+
+        Returns:
+            Tuple of (merged_df, signal_dict_mapping):
+            - merged_df: Single row per sample with merged data
+            - signal_dict_mapping: Dict mapping sample_id to signal dictionaries
+        """
+        # Check if multi-index (sample_id, annotation_id)
+        if not isinstance(df_slice.index, pd.MultiIndex) or df_slice.index.nlevels < 2:
+            return df_slice, {}
+
+        signal_dict_mapping = {}
+        merged_rows = []
+
+        # Identify signal columns (those starting with signal:)
+        signal_cols = [col for col in df_slice.columns if str(col).startswith('signal:')]
+
+        if not signal_cols:
+            # No per-instance signals, just group by sample_id
+            return df_slice.drop_duplicates(subset=['sample_id'], keep='first'), {}
+
+        # Group by sample_id
+        sample_ids = df_slice.index.get_level_values(0).unique()
+
+        for sample_id in sample_ids:
+            sample_rows = df_slice.xs(sample_id, level=0)
+
+            # Handle both Series (single annotation) and DataFrame (multiple annotations)
+            if isinstance(sample_rows, pd.Series):
+                sample_rows = sample_rows.to_frame().T
+
+            # Take first row as template
+            merged_row = sample_rows.iloc[0].copy()
+
+            # Build signal dictionary: {annotation_id: {signal_name: value, ...}}
+            signal_dict = {}
+            for _, instance_row in sample_rows.iterrows():
+                annotation_id = instance_row.get('annotation_id', 0)
+                instance_signals = {}
+
+                for signal_col in signal_cols:
+                    value = instance_row.get(signal_col)
+                    if value is not None:
+                        instance_signals[signal_col] = value
+
+                if instance_signals:
+                    signal_dict[str(annotation_id)] = instance_signals
+
+            # Store merged signal dictionary if we have signals
+            if signal_dict:
+                signal_dict_mapping[sample_id] = signal_dict
+                # Add merged signals dict to row for UI display
+                merged_row['_instance_signals'] = signal_dict
+
+            merged_rows.append(merged_row)
+
+        # Return merged dataframe (one row per sample) and signal mapping
+        merged_df = pd.DataFrame(merged_rows).reset_index(drop=True)
+        return merged_df, signal_dict_mapping
 
     def _process_get_data_samples(self, request, context):
         """
@@ -2515,7 +2852,7 @@ class DataService:
 
             # Slice the snapshot
             try:
-                df_slice = current_df.iloc[request.start_index:request.start_index + request.records_cnt].reset_index()
+                df_slice = safe_reset_index(current_df.iloc[request.start_index:request.start_index + request.records_cnt])
             except IndexError:
                 return pb2.DataSamplesResponse(
                     success=False,
@@ -2530,6 +2867,9 @@ class DataService:
                     message=f"No samples found at index {request.start_index}:{request.start_index + request.records_cnt}",
                     data_records=[]
                 )
+
+            # Handle multi-instance signal merging if needed
+            df_slice, _ = self._merge_multi_instance_signals(df_slice)
 
             logger.debug(
                 "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)
@@ -2669,6 +3009,7 @@ class DataService:
                     message="Failed to retrieve samples (all records None)",
                     data_records=[]
                 )
+
             return pb2.DataSamplesResponse(
                 success=True,
                 message=f"Retrieved {len(data_records)} data records",
@@ -2779,7 +3120,7 @@ class DataService:
 
         # 1) No query: just report counts (Needs lock for consistency)
         if request.query == "":
-            with self._lock:
+            with self._watched_lock("_lock[ApplyDataQuery/counts]"):
                  df = self._all_datasets_df
                  return self._build_success_response(
                     df=df,
@@ -2799,7 +3140,7 @@ class DataService:
                 operations = self._parse_direct_query(request.query)
 
                 # Apply operations with lock
-                with self._lock:
+                with self._watched_lock("_lock[ApplyDataQuery/ops]"):
                     # If this is JUST a view-sort for a specific page, DO NOT force an internal refresh
                     # as that wipes out the existing slice/sort state before we try to modify the next slice.
                     is_only_view_sort = len(operations) == 1 and operations[0].get("function") == "df.sort_view_slice"
@@ -3037,38 +3378,12 @@ class DataService:
                     if hasattr(checkpoint_manager, "update_experiment_hash"):
                         checkpoint_manager.update_experiment_hash()
                 snapshot_path = checkpoint_manager.save_data_snapshot(force_new_state=True)
+                logger.info(f"[EditDataSample] Data snapshot saved to: {snapshot_path}")
                 snapshot_saved = snapshot_path is not None
             except Exception as snapshot_error:
                 logger.warning(f"[EditDataSample] Manual save snapshot failed: {snapshot_error}")
 
         self._slowUpdateInternals(force=True)
-
-        # Force sync of all registered signals AFTER data has been dumped
-        if force_enable_h5:
-            try:
-                from weightslab import _REGISTERED_SIGNALS
-                if _REGISTERED_SIGNALS and self._all_datasets_df is not None and not self._all_datasets_df.empty:
-                    logger.info(f"[Manual Save] Data dumped successfully. Force-syncing {len(_REGISTERED_SIGNALS)} registered signals...")
-                    from weightslab import compute_signals
-                    # Get unique origins/splits from the dataframe
-                    try:
-                        if SampleStatsEx.ORIGIN.value in self._all_datasets_df.columns:
-                            splits = self._all_datasets_df[SampleStatsEx.ORIGIN.value].unique().tolist()
-                        elif isinstance(self._all_datasets_df.index, pd.MultiIndex) and SampleStatsEx.ORIGIN.value in self._all_datasets_df.index.names:
-                            splits = self._all_datasets_df.index.get_level_values(SampleStatsEx.ORIGIN.value).unique().tolist()
-                        else:
-                            splits = []
-
-                        for split_name in splits:
-                            try:
-                                compute_signals(dataset_or_loader=split_name, origin=split_name, signals=list(_REGISTERED_SIGNALS.keys()))
-                                logger.info(f"[Manual Save] Force-synced {len(_REGISTERED_SIGNALS)} signals for split: {split_name}")
-                            except Exception as sig_error:
-                                logger.warning(f"[Manual Save] Failed to sync signals for split '{split_name}': {sig_error}")
-                    except Exception as origin_error:
-                        logger.warning(f"[Manual Save] Could not extract splits from dataframe: {origin_error}")
-            except Exception as sync_error:
-                logger.warning(f"[Manual Save] Signal sync after dump failed: {sync_error}")
 
         if snapshot_saved:
             return pb2.DataEditsResponse(
@@ -3121,7 +3436,7 @@ class DataService:
                     message="Missing source metadata name to copy.",
                 )
 
-            with self._lock:
+            with self._watched_lock("_lock[EditDataSample/__copy_metadata__]"):
                 try:
                     self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
@@ -3142,7 +3457,7 @@ class DataService:
                         experiment_hash = checkpoint_manager.get_current_experiment_hash()
                     experiment_hash = str(experiment_hash or "current_experiment_hash")
 
-                    self._all_datasets_df = self._all_datasets_df.reset_index()
+                    self._all_datasets_df = safe_reset_index(self._all_datasets_df)
                     self._all_datasets_df, backend_column_name = duplicate_metadata_column_in_dataframe(
                         self._all_datasets_df,
                         source_column=source_column,
@@ -3192,7 +3507,7 @@ class DataService:
                     message="Missing metadata name to delete.",
                 )
 
-            with self._lock:
+            with self._watched_lock("_lock[EditDataSample/delete-col]"):
                 try:
                     self._slowUpdateInternals()
                     if self._all_datasets_df is None or self._all_datasets_df.empty:
@@ -3251,17 +3566,52 @@ class DataService:
         # =====================================================================
         # Process tag edits using the new column-based tag system
         # =====================================================================
-        with self._lock:
+        with self._watched_lock("_lock[EditDataSample/tag-discard]"):
             try:
                 if request.samples_ids and self._df_manager is not None:
                     updates_by_origin = {}
-                    is_tag_request = request.stat_name == SampleStatsEx.TAG.value or request.stat_name.startswith(SampleStatsEx.TAG.value)
+                    is_categorical = bool(getattr(request, "is_categorical", False))
+                    is_tag_request = (not is_categorical) and (
+                        request.stat_name == SampleStatsEx.TAG.value
+                        or request.stat_name.startswith(SampleStatsEx.TAG.value)
+                    )
+
+                    # Categorical tag set/clear: normalize column + (re)declare categories once.
+                    cat_tag_col = None
+                    cat_value = None
+                    if is_categorical:
+                        pref = f"{SampleStatsEx.TAG.value}:"
+                        raw = (request.stat_name or "").strip()
+                        cat_tag_name = raw[len(pref):] if raw.startswith(pref) else raw
+                        cat_tag_col = f"{pref}{cat_tag_name}"
+                        declared = [c for c in request.categories if c]
+                        if declared:
+                            self._df_manager.register_categorical_tag(cat_tag_name, declared)
+                        if request.type != SampleEditType.EDIT_REMOVE:
+                            cat_value = request.string_value.strip() if request.string_value else None
+                            if cat_value:
+                                self._df_manager.register_categorical_tag(cat_tag_name, [cat_value])
+
                     for sid, origin in zip(request.samples_ids, request.sample_origins):
                         sid_value = str(sid)
+                        # =====================
+                        # CATEGORICAL TAG EDITS
+                        # =====================
+                        if is_categorical:
+                            if origin not in updates_by_origin:
+                                updates_by_origin[origin] = {}
+                            if sid_value not in updates_by_origin[origin]:
+                                updates_by_origin[origin][sid_value] = {
+                                    "sample_id": sid_value,
+                                    SampleStatsEx.ORIGIN.value: origin,
+                                }
+                            # EDIT_REMOVE clears the value (None); otherwise set the chosen category.
+                            updates_by_origin[origin][sid_value][cat_tag_col] = cat_value
+
                         # =========
                         # TAG EDITS
                         # =========
-                        if is_tag_request:
+                        elif is_tag_request:
                             # Calculate tag column updates based on edit type
                             tag_updates = self._calculate_tag_column_updates(
                                 sid,
@@ -3302,8 +3652,15 @@ class DataService:
                         self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
 
                     # Auto-cleanup: if EDIT_REMOVE was used on a tag, delete the entire column immediately
-                    if is_tag_request and request.type == SampleEditType.EDIT_REMOVE and request.float_value == -1:
-                        column_name = request.stat_name.strip()
+                    if (is_tag_request or is_categorical) and request.type == SampleEditType.EDIT_REMOVE and request.float_value == -1:
+                        column_name = cat_tag_col if is_categorical else request.stat_name.strip()
+                        if is_categorical and cat_tag_col:
+                            # Drop the categorical tag from the registry as well.
+                            try:
+                                self._df_manager._categorical_tags.pop(cat_tag_col[len(f"{SampleStatsEx.TAG.value}:"):], None)
+                                self._df_manager._persist_tag_registry()
+                            except Exception:
+                                pass
                         if column_name:
                             logger.info(f"[EditDataSample] Deleting tag column: {column_name}")
                             # Delete the column from storage
@@ -3319,6 +3676,32 @@ class DataService:
 
                 # Prevent _slowUpdateInternals from automatically overwriting our edits with stale data
                 self._last_internals_update_time = time.time()
+
+                # Log audit event for data edits
+                if is_tag_request:
+                    action_type = "tag_add" if request.type == SampleEditType.EDIT_ACCUMULATE else "tag_remove"
+                    self._log_audit(
+                        action_type,
+                        "success",
+                        {
+                            "tag_name": request.string_value,
+                            "samples_affected": len(request.samples_ids),
+                            "sample_ids": list(request.samples_ids),
+                            "origins": list(request.sample_origins),
+                        },
+                    )
+                else:
+                    # This is a discard/restore operation
+                    action_type = "sample_discard" if request.bool_value else "sample_restore"
+                    self._log_audit(
+                        action_type,
+                        "success",
+                        {
+                            "samples_affected": len(request.samples_ids),
+                            "sample_ids": list(request.samples_ids),
+                            "origins": list(request.sample_origins),
+                        },
+                    )
 
                 return pb2.DataEditsResponse(
                     success=True,

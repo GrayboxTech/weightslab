@@ -1,7 +1,7 @@
 # Global configuration
 device: auto
 experiment_name: cls_MNIST_usecase
-training_steps_to_do: null  # Set to null for infinite training until manually stopped
+training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
 
 # Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
 compute_natural_sort: false

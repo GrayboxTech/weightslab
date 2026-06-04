@@ -1,7 +1,7 @@
 # Global configuration
 device: auto
 experiment_name: det_YOLO_usecase
-training_steps_to_do: null  # Set to null for infinite training until manually stopped
+training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
 # root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
 
 # Checkppoint Manager
@@ -12,7 +12,7 @@ checkpoint_manager:
 
 # Model config.
 model:
-  name: yolo11s.pt
+  name: yolo11n.pt
   lr: 0.001
   momentum: 0.9
 
@@ -20,14 +20,14 @@ model:
 compute_natural_sort: true
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 128
-experiment_dump_to_train_steps_ratio: 128
+eval_full_to_train_steps_ratio: 16
+experiment_dump_to_train_steps_ratio: 16
 tqdm_display: true
 is_training: false  # Start training immediately or not
 
 # Serving
 serving_grpc: true
-serving_cli: false
+serving_cli: true
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
@@ -37,12 +37,12 @@ ledger_flush_interval: 60.0
 
 # Data
 num_classes: 2
-image_size: 1024
-data_root: ./data/data.yaml
+image_size: 320
+data_root: ./data/data.yaml  # Uncomment and set the path to your data.yaml file.
 data:
   train_loader:
     batch_size: 4
     shuffle: true
-  test_loader:
+  val_loader:
     batch_size: 2
     shuffle: false

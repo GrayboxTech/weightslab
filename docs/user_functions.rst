@@ -14,7 +14,10 @@ Public API surface
 - ``wl.signal``
 - ``wl.compute_signals``
 - ``wl.save_signals``
+- ``wl.save_instance_signals``  *(per-instance / per-annotation signals)*
 - ``wl.tag_samples``
+- ``wl.register_categorical_tag``  *(multi-value tags)*
+- ``wl.set_categorical_tag``  *(multi-value tags)*
 - ``wl.discard_samples``
 - ``wl.get_samples_by_tag``
 - ``wl.get_discarded_samples``
@@ -120,29 +123,93 @@ signal
 
 .. code-block:: python
 
-   @wl.signal(name=None, subscribe_to=None, compute_every_n_steps=1, **kwargs)
-   def my_signal(ctx):
+   @wl.signal(
+       name: str,
+       subscribe_to: str,
+       compute_every_n_steps: int = 1,
+       include_history: bool = False,
+       include_history_metadata: bool = False
+   )
+   def my_signal(ctx: SignalContext) -> float:
        ...
 
 **Purpose**
 
-Register a custom signal function.
+Register a custom, user-defined signal. The decorated function receives a single
+:ref:`SignalContext <signalcontext>` ``ctx`` and returns one scalar value per
+sample, which Weightslab stores per ``sample_id`` (drivable from filters, tags,
+sorting and root-cause analysis in the studio).
 
-- Static signal: computed from sample context.
-- Dynamic signal: subscribes to another metric/signal value.
+**Arguments**
+
+- ``name``: signal name (defaults to the function name). Stored as a
+  ``signals//<name>`` column.
+- ``subscribe_to``: if set, makes this a **dynamic** signal that fires whenever
+  the named metric/loss/signal is logged, receiving its value as
+  ``ctx.subscribed_value``. If omitted, the signal is **static**.
+- ``compute_every_n_steps``: throttle for dynamic signals (e.g. ``10`` = compute
+  on every 10th step the subscribed metric is produced).
+
+**Static vs dynamic**
+
+- **Static** — computed from the sample itself (``ctx.image`` / ``ctx.data``),
+  typically over a whole dataset via :func:`compute_signals`. Use for
+  input-derived features (brightness, blue-pixel count, sharpness, …).
+- **Dynamic** — reacts to a live training metric via ``subscribe_to``. Use for
+  values that depend on the current model state (e.g. loss-derived signals,
+  trajectory features). Dynamic signals can also read previously computed values
+  through ``ctx.dataframe``.
 
 **Examples**
 
+Simple example (no history):
+
 .. code-block:: python
 
-   @wl.signal(name="brightness")
-   def brightness(ctx):
-      image = ctx.image
-      return 0.0 if image is None else float(image.mean())
-
-   @wl.signal(name="weighted_loss", subscribe_to="train-loss", compute_every_n_steps=10)
+   @wl.signal(name="weighted_loss", subscribe_to="train_loss", compute_every_n_steps=1)
    def weighted_loss(ctx):
-      return 0.0 if ctx.subscribed_value is None else 0.5 * float(ctx.subscribed_value)
+       """Scale the loss value by a fixed weight."""
+       return 0.0 if ctx.subscribed_value is None else 0.5 * float(ctx.subscribed_value)
+
+Advanced example with history (coefficient of variation):
+
+.. code-block:: python
+
+   @wl.signal(
+       name="loss_cv_over_time",
+       subscribe_to="train_mlt_loss/CE",
+       compute_every_n_steps=1,
+       include_history=True,
+       include_history_metadata=False
+   )
+   def compute_loss_cv_over_time(ctx):
+       """
+       Compute coefficient of variation (CV) of loss across training history.
+
+       CV = std_dev / abs(mean)
+
+       This metric helps detect training instability:
+       - CV ≈ 0: stable training
+       - CV > 0.5: high variability, training instability
+       """
+       loss = ctx.subscribed_value
+       loss_history = ctx.subscribed_history
+
+       # Extract signal values from history entries
+       historical_values = [entry['signal_value'] for entry in loss_history]
+       all_values = historical_values + [loss]
+
+       if len(all_values) < 2:
+           return 0.0
+
+       mean = sum(all_values) / len(all_values)
+       if mean == 0:
+           return 0.0
+
+       variance = sum((x - mean) ** 2 for x in all_values) / len(all_values)
+       std_dev = variance ** 0.5
+
+       return std_dev / abs(mean)
 
 compute_signals
 ---------------
@@ -190,6 +257,83 @@ Persist batch signals and optional predictions/targets with sample IDs.
       log=True,
    )
 
+Per-sample signals are written to the **sample row** (``annotation_id == 0``) of
+the ``(sample_id, annotation_id)`` multi-index.
+
+save_instance_signals
+---------------------
+
+**Signature**
+
+.. code-block:: python
+
+   wl.save_instance_signals(signals, batch_ids, batch_idx,
+                            step=None, origin=None, targets=None, log=True)
+
+**Purpose**
+
+Persist **per-instance / per-annotation** signals (and optional per-instance
+targets) for tasks where a sample has multiple instances — detection boxes or
+segmentation masks. Values land at ``(sample_id, annotation_id)`` for
+``annotation_id >= 1`` (``instance_id 0`` is the per-sample row).
+
+**Arguments**
+
+- ``signals``: ``{name: tensor}`` where each tensor is flat, length =
+  ``total_instances`` across the batch (sample-major order).
+- ``batch_ids``: sample IDs for each batch position (length ``B``).
+- ``batch_idx``: for each instance, the batch position it belongs to
+  (length ``total_instances``). Determines the sample-major ordering.
+- ``targets``: optional flat list of per-instance targets (e.g. one mask/box per
+  instance) to persist alongside the signals.
+
+**Typical usage**
+
+.. code-block:: python
+
+   wl.save_instance_signals(
+      signals={"signals//iou_instance": iou_per_box},   # flat [total_instances]
+      batch_ids=ids,
+      batch_idx=batch_idx,                                # instance -> sample position
+      targets=flat_masks,
+      step=current_step,
+   )
+
+**Note**
+
+- You rarely call this directly: wrapping a loss/metric with
+  ``wl.watch_or_edit(..., per_instance=True)`` calls it for you (see
+  :ref:`per-sample vs per-instance <per-instance-signals>`).
+- Annotation ids are **1-based** and assigned in the order instances appear
+  within each sample.
+
+.. _per-instance-signals:
+
+Per-sample vs per-instance watched signals
+------------------------------------------
+
+``wl.watch_or_edit`` accepts two routing flags for ``flag="loss"`` /
+``flag="metric"`` wrappers:
+
+- ``per_sample=True`` — the wrapped object returns one value per sample
+  (``[B]``); it is logged and saved on the **sample row** (``instance_id 0``)
+  via the :func:`save_signals` path.
+- ``per_instance=True`` — the wrapped object returns a **flat** tensor with one
+  value per instance (sample-major); Weightslab auto-saves it at
+  ``(sample_id, annotation_id)`` (``annotation_id >= 1``) via
+  :func:`save_instance_signals`. The wrapper locates the instance→sample map
+  from a ``batch`` dict argument containing ``batch_idx`` or from a
+  ``batch_idx=`` keyword.
+
+.. code-block:: python
+
+   # one value per sample  -> instance_id 0
+   wl.watch_or_edit(PerSampleDice(),   flag="metric", name="dice/sample",   per_sample=True,  log=True)
+   # one value per instance -> instance_id 1..N
+   wl.watch_or_edit(PerInstanceDice(), flag="metric", name="dice/instance", per_instance=True, log=True)
+
+See :doc:`segmentation_usecase` for a full per-instance + per-sample example.
+
 Tag/discard APIs
 ----------------
 
@@ -199,11 +343,26 @@ Tag/discard APIs
 
    wl.tag_samples(sample_ids, tag, mode="add")
 
-Add, remove, or set tags on sample IDs.
+Add, remove, or set **boolean** tags on sample IDs (present / absent).
 
 **Important**
 
 - ``mode="set"`` is currently treated as ``add`` in current implementation.
+
+**Categorical (multi-value) tags**
+
+.. code-block:: python
+
+   # Declare a tag with its allowed category values (UI shows the choices).
+   wl.register_categorical_tag("weather", ["rainy", "sunny", "cloudy"])
+
+   # Set one category value on samples (auto-registers the value; "" / None clears it).
+   wl.set_categorical_tag(sample_ids, "weather", "rainy")
+
+Unlike boolean tags (present/absent), a categorical tag holds **one string value
+per sample** chosen from a predefined set. The allowed category set is persisted
+in the tag registry (so it survives the dataframe/H5 round-trip and the UI can
+render the full choice list even before any sample uses a value).
 
 **Discard / restore**
 
@@ -229,24 +388,67 @@ Return IDs matching a tag.
 
 Return IDs currently marked discarded.
 
+.. _signalcontext:
+
 SignalContext
 -------------
 
-``SignalContext`` is passed to custom signal functions.
+``SignalContext`` is passed to custom signal functions (decorators: ``@wl.signal``, ``@wl.eval_fn``).
 
-Key attributes:
+**Attributes for dynamic signals** (when using ``@wl.signal(subscribe_to=...)``):
 
-- ``sample_id``
-- ``dataframe``
-- ``data``
-- ``subscribed_value``
-- ``origin``
+Attribute                                    Description
+``subscribed_value``                         Current value of the subscribed metric (float or None)
+``subscribed_history``                       List of historical entries for the subscribed signal
+                                             (only if ``include_history=True`` in decorator)
+                                             Each entry is a dict with keys:
+                                             - ``signal_value`` (float): the metric value
+                                             - ``model_age`` (int): training step when recorded
+                                             (``model_age`` included only if ``include_history_metadata=True``)
 
-Convenience properties:
+**Attributes for static signals & sample context** (general use):
 
-- ``ctx.image``: normalized image view when possible
-- ``ctx.points``: point cloud view when possible
-- ``ctx.is_static`` / ``ctx.is_dynamic``
+Attribute                                    Description
+``sample_id`` (str)                          Unique identifier for the sample
+``dataframe``                                Full ledger dataframe for context
+``data``                                     Raw sample data (image, point cloud, etc.)
+``origin`` (str)                             Data split: "train", "val", "test", etc.
+
+**Convenience properties** (data format helpers):
+
+===========================================  =====================================================================
+Property                                     Description
+===========================================  =====================================================================
+``ctx.image``                                Normalized image tensor view (if applicable)
+``ctx.points``                               Point cloud view (if applicable)
+``ctx.is_static``                            True if computing static signal (no subscription)
+``ctx.is_dynamic``                           True if computing dynamic signal (subscribed to another metric)
+===========================================  =====================================================================
+
+**Usage patterns**
+
+Accessing subscribed values:
+
+.. code-block:: python
+
+   # Simple value access
+   loss = ctx.subscribed_value  # current step's loss
+
+   # History access (requires include_history=True)
+   history = ctx.subscribed_history
+   values = [entry['signal_value'] for entry in history]
+   steps = [entry['model_age'] for entry in history]  # if include_history_metadata=True
+
+Checking data type:
+
+.. code-block:: python
+
+   if ctx.is_dynamic:
+       # Compute from subscribed metric
+       return 0.5 * ctx.subscribed_value
+   else:
+       # Compute from sample data
+       return process_sample(ctx.data, ctx.sample_id)
 
 Evaluation mode
 ---------------
@@ -382,5 +584,4 @@ optional when ``wl.watch_or_edit`` registrations are in place.
 
 **Where SignalContext is used**
 
-- In static signals called by ``wl.compute_signals``.
 - In dynamic signals subscribed through ``@wl.signal(subscribe_to=...)``.
