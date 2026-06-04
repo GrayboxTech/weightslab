@@ -1011,7 +1011,9 @@ class LedgeredDataFrameManager:
             losses: Dict of {signal_name: array-like of length N}.
             step: Current training step (optional).
             targets: Target values for each instance (optional).
-            origin: Dataset split (e.g. 'train', 'val'). Used when creating new rows.
+
+        Note: instance rows (annotation_id >= 1) do NOT carry an origin — the flush
+        derives each row's origin from its sample's annotation_id 0 row for routing.
         """
         if sample_ids is None or len(sample_ids) == 0:
             return

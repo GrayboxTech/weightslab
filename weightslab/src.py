@@ -1875,23 +1875,26 @@ def save_instance_signals(
     # batch_idx[i] is the image position (in batch_ids) that instance i belongs to.
     # Annotation ids are 1-based: instance_id 0 is reserved for the per-sample row,
     # so the k-th instance of a sample is stored at annotation_id k (1, 2, ...).
-    # NOTE: both lists are length num_instances_total and ALIGNED with the flat
-    # signal/target order — enqueue_instance_batch requires len(sample_ids) ==
-    # len(annotation_ids), so passing the raw batch_ids (length B) would make it
-    # silently no-op for any batch with more instances than images.
-    # instance_sample_ids: list[str] = []
-    # instance_annotation_ids: list[int] = []
-    # counters: Dict[int, int] = {}
-    # for pos in batch_idx_np:
-    #     pos = int(pos)
-    #     if pos < 0 or pos >= len(batch_ids_list):
-    #         continue
-    #     aid = counters.get(pos, 0) + 1  # 1-based (instance_id 0 = sample row)
-    #     instance_sample_ids.append(batch_ids_list[pos])
-    #     instance_annotation_ids.append(aid)
-    #     counters[pos] = aid
-    instance_sample_ids: list[str] = batch_ids
-    instance_annotation_ids: list[int] = batch_idx
+    # Build per-instance (sample_id, annotation_id) lists from the flat batch_idx map.
+    # Both lists have length num_instances_total and are ALIGNED with the flat
+    # signal/target order. enqueue_instance_batch zips sample_ids with annotation_ids
+    # and requires len(sample_ids) == len(annotation_ids); passing the raw batch_ids
+    # (length B) instead would trip its length guard and silently drop everything for
+    # any batch with more instances than images.
+    #
+    # annotation_id is 1-based per sample (instance_id 0 is reserved for the sample
+    # row): the k-th instance of a given image becomes annotation_id k (1, 2, ...).
+    instance_sample_ids: list[str] = []
+    instance_annotation_ids: list[int] = []
+    counters: Dict[int, int] = {}
+    for pos in batch_idx_np:
+        pos = int(pos)
+        if pos < 0 or pos >= len(batch_ids_list):
+            continue
+        aid = counters.get(pos, 0) + 1  # 1-based (instance_id 0 = sample row)
+        instance_sample_ids.append(batch_ids_list[pos])
+        instance_annotation_ids.append(aid)
+        counters[pos] = aid
     if not instance_sample_ids:
         return
 
@@ -1930,13 +1933,14 @@ def save_instance_signals(
     if not losses_data:
         return
 
-    active_origin = origin or global_monitoring.get_active_origin() or "train"
+    # origin is intentionally NOT forwarded: instance rows (annotation_id >= 1) don't
+    # carry an origin; the flush derives it from the sample row (annotation_id 0).
     DATAFRAME_M.enqueue_instance_batch(
         sample_ids=instance_sample_ids,
         annotation_ids=instance_annotation_ids,
         losses=losses_data,
         step=step,
-        targets=targets
+        targets=targets,
     )
 
 

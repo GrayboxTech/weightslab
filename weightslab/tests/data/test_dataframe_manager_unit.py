@@ -86,7 +86,6 @@ class TestDataFrameManagerUnit(unittest.TestCase):
                 losses={"signal:bbox_loss": np.array([0.1, 0.2, 0.3])},
                 targets=[np.array([1, 2, 3, 4]), np.array([5, 6, 7, 8]), np.array([9, 10, 11, 12])],
                 step=3,
-                origin="train",
             )
 
         self.assertTrue(flush_async.called)
@@ -116,7 +115,6 @@ class TestDataFrameManagerUnit(unittest.TestCase):
             annotation_ids=[1, 2, 3],
             losses={"signal:il": np.array([0.5, 0.6, 0.7])},
             step=2,
-            origin="train",
         )
         mgr.flush()
 
@@ -143,7 +141,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         # Per-instance signal → one value per instance row (instance_id >= 1).
         mgr.enqueue_instance_batch(
             sample_ids=["1", "1"], annotation_ids=[1, 2],
-            losses={"signal:il": np.array([0.2, 0.8])}, step=5, origin="train",
+            losses={"signal:il": np.array([0.2, 0.8])}, step=5,
         )
         mgr.flush()
 
@@ -167,7 +165,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         with patch.object(mgr, "flush_async"):
             mgr.enqueue_instance_batch(
                 sample_ids=["1", "1"], annotation_ids=[1, 2],
-                losses={"signal:il": np.array([0.11, 0.22])}, origin="train",
+                losses={"signal:il": np.array([0.11, 0.22])},
             )
         # Still buffered (flush_async patched out), but should be merged into the view.
         combined = mgr.get_combined_df()
@@ -413,7 +411,6 @@ class TestDataFrameManagerUnit(unittest.TestCase):
             annotation_ids=[1, 2, 3, 1, 2],
             losses={"signals//train/iou_instance": np.array([0.9, 0.8, 0.7, 0.5, 0.6])},
             step=5,
-            origin="train",
         )
         mgr.flush()
 

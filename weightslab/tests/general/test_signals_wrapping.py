@@ -324,7 +324,9 @@ class TestSignalWrappingWithDetection(unittest.TestCase):
             # 1-based annotation ids: instance_id 0 is reserved for the sample row,
             # so sample 1's two instances are 1,2 and sample 2's three are 1,2,3.
             self.assertEqual(call_kwargs["annotation_ids"], [1, 2, 1, 2, 3])
-            self.assertEqual(call_kwargs["origin"], "train")
+            # origin is not forwarded to enqueue_instance_batch — instance rows derive
+            # their origin from the sample row at flush time.
+            self.assertNotIn("origin", call_kwargs)
             # Signal name should be prefixed with "signals//"
             sig_key = next(iter(call_kwargs["losses"]))
             self.assertEqual(sig_key, "signals//train/iou_instance")
