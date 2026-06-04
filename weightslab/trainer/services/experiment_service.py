@@ -1,3 +1,4 @@
+import os
 import time
 import types
 import logging
@@ -20,6 +21,54 @@ from weightslab.components.evaluation_controller import eval_controller
 
 # Logger
 logger = logging.getLogger(__name__)
+
+
+# Default cap on the number of per-sample logger points returned per sample in the
+# break-by-slices view. A run with 10k tagged samples × 10k steps would otherwise
+# stream 100M points. Override with the WL_MAX_POINTS_PER_SAMPLE env variable
+# (see docs/configuration.rst). Set to 0 (or a negative value) to disable the cap.
+_DEFAULT_MAX_POINTS_PER_SAMPLE = 200
+
+
+def _max_points_per_sample() -> int:
+    """Read WL_MAX_POINTS_PER_SAMPLE; 0/negative/invalid disables the cap (returns 0)."""
+    raw = os.getenv("WL_MAX_POINTS_PER_SAMPLE")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_POINTS_PER_SAMPLE
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "WL_MAX_POINTS_PER_SAMPLE=%r is not an integer — using default %d",
+            raw, _DEFAULT_MAX_POINTS_PER_SAMPLE,
+        )
+        return _DEFAULT_MAX_POINTS_PER_SAMPLE
+    return max(0, val)
+
+
+def _downsample_uniform(series, max_points: int):
+    """Reduce a per-sample, step-ordered ``series`` to at most ``max_points`` items.
+
+    Uses evenly-spaced index selection that ALWAYS keeps the first and last point
+    (so the curve's endpoints — start and most-recent value — are preserved) and
+    samples the interior uniformly. This is a cheap, shape-preserving downsample;
+    it does not invent interpolated values, it picks a representative subset of the
+    real logged points. ``max_points <= 0`` means "no cap" (returns ``series``).
+    """
+    n = len(series)
+    if max_points <= 0 or n <= max_points:
+        return series
+    if max_points == 1:
+        return [series[-1]]
+    # Evenly spaced indices across [0, n-1], inclusive of both endpoints.
+    seen = set()
+    picked = []
+    for i in range(max_points):
+        idx = round(i * (n - 1) / (max_points - 1))
+        if idx not in seen:
+            seen.add(idx)
+            picked.append(series[idx])
+    return picked
 
 
 class ExperimentService(pb2_grpc.ExperimentServiceServicer):
@@ -143,19 +192,46 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # per-sample data lives under eval-marker hashes, so derive audit_mode.
             now = int(time.time())
             eval_hashes = set(signal_logger.get_evaluation_marker_hashes())
+
+            # AGGREGATE the per-sample curves into a single MEAN curve per
+            # experiment_hash, computed here in the backend. Instead of streaming one
+            # curve per sample (10k samples × 10k steps → 100M points), we send the
+            # mean over the matching samples at each step → one curve per run. We
+            # accumulate sum/count per (exp_hash, step) in a single pass (O(points),
+            # no per-sample buffering), then emit mean = sum / count.
+            from collections import defaultdict
+            sums = defaultdict(float)
+            counts = defaultdict(int)
             for sid, step, val, exp_hash in signal_logger.query_per_sample(
                     graph_name, sample_ids=sample_ids):
-                points.append(
-                    pb2.LoggerDataPoint(
-                        metric_name=graph_name,
-                        model_age=int(step),
-                        metric_value=float(val),
-                        experiment_hash=exp_hash if exp_hash else "N.A.",
-                        timestamp=now,
-                        sample_id=str(sid),
-                        audit_mode=(exp_hash in eval_hashes),
+                key = (exp_hash if exp_hash else "N.A.", int(step))
+                sums[key] += float(val)
+                counts[key] += 1
+
+            # Regroup the (exp_hash, step) means into one step-ordered series per hash.
+            per_hash = defaultdict(list)
+            for (exp_hash, step), total in sums.items():
+                per_hash[exp_hash].append((step, total / counts[(exp_hash, step)]))
+
+            # Still cap each returned curve's length (a run can have 10k+ steps);
+            # WL_MAX_POINTS_PER_SAMPLE bounds points per returned curve (endpoints kept).
+            max_points = _max_points_per_sample()
+            for exp_hash, series in per_hash.items():
+                series.sort(key=lambda sv: sv[0])  # order by step (model age)
+                series = _downsample_uniform(series, max_points)
+                audit = exp_hash in eval_hashes
+                for step, mean_val in series:
+                    points.append(
+                        pb2.LoggerDataPoint(
+                            metric_name=graph_name,
+                            model_age=step,
+                            metric_value=mean_val,
+                            experiment_hash=exp_hash,
+                            timestamp=now,
+                            sample_id="",  # aggregated mean curve — not a single sample
+                            audit_mode=audit,
+                        )
                     )
-                )
 
             return pb2.GetLatestLoggerDataResponse(points=points)
 
