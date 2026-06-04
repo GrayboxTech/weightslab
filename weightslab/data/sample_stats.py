@@ -16,6 +16,7 @@ __all__ = [
 class SampleStats:
     class Ex(str, Enum):
         SAMPLE_ID = "sample_id"
+        INSTANCE_ID = "annotation_id"
 
         PREDICTION = "prediction"
         PREDICTION_RAW = "prediction_raw"
@@ -23,6 +24,7 @@ class SampleStats:
         SIGNAL = "signal"
 
         TARGET = "target"
+
         ORIGIN = "origin"
         TASK_TYPE = "task_type"
         LAST_SEEN = "last_seen"
@@ -38,7 +40,8 @@ class SampleStats:
             return list(map(lambda c: c.value, cls))
 
     DEFAULTS_TYPES: Dict[str, Any] = {
-        Ex.SAMPLE_ID.value: int,
+        Ex.SAMPLE_ID.value: str or int,  # Accept both str and int for sample_id
+        Ex.INSTANCE_ID.value: str or int,  # Accept both str and int for instance_id
 
         Ex.PREDICTION.value: list,
         Ex.PREDICTION_RAW.value: list,
@@ -55,11 +58,12 @@ class SampleStats:
 
     # None are not accepted by PD H5 storage
     DEFAULTS: Dict[str, Any] = {
-        Ex.SAMPLE_ID.value: -1,
+        Ex.SAMPLE_ID.value: 0,
+        Ex.INSTANCE_ID.value: 0,
 
-        Ex.PREDICTION.value: None, #[],
-        Ex.PREDICTION_RAW.value: None, #[],
-        Ex.TARGET.value: None, #[],
+        Ex.PREDICTION.value: None,
+        Ex.PREDICTION_RAW.value: None,
+        Ex.TARGET.value: None,
 
         Ex.DISCARDED.value: False,
 
@@ -70,9 +74,11 @@ class SampleStats:
         Ex.MEMBER_RANK.value: 0,
     }
 
+    # What are np arrays, tensor here ?
     MODEL_INOUT_LIST = [
         Ex.PREDICTION.value,
         Ex.PREDICTION_RAW.value,
+        Ex.TARGET.value,
     ]
 
     @classmethod

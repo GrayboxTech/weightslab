@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 # Ensure intent_prompt is accessible
 from .intent_prompt import INTENT_PROMPT
+from weightslab.data.sample_stats import SampleStatsEx
 
 
 # Set up logging
@@ -302,19 +303,41 @@ class DataManipulationAgent:
     def _setup_schema(self):
         """Builds a rich column schema with statistical context for the LLM."""
         df = self.ctx._all_datasets_df
-        all_columns = df.columns.tolist()
+
+        # Internal bookkeeping columns/levels that the user should never query
+        # against. ``annotation_id`` is the per-instance multi-index level and
+        # ``_instance_signals`` is the nested per-instance signal dict produced
+        # when the (sample_id, annotation_id) view is collapsed to one row per
+        # sample. Hide both from the LLM-facing schema.
+        INTERNAL_COLUMNS = {"annotation_id", "_instance_signals"}
+
+        all_columns = [c for c in df.columns.tolist() if c not in INTERNAL_COLUMNS]
         index_columns = []
 
         if isinstance(df.index, pd.MultiIndex):
             for name in df.index.names:
-                if name is not None:
+                if name is not None and name not in INTERNAL_COLUMNS:
                     index_columns.append(name)
                     if name not in all_columns:
                         all_columns.append(name)
-        elif df.index.name is not None:
+        elif df.index.name is not None and df.index.name not in INTERNAL_COLUMNS:
             index_columns.append(df.index.name)
             if df.index.name not in all_columns:
                 all_columns.append(df.index.name)
+
+        # Report the number of distinct samples, not raw rows. The shared
+        # dataframe may still be annotation-expanded (one row per instance), so
+        # falling back to len(df) would overstate the dataset size to the LLM.
+        sample_level = SampleStatsEx.SAMPLE_ID.value
+        try:
+            if isinstance(df.index, pd.MultiIndex) and sample_level in (df.index.names or []):
+                row_count = int(df.index.get_level_values(sample_level).nunique())
+            elif sample_level in df.columns:
+                row_count = int(df[sample_level].nunique())
+            else:
+                row_count = len(df)
+        except Exception:
+            row_count = len(df)
 
         column_metadata = {}
         for col in all_columns:
@@ -345,7 +368,7 @@ class DataManipulationAgent:
             'columns': all_columns,
             'index_columns': index_columns,
             'metadata': column_metadata,
-            'row_count': len(df)
+            'row_count': row_count
         }
         self._build_column_index()
 

@@ -28,6 +28,7 @@ Manifest tracks hash chronology for loading most recent experiments.
 
 import os
 import json
+import traceback
 import yaml
 import logging
 import time
@@ -56,7 +57,7 @@ from weightslab.backend.ledgers import (
 from weightslab.backend import ledgers
 from weightslab.utils.logger import LoggerQueue
 from weightslab.data.sample_stats import SampleStatsEx
-from weightslab.utils.tools import capture_rng_state, restore_rng_state, recursive_update, normalize_config
+from weightslab.utils.tools import capture_rng_state, restore_rng_state, recursive_update, normalize_config, safe_reset_index
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl
 
 # Init logger
@@ -162,10 +163,9 @@ class CheckpointManager:
             collected_tags = {}
 
             # Collect discarded series
+            df_view = dfm.get_df_view().xs(0, level='annotation_id')
             collected_discarded.update(
-                dfm.get_df_view(
-                    SampleStatsEx.DISCARDED.value
-                ).to_dict()
+                df_view[SampleStatsEx.DISCARDED.value].to_dict()
             )
 
             # Collect tag series (main tag column + prefixed columns)
@@ -173,7 +173,7 @@ class CheckpointManager:
             tag_cols_to_capture = [col for col in df_columns if col == SampleStatsEx.TAG.value or col.startswith(f"{SampleStatsEx.TAG.value}:")]
 
             for col in tag_cols_to_capture:
-                 col_data = dfm.get_df_view(col)
+                 col_data = df_view[col]
                  if isinstance(col_data, pd.Series):
                      collected_tags[col] = col_data.to_dict()
                  elif isinstance(col_data, pd.DataFrame) and col in col_data.columns:
@@ -416,8 +416,13 @@ class CheckpointManager:
 
         return self.current_exp_hash
 
+    # Experiment-STATE keys: runtime state, not config. Excluded from the saved HP
+    # snapshot so a restore's register_hyperparams(saved_config) can't resurrect them
+    # (e.g. overwrite the live is_training). Same set excluded from the experiment hash.
+    _STATE_ONLY_HP = ("is_training", "pause_at_step", "root_log_dir")
+
     def get_HP_snapshot(self) -> Dict[str, Any]:
-        """Get current hyperparameters snapshot from ledger."""
+        """Get current hyperparameters snapshot from ledger (excluding experiment state)."""
         try:
             hp_name = ledgers.resolve_hp_name()
             hp = ledgers.get_hyperparams(hp_name)
@@ -426,11 +431,14 @@ class CheckpointManager:
             if isinstance(hp, ledgers.Proxy) and hasattr(hp, 'get') and callable(hp.get):
                 hp = hp.get()
             if isinstance(hp, dict):
-                return hp
+                snap = dict(hp)
             elif hasattr(hp, '__dict__'):
-                return vars(hp)
+                snap = dict(vars(hp))
             else:
                 return {}
+            for k in self._STATE_ONLY_HP:        # copy first, then strip — never mutate the ledger
+                snap.pop(k, None)
+            return snap
         except Exception:
             return {}
 
@@ -659,10 +667,17 @@ class CheckpointManager:
                     rng_state = capture_rng_state()
                     restore_rng_state(rng_state)
 
-                    # Reset dataloader iterators to sync with new state
+                    # Reset dataloader iterators to sync with new state.
+                    # Lazy invalidate-flag path preferred (see notes above) — avoids
+                    # tearing workers down from a non-owning thread.
                     for loader_name in get_dataloaders():
                         loader = get_dataloader(loader_name)
-                        if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                        if loader is None:
+                            continue
+                        inv = getattr(loader, '_invalidate_iter', None)
+                        if callable(inv):
+                            inv()
+                        elif hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
                             loader.reset_iterator()
                             logger.debug(f"Reset iterator for dataloader: {loader_name}")
                 except Exception as e:
@@ -1110,12 +1125,13 @@ class CheckpointManager:
                 return None
 
             if 'sample_id' not in df.columns:
-                df = df.reset_index()
+                df = safe_reset_index(df)
 
             # Keep only checkpoint-specific columns
             available_cols = [
                 col for col in df.columns if col in [
                     SampleStatsEx.SAMPLE_ID.value,
+                    SampleStatsEx.INSTANCE_ID.value,
                     SampleStatsEx.DISCARDED.value
                 ] or col.startswith(SampleStatsEx.TAG.value)
             ]
@@ -1204,6 +1220,8 @@ class CheckpointManager:
             return json_file
 
         except Exception as e:
+            if os.getenv("WEIGHTSLAB_DEBUG"):
+                traceback.print_exc()
             logger.error(f"Failed to save data snapshot: {e}")
         return None
 
@@ -1785,7 +1803,7 @@ class CheckpointManager:
                     # Extract RNG state from data snapshot if available
                     rng_state = snapshot_data.get('rng_state', {})
                     if load_data_snapshot:
-                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index('sample_id') if 'data' in snapshot_data else pd.DataFrame()
+                        snapshot_df = pd.DataFrame(snapshot_data.get('data', [])).set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value]) if 'data' in snapshot_data else pd.DataFrame()
                         if not snapshot_df.empty:
                             result['data_state'] = {'snapshot': snapshot_df}
                             result['loaded_components'].add('data')
@@ -1865,12 +1883,34 @@ class CheckpointManager:
                 if hasattr(model, 'guard_training_context'):
                     del model.guard_training_context
 
-                # Register in ledger
-                ledgers.register_model(model)
-
-                # Set Model Training Guard
-                guard_training_context.model = model  # Train
-                guard_testing_context.model = model  # Eval
+                # Identity-preserving restore: when a live model is already
+                # registered AND its state-dict (keys + tensor shapes) matches
+                # the saved weights, skip register-replace so the apply-weights
+                # branch below can load the saved weights INTO the existing
+                # object in-place. Replacing a live registered object would
+                # orphan captured references (e.g. `model = trainer.model` in a
+                # training loop), leaving the trainer to train a stale model
+                # while pause-checks read the fresh one — so `pause_at_step`
+                # would never match. When arch differs (e.g. neuron surgery
+                # between save and restore) the key set may still match while
+                # shapes don't, so we must compare both — else apply-weights
+                # would shape-mismatch on load_state_dict and hit recovery.
+                _existing = ledgers.get_model()
+                _can_inplace = False
+                try:
+                    _saved_sd = (checkpoint_data.get('weights') or {}).get('model_state_dict') or {}
+                    _exist_sd = _existing.state_dict() if hasattr(_existing, "state_dict") else {}
+                    if _exist_sd and _saved_sd and set(_exist_sd.keys()) == set(_saved_sd.keys()):
+                        _can_inplace = all(
+                            tuple(getattr(_exist_sd[k], "shape", ())) == tuple(getattr(_saved_sd[k], "shape", ()))
+                            for k in _exist_sd
+                        )
+                except Exception:
+                    _can_inplace = False
+                if not _can_inplace:
+                    ledgers.register_model(model)
+                    guard_training_context.model = model  # Train
+                    guard_testing_context.model = model  # Eval
 
                 loaded_step = None
                 if checkpoint_data.get('weights') is not None:
@@ -1971,10 +2011,10 @@ class CheckpointManager:
 
                 if snapshot_df is not None and not snapshot_df.empty:
                     dfm = ledgers.get_dataframe()
-                    if dfm is not None:
+                    if dfm != None:
                         # Set index if needed
                         if 'sample_id' in snapshot_df.columns:
-                            snapshot_df = snapshot_df.set_index('sample_id')
+                            snapshot_df = snapshot_df.set_index([SampleStatsEx.SAMPLE_ID.value, SampleStatsEx.INSTANCE_ID.value])
 
                         # Merge only the checkpoint-specific columns (tags, discarded)
                         # This updates existing rows without replacing all data
@@ -1991,63 +2031,67 @@ class CheckpointManager:
                 restore_rng_state(checkpoint_data['rng_state'])
                 logger.debug(f"Restored RNG state from checkpoint")
 
-                # Reset dataloaders iterators to ensure reproducibility
-                for loader_name in ledgers.get_dataloaders():
-                    loader = ledgers.get_dataloader(loader_name)
+                # # TODO (GP): This part has been disabled because we do not manage dataloader iteration state in a consistent way yet, and it has caused some issues with loading checkpoints that have this state but the current dataloaders do not support restoring it.
+                # # We should re-enable this in the future once we have a more robust solution for managing dataloader iteration state across different types of dataloaders and shuffling state or not.
+                # # Reset dataloaders iterators to ensure reproducibility
+                # for loader_name in ledgers.get_dataloaders():
+                #     loader = ledgers.get_dataloader(loader_name)
 
-                    if loader is not None:
-                        # Resume loader state
-                        if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
-                            loader.reset_iterator()
-                            logger.debug(f"Reset iterator for dataloader: {loader}")
+                #     if loader is not None:
+                #         # Resume loader state
+                #         if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                #             loader.reset_iterator()
+                #             logger.debug(f"Reset iterator for dataloader: {loader}")
 
-                # Restore RNG state again after resetting dataloaders
-                restore_rng_state(checkpoint_data['rng_state'])
-                logger.debug(f"Restored RNG state from checkpoint")
-                self.error_loading_checkpoint.remove('rng') if 'rng' in self.error_loading_checkpoint else None
+                # # Restore RNG state again after resetting dataloaders
+                # restore_rng_state(checkpoint_data['rng_state'])
+                # logger.debug(f"Restored RNG state from checkpoint")
+                # self.error_loading_checkpoint.remove('rng') if 'rng' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to restore RNG state: {e}")
                 pause_ctrl.pause()
                 self.error_loading_checkpoint.append('rng') if 'rng' not in self.error_loading_checkpoint else None
 
-        # Restore dataloader iteration state if provided
-        if checkpoint_data.get('dataloader_iteration_state'):
-            try:
-                iter_state_raw = checkpoint_data['dataloader_iteration_state']
+        # # TODO (GP): This part has been disabled because we do not manage dataloader iteration state in a consistent way yet, and it has caused some issues with loading checkpoints that have this state but the current dataloaders do not support restoring it.
+        # # We should re-enable this in the future once we have a more robust solution for managing dataloader iteration state across different types of dataloaders and shuffling state or not.
+        # # Restore dataloader iteration state if provided
+        # if checkpoint_data.get('dataloader_iteration_state'):
+        #     try:
+        #         iter_state_raw = checkpoint_data['dataloader_iteration_state']
 
-                # Normalize to mapping loader_name -> state for backward compatibility
-                if isinstance(iter_state_raw, dict) and 'samples_yielded' in iter_state_raw:
-                    state_map = {'default': iter_state_raw}
-                elif isinstance(iter_state_raw, dict):
-                    state_map = iter_state_raw
-                else:
-                    state_map = {'default': iter_state_raw}
+        #         # Normalize to mapping loader_name -> state for backward compatibility
+        #         if isinstance(iter_state_raw, dict) and 'samples_yielded' in iter_state_raw:
+        #             state_map = {'default': iter_state_raw}
+        #         elif isinstance(iter_state_raw, dict):
+        #             state_map = iter_state_raw
+        #         else:
+        #             state_map = {'default': iter_state_raw}
 
-                restored_any = False
-                for loader_name in ledgers.get_dataloaders():
-                    loader = ledgers.get_dataloader(loader_name)
-                    if loader is None or not hasattr(loader, 'restore_iteration_state'):
-                        continue
+        #         restored_any = False
+        #         for loader_name in ledgers.get_dataloaders():
+        #             loader = ledgers.get_dataloader(loader_name)
+        #             if loader is None or not hasattr(loader, 'restore_iteration_state'):
+        #                 continue
 
-                    state_for_loader = state_map.get(loader_name) or state_map.get('default')
-                    if state_for_loader:
-                        try:
-                            loader.restore_iteration_state(state_for_loader)
-                            # Resume loader state
-                            if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
-                                loader.reset_iterator()
-                                logger.debug(f"Reset iterator for dataloader: {loader}")
-                            logger.info(f"[OK] Restored dataloader iteration state for {loader_name}: {state_for_loader}")
-                            restored_any = True
-                        except Exception as inner_e:
-                            logger.warning(f"[WARNING] Failed to restore iteration state for {loader_name}: {inner_e}")
+        #             state_for_loader = state_map.get(loader_name) or state_map.get('default')
+        #             if state_for_loader:
+        #                 try:
+        #                     loader.restore_iteration_state(state_for_loader)
+        #                     # Resume loader state
+        #                     if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+        #                         loader.reset_iterator()
+        #                         logger.debug(f"Reset iterator for dataloader: {loader}")
+        #                     logger.info(f"[OK] Restored dataloader iteration state for {loader_name}: {state_for_loader}")
+        #                     restored_any = True
+        #                 except Exception as inner_e:
+        #                     logger.warning(f"[WARNING] Failed to restore iteration state for {loader_name}: {inner_e}")
 
-                if not restored_any:
-                    logger.warning("No dataloader iteration state could be applied to registered loaders")
-                self.error_loading_checkpoint.remove('dataloader_iteration') if 'dataloader_iteration' in self.error_loading_checkpoint else None
-            except Exception as e:
-                logger.error(f"[ERROR] Failed to restore dataloader iteration state: {e}")
-                self.error_loading_checkpoint.append('dataloader_iteration') if 'dataloader_iteration' not in self.error_loading_checkpoint else None
+        #         if not restored_any:
+        #             logger.warning("No dataloader iteration state could be applied to registered loaders")
+        #         self.error_loading_checkpoint.remove('dataloader_iteration') if 'dataloader_iteration' in self.error_loading_checkpoint else None
+        #     except Exception as e:
+        #         logger.error(f"[ERROR] Failed to restore dataloader iteration state: {e}")
+        #         self.error_loading_checkpoint.append('dataloader_iteration') if 'dataloader_iteration' not in self.error_loading_checkpoint else None
 
         # Restore logger snapshot for this experiment if available
         logger_len = self.get_logger_length()

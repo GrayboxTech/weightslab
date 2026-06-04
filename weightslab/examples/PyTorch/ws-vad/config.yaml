@@ -1,7 +1,7 @@
 experiment_name: vad_unet
-root_log_dir: ./logs/vad/24
+# root_log_dir:
 # Absolute path to your VAD data root (can also be set at runtime via the WL UI)
-data_root: /Users/marcgraybx/graybox/development/data/VAD
+# data_root:
 
 # ── Model ────────────────────────────────────────────────────────────────────
 base_channels: 8          # channel multiplier for UNetMulti

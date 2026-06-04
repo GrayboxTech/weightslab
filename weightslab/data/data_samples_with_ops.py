@@ -13,7 +13,7 @@ from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
-from weightslab.utils.tools import array_id_2bytes
+from weightslab.utils.tools import array_id_2bytes, safe_reset_index
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.dataframe_manager import create_ledger_manager
@@ -366,6 +366,7 @@ class DataSampleTrackingWrapper(Dataset):
                 row = SampleStats.DEFAULTS.copy()
                 row.update({
                     SampleStatsEx.SAMPLE_ID.value: sid,
+                    # SampleStatsEx.INSTANCE_ID.value: str(0),  # Added later in the preprocessing during df registration
                     SampleStatsEx.ORIGIN.value: split,
                     SampleStatsEx.GROUP_ID.value: str(group_id),
                     SampleStatsEx.MEMBER_RANK.value: rank
@@ -683,10 +684,11 @@ class DataSampleTrackingWrapper(Dataset):
 
                 # Generate the ID
                 uid = array_id_2bytes(data_array, return_hex=False, tronc_1byte=True)
+                uid = str(uid)  # Convert to string for consistent handling
                 return idx, uid
             except Exception as e:
                 logger.warning(f"Failed to generate ID for sample {idx}: {e}")
-                return idx, idx  # Fallback to index as ID
+                return idx, str(idx)  # Fallback to index as ID
 
         # Use ThreadPoolExecutor; track progress on completed tasks.
         with ThreadPoolExecutor(thread_name_prefix="unique_id_generator") as executor:
@@ -952,9 +954,7 @@ class DataSampleTrackingWrapper(Dataset):
         """Convert DataFrame to list of records."""
         with self._df_lock:
             df = self._get_df_view(limit=limit)
-            # Ensure sample_id is a column (not just index)
-            if 'sample_id' not in df.columns:
-                df = df.reset_index()  # Bring sample_id into columns
+            df = safe_reset_index(df)
             # Convert NaN to None to match previous behavior
             return df.where(pd.notnull(df), None).to_dict(orient="records")
 

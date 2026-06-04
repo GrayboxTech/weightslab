@@ -19,7 +19,7 @@ import torch as th
 import weightslab as wl
 
 from tqdm import tqdm
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Dict
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -29,11 +29,13 @@ from weightslab.backend.model_interface import ModelInterface
 from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
+from weightslab.utils.tools import detach_to_cpu
 from weightslab.utils.logger import LoggerQueue
+from weightslab.utils.tools import ddp_info, is_main_process
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
-from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.backend.ledgers import register_signal
+from weightslab.components.global_monitoring import pause_controller as pause_ctrl
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
@@ -83,11 +85,12 @@ class SignalContext:
     Unified context object for WeightsLab signals.
     Carries all available metadata for a single sample during computation.
     """
-    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, origin=None):
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, subscribed_history=None, origin=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
         self.subscribed_value = subscribed_value
+        self.subscribed_history = subscribed_history
         self.origin = origin
 
     @property
@@ -358,6 +361,84 @@ def _update_log_directory(new_log_dir: str):
         logger.debug(f"Could not update log directory: {e}")
 
 
+
+def _move_to_cpu(value: Any) -> Any:
+    """Recursively move tensor containers to CPU."""
+    if isinstance(value, th.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {k: _move_to_cpu(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_to_cpu(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_move_to_cpu(v) for v in value)
+    return value
+
+
+def _release_gpu_resources() -> None:
+    """Best-effort migration of tracked Torch objects to CPU and CUDA cache cleanup."""
+    try:
+        model_names = list_models() or []
+    except Exception:
+        model_names = []
+
+    for model_name in model_names:
+        try:
+            model_obj = get_model(model_name)
+
+            # Try direct module first
+            if hasattr(model_obj, 'to') and callable(getattr(model_obj, 'to')):
+                model_obj.to('cpu')
+
+            # Fallback for wrappers exposing an inner model/module
+            inner_model = getattr(model_obj, 'model', None)
+            if inner_model is not None and hasattr(inner_model, 'to') and callable(getattr(inner_model, 'to')):
+                inner_model.to('cpu')
+
+            module = getattr(model_obj, 'module', None)
+            if module is not None and hasattr(module, 'to') and callable(getattr(module, 'to')):
+                module.to('cpu')
+        except Exception as e:
+            logger.debug(f"Could not move model '{model_name}' to CPU: {e}")
+
+    try:
+        optimizer = get_optimizer()
+        if optimizer is not None and hasattr(optimizer, 'state'):
+            for _, state in optimizer.state.items():
+                if isinstance(state, dict):
+                    for key, value in state.items():
+                        state[key] = _move_to_cpu(value)
+    except Exception as e:
+        logger.debug(f"Could not move optimizer state to CPU: {e}")
+
+    # Clean cached data and free memory
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    cuda_module = getattr(th, 'cuda', None)
+    if cuda_module is not None:
+        try:
+            cuda_initialized = bool(
+                hasattr(cuda_module, 'is_initialized') and cuda_module.is_initialized()
+            )
+        except Exception:
+            cuda_initialized = False
+
+        # Important: avoid creating a fresh CUDA context just for cleanup,
+        # which can reserve baseline VRAM in idle keep-serving mode.
+        if cuda_initialized:
+            try:
+                cuda_module.empty_cache()
+            except Exception as e:
+                logger.debug(f"Could not empty CUDA cache: {e}")
+            try:
+                cuda_module.ipc_collect()
+            except Exception:
+                pass
+
+
 @functools.lru_cache(maxsize=128)
 def _fwd_params(fn):
     """Return the frozenset of parameter names accepted by *fn*. Cached per function."""
@@ -385,38 +466,64 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     fwd_params = _fwd_params(original_forward)
     wl_kw = {k: kw.pop(k) for k in _WL_KWARGS if k in kw and k not in fwd_params}
 
+    # Extract torch function parameters
     _ = wl_kw.get('flag')
     preds_raw = a[0] if len(a) > 0 else None
+
+    # User parameters
     batch_ids = wl_kw.get('batch_ids')
-    group_ids = wl_kw.get('group_id')
     batch_scalar = wl_kw.get('signals')
     preds = wl_kw.get('preds')
     targets = wl_kw.get('targets') if 'targets' in wl_kw else None
 
+    # Make sure we always have targets if they are passed positionally (for backward compatibility), but allow them to be overridden by keyword if both are present
+    targets = a[1] if len(a) > 1 and targets is None else targets
+
     # Original forward of the signal
     out = original_forward(*a, **kw)
 
-    # discarded samples/tainted groups from the loss tensor.
-    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
+    # NO post-hoc discard masking here. Discard is a TRANSACTION-BOUNDARY event
+    # (see docs/ddp_design.md): batch membership is fixed when the batch is built
+    # from the current deny-list (sampler filter), and a discard takes effect at
+    # the NEXT boundary — the prefetch queue is flushed by iterator invalidation
+    # so no since-discarded sample reaches a later batch. So whatever is in this
+    # batch was valid at its boundary; zeroing its loss after the fact (the old
+    # get_active_sample_mask / get_active_group_mask) was a symptom fix that
+    # actually violated the transactional model. Removed.
 
-    if origin and batch_ids is not None and hasattr(out, 'device') and out.ndim > 0:
-        try:
-            # Multi-sample Group Masking
-            if group_ids is not None:
-                mask = get_active_group_mask(group_ids, origin).to(out.device)
-                if len(mask) == len(out):
-                    out = out * mask
+    # Per-instance handling: extract instance values + batch_idx mapping
+    # and save per-annotation to dataframe. `out` may be a dict
+    # {'instance', 'sample', 'batch'} or a flat tensor of instance values.
+    per_instance = kwargs.get('per_instance', False)
+    instance_values = None
+    instance_batch_idx = None
+    if per_instance:
+        # Resolve instance tensor (dict from PerInstanceDetectionLoss, or flat tensor from PerInstanceIoU)
+        if isinstance(out, dict) and 'instance' in out:
+            instance_values = out['instance']
+        else:
+            instance_values = out
 
-            # Per-sample Individual Masking
-            else:
-                mask = get_active_sample_mask(batch_ids, origin).to(out.device)
-                if len(mask) == len(out):
-                    out = out * mask
-        except Exception as e:
-            logger.debug(f"Automatic backend discard masking failed: {e}")
+        if instance_batch_idx is None and 'batch_idx' in kw:
+            instance_batch_idx = kw['batch_idx']
+        elif instance_batch_idx is None and targets is not None and isinstance(targets, list):
+            instance_batch_idx = [i for i, tars in enumerate(targets) for _ in tars]  # Auto determine batch_idx from targets if not explicitly provided (assumes targets is list of lists of annotations)
+        else:
+            instance_batch_idx = ledgers.get_dataframe()._df.loc[batch_ids].index.get_level_values(1).tolist()  # Query directly instance_ids related and ordered to the samples_ids in the batch
+            batch_ids = ledgers.get_dataframe()._df.loc[batch_ids].index.get_level_values(0).tolist()
+
+    # If output is a dict (from PerInstanceDetectionLoss), pick 'sample'
+    # for downstream per-sample logging while keeping the original dict for
+    # the caller (so they can still use out['batch'] for backward).
+    out_original = out
+    if isinstance(out, dict):
+        if 'sample' in out:
+            out = out['sample']
+        elif 'instance' in out:
+            out = out['instance']
 
     if kwargs.get('per_sample', False) and not isinstance(out, dict):
-        if out.ndim > 1:
+        if hasattr(out, 'ndim') and out.ndim > 1:
             out = out.mean(dim=tuple(range(1, out.ndim)))  # Reduce to [B,]0
 
     # Extract scalar from tensor
@@ -424,7 +531,24 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
 
     # Log if requested
     step = _get_step()
-    _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
+
+    # Save per-instance values to dataframe with annotation_id
+    if per_instance and instance_values is not None:
+        try:
+            origin_resolved = origin or kwargs.get('origin')
+            save_instance_signals(
+                signals={reg_name: instance_values},
+                batch_ids=batch_ids,
+                batch_idx=instance_batch_idx,
+                targets=targets,
+                step=step,
+                origin=origin_resolved,
+                log=False,  # already logged sample-level above
+            )
+        except Exception as e:
+            logger.debug(f"Per-instance signal save failed for {reg_name}: {e}")
+    else:
+        _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
 
     # CHECK FOR SUBSCRIBERS (Dynamic Signals)
     # Allows @wl.signal(subscribe_to="metric_name")
@@ -449,6 +573,9 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                  subscribers.append((name, func))
 
          if subscribers:
+             # Get logger history
+             signal_history_per_sample = ledgers.get_logger().get_current_signaL_history_per_sample(reg_name, sample_ids=ids_np) if meta.get('include_history', False) else None
+
              # Resolve generic value vector
              val_tensor = out
              if hasattr(val_tensor, 'detach'):
@@ -494,7 +621,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                          continue
 
                      try:
-                         batch_res = []
+                         batch_res = {}
                          for i, uid in enumerate(ids_np):
                              # Generic 'value' argument
                              val = float(val_vec[i])
@@ -503,28 +630,41 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              ctx = SignalContext(
                                  sample_id=int(uid),
                                  subscribed_value=val,
+                                 subscribed_history=signal_history_per_sample.get(uid) if signal_history_per_sample is not None else None,
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train')
                              )
                              try:
-                                 res = func(ctx)
+                                 res = func(ctx)  # Compute per sample result with unified context
                              except TypeError:
                                  # Fallback for legacy subscriber functions
                                  res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
 
-                             batch_res.append(res)
-                         dynamic_updates[name] = np.array(batch_res)
+                             batch_res[uid] = res
+                         signal_value = list(batch_res.values())
+                         dynamic_updates[name] = signal_value
+                         if dynamic_updates and meta.get('log', True):
+                             logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
+                             _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs)  # Log custom subscribed signals
                      except Exception as e:
                          logger.debug(f"Dynamic signal {name} failed: {e}")
                          pass  # User function error, skip
 
-    # Save statistics if requested and applicable
-    if (batch_scalar is not None and batch_ids is not None) or dynamic_updates:
+    # Save statistics if requested and applicable.
+    # Skip the per-sample save path when per_instance=True — instance values
+    # don't map 1:1 to batch_ids, so they're saved separately above via
+    # save_instance_signals (keyed by (sample_id, annotation_id)).
+    if not per_instance and ((batch_scalar is not None and batch_ids is not None) or dynamic_updates):
         signals = {
             reg_name: list(batch_scalar.values()) if isinstance(batch_scalar, dict) else batch_scalar.detach().cpu().tolist()
         } if batch_scalar is not None else {}
-        signals.update(dynamic_updates) # Merge dynamic signals
+        if dynamic_updates:
+            signals.update(dynamic_updates) # Merge dynamic signals
 
+        preds = detach_to_cpu(preds)
+        preds_raw = detach_to_cpu(preds_raw)
+
+        # Enqueue signals and data
         save_signals(
             signals=signals,
             batch_ids=batch_ids,
@@ -533,7 +673,10 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
             targets=targets,
             log=False  # Already logged above, no need to log again in save_signals; set to False to avoid duplicate logging if save_signals is called separately without logging
         )
-    return out
+
+    # Return the original output (dict for per-instance losses so caller can
+    # use out['batch'] for backward, tensor for standard per-sample losses).
+    return out_original if isinstance(out_original, dict) else out
 
 
 # ##############################################################################################################
@@ -912,82 +1055,17 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 # USER FUNCTION EXPOSED TO SERVE SIGNALS, TAG SAMPLES, ETC. (can be called from training script to manually set)
 # ##############################################################################################################
 
-def _move_to_cpu(value: Any) -> Any:
-    """Recursively move tensor containers to CPU."""
-    if isinstance(value, th.Tensor):
-        return value.detach().cpu()
-    if isinstance(value, dict):
-        return {k: _move_to_cpu(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_move_to_cpu(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_move_to_cpu(v) for v in value)
-    return value
+def start_training(timeout: int = None) -> None:
+    """Start WeightsLab training mode with optional background services.
 
-
-def _release_gpu_resources() -> None:
-    """Best-effort migration of tracked Torch objects to CPU and CUDA cache cleanup."""
-    try:
-        model_names = list_models() or []
-    except Exception:
-        model_names = []
-
-    for model_name in model_names:
-        try:
-            model_obj = get_model(model_name)
-
-            # Try direct module first
-            if hasattr(model_obj, 'to') and callable(getattr(model_obj, 'to')):
-                model_obj.to('cpu')
-
-            # Fallback for wrappers exposing an inner model/module
-            inner_model = getattr(model_obj, 'model', None)
-            if inner_model is not None and hasattr(inner_model, 'to') and callable(getattr(inner_model, 'to')):
-                inner_model.to('cpu')
-
-            module = getattr(model_obj, 'module', None)
-            if module is not None and hasattr(module, 'to') and callable(getattr(module, 'to')):
-                module.to('cpu')
-        except Exception as e:
-            logger.debug(f"Could not move model '{model_name}' to CPU: {e}")
-
-    try:
-        optimizer = get_optimizer()
-        if optimizer is not None and hasattr(optimizer, 'state'):
-            for _, state in optimizer.state.items():
-                if isinstance(state, dict):
-                    for key, value in state.items():
-                        state[key] = _move_to_cpu(value)
-    except Exception as e:
-        logger.debug(f"Could not move optimizer state to CPU: {e}")
-
-    # Clean cached data and free memory
-    try:
-        gc.collect()
-    except Exception:
-        pass
-
-    cuda_module = getattr(th, 'cuda', None)
-    if cuda_module is not None:
-        try:
-            cuda_initialized = bool(
-                hasattr(cuda_module, 'is_initialized') and cuda_module.is_initialized()
-            )
-        except Exception:
-            cuda_initialized = False
-
-        # Important: avoid creating a fresh CUDA context just for cleanup,
-        # which can reserve baseline VRAM in idle keep-serving mode.
-        if cuda_initialized:
-            try:
-                cuda_module.empty_cache()
-            except Exception as e:
-                logger.debug(f"Could not empty CUDA cache: {e}")
-            try:
-                cuda_module.ipc_collect()
-            except Exception:
-                pass
-
+    Args:
+        timeout: Maximum number of seconds to keep running. If ``None``, runs
+            until interrupted.
+    """
+    if timeout is not None and isinstance(timeout, int) and timeout > 0:
+        logger.info(f"Starting WeightsLab training mode with a timeout of {timeout} seconds.")
+        time.sleep(timeout)
+    pause_ctrl.resume()  # Ensure we're not paused if start_training is called after serve
 
 def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> None:
     """Start WeightsLab services.
@@ -996,7 +1074,17 @@ def serve(serving_cli: bool = False, serving_grpc: bool = False, **kwargs) -> No
         serving_cli: Start the interactive CLI server.
         serving_grpc: Start the gRPC server.
         **kwargs: Extra server options passed to underlying backends.
+
+    Under DDP this is a no-op on non-zero ranks: the gRPC backend binds one
+    fixed port over this process's global ledger, so a second backend on a
+    child rank would only collide on the port and serve that rank's shard. The
+    studio talks to rank 0. Single-process (world_size == 1) is rank 0 -> serves
+    as before, so callers can write ``wl.serve()`` unconditionally.
     """
+    rank, world_size = ddp_info()
+    if not is_main_process():
+        logger.info("[serve] rank %d/%d is not the main process; skipping serve (rank 0 owns the UI backend).", rank, world_size)
+        return
 
     if serving_grpc:
         grpc_serve(**kwargs)
@@ -1013,7 +1101,17 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
             until interrupted.
         release_gpu: If ``True``, move tracked torch objects to CPU and release
             CUDA cached memory before entering the wait loop.
+
+    Under DDP this is a no-op on non-zero ranks: only rank 0 holds the process
+    alive to serve the UI. A child must NOT release its GPU / idle here (it is
+    still a live training replica), so it returns immediately and proceeds to
+    its own clean shutdown.
     """
+    if not is_main_process():
+        rank, world_size = ddp_info()
+        logger.info("[keep_serving] rank %d/%d is not the main process; returning (only rank 0 holds the UI backend alive).", rank, world_size)
+        return
+
     if release_gpu:
         _release_gpu_resources()
         logger.info("WeightsLab switched to CPU idle mode for serving.")
@@ -1029,7 +1127,7 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
         logger.info("Shutting down WeightsLab services.")
 
 
-def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
+def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
     Decorator that registers a custom signal function.
 
@@ -1064,12 +1162,6 @@ def signal(name: str = None, subscribe_to: str = None, compute_every_n_steps: in
         func._wl_signal_meta['subscribe_to'] = subscribe_to
         func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
         func._wl_signal_name = reg_name
-
-        # Register in global ledger for visibility by backend services
-        try:
-            register_signal(func, name=reg_name)
-        except Exception as e:
-            logger.warning(f"Failed to register signal '{reg_name}' in ledger: {e}")
 
         return func
     return decorator
@@ -1272,7 +1364,12 @@ def tag_samples(
             logger.error(f"Invalid mode '{mode}'. Use 'add', 'remove', or 'set'")
             return False
 
-        df_update = pd.DataFrame(rows).set_index("sample_id")
+        # Build directly on the (sample_id, annotation_id=0) multi-index: tags and
+        # the discarded flag are SAMPLE-LEVEL, so they live on the canonical sample
+        # row (annotation_id 0). Never hand upsert a bare single-level frame.
+        df_update = pd.DataFrame(rows)
+        df_update["annotation_id"] = 0
+        df_update = df_update.set_index(["sample_id", "annotation_id"])
         df_manager.upsert_df(df_update, force_flush=True)
 
         logger.info(f"Tagged {len(sample_ids)} samples with '{tag}' (mode={mode})")
@@ -1280,6 +1377,85 @@ def tag_samples(
 
     except Exception as e:
         logger.error(f"Failed to tag samples: {e}", exc_info=True)
+        return False
+
+
+def register_categorical_tag(name: str, categories: list[str], replace: bool = False) -> list:
+    """Declare a categorical (multi-value) tag and its allowed category values.
+
+    Categorical tags hold one string value per sample chosen from a predefined
+    set (e.g. ``weather`` -> ``rainy`` / ``sunny`` / ``cloudy``), as opposed to
+    boolean tags which are simply present/absent. Declaring the tag up-front lets
+    the UI render the full set of choices even before any sample uses a value,
+    and ensures the complete category set survives the dataframe/H5 round-trip.
+
+    Args:
+        name: Tag name (with or without the ``tag:`` prefix), e.g. ``"weather"``.
+        categories: Allowed category values, e.g. ``["rainy", "sunny", "cloudy"]``.
+        replace: If True, replace any existing categories; otherwise merge.
+
+    Returns:
+        The resulting ordered list of allowed categories (empty on failure).
+
+    Examples:
+        >>> wl.register_categorical_tag("weather", ["rainy", "sunny", "cloudy"])
+        >>> wl.set_categorical_tag([0, 3], "weather", "rainy")
+    """
+    from weightslab.backend.ledgers import get_dataframe
+
+    df_manager = get_dataframe()
+    if df_manager is None:
+        logger.error("Dataframe manager not initialized. Call this after registering your dataloader.")
+        return []
+    try:
+        return df_manager.register_categorical_tag(name, categories, replace=replace)
+    except Exception as e:
+        logger.error(f"Failed to register categorical tag '{name}': {e}", exc_info=True)
+        return []
+
+
+def set_categorical_tag(sample_ids: list[int], name: str, value: str) -> bool:
+    """Set a categorical tag value on samples (e.g. weather='rainy').
+
+    The tag is auto-registered and the value added to its allowed categories if
+    not already present. Pass ``value=None`` or ``""`` to clear (unset) the tag.
+
+    Args:
+        sample_ids: Sample IDs to update.
+        name: Categorical tag name (with or without ``tag:`` prefix).
+        value: The category value to set, or None/"" to clear.
+
+    Returns:
+        bool: True if successful.
+    """
+    import pandas as pd
+    from weightslab.backend.ledgers import get_dataframe
+
+    df_manager = get_dataframe()
+    if df_manager is None:
+        logger.error("Dataframe manager not initialized. Call this after registering your dataloader.")
+        return False
+
+    pref = f"{SampleStatsEx.TAG.value}:"
+    tag_name = name[len(pref):] if str(name).startswith(pref) else str(name).strip()
+    tag_col = f"{pref}{tag_name}"
+    cleaned = None if value is None or str(value).strip() == "" else str(value).strip()
+
+    try:
+        if cleaned is not None:
+            df_manager.register_categorical_tag(tag_name, [cleaned])
+        rows = [{"sample_id": sid, tag_col: cleaned} for sid in sample_ids]
+        # Build directly on the (sample_id, annotation_id=0) multi-index: tags and
+        # the discarded flag are SAMPLE-LEVEL, so they live on the canonical sample
+        # row (annotation_id 0). Never hand upsert a bare single-level frame.
+        df_update = pd.DataFrame(rows)
+        df_update["annotation_id"] = 0
+        df_update = df_update.set_index(["sample_id", "annotation_id"])
+        df_manager.upsert_df(df_update, force_flush=True)
+        logger.info(f"Set categorical tag '{tag_name}'={cleaned!r} on {len(sample_ids)} samples")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set categorical tag '{name}': {e}", exc_info=True)
         return False
 
 
@@ -1316,7 +1492,12 @@ def discard_samples(
         rows = [{"sample_id": sid, SampleStatsEx.DISCARDED.value: bool(discarded)}
                 for sid in sample_ids]
 
-        df_update = pd.DataFrame(rows).set_index("sample_id")
+        # Build directly on the (sample_id, annotation_id=0) multi-index: tags and
+        # the discarded flag are SAMPLE-LEVEL, so they live on the canonical sample
+        # row (annotation_id 0). Never hand upsert a bare single-level frame.
+        df_update = pd.DataFrame(rows)
+        df_update["annotation_id"] = 0
+        df_update = df_update.set_index(["sample_id", "annotation_id"])
         df_manager.upsert_df(df_update, force_flush=True)
 
         action = "Discarded" if discarded else "Restored"
@@ -1425,35 +1606,64 @@ def save_signals(
     targets: th.Tensor | np.ndarray | dict = None,
     preds: th.Tensor | np.ndarray | dict = None,
     step: int | None = None,
-    log: bool = True
+    log: bool = False
 ):
-    """
-        Save data statistics to the tracked dataset.
+    """Save **per-sample** statistics to the tracked dataset.
 
-        Args:
-            signals (th.Tensor): The batch losses.
-            preds_raw (th.Tensor, ...etc, optional): The raw batch predictions. Defaults to None.
-            targets (th.Tensor, ...etc, optional): The batch targets. Defaults to None.
-            batch_ids (th.Tensor, optional): The batch ids. Defaults to None.
-            preds (th.Tensor, optional): The batch predictions. Defaults to None.
-            step (int, optional): The current training step. Defaults to 0.
-            log (bool, optional): Whether to log the signals. Defaults to True.
+    This is the *one-value-per-sample* path: every array you pass is indexed by
+    ``batch_ids`` and written onto that sample's canonical row — the
+    ``(sample_id, annotation_id=0)`` row of the multi-index. Use this for losses,
+    metrics, predictions and targets that describe the whole sample (e.g. the
+    classification loss of an image, the per-image mAP, the predicted mask).
 
-        Examples:
-            >>> # In your training loop, after computing losses and predictions:
-            >>> for batch in train_loader:
-            ...     inputs, targets = batch
-            ...     preds = model(inputs)
-            ...     loss = loss_fn(preds, targets)
-            ...     batch_ids = batch['sample_id']  # Assuming your dataloader provides sample IDs
-            ...     wl.save_signals(
-            ...         signals={'train_loss': loss},
-            ...         batch_ids=batch_ids,
-            ...         preds_raw=preds,  # Optionally save raw predictions. Not useful if already saved by loss wrapper.
-            ...         targets=targets,  # Optionally save target predictions. Not useful if already saved by loss wrapper.
-            ...         step=current_step,  # Optionally save step. If not provided, will attempt to infer from training loop context.
-            ...         log=True  # Should we log the signals also or only save to sample metadata.
-            ...     )
+    For tasks where a single sample has *several* instances (detection boxes,
+    segmentation masks, ...) and you want one value **per instance**, use
+    :func:`save_instance_signals` instead — it writes to ``annotation_id >= 1``.
+
+    Shapes / formats:
+        - ``signals`` values: shape ``(B,)`` (one scalar per sample) or
+          ``(B, ...)`` — extra dims are mean-reduced to ``(B,)`` before storage.
+        - ``batch_ids``: length ``B``; the i-th entry names the sample the i-th
+          row of every other array belongs to. Coerced to ``str`` internally.
+        - ``preds`` / ``preds_raw`` / ``targets``: array of length ``B`` (or a
+          ``dict`` of such arrays, or a ``list`` of length ``B`` for
+          inhomogeneous per-sample shapes). 1-D arrays get a trailing axis.
+
+    Args:
+        signals (dict | th.Tensor): ``{name: values}`` where ``values`` is a
+            length-``B`` tensor/array (or a bare tensor → stored as
+            ``signals//default``). Each becomes a ``signals//<name>`` column.
+        batch_ids (th.Tensor | np.ndarray | list): Sample IDs, length ``B``.
+        preds_raw (optional): Raw model outputs (e.g. logits), length ``B``.
+            Skip it if a watched loss wrapper already saved it.
+        targets (optional): Ground-truth targets, length ``B``.
+        preds (optional): Post-processed predictions, length ``B``.
+        step (int, optional): Training step. Inferred from the training context
+            when omitted.
+        log (bool, optional): Also push the (mean) scalar to the dashboard
+            logger, not only to the per-sample row. Defaults to False.
+
+    Examples:
+        Classification — one loss scalar per image::
+
+            for inputs, targets, ids in train_loader:   # ids: sample IDs, len B
+                logits = model(inputs)                   # (B, num_classes)
+                loss = loss_fn(logits, targets)          # (B,) per-sample loss
+                wl.save_signals(
+                    signals={"train_loss": loss},        # (B,) -> signals//train_loss
+                    batch_ids=ids,
+                    preds_raw=logits,                    # (B, num_classes)
+                    targets=targets,                     # (B,)
+                    step=current_step,
+                    log=True,
+                )
+
+        Several named per-sample metrics at once::
+
+            wl.save_signals(
+                signals={"iou": iou_per_image, "dice": dice_per_image},  # each (B,)
+                batch_ids=ids,
+            )
     """
 
     global DATAFRAME_M
@@ -1492,7 +1702,9 @@ def save_signals(
     def normalize(x):
         if x is None:
             return None
-        if isinstance(x, list):
+        if isinstance(x, list) and isinstance(x[0], list):
+            return [np.max(np.array([to_numpy(t) for t in row]), axis=0) for row in x]
+        elif isinstance(x, list):
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):
             return to_numpy(x)
@@ -1513,15 +1725,15 @@ def save_signals(
     # Processing signals
     if isinstance(signals, dict):
         losses_data = {
-            'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
-                v.detach().cpu().numpy() if hasattr(v, 'detach') else np.asarray(v)
+            'signals//' + k: (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
+                v.detach().cpu().numpy() if hasattr(v, 'detach') else normalize(v)
             )
             for k, v in signals.items()
         }
     elif signals is not None and isinstance(signals, (th.Tensor, np.ndarray, list)):
         losses_data = {
-            "signals//default": (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if arr.ndim > 1 else arr)(
-                signals.detach().cpu().numpy() if hasattr(signals, 'detach') else np.asarray(signals)
+            "signals//default": (lambda arr: arr.mean(axis=tuple(range(1, arr.ndim))) if isinstance(arr, np.ndarray) and arr.ndim > 1 else arr)(
+                signals.detach().cpu().numpy() if hasattr(signals, 'detach') else normalize(signals)
             )
         }
     else:
@@ -1548,6 +1760,204 @@ def save_signals(
         targets=target_np if target_np is not None else targets,
         losses=losses_data,
         step=step
+    )
+
+
+# NOTE: get_active_group_mask / get_active_sample_mask were removed. They
+# post-hoc zeroed the loss of discarded samples/tainted groups still present in a
+# batch — a symptom fix that contradicted the transactional-discard model (a
+# discard takes effect at the next batch boundary via the sampler filter +
+# prefetch-flush, so no since-discarded sample reaches a later batch, and nothing
+# needs masking). See docs/ddp_design.md and wrappered_fwd.
+def save_instance_signals(
+    signals: dict,
+    batch_ids: th.Tensor | np.ndarray | list,
+    batch_idx: th.Tensor | np.ndarray | list,
+    step: int | None = None,
+    origin: str | None = None,
+    targets: th.Tensor | np.ndarray | dict = None,
+    log: bool = False,
+):
+    """Save **per-instance** (per-annotation) signals to the dataframe.
+
+    This is the *one-value-per-instance* counterpart of :func:`save_signals`.
+    A sample can own several instances (detection boxes, segmentation masks,
+    keypoints, ...); their values are stored on the instance rows
+    ``(sample_id, annotation_id)`` with ``annotation_id >= 1`` (``annotation_id 0``
+    stays reserved for the per-sample row written by :func:`save_signals`).
+
+    **Flat, sample-major (Ultralytics) format**
+
+    Instances are passed *flattened across the whole batch*, exactly the layout
+    Ultralytics/YOLO uses for a detection batch: all targets of all images are
+    concatenated into one ``(num_instances_total, ...)`` tensor, and a companion
+    ``batch_idx`` tensor says which image each row belongs to. So you pass the
+    Ultralytics ``batch["batch_idx"]`` straight through here:
+
+        - ``signals[name]``: flat tensor of length ``num_instances_total``
+          (one scalar per instance, in sample-major order).
+        - ``batch_idx``: flat tensor of length ``num_instances_total``; entry
+          ``i`` is the *position in* ``batch_ids`` (i.e. the image index within
+          the batch, in ``[0, B)``) that instance ``i`` belongs to.
+        - ``batch_ids``: the ``B`` sample IDs for the batch (one per image).
+
+    The ``annotation_id`` is derived automatically: instances are numbered in the
+    order they appear per sample → the first instance of a sample becomes
+    ``annotation_id 1``, the second ``2``, and so on (1-based, since ``0`` is the
+    sample row).
+
+    Worked example — ``batch_ids = ["img7", "img3"]`` (B = 2), 5 boxes total::
+
+        # box:        0      1      2      3      4
+        batch_idx = [ 0,     0,     1,     1,     1 ]   # boxes 0-1 -> img7, 2-4 -> img3
+        ious      = [0.91,  0.62,  0.50,  0.74,  0.30]  # one IoU per box
+
+        wl.save_instance_signals(
+            signals={"iou_instance": ious},   # -> signals//iou_instance
+            batch_ids=["img7", "img3"],
+            batch_idx=batch_idx,
+            origin="train",
+        )
+        # writes:
+        #   ("img7", 1)=0.91  ("img7", 2)=0.62
+        #   ("img3", 1)=0.50  ("img3", 2)=0.74  ("img3", 3)=0.30
+
+    Typical detection loop using the Ultralytics batch dict directly::
+
+        image, batch_ids, batch = inputs[0], inputs[1], inputs[3]["batch"]
+        raw_preds = model(image)
+        iou_per_box = compute_iou(raw_preds, batch)            # flat [total_instances]
+        wl.save_instance_signals(
+            signals={"iou_instance": iou_per_box},
+            batch_ids=batch_ids,
+            batch_idx=batch["batch_idx"],                      # Ultralytics flat index
+            step=current_step,
+        )
+
+    Persisting per-instance ground truth — pass ``targets`` as a **nested**
+    per-sample list (``targets[s]`` = sample ``s``'s list of instance targets),
+    in the same per-sample order ``batch_idx`` implies. It is flattened
+    sample-major to align with the instances::
+
+        targets = [                       # batch_ids = ["img7", "img3"]
+            [box7_0, box7_1],             # img7's two boxes  -> annotation_id 1, 2
+            [box3_0, box3_1, box3_2],     # img3's three boxes -> annotation_id 1, 2, 3
+        ]
+        wl.save_instance_signals(signals={"iou_instance": ious},
+                                 batch_ids=["img7", "img3"],
+                                 batch_idx=[0, 0, 1, 1, 1],
+                                 targets=targets)
+
+    Args:
+        signals (dict): ``{name: values}`` with ``values`` a flat tensor/array of
+            shape ``(num_instances_total,)`` (extra dims are mean-reduced). Each
+            becomes a ``signals//<name>`` column on the instance rows.
+        batch_ids (th.Tensor | np.ndarray | list): The ``B`` sample IDs of the
+            batch (one per image). Coerced to ``str`` internally.
+        batch_idx (th.Tensor | np.ndarray | list): Flat instance→image map of
+            length ``num_instances_total``, values in ``[0, B)`` — the Ultralytics
+            ``batch_idx``. Out-of-range entries are skipped.
+        step (int, optional): Training step. Inferred from context when omitted.
+        origin (str, optional): Dataset split (``"train"``, ``"val"``, ...). When
+            omitted, the active training origin is used (fallback ``"train"``).
+        targets (optional): Per-instance ground truth to persist alongside the
+            signals — a **nested** ``list[B]`` where ``targets[s]`` is sample
+            ``s``'s list of instance targets (or a ``dict`` of such). Flattened
+            sample-major to match ``batch_idx``.
+        log (bool, optional): Also push the per-sample aggregated mean of each
+            signal to the dashboard logger. Defaults to False.
+    """
+    global DATAFRAME_M
+    if DATAFRAME_M is None:
+        DATAFRAME_M = get_dataframe()
+
+    step = _get_step(step=step)
+
+    # Normalize batch_ids to list of strings (matching ledger format)
+    if isinstance(batch_ids, th.Tensor):
+        batch_ids_list = [str(i) for i in batch_ids.detach().cpu().tolist()]
+    else:
+        batch_ids_list = [str(i) for i in batch_ids]
+
+    # Normalize batch_idx to numpy ints (per-instance → batch-position map)
+    if isinstance(batch_idx, th.Tensor):
+        batch_idx_np = batch_idx.detach().cpu().numpy().astype(int).flatten()
+    else:
+        batch_idx_np = np.asarray(batch_idx).astype(int).flatten()
+
+    if len(batch_idx_np) == 0:
+        return
+
+    # Build per-instance sample_ids and annotation_ids from the flat batch_idx map.
+    # batch_idx[i] is the image position (in batch_ids) that instance i belongs to.
+    # Annotation ids are 1-based: instance_id 0 is reserved for the per-sample row,
+    # so the k-th instance of a sample is stored at annotation_id k (1, 2, ...).
+    # Build per-instance (sample_id, annotation_id) lists from the flat batch_idx map.
+    # Both lists have length num_instances_total and are ALIGNED with the flat
+    # signal/target order. enqueue_instance_batch zips sample_ids with annotation_ids
+    # and requires len(sample_ids) == len(annotation_ids); passing the raw batch_ids
+    # (length B) instead would trip its length guard and silently drop everything for
+    # any batch with more instances than images.
+    #
+    # annotation_id is 1-based per sample (instance_id 0 is reserved for the sample
+    # row): the k-th instance of a given image becomes annotation_id k (1, 2, ...).
+    instance_sample_ids: list[str] = []
+    instance_annotation_ids: list[int] = []
+    counters: Dict[int, int] = {}
+    for pos in batch_idx_np:
+        pos = int(pos)
+        if pos < 0 or pos >= len(batch_ids_list):
+            continue
+        aid = counters.get(pos, 0) + 1  # 1-based (instance_id 0 = sample row)
+        instance_sample_ids.append(batch_ids_list[pos])
+        instance_annotation_ids.append(aid)
+        counters[pos] = aid
+    if not instance_sample_ids:
+        return
+
+    # Optionally log per-sample aggregated mean to dashboard
+    if log:
+        for name, values in signals.items():
+            try:
+                arr = values.detach().cpu().numpy() if hasattr(values, 'detach') else np.asarray(values)
+                if arr.size == 0:
+                    continue
+                scalar = float(arr.mean())
+                _log_signal(scalar, None, name, step=step)
+            except Exception:
+                pass
+
+    # During evaluation mode, don't mutate dataframe state
+    try:
+        from weightslab.components.evaluation_controller import eval_controller
+        if eval_controller.is_running():
+            return
+    except Exception:
+        pass
+
+    # Build losses dict with signals// prefix to match save_signals convention
+    losses_data = {}
+    for name, values in signals.items():
+        key = name if name.startswith("signals//") else f"signals//{name}"
+        try:
+            arr = values.detach().cpu().numpy() if hasattr(values, 'detach') else np.asarray(values)
+            if arr.ndim > 1:
+                arr = arr.reshape(arr.shape[0], -1).mean(axis=1)
+            losses_data[key] = arr.astype(np.float32)
+        except Exception:
+            continue
+
+    if not losses_data:
+        return
+
+    # origin is intentionally NOT forwarded: instance rows (annotation_id >= 1) don't
+    # carry an origin; the flush derives it from the sample row (annotation_id 0).
+    DATAFRAME_M.enqueue_instance_batch(
+        sample_ids=instance_sample_ids,
+        annotation_ids=instance_annotation_ids,
+        losses=losses_data,
+        step=step,
+        targets=targets,
     )
 
 
@@ -1803,6 +2213,10 @@ def _unpack_batch(batch, device=None):
     return inputs, ids, targets, metadata
 
 
+# ##############################################################################################################
+# EVALUATION MODE PUBLIC API
+# ##############################################################################################################
+
 def _make_default_eval_fn(model):
     """Return a default evaluation callable that uses all registered ledger signals.
 
@@ -2007,10 +2421,6 @@ def trigger_pending_evaluation_async() -> bool:
 
     return True
 
-
-# ##############################################################################################################
-# EVALUATION MODE PUBLIC API
-# ##############################################################################################################
 
 def run_pending_evaluation(
     loaders: dict = None,
@@ -2351,6 +2761,10 @@ def run_pending_evaluation(
     logger.info(f"{'='*70}")
     logger.info(f"  Split:        {split_name}")
     logger.info(f"  Model Step:   {model_age}")
+    logger.info(f"  Tags:         {tags}")
+    logger.info(f"  Total Samples: {filtered_count if filtered_count is not None else 'unknown'}")
+    logger.info(f"  Total Batches: {total_batches}")
+    logger.info(f"  Eval Hash:    {eval_hash}")
 
     if result:
         logger.info(f"  Metrics:\n")
@@ -2441,12 +2855,8 @@ def _build_eval_allow_list(loader_if, tags: list, split_name: str) -> set:
             # Try to filter by origin matching split_name (either exact or prefix match)
             origin_level = filtered.index.get_level_values(SampleStatsEx.ORIGIN.value) \
                 if SampleStatsEx.ORIGIN.value in filtered.index.names else \
-                filtered.index.get_level_values(0)
-            origin_mask = origin_level == split_name
-            if not origin_mask.any():
-                # Try prefix: "train" matches "train_loader"
-                origin_mask = pd.Series(origin_level).str.startswith(split_name.replace("_loader", "")).values
-            sub = filtered[origin_mask]
+                filtered[filtered[SampleStatsEx.ORIGIN.value] == split_name].index.get_level_values(0)
+            sub = filtered.loc[origin_level]
             # Extract sample_id level
             sid_level_name = SampleStatsEx.SAMPLE_ID.value \
                 if SampleStatsEx.SAMPLE_ID.value in sub.index.names else None
@@ -2505,12 +2915,9 @@ def _resolve_eval_sampler(loader_if):
 
 def _get_eval_timeout_config() -> tuple[float, float, float]:
     """Return (multiplier, min_seconds, absolute_seconds_override)."""
-    multiplier = 1.3
-    min_seconds = 5.0
-    absolute_timeout = 0.0
 
     try:
-        multiplier = max(1.0, float(os.getenv("WEIGHTSLAB_EVAL_TIMEOUT_MULTIPLIER", "1.3")))
+        multiplier = max(1.0, float(os.getenv("WEIGHTSLAB_EVAL_TIMEOUT_MULTIPLIER", "13")))
     except Exception:
         multiplier = 1.3
 
