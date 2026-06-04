@@ -123,8 +123,14 @@ signal
 
 .. code-block:: python
 
-   @wl.signal(name=None, subscribe_to=None, compute_every_n_steps=1, **kwargs)
-   def my_signal(ctx: wl.SignalContext):
+   @wl.signal(
+       name: str,
+       subscribe_to: str,
+       compute_every_n_steps: int = 1,
+       include_history: bool = False,
+       include_history_metadata: bool = False
+   )
+   def my_signal(ctx: SignalContext) -> float:
        ...
 
 **Purpose**
@@ -156,40 +162,54 @@ sorting and root-cause analysis in the studio).
 
 **Examples**
 
+Simple example (no history):
+
 .. code-block:: python
 
-   # STATIC: computed from the input image (run via wl.compute_signals)
-   @wl.signal(name="blue_pixels")
-   def compute_blue_pixels(ctx: wl.SignalContext) -> int:
-       img = ctx.image                      # HWC uint8, or None
-       if img is None or img.ndim != 3:
-           return 0
-       r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
-       return int(((b > 150) & (b > r) & (b > g)).sum())
+   @wl.signal(name="weighted_loss", subscribe_to="train_loss", compute_every_n_steps=1)
+   def weighted_loss(ctx):
+       """Scale the loss value by a fixed weight."""
+       return 0.0 if ctx.subscribed_value is None else 0.5 * float(ctx.subscribed_value)
 
-   # DYNAMIC: fires when "train_mlt_loss/CE" is logged; combines the live loss
-   # with a previously computed static signal looked up from the dataframe.
-   @wl.signal(name="blue_weighted_loss",
-              subscribe_to="train_mlt_loss/CE",
-              compute_every_n_steps=1)
-   def compute_blue_weighted_loss(ctx: wl.SignalContext) -> float:
+Advanced example with history (coefficient of variation):
+
+.. code-block:: python
+
+   @wl.signal(
+       name="loss_cv_over_time",
+       subscribe_to="train_mlt_loss/CE",
+       compute_every_n_steps=1,
+       include_history=True,
+       include_history_metadata=False
+   )
+   def compute_loss_cv_over_time(ctx):
+       """
+       Compute coefficient of variation (CV) of loss across training history.
+
+       CV = std_dev / abs(mean)
+
+       This metric helps detect training instability:
+       - CV ≈ 0: stable training
+       - CV > 0.5: high variability, training instability
+       """
        loss = ctx.subscribed_value
-       blue = ctx.dataframe.get_value(ctx.origin, ctx.sample_id, "signals_blue_pixels")
-       blue = 0.0 if blue is None else float(blue)
-       return loss * (blue / (128 * 128))
+       loss_history = ctx.subscribed_history
 
-**Registration & timing**
+       # Extract signal values from history entries
+       historical_values = [entry['signal_value'] for entry in loss_history]
+       all_values = historical_values + [loss]
 
-- Define signals in a function and call it before ``wl.serve()`` so they are
-  registered in the ledger (the segmentation example does this in
-  ``custom_signals()``).
-- Static signals materialise when you call :func:`compute_signals`; dynamic ones
-  fire automatically during training as their subscribed metric is logged.
-- For **per-instance** signals (one value per annotation rather than per sample),
-  use a watched criterion with ``per_instance=True`` /
-  :func:`save_instance_signals` instead — see
-  :ref:`per-sample vs per-instance <per-instance-signals>` and
-  :doc:`segmentation_usecase`.
+       if len(all_values) < 2:
+           return 0.0
+
+       mean = sum(all_values) / len(all_values)
+       if mean == 0:
+           return 0.0
+
+       variance = sum((x - mean) ** 2 for x in all_values) / len(all_values)
+       std_dev = variance ** 0.5
+
+       return std_dev / abs(mean)
 
 compute_signals
 ---------------
@@ -373,26 +393,62 @@ Return IDs currently marked discarded.
 SignalContext
 -------------
 
-``SignalContext`` is the single argument passed to every ``@wl.signal`` function.
+``SignalContext`` is passed to custom signal functions (decorators: ``@wl.signal``, ``@wl.eval_fn``).
 
-Key attributes:
+**Attributes for dynamic signals** (when using ``@wl.signal(subscribe_to=...)``):
 
-- ``sample_id``: unique id of the sample being processed.
-- ``origin``: dataset split name (e.g. ``"train_loader"`` / ``"test_loader"``).
-- ``data``: the raw sample item (static mode); ``None`` in dynamic mode.
-- ``subscribed_value``: the live value of the subscribed metric (dynamic mode);
-  ``None`` in static mode.
-- ``dataframe``: proxy to query previously computed signals, e.g.
-  ``ctx.dataframe.get_value(origin, sample_id, "signals_blue_pixels")``.
+Attribute                                    Description
+``subscribed_value``                         Current value of the subscribed metric (float or None)
+``subscribed_history``                       List of historical entries for the subscribed signal
+                                             (only if ``include_history=True`` in decorator)
+                                             Each entry is a dict with keys:
+                                             - ``signal_value`` (float): the metric value
+                                             - ``model_age`` (int): training step when recorded
+                                             (``model_age`` included only if ``include_history_metadata=True``)
 
-Convenience properties:
+**Attributes for static signals & sample context** (general use):
 
-- ``ctx.image``: normalized HWC ``uint8`` image view when ``data`` is image-like.
-- ``ctx.points``: ``(N, 3|4)`` point-cloud view when applicable.
-- ``ctx.is_static``: ``True`` when running from :func:`compute_signals`
-  (``ctx.data`` available).
-- ``ctx.is_dynamic``: ``True`` when triggered by a subscribed metric
-  (``ctx.subscribed_value`` available).
+Attribute                                    Description
+``sample_id`` (str)                          Unique identifier for the sample
+``dataframe``                                Full ledger dataframe for context
+``data``                                     Raw sample data (image, point cloud, etc.)
+``origin`` (str)                             Data split: "train", "val", "test", etc.
+
+**Convenience properties** (data format helpers):
+
+===========================================  =====================================================================
+Property                                     Description
+===========================================  =====================================================================
+``ctx.image``                                Normalized image tensor view (if applicable)
+``ctx.points``                               Point cloud view (if applicable)
+``ctx.is_static``                            True if computing static signal (no subscription)
+``ctx.is_dynamic``                           True if computing dynamic signal (subscribed to another metric)
+===========================================  =====================================================================
+
+**Usage patterns**
+
+Accessing subscribed values:
+
+.. code-block:: python
+
+   # Simple value access
+   loss = ctx.subscribed_value  # current step's loss
+
+   # History access (requires include_history=True)
+   history = ctx.subscribed_history
+   values = [entry['signal_value'] for entry in history]
+   steps = [entry['model_age'] for entry in history]  # if include_history_metadata=True
+
+Checking data type:
+
+.. code-block:: python
+
+   if ctx.is_dynamic:
+       # Compute from subscribed metric
+       return 0.5 * ctx.subscribed_value
+   else:
+       # Compute from sample data
+       return process_sample(ctx.data, ctx.sample_id)
 
 Evaluation mode
 ---------------
@@ -528,5 +584,4 @@ optional when ``wl.watch_or_edit`` registrations are in place.
 
 **Where SignalContext is used**
 
-- In static signals called by ``wl.compute_signals``.
 - In dynamic signals subscribed through ``@wl.signal(subscribe_to=...)``.

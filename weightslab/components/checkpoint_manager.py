@@ -1991,24 +1991,70 @@ class CheckpointManager:
         # Restore RNG state if provided and not already restored
         if checkpoint_data.get('rng_state'):
             try:
-                # Reset dataloaders iterators to ensure reproducibility
-                for loader_name in ledgers.get_dataloaders():
-                    loader = ledgers.get_dataloader(loader_name)
-
-                    if loader != None:
-                        # Resume loader state
-                        if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
-                            loader.reset_iterator()
-                            logger.debug(f"Reset iterator for dataloader: {loader}")
-
-                # Restore RNG state again after resetting dataloaders
                 restore_rng_state(checkpoint_data['rng_state'])
                 logger.debug(f"Restored RNG state from checkpoint")
-                self.error_loading_checkpoint.remove('rng') if 'rng' in self.error_loading_checkpoint else None
+
+                # # TODO (GP): This part has been disabled because we do not manage dataloader iteration state in a consistent way yet, and it has caused some issues with loading checkpoints that have this state but the current dataloaders do not support restoring it.
+                # # We should re-enable this in the future once we have a more robust solution for managing dataloader iteration state across different types of dataloaders and shuffling state or not.
+                # # Reset dataloaders iterators to ensure reproducibility
+                # for loader_name in ledgers.get_dataloaders():
+                #     loader = ledgers.get_dataloader(loader_name)
+
+                #     if loader is not None:
+                #         # Resume loader state
+                #         if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                #             loader.reset_iterator()
+                #             logger.debug(f"Reset iterator for dataloader: {loader}")
+
+                # # Restore RNG state again after resetting dataloaders
+                # restore_rng_state(checkpoint_data['rng_state'])
+                # logger.debug(f"Restored RNG state from checkpoint")
+                # self.error_loading_checkpoint.remove('rng') if 'rng' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to restore RNG state: {e}")
                 pause_ctrl.pause()
                 self.error_loading_checkpoint.append('rng') if 'rng' not in self.error_loading_checkpoint else None
+
+        # # TODO (GP): This part has been disabled because we do not manage dataloader iteration state in a consistent way yet, and it has caused some issues with loading checkpoints that have this state but the current dataloaders do not support restoring it.
+        # # We should re-enable this in the future once we have a more robust solution for managing dataloader iteration state across different types of dataloaders and shuffling state or not.
+        # # Restore dataloader iteration state if provided
+        # if checkpoint_data.get('dataloader_iteration_state'):
+        #     try:
+        #         iter_state_raw = checkpoint_data['dataloader_iteration_state']
+
+        #         # Normalize to mapping loader_name -> state for backward compatibility
+        #         if isinstance(iter_state_raw, dict) and 'samples_yielded' in iter_state_raw:
+        #             state_map = {'default': iter_state_raw}
+        #         elif isinstance(iter_state_raw, dict):
+        #             state_map = iter_state_raw
+        #         else:
+        #             state_map = {'default': iter_state_raw}
+
+        #         restored_any = False
+        #         for loader_name in ledgers.get_dataloaders():
+        #             loader = ledgers.get_dataloader(loader_name)
+        #             if loader is None or not hasattr(loader, 'restore_iteration_state'):
+        #                 continue
+
+        #             state_for_loader = state_map.get(loader_name) or state_map.get('default')
+        #             if state_for_loader:
+        #                 try:
+        #                     loader.restore_iteration_state(state_for_loader)
+        #                     # Resume loader state
+        #                     if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+        #                         loader.reset_iterator()
+        #                         logger.debug(f"Reset iterator for dataloader: {loader}")
+        #                     logger.info(f"[OK] Restored dataloader iteration state for {loader_name}: {state_for_loader}")
+        #                     restored_any = True
+        #                 except Exception as inner_e:
+        #                     logger.warning(f"[WARNING] Failed to restore iteration state for {loader_name}: {inner_e}")
+
+        #         if not restored_any:
+        #             logger.warning("No dataloader iteration state could be applied to registered loaders")
+        #         self.error_loading_checkpoint.remove('dataloader_iteration') if 'dataloader_iteration' in self.error_loading_checkpoint else None
+        #     except Exception as e:
+        #         logger.error(f"[ERROR] Failed to restore dataloader iteration state: {e}")
+        #         self.error_loading_checkpoint.append('dataloader_iteration') if 'dataloader_iteration' not in self.error_loading_checkpoint else None
 
         # Restore logger snapshot for this experiment if available
         logger_len = self.get_logger_length()

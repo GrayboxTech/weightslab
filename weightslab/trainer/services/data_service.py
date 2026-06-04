@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
+from weightslab.backend.audit_logger import AuditLogger
 
 from PIL import Image
 from tqdm import tqdm
@@ -246,6 +247,14 @@ class DataService:
         self._h5_path = self._resolve_h5_path()
         self._stats_store = H5DataFrameStore(self._h5_path) if self._h5_path else None
 
+        # Initialize audit logger using root_log_dir
+        self.audit_logger = None
+        if self._root_log_dir:
+            try:
+                self.audit_logger = AuditLogger(self._root_log_dir, ctx.exp_name or "default")
+            except Exception as e:
+                logger.warning(f"Failed to initialize audit logger in DataService: {e}")
+
         # Check hyperparameters for compute_natural_sort flag (default: False)
         # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
@@ -290,7 +299,6 @@ class DataService:
         if self._compute_natural_sort:
            self._compute_natural_sort_stats()
 
-        # self._compute_custom_signals()
         self._is_filtered = False  # Track if the current view is filtered/modified by user
 
         # =====================================================================
@@ -672,6 +680,25 @@ class DataService:
             pass
         return data_dir / "data_with_ops.h5"
 
+    def _log_audit(
+        self,
+        action_type: str,
+        status: str,
+        details: dict = None,
+        error: str = None,
+    ) -> None:
+        """Helper to log audit events if logger is available."""
+        if self.audit_logger:
+            try:
+                self.audit_logger.log_event(
+                    action_type=action_type,
+                    status=status,
+                    details=details,
+                    error=error,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to log audit event: {e}")
+
     def _is_agent_available(self) -> bool:
         """
         Check if the agent (Ollama) is available for natural language queries.
@@ -824,7 +851,7 @@ class DataService:
 
     def _compute_natural_sort_stats(self):
         """
-        Compute natural sort statistics (brightness, hue, saturation, entropy) for all samples
+        Compute hardcoded natural sort statistics (brightness, hue, saturation, entropy) for all samples
         and update the dataframe.
 
         Includes 'signals.defaults.natural' (the weighted composite) for sorting.
@@ -1766,6 +1793,19 @@ class DataService:
         in_loop_count = total_count - discarded_count
         unique_tags = self._get_unique_tags()
 
+        # Log query execution
+        self._log_audit(
+            "query_execute",
+            "success",
+            {
+                "query_type": "pandas" if intent_type == pb2.INTENT_FILTER else "analysis",
+                "results_count": in_loop_count,
+                "all_samples_count": total_count,
+                "discarded_count": discarded_count,
+                "message": message[:100],
+            },
+        )
+
         return pb2.DataQueryResponse(
             success=True,
             message=message,
@@ -2417,6 +2457,7 @@ class DataService:
             reset_view: If True, reset user/agent filters and show the full dataset.
         """
         current_time = time.time()
+        logger.debug(f"[_slowUpdateInternals] Called with force={force}, reset_view={reset_view}. Last update at {self._last_internals_update_time}, current time {current_time}")
 
         # Fast throttle — avoids even trying to acquire the lock when data is fresh.
         if not force and self._last_internals_update_time is not None and \
@@ -2968,6 +3009,7 @@ class DataService:
                     message="Failed to retrieve samples (all records None)",
                     data_records=[]
                 )
+
             return pb2.DataSamplesResponse(
                 success=True,
                 message=f"Retrieved {len(data_records)} data records",
@@ -3634,6 +3676,32 @@ class DataService:
 
                 # Prevent _slowUpdateInternals from automatically overwriting our edits with stale data
                 self._last_internals_update_time = time.time()
+
+                # Log audit event for data edits
+                if is_tag_request:
+                    action_type = "tag_add" if request.type == SampleEditType.EDIT_ACCUMULATE else "tag_remove"
+                    self._log_audit(
+                        action_type,
+                        "success",
+                        {
+                            "tag_name": request.string_value,
+                            "samples_affected": len(request.samples_ids),
+                            "sample_ids": list(request.samples_ids),
+                            "origins": list(request.sample_origins),
+                        },
+                    )
+                else:
+                    # This is a discard/restore operation
+                    action_type = "sample_discard" if request.bool_value else "sample_restore"
+                    self._log_audit(
+                        action_type,
+                        "success",
+                        {
+                            "samples_affected": len(request.samples_ids),
+                            "sample_ids": list(request.samples_ids),
+                            "origins": list(request.sample_origins),
+                        },
+                    )
 
                 return pb2.DataEditsResponse(
                     success=True,

@@ -287,6 +287,7 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         ds._last_internals_update_time = 0
         ds._agent = MagicMock()
         ds._agent.is_ollama_available.return_value = True
+        ds.audit_logger = MagicMock()
 
         return ds, df_manager
 
