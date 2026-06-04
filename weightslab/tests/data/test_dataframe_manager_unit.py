@@ -296,7 +296,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         self.assertTrue((result_df["metadata"] == "urban").sum() > 0)
 
         # Memory usage comparison
-        original_bytes = 100 * (len("train") + len("urban"))  # Rough estimate
+        # original_bytes = 100 * (len("train") + len("urban"))  # Rough estimate
         # With categorical: ~100 bytes for codes + ~40 bytes for categories = ~140 bytes
         # Real compression achieved by pandas
 

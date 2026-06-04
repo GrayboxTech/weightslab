@@ -147,15 +147,7 @@ class TestH5DataFrameStore(unittest.TestCase):
         # Get memory before categorical optimization
         normalized_df = self.store._normalize_for_write(df)
 
-        # Check if tag column is categorical (optimization applied)
-        # If it succeeded, memory should be reduced
-        if 'tag:quality' in normalized_df.columns:
-            # The optimization should have been applied during normalize_for_write
-            is_categorical = pd.api.types.is_categorical_dtype(normalized_df['tag:quality'])
-            # We expect it to be categorical after _optimize_categorical_tags is called
-            # (though it may get converted to string later for HDF5 serialization)
-            # The key test is that the method doesn't error out
-            self.assertIsNotNone(normalized_df)
+        self.assertIsNotNone(normalized_df)
 
     def test_multi_index_with_tags(self):
         """Verify multi-index and categorical tags work together."""

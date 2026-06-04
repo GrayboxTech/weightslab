@@ -104,6 +104,8 @@ __all__ = [
     "guard_testing_context",
     "ledger",
 	"start_training",
+	"register_categorical_tag",
+	"set_categorical_tag",
 
     "_BANNER",
     "__version__",

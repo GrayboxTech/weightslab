@@ -1801,7 +1801,6 @@ class LedgeredDataFrameManager:
         Used by ``get_combined_df`` to surface not-yet-flushed buffer entries.
         Does not touch ``self._df``.
         """
-        annot = SampleStats.Ex.INSTANCE_ID.value
         frames = []
         df_is_multi = isinstance(df.index, pd.MultiIndex) and df.index.nlevels >= 2
 
