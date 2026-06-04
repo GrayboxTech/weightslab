@@ -389,7 +389,6 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     _ = wl_kw.get('flag')
     preds_raw = a[0] if len(a) > 0 else None
     batch_ids = wl_kw.get('batch_ids')
-    group_ids = wl_kw.get('group_id')
     batch_scalar = wl_kw.get('signals')
     preds = wl_kw.get('preds')
     targets = wl_kw.get('targets') if 'targets' in wl_kw else None

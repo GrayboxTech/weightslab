@@ -91,7 +91,7 @@ def main():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     print(f"[suite] spawning {_WORLD} gloo/CPU ranks for primitive test", flush=True)
-    ctx = mp.spawn(_worker, args=(_WORLD, port), nprocs=_WORLD, join=True)
+    mp.spawn(_worker, args=(_WORLD, port), nprocs=_WORLD, join=True)
 
 
 if __name__ == "__main__":

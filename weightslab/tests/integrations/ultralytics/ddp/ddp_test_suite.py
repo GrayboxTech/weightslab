@@ -669,7 +669,6 @@ def scenario_resume_continues_curve(client, world, batch):
         print("[client] no full-ckpt hash"); return False
     print(f"[client] saved hash={saved_hash}")
     pre_restore_plot = client.scalar_plot("train/bbxs")
-    pre_restore_max_plot_age = max((p[0] for p in pre_restore_plot), default=0)
 
     # diverge — train more so the trainer has actual divergent work
     client.train_steps(epoch_steps)
