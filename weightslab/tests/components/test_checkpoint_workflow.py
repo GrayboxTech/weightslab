@@ -35,7 +35,7 @@ from pathlib import Path
 from weightslab.components.checkpoint_manager import CheckpointManager
 from weightslab.components.experiment_hash import ExperimentHashGenerator
 from weightslab.data.sample_stats import SampleStatsEx
-from weightslab.utils.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue
 from weightslab.backend import ledgers
 from weightslab.components.global_monitoring import (
     guard_training_context,

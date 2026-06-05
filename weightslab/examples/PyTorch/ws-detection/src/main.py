@@ -19,167 +19,17 @@ import yaml
 
 import weightslab as wl
 
-from weightslab.utils.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue
 
 from ultralytics.data.dataset import YOLODataset
-from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.cfg import get_cfg
 from ultralytics.data.utils import check_det_dataset
 
+from utils.trainer import WLCompatileDetTrainer
 from utils.data import YOLODatasetWL, _wl_yolo_collate as collate_fn
-from utils.criterions import (
-    PerSampleDetectionLoss, PerSampleIoU,
-    PerInstanceDetectionLoss, PerInstanceIoU,
-    _decode_predictions
-)
 
 logging.getLogger("weightslab.watchdog.grpc_watchdog").setLevel(logging.ERROR)
 logging.getLogger("weightslab.trainer.services.agent.agent").setLevel(logging.ERROR)
-
-
-# ==================
-# Trainer Definition
-# ==================
-
-class WLCompatileDetTrainer(DetectionTrainer):
-    def __init__(self, *a, **kw):
-        self.data_train_loader = kw.pop("train_loader")
-        self.data_val_loader = kw.pop("val_loader")
-        self.hparams = kw.pop("hparams", {})
-        self.device = kw.get("device", torch.device("cpu"))
-        super().__init__(*a, **kw)
-        self._init_experiment_modules()
-
-    @property
-    def val_every(self):
-        return self.hparams.get("eval_full_to_train_steps_ratio", 1)
-
-    def _init_experiment_modules(self):
-        super().setup_model()
-        self.model = self.model.to(self.device)
-
-        # Order matters: _setup_train builds the optimizer, which iterates model.modules()
-        # with isinstance checks that fail once WL wraps the model. Run it BEFORE wrapping.
-        self._init_training_loss()
-        self._setup_train()
-        self.optimizer = wl.watch_or_edit(self.optimizer, flag="optimizer")
-        self.model = wl.watch_or_edit(
-            self.model, flag="model", device=self.device, compute_dependencies=False)
-
-    def _init_training_loss(self):
-        if not hasattr(self.model, "args"):
-            self.model.args = get_cfg()
-        _LOSS_PARTS = [(0, "bbxs"), (1, "clsf"), (2, "dfl")]
-        self.criterions = {"train": {}, "val": {}}
-        self.criterions_per_instance = {"train": {}, "val": {}}
-        self.iou = {}
-        self.iou_per_instance = {}
-        for split in ("train", "val"):
-            # Per-sample metrics (aggregated)
-            for t, n in _LOSS_PARTS:
-                self.criterions[split][n] = wl.watch_or_edit(
-                    PerSampleDetectionLoss(self.model, loss_type=t),
-                    flag="loss", name=f"{split}/{n}_sample", per_sample=True, log=True,
-                )
-            self.iou[split] = wl.watch_or_edit(
-                PerSampleIoU(conf=0.25, iou_thres=0.5),
-                flag="metric", name=f"iou/{split}_sample", per_sample=True, log=True,
-            )
-
-            # Per-instance metrics (per annotation) — auto-saved by WL with annotation_id
-            for t, n in _LOSS_PARTS:
-                self.criterions_per_instance[split][n] = wl.watch_or_edit(
-                    PerInstanceDetectionLoss(self.model, loss_type=t),
-                    flag="loss", name=f"{split}/{n}_instance", per_instance=True, log=True,
-                )
-            self.iou_per_instance[split] = wl.watch_or_edit(
-                PerInstanceIoU(conf=0.25, iou_thres=0.5),
-                flag="metric", name=f"iou/{split}_instance", per_instance=True, log=True,
-            )
-
-    def process_predictions(self, pred_raw, image, conf=0.25, cls_thresh=0.5):
-        img_h, img_w = image[0].shape[-2:]
-
-        # Process check for eval mode
-        if isinstance(pred_raw, (tuple, list)):
-            pred_raw = pred_raw[1]
-
-        # Gen. bounding boxes
-        pred_raw = torch.cat([pred_raw['boxes'], pred_raw['scores']], dim=1)
-        # Convert to raw model predictions format [batch, 64+nc, 8400]
-        preds_bboxes, preds_cls = _decode_predictions(
-            pred_raw, img_h, img_w, conf=conf, iou_thres=cls_thresh)
-
-        return preds_bboxes, preds_cls
-
-    def train(self):
-        cs, m = self.criterions["train"], self.iou["train"]
-        cs_inst, m_inst = self.criterions_per_instance["train"], self.iou_per_instance["train"]
-
-        while True:
-            with wl.guard_training_context:
-                self.optimizer.zero_grad()
-                inputs = next(self.data_train_loader)
-                image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
-
-                raw_preds = self.model(image.to(self.device))
-                if not isinstance(raw_preds, dict):
-                    raw_preds = raw_preds[1]  # For audit mode, we are in evaluation so model also output the bb
-                preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
-                imgsz = float(image.shape[-1])
-                preds_by_batch = [
-                    torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
-                    if b.numel() > 0 else torch.zeros((0, 6))
-                    for b, c in zip(preds_bboxes, preds_cls)
-                ]
-
-                # Per-sample signals — used for backward pass
-                per_sample = (
-                    cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-                    + cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
-                    + cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
-                )
-                m(raw_preds, batch, batch_ids=batch_ids)
-
-                # Per-instance signals (per annotation) — auto-saved with annotation_id
-                cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids)
-                cs_inst["clsf"](raw_preds, batch, batch_ids=batch_ids)
-                cs_inst["dfl"](raw_preds, batch, batch_ids=batch_ids)
-                m_inst(raw_preds, batch, batch_ids=batch_ids)
-
-                loss = per_sample.mean()
-                loss.backward()
-                self.optimizer.step()
-
-            if self.model.get_age() % self.val_every == 0:
-                with wl.guard_testing_context:
-                    self.do_validate(self.data_val_loader)
-
-    def do_validate(self, loader):
-        cs, m = self.criterions["val"], self.iou["val"]
-        cs_inst, m_inst = self.criterions_per_instance["val"], self.iou_per_instance["val"]
-        for inputs in loader:
-            image, batch_ids, batch = inputs[0].float(), inputs[1], inputs[3]['batch']
-            raw_preds = self.model(image.to(self.device))[1]
-            preds_bboxes, preds_cls = self.process_predictions(raw_preds, image, conf=0.0001, cls_thresh=0.0001)
-            imgsz = float(image.shape[-1])
-            preds_by_batch = [
-                torch.cat([b.detach().cpu() / imgsz, c[:, 1:2].cpu(), c[:, 0:1].cpu()], dim=-1)
-                if b.numel() > 0 else torch.zeros((0, 6))
-                for b, c in zip(preds_bboxes, preds_cls)
-            ]
-
-            # Per-sample metrics (aggregated per sample)
-            cs["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-            cs["clsf"](raw_preds, batch, batch_ids=batch_ids)
-            cs["dfl"](raw_preds, batch, batch_ids=batch_ids)
-            m(raw_preds, batch, batch_ids=batch_ids)
-
-            # Per-instance metrics (per annotation) — auto-saved with annotation_id
-            cs_inst["bbxs"](raw_preds, batch, batch_ids=batch_ids, preds={'bboxes': preds_by_batch})
-            cs_inst["clsf"](raw_preds, batch, batch_ids=batch_ids)
-            cs_inst["dfl"](raw_preds, batch, batch_ids=batch_ids)
-            m_inst(raw_preds, batch, batch_ids=batch_ids)
 
 
 def main():
@@ -268,6 +118,7 @@ def main():
         hparams=parameters,
     )
 
+    # Wrap the custom function to be able to use WeightsStudio Evaluation Feature
     @wl.eval_fn
     def _wl_validate(loader):
         trainer.do_validate(loader)
@@ -276,6 +127,7 @@ def main():
     # 7. Training Loop
     wl.start_training(timeout=None)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
     trainer.train()
+
     wl.keep_serving()
 
 

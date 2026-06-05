@@ -1,11 +1,16 @@
+import numpy as np
 import torch as th
 import torch.nn as nn
+import weightslab as wl
 
 from ultralytics.utils.loss import v8DetectionLoss as DetectionLoss
 from ultralytics.utils.nms import non_max_suppression
 from ultralytics.utils.tal import make_anchors, dist2bbox
 from ultralytics.utils.nms import box_iou
 from ultralytics.utils.ops import xywh2xyxy
+
+from weightslab.backend import ledgers
+
 
 def _decode_predictions(pred, img_h, img_w, conf=0.25, iou_thres=0.5):
     """Decode raw model preds [batch, 64+nc, 8400] → per-sample (boxes, [score, cls]) after NMS."""
@@ -274,3 +279,112 @@ class PerInstanceDetectionLoss(nn.Module):
         if not instance_losses:
             return th.tensor([], device=device)
         return th.stack(instance_losses)
+
+
+# =========================================================================
+# Custom subscribed signal: per-sample loss-shape classification
+# =========================================================================
+# This is a *dynamic* WeightsLab signal. It subscribes to the per-sample
+# classification loss "train/clsf_sample" and, every 25 optimisation steps,
+# inspects each sample's full loss trajectory, classifies its *shape*, and
+# writes the verdict back onto the sample as the categorical tag "loss_shape".
+#
+# The six shapes describe how a sample's loss evolved over training:
+#   monotonic     -> loss steadily decreasing             (model is learning it)
+#   plateaued     -> dropped then leveled off still-high  (stuck / hard sample)
+#   Flat_high     -> never moved, stayed high             (mislabel / unlearnable)
+#   high_variance -> noisy oscillation                    (ambiguous label)
+#   U_Shape       -> learned then forgotten               (catastrophic interference)
+#   Spiked        -> sudden jump at some step             (data/aug/version change)
+
+# Allowed values for the categorical tag, in display order.
+LOSS_SHAPE_LABELS = [
+    "monotonic", "plateaued", "Flat_high",
+    "high_variance", "U_Shape", "Spiked",
+]
+
+# Numeric encoding returned by the signal so the verdict is also plottable
+# per-sample (a tag is a string; a signal must be numeric).
+LOSS_SHAPE_CODES = {label: i for i, label in enumerate(LOSS_SHAPE_LABELS)}
+
+# Minimum number of logged points before a trajectory can be classified.
+_MIN_HISTORY = 5
+
+# Get checkpoint manager
+checkpoint_manager = ledgers.get_checkpoint_manager()
+
+# Declare the categorical tag written by the loss-shape classifier signal,
+# so the UI shows all six choices even before any sample is tagged. Must be
+# called after the dataloader is registered (the dataframe now exists).
+wl.register_categorical_tag("loss_shape", LOSS_SHAPE_LABELS)
+
+
+def _classify_loss_shape(values):
+    """Classify a per-sample loss trajectory into one of LOSS_SHAPE_LABELS.
+
+    *values* is the loss series ordered by step. Returns a label string, or
+    ``None`` when there is not enough history yet to decide. All thresholds
+    are scale-invariant (expressed as fractions of the trajectory's own
+    range), so the same logic works regardless of the absolute loss scale.
+    These thresholds are illustrative — tune them for your own task.
+    """
+    y = np.asarray(values, dtype=float)
+    if y.size < _MIN_HISTORY:
+        return None
+
+    n = y.size
+    first, last = float(y[0]), float(y[-1])
+    ymin, ymax = float(y.min()), float(y.max())
+    rng = max(ymax - ymin, 1e-8)
+    mean = float(y.mean())
+
+    cv = float(y.std()) / (abs(mean) + 1e-8)        # noisiness (coeff. of variation)
+    drop = (first - last) / (abs(first) + 1e-8)     # net improvement, start -> end
+    argmin = int(np.argmin(y))
+    rebound = (last - ymin) / rng                    # how far it climbed back from the trough
+    max_up_jump = float(np.diff(y).max()) / rng      # largest single-step rise
+
+    # Flat, recent tail (last 40% of the trajectory) is used to detect plateaus.
+    tail = y[int(0.6 * n):]
+    tail_flat = (float(tail.std()) / (abs(float(tail.mean())) + 1e-8)) < 0.1
+
+    # Order matters: most specific / most alarming shapes are checked first.
+    if max_up_jump > 0.5:                            # one big isolated jump up
+        return "Spiked"
+    if cv > 0.5:                                     # globally noisy / oscillating
+        return "high_variance"
+    if 0.2 * n < argmin < 0.8 * n and rebound > 0.3:  # dipped mid-run, then rose
+        return "U_Shape"
+    if drop > 0.4:                                   # large, steady net decrease
+        return "monotonic"
+    if drop > 0.15 and tail_flat:                    # modest drop, then leveled high
+        return "plateaued"
+    return "Flat_high"                               # barely moved — never learned
+
+
+@wl.signal(
+    name="loss_shape_classifier",
+    subscribe_to="train/clsf_sample",
+    compute_every_n_steps=25,
+    log=False,  # side-effecting signal: we tag samples, no aggregate curve needed
+)
+def classify_loss_shape(ctx: wl.SignalContext) -> int:
+    """Dynamic signal fired per sample every 25 steps for "train/clsf_sample".
+
+    Pulls the sample's full loss history, classifies its shape, and tags the
+    sample with the categorical tag ``loss_shape``. Returns the numeric shape
+    code (or -1 when there is not enough history yet) so the verdict is also
+    available as a per-sample signal column.
+    """
+    # Full per-sample trajectory of the subscribed metric, ordered by step.
+    history = wl.query_sample_history(ctx.sample_id, signal_name="train/clsf_sample", exp_hash=checkpoint_manager.get_current_experiment_hash())
+    series = sorted(((step, val) for _, step, val, _ in history), key=lambda t: t[0])
+    values = [v for _, v in series]
+
+    label = _classify_loss_shape(values)
+    if label is None:
+        return -1
+
+    # Persist the verdict as a categorical tag on this sample.
+    wl.set_categorical_tag([ctx.sample_id], "loss_shape", label)
+    return LOSS_SHAPE_CODES[label]

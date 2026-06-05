@@ -225,25 +225,14 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             now = int(time.time())
             eval_hashes = set(signal_logger.get_evaluation_marker_hashes())
 
-            # AGGREGATE the per-sample curves into a single MEAN curve per
-            # experiment_hash, computed here in the backend. Instead of streaming one
-            # curve per sample (10k samples × 10k steps → 100M points), we send the
-            # mean over the matching samples at each step → one curve per run. We
-            # accumulate sum/count per (exp_hash, step) in a single pass (O(points),
-            # no per-sample buffering), then emit mean = sum / count.
-            from collections import defaultdict
-            sums = defaultdict(float)
-            counts = defaultdict(int)
-            for sid, step, val, exp_hash in signal_logger.query_per_sample(
-                    graph_name, sample_ids=sample_ids):
-                key = (exp_hash if exp_hash else "N.A.", int(step))
-                sums[key] += float(val)
-                counts[key] += 1
-
-            # Regroup the (exp_hash, step) means into one step-ordered series per hash.
-            per_hash = defaultdict(list)
-            for (exp_hash, step), total in sums.items():
-                per_hash[exp_hash].append((step, total / counts[(exp_hash, step)]))
+            # AGGREGATE: numpy-vectorized mean per (exp_hash, step) over matching samples.
+            # aggregate_per_sample_by_step uses np.unique + np.bincount — ~100× faster
+            # than a Python loop for large sample counts.
+            per_hash = signal_logger.aggregate_per_sample_by_step(
+                graph_name, sample_ids=sample_ids
+            )
+            # Normalise None keys that come from experiments with no hash
+            per_hash = {(h if h is not None else "N.A."): v for h, v in per_hash.items()}
 
             # Still cap each returned curve's length (a run can have 10k+ steps);
             # WL_MAX_POINTS_PER_SAMPLE bounds points per returned curve (endpoints kept).

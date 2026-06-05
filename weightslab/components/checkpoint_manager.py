@@ -53,7 +53,7 @@ from weightslab.backend.ledgers import (
     get_dataloaders,
 )
 from weightslab.backend import ledgers
-from weightslab.utils.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.tools import capture_rng_state, restore_rng_state, recursive_update, normalize_config, safe_reset_index
 from weightslab.components.global_monitoring import pause_controller as pause_ctrl

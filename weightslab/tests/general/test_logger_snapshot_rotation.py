@@ -5,7 +5,7 @@ from pathlib import Path
 
 from weightslab.backend import ledgers
 from weightslab.components.checkpoint_manager import CheckpointManager
-from weightslab.utils.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue
 
 
 class LoggerSnapshotRotationTests(unittest.TestCase):

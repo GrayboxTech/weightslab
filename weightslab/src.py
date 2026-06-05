@@ -18,7 +18,7 @@ import numpy as np
 import torch as th
 
 from tqdm import tqdm
-from typing import Callable, Optional, Any, Dict
+from typing import Callable, Optional, Any
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -29,7 +29,7 @@ from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
 from weightslab.utils.tools import detach_to_cpu
-from weightslab.utils.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue
 from weightslab.utils.tools import ddp_info, is_main_process
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
@@ -83,12 +83,12 @@ class SignalContext:
     Unified context object for WeightsLab signals.
     Carries all available metadata for a single sample during computation.
     """
-    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, subscribed_history=None, origin=None):
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
         self.subscribed_value = subscribed_value
-        self.subscribed_history = subscribed_history
+        self.logger = logger
         self.origin = origin
 
     @property
@@ -569,9 +569,6 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                  subscribers.append((name, func))
 
          if subscribers:
-             # Get logger history
-             signal_history_per_sample = ledgers.get_logger().get_current_signaL_history_per_sample(reg_name, sample_ids=ids_np) if meta.get('include_history', False) else None
-
              # Resolve generic value vector
              val_tensor = out
              if hasattr(val_tensor, 'detach'):
@@ -626,7 +623,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                              ctx = SignalContext(
                                  sample_id=int(uid),
                                  subscribed_value=val,
-                                 subscribed_history=signal_history_per_sample.get(uid) if signal_history_per_sample is not None else None,
+                                 logger=ledgers.get_logger(),
                                  dataframe=df_proxy,
                                  origin=kwargs.get('origin', 'train')
                              )
@@ -1400,7 +1397,7 @@ def register_categorical_tag(name: str, categories: list[str], replace: bool = F
     from weightslab.backend.ledgers import get_dataframe
 
     df_manager = get_dataframe()
-    if df_manager is None:
+    if df_manager == None:
         logger.error("Dataframe manager not initialized. Call this after registering your dataloader.")
         return []
     try:
@@ -1868,12 +1865,6 @@ def save_instance_signals(
 
     step = _get_step(step=step)
 
-    # Normalize batch_ids to list of strings (matching ledger format)
-    if isinstance(batch_ids, th.Tensor):
-        batch_ids_list = [str(i) for i in batch_ids.detach().cpu().tolist()]
-    else:
-        batch_ids_list = [str(i) for i in batch_ids]
-
     # Normalize batch_idx to numpy ints (per-instance → batch-position map)
     if isinstance(batch_idx, th.Tensor):
         batch_idx_np = batch_idx.detach().cpu().numpy().astype(int).flatten()
@@ -1946,6 +1937,27 @@ def save_instance_signals(
         step=step,
         targets=targets,
     )
+
+    # Mirror scalar instance signals into the per-instance logger history so they
+    # are queryable via query_instance_history / query_per_instance.
+    try:
+        _inst_logger = get_logger()
+        if _inst_logger is not None and hasattr(_inst_logger, "add_instance_scalars"):
+            _log_step = step if step is not None else 0
+            for _key, _arr in losses_data.items():
+                _sig_name = _key.replace("signals//", "")
+                try:
+                    _inst_logger.add_instance_scalars(
+                        graph_name=_sig_name,
+                        sample_ids=instance_sample_ids,
+                        annotation_ids=instance_annotation_ids,
+                        values=_arr,
+                        global_step=_log_step,
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def get_active_group_mask(
@@ -2997,6 +3009,666 @@ class _EvalManagedLoader:
                 progress_total,
                 f"Evaluating '{self._split_name}'…",
             )
+
+
+# ##############################################################################################################
+# SIGNAL HISTORY QUERY HELPERS
+# ##############################################################################################################
+
+def get_current_experiment_hash() -> str | None:
+    """Return the hash of the currently active experiment run.
+
+    Reads the hash from the registered checkpoint manager.  Returns ``None``
+    when no experiment is active or no checkpoint manager has been registered.
+
+    Example::
+
+        h = wl.get_current_experiment_hash()
+        wl.write_history("/tmp/run", experiment_hash=h)
+    """
+    try:
+        cm = get_checkpoint_manager()
+        if cm is None:
+            return None
+        h = cm.get_current_experiment_hash()
+        return h if isinstance(h, str) else None
+    except Exception:
+        return None
+
+
+def query_signal_history(
+    signal_name: str,
+    exp_hash: str | None = None,
+) -> list:
+    """Return per-sample history for *signal_name* across all samples.
+
+    Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples.
+    Pass *exp_hash* to restrict to a single experiment run.
+
+    Example::
+
+        history = wl.query_signal_history("train/loss")
+        for sample_id, step, loss, h in history:
+            print(sample_id, step, loss)
+    """
+    _lg = get_logger()
+    if _lg is None:
+        return []
+    return _lg.query_per_sample(signal_name, sample_ids=None, exp_hash=exp_hash)
+
+
+def query_sample_history(
+    sample_id: str,
+    signal_name: str | None = None,
+    exp_hash: str | None = None,
+) -> list:
+    """Return the full logged history for a given *sample_id*.
+
+    Returns a list of ``(signal_name, step, value, experiment_hash)`` tuples.
+    Pass *signal_name* to restrict to a single metric; pass *exp_hash* to
+    restrict to a single experiment run.
+
+    Example::
+
+        for sig, step, val, h in wl.query_sample_history("img_0042"):
+            print(sig, step, val)
+    """
+    _lg = get_logger()
+    if _lg is None:
+        return []
+    names = (
+        [signal_name]
+        if signal_name
+        else list(_lg._signal_history_per_sample.keys())
+    )
+    results = []
+    for name in names:
+        for sid, step, val, h in _lg.query_per_sample(
+            name, sample_ids=[sample_id], exp_hash=exp_hash
+        ):
+            results.append((name, step, val, h))
+    return results
+
+
+def query_instance_history(
+    sample_id: str,
+    annotation_id: int,
+    signal_name: str | None = None,
+    exp_hash: str | None = None,
+) -> list:
+    """Return the full logged history for a ``(sample_id, annotation_id)`` instance.
+
+    *annotation_id* is 1-based (0 is the per-sample row; instances start at 1).
+    Returns a list of ``(signal_name, step, value, experiment_hash)`` tuples.
+
+    Example::
+
+        for sig, step, val, h in wl.query_instance_history("img_0042", annotation_id=1):
+            print(sig, step, val)
+    """
+    _lg = get_logger()
+    if _lg is None:
+        return []
+    names = (
+        [signal_name]
+        if signal_name
+        else list(_lg._signal_history_per_instance.keys())
+    )
+    results = []
+    for name in names:
+        for sid, aid, step, val, h in _lg.query_per_instance(
+            name, sample_id=sample_id, annotation_id=annotation_id, exp_hash=exp_hash
+        ):
+            results.append((name, step, val, h))
+    return results
+
+
+def write_history(
+    path: str | None = None,
+    format: str = "json",
+    type_of_history=None,
+    graph_name=None,
+    experiment_hash: str | None = None,
+    sample_id=None,
+    instance_id=None,
+) -> str:
+    """Dump signal history to *path* as JSON or CSV.
+
+    Parameters
+    ----------
+    path : str, optional
+        Output file path **or** directory.  When omitted (``None``), the
+        ``root_log_dir`` from the active checkpoint manager is used as the
+        output directory.
+
+        - If *path* points to a file (has an extension) the file is written
+          directly.
+        - If *path* has no extension or is an existing directory, a filename
+          is auto-generated as ``<hash>_history.<format>`` inside that
+          directory, where ``<hash>`` is an 8-character hex MD5 of the
+          normalized call parameters (*type_of_history*, *graph_name*,
+          *experiment_hash*, *sample_id*, *instance_id*).  The same filter
+          combination always produces the same filename; different filters
+          produce different filenames.
+        - The directory is created automatically if it does not exist.
+    format : {"json", "csv"}
+        Output format (default ``"json"``).
+    type_of_history : {None, "all", "global", "sample", "instance", "instances"}
+        Which history to include.  ``None`` or ``"all"`` writes every type.
+        ``"global"`` writes the aggregated training-curve history.
+        ``"sample"`` writes per-sample history.
+        ``"instance"`` / ``"instances"`` writes per-instance history.
+    graph_name : str or list of str, optional
+        Restrict to one or more signal / metric names.
+    experiment_hash : str, optional
+        ``None`` (default) — use the current experiment hash from the
+        checkpoint manager.  ``"all"`` — include every hash.
+        Any other string — restrict to that specific experiment run.
+    sample_id : str or list of str, optional
+        Restrict per-sample and per-instance rows to one or more sample IDs.
+        Has no effect on global history.
+    instance_id : int or list of int, optional
+        Restrict per-instance rows to one or more annotation IDs.
+        Has no effect on global or per-sample history.
+
+    Returns
+    -------
+    str
+        Absolute path of the file that was written.
+
+    Examples
+    --------
+    Write all history — directory inferred from ``root_log_dir``::
+
+        wl.write_history()
+
+    Write all history into a specific directory::
+
+        wl.write_history(r"C:\\tmp\\myrun")
+
+    Write only per-sample data for one experiment to CSV::
+
+        wl.write_history(
+            r"C:\\tmp\\myrun",
+            format="csv",
+            type_of_history="sample",
+            experiment_hash="abc123",
+        )
+    """
+    import csv as _csv
+    import json as _json
+    import os as _os
+    import hashlib as _hashlib
+
+    logger.debug(
+        "write_history called: path=%r, format=%r, type_of_history=%r, "
+        "graph_name=%r, experiment_hash=%r, sample_id=%r, instance_id=%r",
+        path, format, type_of_history, graph_name, experiment_hash,
+        sample_id, instance_id,
+    )
+
+    _lg = get_logger()
+    if _lg is None:
+        logger.warning(
+            "write_history: no active logger (get_logger() returned None); "
+            "nothing to write. Returning path=%r.", path or "."
+        )
+        return path or "."
+
+    # Resolve path: fall back to root_log_dir from the checkpoint manager
+    if path is None:
+        try:
+            _cm = _lg.chkpt_manager
+            if _cm is not None:
+                _rld = _cm.root_log_dir
+                path = str(_rld) if _rld is not None else "."
+            else:
+                path = "."
+        except Exception as _e:
+            logger.debug("write_history: failed to resolve root_log_dir (%s); "
+                         "falling back to current directory.", _e)
+            path = "."
+        logger.info("write_history: no path given, using output directory %r.", path)
+
+    fmt = format.lower().strip()
+
+    # --- Normalize all parameters first (needed for the auto-filename hash) ---
+
+    # Resolve experiment_hash:
+    #   None      → use the current hash from the checkpoint manager (default)
+    #   "all"     → no filter, include every hash
+    #   any str   → filter to that specific hash
+    if experiment_hash is None or experiment_hash == 'last':
+        try:
+            _current = (
+                _lg.chkpt_manager.get_current_experiment_hash()
+                if _lg.chkpt_manager is not None
+                else None
+            )
+            experiment_hash = _current if isinstance(_current, str) else None
+        except Exception:
+            experiment_hash = None
+    elif experiment_hash == "all":
+        experiment_hash = None  # sentinel: skip hash filtering below
+
+    # Normalize graph_name → set or None
+    _gn_filter = None
+    if graph_name is not None:
+        _gn_filter = {graph_name} if isinstance(graph_name, str) else set(graph_name)
+
+    # Normalize sample_id → list or None
+    _sid_filter = None
+    if sample_id is not None:
+        _sid_filter = [sample_id] if isinstance(sample_id, str) else list(sample_id)
+
+    # Normalize instance_id → list or None
+    _aid_filter = None
+    if instance_id is not None:
+        _aid_filter = [instance_id] if isinstance(instance_id, int) else list(instance_id)
+
+    _type = (type_of_history or "all").lower().strip()
+    if _type == "instances":
+        _type = "instance"
+    write_global = _type in ("all", "global")
+    write_sample = _type in ("all", "sample")
+    write_instance = _type in ("all", "instance")
+
+    logger.info(
+        "write_history: resolved filters → type=%r, experiment_hash=%s, "
+        "graph_name=%s, sample_id=%s, instance_id=%s",
+        _type,
+        experiment_hash if experiment_hash is not None else "<all>",
+        sorted(_gn_filter) if _gn_filter is not None else "<all>",
+        _sid_filter if _sid_filter is not None else "<all>",
+        _aid_filter if _aid_filter is not None else "<all>",
+    )
+
+    # --- Resolve output path ---
+    # When path has no file extension (or is an existing directory), generate a
+    # filename from a short hash of the normalized call parameters so that the
+    # same filter combination always produces the same filename.
+    _base = _os.path.basename(path)
+    if not _os.path.splitext(_base)[1] or _os.path.isdir(path):
+        _params_key = (
+            _type,
+            tuple(sorted(_gn_filter)) if _gn_filter is not None else None,
+            experiment_hash,
+            tuple(sorted(_sid_filter)) if _sid_filter is not None else None,
+            tuple(sorted(int(x) for x in _aid_filter)) if _aid_filter is not None else None,
+        )
+        _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
+        path = _os.path.join(path, f"{_phash}_history.{fmt}")
+        logger.info("write_history: auto-generated filename %r (params hash "
+                    "%s).", _os.path.basename(path), _phash)
+    _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
+    logger.info("write_history: output file → %s", _os.path.abspath(path))
+
+    global_rows: list = []
+    sample_rows: list = []
+    instance_rows: list = []
+
+    if write_global:
+        for gn, hashes in _lg._signal_history.items():
+            if _gn_filter is not None and gn not in _gn_filter:
+                continue
+            for h, steps in hashes.items():
+                if experiment_hash is not None and h != experiment_hash:
+                    continue
+                for step, entries in steps.items():
+                    for entry in entries:
+                        val = (
+                            entry.get("metric_value")
+                            if isinstance(entry, dict)
+                            else float(entry)
+                        )
+                        global_rows.append({
+                            "graph_name": gn,
+                            "experiment_hash": h if h is not None else "",
+                            "step": step,
+                            "metric_value": val,
+                        })
+        logger.debug("write_history: collected %d global row(s).",
+                     len(global_rows))
+
+    if write_sample:
+        graphs_s = (
+            list(_gn_filter)
+            if _gn_filter is not None
+            else list(_lg._signal_history_per_sample.keys())
+        )
+        for gn in graphs_s:
+            for sid, step, val, h in _lg.query_per_sample(
+                gn,
+                sample_ids=_sid_filter,
+                exp_hash=experiment_hash,
+            ):
+                sample_rows.append({
+                    "graph_name": gn,
+                    "experiment_hash": h if h is not None else "",
+                    "sample_id": sid,
+                    "step": step,
+                    "metric_value": val,
+                })
+        logger.debug("write_history: collected %d sample row(s) across %d "
+                     "graph(s).", len(sample_rows), len(graphs_s))
+
+    if write_instance:
+        graphs_i = (
+            list(_gn_filter)
+            if _gn_filter is not None
+            else list(_lg._signal_history_per_instance.keys())
+        )
+        # query_per_instance filters by a single (sample_id, annotation_id); iterate when multiple given
+        _sid_iter = _sid_filter if _sid_filter is not None else [None]
+        _aid_iter = _aid_filter if _aid_filter is not None else [None]
+        for gn in graphs_i:
+            for _sid in _sid_iter:
+                for _aid in _aid_iter:
+                    for sid, aid, step, val, h in _lg.query_per_instance(
+                        gn,
+                        sample_id=_sid,
+                        annotation_id=_aid,
+                        exp_hash=experiment_hash,
+                    ):
+                        instance_rows.append({
+                            "graph_name": gn,
+                            "experiment_hash": h if h is not None else "",
+                            "sample_id": sid,
+                            "annotation_id": aid,
+                            "step": step,
+                            "metric_value": val,
+                        })
+        logger.debug("write_history: collected %d instance row(s) across %d "
+                     "graph(s).", len(instance_rows), len(graphs_i))
+
+    if fmt == "json":
+        payload = {}
+        if write_global:
+            payload["global"] = global_rows
+        if write_sample:
+            payload["sample"] = sample_rows
+        if write_instance:
+            payload["instance"] = instance_rows
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(payload, fh, indent=2)
+
+    elif fmt == "csv":
+        _CSV_FIELDS = [
+            "type", "graph_name", "experiment_hash", "step", "metric_value",
+            "sample_id", "annotation_id",
+        ]
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = _csv.DictWriter(fh, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            for row in global_rows:
+                writer.writerow({"type": "global", **row})
+            for row in sample_rows:
+                writer.writerow({"type": "sample", **row})
+            for row in instance_rows:
+                writer.writerow({"type": "instance", **row})
+
+    else:
+        logger.error("write_history: unsupported format %r (expected 'json' "
+                     "or 'csv').", format)
+        raise ValueError(
+            f"write_history: unsupported format {format!r}. Use 'json' or 'csv'."
+        )
+
+    _total = len(global_rows) + len(sample_rows) + len(instance_rows)
+    logger.info(
+        "write_history: wrote %d row(s) (global=%d, sample=%d, instance=%d) "
+        "as %s to %s",
+        _total, len(global_rows), len(sample_rows), len(instance_rows),
+        fmt, _os.path.abspath(path),
+    )
+    if _total == 0:
+        logger.warning(
+            "write_history: output is empty — no rows matched the given "
+            "filters (type=%r, experiment_hash=%r). Check that the signals "
+            "have been logged for the requested experiment hash.",
+            _type, experiment_hash,
+        )
+
+    return path
+
+
+def write_dataframe(
+    path: str | None = None,
+    format: str = "json",
+    columns=None,
+    sample_id=None,
+    instance_id=None,
+) -> str:
+    """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
+
+    Parameters
+    ----------
+    path : str, optional
+        Output file path **or** directory.  When omitted (``None``), the
+        ``root_log_dir`` from the active checkpoint manager is used.
+
+        - If *path* has a file extension the file is written directly.
+        - If *path* has no extension or is an existing directory, a filename is
+          auto-generated as ``<hash>_dataframe.<format>`` inside that directory.
+          ``<hash>`` is an 8-character MD5 hex digest of the normalized call
+          parameters (*columns*, *sample_id*, *instance_id*).  Same filters →
+          same filename (idempotent overwrite); different filters → different
+          file.
+        - The directory is created automatically if it does not exist.
+    format : {"json", "csv"}
+        Output format.  Default ``"json"``.
+    columns : str or list of str, optional
+        Which columns to include (index levels ``sample_id`` / ``annotation_id``
+        are always written).
+
+        - ``None`` / ``"all"`` — every column.
+        - ``"tags"`` — only columns prefixed with ``tag:`` (categorical and
+          boolean tags, e.g. ``tag:loss_shape``, ``tag:weather``).
+        - ``"signals"`` — only columns prefixed with ``signals`` (per-sample
+          signals logged by ``wl.watch_or_edit`` or ``wl.save_signals``).
+        - ``"discarded"`` — only the boolean ``discarded`` column.
+        - A list of any mix of the above group names and/or exact column names.
+    sample_id : str or list of str, optional
+        Restrict to one or more sample IDs (index level 0).  ``None`` keeps all.
+    instance_id : int or list of int, optional
+        Restrict to one or more annotation IDs (index level 1, 0 = sample row,
+        ≥ 1 = per-instance rows).  ``None`` keeps all.
+
+    Returns
+    -------
+    str
+        Absolute path of the file that was written.
+
+    Notes
+    -----
+    The function calls ``flush()`` on the dataframe manager before reading so
+    that any in-flight writes are included in the output.  Pass
+    ``instance_id=0`` to keep only sample-level rows; pass ``instance_id=[1,2]``
+    to keep specific annotation rows.
+
+    Examples
+    --------
+    Dump everything (path inferred from ``root_log_dir``)::
+
+        wl.write_dataframe()
+
+    Dump only tags to CSV::
+
+        wl.write_dataframe("tags.csv", format="csv", columns="tags")
+
+    Dump signals + discarded for specific samples::
+
+        wl.write_dataframe(
+            "subset.json",
+            columns=["signals", "discarded"],
+            sample_id=["img_001", "img_042"],
+        )
+    """
+    import json as _json
+    import os as _os
+    import hashlib as _hashlib
+
+    logger.debug(
+        "write_dataframe called: path=%r, format=%r, columns=%r, "
+        "sample_id=%r, instance_id=%r",
+        path, format, columns, sample_id, instance_id,
+    )
+
+    _dm = get_dataframe()
+    if _dm is None:
+        logger.warning(
+            "write_dataframe: no active dataframe manager; nothing to write. "
+            "Returning path=%r.", path or "."
+        )
+        return path or "."
+
+    # Resolve path: fall back to root_log_dir from the checkpoint manager
+    if path is None:
+        _lg = get_logger()
+        try:
+            _cm = _lg.chkpt_manager if _lg is not None else None
+            _rld = _cm.root_log_dir if _cm is not None else None
+            path = str(_rld) if _rld is not None else "."
+        except Exception as _e:
+            logger.debug("write_dataframe: failed to resolve root_log_dir (%s); "
+                         "falling back to current directory.", _e)
+            path = "."
+        logger.info("write_dataframe: no path given, using output directory %r.", path)
+
+    fmt = format.lower().strip()
+
+    # Normalize sample_id → list[str] or None
+    _sid_filter = None
+    if sample_id is not None:
+        _sid_filter = [str(sample_id)] if isinstance(sample_id, str) else [str(s) for s in sample_id]
+
+    # Normalize instance_id → list[int] or None
+    _iid_filter = None
+    if instance_id is not None:
+        _iid_filter = [int(instance_id)] if isinstance(instance_id, int) else [int(x) for x in instance_id]
+
+    # Normalize columns filter
+    _col_filter = None
+    if columns is not None and not (isinstance(columns, str) and columns.lower() == "all"):
+        _col_filter = [columns] if isinstance(columns, str) else list(columns)
+
+    logger.info(
+        "write_dataframe: resolved filters → columns=%s, sample_id=%s, instance_id=%s",
+        _col_filter if _col_filter is not None else "<all>",
+        _sid_filter if _sid_filter is not None else "<all>",
+        _iid_filter if _iid_filter is not None else "<all>",
+    )
+
+    # Resolve output path (same convention as write_history)
+    _base = _os.path.basename(path)
+    if not _os.path.splitext(_base)[1] or _os.path.isdir(path):
+        _params_key = (
+            "dataframe",
+            tuple(sorted(_col_filter)) if _col_filter is not None else None,
+            tuple(sorted(_sid_filter)) if _sid_filter is not None else None,
+            tuple(sorted(_iid_filter)) if _iid_filter is not None else None,
+        )
+        _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
+        path = _os.path.join(path, f"{_phash}_dataframe.{fmt}")
+        logger.info("write_dataframe: auto-generated filename %r (params hash %s).",
+                    _os.path.basename(path), _phash)
+    _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
+    logger.info("write_dataframe: output file → %s", _os.path.abspath(path))
+
+    # Flush pending buffer to H5 before reading
+    try:
+        _dm.flush()
+        logger.debug("write_dataframe: buffer flushed to H5.")
+    except Exception as _e:
+        logger.warning("write_dataframe: flush failed (%s); proceeding with "
+                       "in-memory data only.", _e)
+
+    # Retrieve the full dataframe
+    try:
+        _df = _dm.get_combined_df()
+    except Exception as _e:
+        logger.error("write_dataframe: failed to retrieve dataframe (%s).", _e)
+        raise
+
+    import pandas as _pd
+    if _df is None or _df.empty:
+        logger.warning("write_dataframe: dataframe is empty; writing empty output.")
+        _df = _pd.DataFrame()
+
+    df_out = _df
+
+    # Filter by sample_id (MultiIndex level 0)
+    if _sid_filter is not None and not df_out.empty:
+        _sid_set = set(_sid_filter)
+        mask = df_out.index.get_level_values(0).astype(str).isin(_sid_set)
+        df_out = df_out.loc[mask]
+        logger.debug("write_dataframe: after sample_id filter → %d row(s).", len(df_out))
+
+    # Filter by instance_id / annotation_id (MultiIndex level 1)
+    if _iid_filter is not None and not df_out.empty:
+        _iid_set = set(_iid_filter)
+        try:
+            mask = df_out.index.get_level_values(1).astype(int).isin(_iid_set)
+            df_out = df_out.loc[mask]
+        except Exception:
+            pass  # non-integer annotation_ids — skip this filter
+        logger.debug("write_dataframe: after instance_id filter → %d row(s).", len(df_out))
+
+    # Filter columns by group or exact name
+    if _col_filter is not None and not df_out.empty:
+        _selected: list = []
+        for _item in _col_filter:
+            _lc = str(_item).lower()
+            if _lc == "tags":
+                _selected += [
+                    c for c in df_out.columns
+                    if str(c).startswith("tag:") or str(c).startswith("TAG:")
+                ]
+            elif _lc == "signals":
+                _selected += [
+                    c for c in df_out.columns
+                    if str(c).lower().startswith("signals")
+                ]
+            elif _lc == "discarded":
+                if "discarded" in df_out.columns:
+                    _selected.append("discarded")
+            else:
+                if _item in df_out.columns:
+                    _selected.append(_item)
+        _selected = list(dict.fromkeys(_selected))  # deduplicate, preserve order
+        df_out = df_out[_selected] if _selected else df_out[[]]
+        logger.debug("write_dataframe: column filter → %d column(s): %s",
+                     len(_selected), _selected)
+
+    # Reset index so sample_id / annotation_id appear as regular columns in output
+    df_out = df_out.reset_index()
+
+    if fmt == "json":
+        _json_str = df_out.to_json(orient="records", default_handler=str)
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(_json.loads(_json_str), fh, indent=2)
+
+    elif fmt == "csv":
+        df_out.to_csv(path, index=False, encoding="utf-8")
+
+    else:
+        logger.error("write_dataframe: unsupported format %r (expected 'json' or 'csv').", format)
+        raise ValueError(
+            f"write_dataframe: unsupported format {format!r}. Use 'json' or 'csv'."
+        )
+
+    logger.info(
+        "write_dataframe: wrote %d row(s) × %d column(s) as %s to %s",
+        len(df_out), len(df_out.columns), fmt, _os.path.abspath(path),
+    )
+    if df_out.empty:
+        logger.warning(
+            "write_dataframe: output is empty — no rows matched the given filters "
+            "(sample_id=%r, instance_id=%r).",
+            _sid_filter, _iid_filter,
+        )
+
+    return path
 
 
 # ##############################################################################################################

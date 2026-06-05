@@ -37,7 +37,7 @@ def _build_pipeline(cfg, device, rank, world_size):
     Returns (trainer, train_loader, criterions, my_uids, all_uids).
     """
     import weightslab as wl
-    from weightslab.utils.logger import LoggerQueue
+    from weightslab.backend.logger import LoggerQueue
     from ultralytics.data.dataset import YOLODataset
     from ultralytics.models.yolo.detect import DetectionTrainer
     from ultralytics.cfg import get_cfg
