@@ -197,58 +197,74 @@ jobs:
 
           PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -n 1 || true)
           if [ -n "$PREV_TAG" ]; then
-            RANGE="${PREV_TAG}..HEAD"
-            PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+            export PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+            export GIT_RANGE="${PREV_TAG}..HEAD"
           else
-            RANGE="HEAD"
-            PREV_TAG_DATE="2020-01-01T00:00:00Z"
+            export PREV_TAG_DATE="2020-01-01T00:00:00Z"
+            export GIT_RANGE="HEAD"
           fi
 
-          export PRS
-          PRS=$(gh pr list --state merged --base "dev" --limit 100 \
-            --json number,title,mergedAt \
-            --jq ".[] | select(.mergedAt > \"${PREV_TAG_DATE}\") | \"- \" + .title" \
-            2>/dev/null || true)
-          [ -z "$PRS" ] && PRS="_(no pull requests found since last release)_"
-
           export COMMITS
-          COMMITS=$(git log "${RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -50 || true)
+          COMMITS=$(git log "${GIT_RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -25 || true)
           [ -z "$COMMITS" ] && COMMITS="_(no commits found)_"
 
-          export CONTRIBUTORS
-          CONTRIBUTORS=$(git log "${RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
-          [ -z "$CONTRIBUTORS" ] && CONTRIBUTORS="_(no contributors found)_"
+          export GIT_AUTHORS
+          GIT_AUTHORS=$(git log "${GIT_RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
+
+          export PRS_JSON
+          PRS_JSON=$(gh pr list --state merged --base "dev" --limit 100 \
+            --json number,title,mergedAt,url,author \
+            2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
-          import os
-          version      = os.environ["VERSION"]
-          pypi_url     = os.environ["PYPI_URL"]
-          prs          = os.environ["PRS"]
-          commits      = os.environ["COMMITS"]
-          contributors = os.environ["CONTRIBUTORS"]
+          import os, json
+          version     = os.environ["VERSION"]
+          pypi_url    = os.environ["PYPI_URL"]
+          prev_date   = os.environ.get("PREV_TAG_DATE", "2020-01-01")
+          commits     = os.environ.get("COMMITS", "_(no commits found)_")
+          git_authors = os.environ.get("GIT_AUTHORS", "")
+          try:
+            prs_data = json.loads(os.environ.get("PRS_JSON", "[]"))
+          except Exception:
+            prs_data = []
+          filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
+          if filtered:
+            prs_lines = "\n".join(
+              f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
+              for pr in filtered
+            )
+            seen, clabels = set(), []
+            for pr in filtered:
+              login = pr.get("author", {}).get("login", "")
+              if login and login not in seen:
+                seen.add(login)
+                clabels.append(f"- [{login}](https://github.com/{login})")
+            contributors = "\n".join(sorted(clabels))
+          else:
+            prs_lines = "_(no pull requests found since last release)_"
+            contributors = git_authors or "_(no contributors found)_"
           body = (
-              f"# **Weightslab {version}**\n\n"
-              "---\n\n"
-              "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
-              " | [Graybx](https://www.graybx.com/)\n\n"
-              "---\n\n"
-              "## Welcome\n\n"
-              f"Welcome to the **{version}** release of WeightsLab. "
-              "This release was made with the idea to improve how you "
-              "Inspect Data, Edit and Evolve Neural Networks, all by Graybx:\n\n"
-              f"{prs}\n\n"
-              "One platform. Unmatched flexibility. Ultimate control.  \n"
-              f"Make sure to install our last version [on TestPyPI]({pypi_url})\n\n"
-              "Happy Training!\n\n"
-              "---\n\n"
-              "## What's Changed precisely:\n\n"
-              f"{commits}\n\n"
-              "---\n\n"
-              "## Thank you!\n\n"
-              f"{contributors}\n"
+            "## **Weightslab**\n\n"
+            "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
+            " | [Graybx](https://www.graybx.com/)\n\n"
+            "---\n\n"
+            "### Welcome\n\n"
+            f"Welcome to the **{version}** release of WeightsLab. "
+            "This release was made with the idea to improve how you "
+            "Inspect Data, Edit and Evolve Neural Networks, all by Graybx:\n\n"
+            f"{prs_lines}\n\n"
+            "One platform. Unmatched flexibility. Ultimate control.  \n"
+            f"Make sure to install our last version [on TestPyPI]({pypi_url})\n\n"
+            "Happy Training!\n\n"
+            "---\n\n"
+            "### What's Changed precisely:\n\n"
+            f"{commits}\n\n"
+            "---\n\n"
+            "### Thank you!\n\n"
+            f"{contributors}\n"
           )
           with open("RELEASE_NOTES.md", "w") as f:
-              f.write(body)
+            f.write(body)
           PYEOF
 
       - name: Create GitHub pre-release
@@ -403,58 +419,74 @@ jobs:
 
           PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -n 1 || true)
           if [ -n "$PREV_TAG" ]; then
-            RANGE="${PREV_TAG}..HEAD"
-            PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+            export PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+            export GIT_RANGE="${PREV_TAG}..HEAD"
           else
-            RANGE="HEAD"
-            PREV_TAG_DATE="2020-01-01T00:00:00Z"
+            export PREV_TAG_DATE="2020-01-01T00:00:00Z"
+            export GIT_RANGE="HEAD"
           fi
 
-          export PRS
-          PRS=$(gh pr list --state merged --base "main" --limit 100 \
-            --json number,title,mergedAt \
-            --jq ".[] | select(.mergedAt > \"${PREV_TAG_DATE}\") | \"- \" + .title" \
-            2>/dev/null || true)
-          [ -z "$PRS" ] && PRS="_(no pull requests found since last release)_"
-
           export COMMITS
-          COMMITS=$(git log "${RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -50 || true)
+          COMMITS=$(git log "${GIT_RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -25 || true)
           [ -z "$COMMITS" ] && COMMITS="_(no commits found)_"
 
-          export CONTRIBUTORS
-          CONTRIBUTORS=$(git log "${RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
-          [ -z "$CONTRIBUTORS" ] && CONTRIBUTORS="_(no contributors found)_"
+          export GIT_AUTHORS
+          GIT_AUTHORS=$(git log "${GIT_RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
+
+          export PRS_JSON
+          PRS_JSON=$(gh pr list --state merged --base "main" --limit 100 \
+            --json number,title,mergedAt,url,author \
+            2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
-          import os
-          version      = os.environ["VERSION"]
-          pypi_url     = os.environ["PYPI_URL"]
-          prs          = os.environ["PRS"]
-          commits      = os.environ["COMMITS"]
-          contributors = os.environ["CONTRIBUTORS"]
+          import os, json
+          version     = os.environ["VERSION"]
+          pypi_url    = os.environ["PYPI_URL"]
+          prev_date   = os.environ.get("PREV_TAG_DATE", "2020-01-01")
+          commits     = os.environ.get("COMMITS", "_(no commits found)_")
+          git_authors = os.environ.get("GIT_AUTHORS", "")
+          try:
+            prs_data = json.loads(os.environ.get("PRS_JSON", "[]"))
+          except Exception:
+            prs_data = []
+          filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
+          if filtered:
+            prs_lines = "\n".join(
+              f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
+              for pr in filtered
+            )
+            seen, clabels = set(), []
+            for pr in filtered:
+              login = pr.get("author", {}).get("login", "")
+              if login and login not in seen:
+                seen.add(login)
+                clabels.append(f"- [{login}](https://github.com/{login})")
+            contributors = "\n".join(sorted(clabels))
+          else:
+            prs_lines = "_(no pull requests found since last release)_"
+            contributors = git_authors or "_(no contributors found)_"
           body = (
-              f"# **Weightslab {version}**\n\n"
-              "---\n\n"
-              "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
-              " | [Graybx](https://www.graybx.com/)\n\n"
-              "---\n\n"
-              "## Welcome\n\n"
-              f"Welcome to the **{version}** release of WeightsLab. "
-              "This release was made with the idea to improve how you "
-              "Inspect Data, Edit and Evolve Neural Networks, all by Graybx:\n\n"
-              f"{prs}\n\n"
-              "One platform. Unmatched flexibility. Ultimate control.  \n"
-              f"Make sure to install our last version [on PyPI]({pypi_url})\n\n"
-              "Happy Training!\n\n"
-              "---\n\n"
-              "## What's Changed precisely:\n\n"
-              f"{commits}\n\n"
-              "---\n\n"
-              "## Thank you!\n\n"
-              f"{contributors}\n"
+            "## **Weightslab**\n\n"
+            "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
+            " | [Graybx](https://www.graybx.com/)\n\n"
+            "---\n\n"
+            "### Welcome\n\n"
+            f"Welcome to the **{version}** release of WeightsLab. "
+            "This release was made with the idea to improve how you "
+            "Inspect Data, Edit and Evolve Neural Networks, all by Graybx:\n\n"
+            f"{prs_lines}\n\n"
+            "One platform. Unmatched flexibility. Ultimate control.  \n"
+            f"Make sure to install our last version [on PyPI]({pypi_url})\n\n"
+            "Happy Training!\n\n"
+            "---\n\n"
+            "### What's Changed precisely:\n\n"
+            f"{commits}\n\n"
+            "---\n\n"
+            "### Thank you!\n\n"
+            f"{contributors}\n"
           )
           with open("RELEASE_NOTES.md", "w") as f:
-              f.write(body)
+            f.write(body)
           PYEOF
 
       - name: Create GitHub release
