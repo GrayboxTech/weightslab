@@ -421,31 +421,11 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     target_step=target_step,
                 )
             else:
-                # force=True: explicit user-driven rollback must override the hash-equality
-                # skip in load_checkpoint. When divergent edits (discards / tags) land between
-                # save and restore, the cached data_hash still equals the saved one (it's only
-                # updated on save), so without force the data snapshot would be silently
-                # skipped — restore would succeed for model/config but leave the dataframe
-                # diverged.
-                success = checkpoint_manager.load_state(experiment_hash, load_logger=False, force=True)
+                success = checkpoint_manager.load_state(experiment_hash, load_logger=False)  # Don't load logger for full restore to avoid overwriting signals already in memory
 
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
-                # Pause after restore so the user explicitly drives the next train
-                # cycle. get_HP_snapshot now strips is_training from the saved config,
-                # so register_hyperparams no longer resurrects a stale is_training=True
-                # on restore — this is the intentional pause, not a workaround for that.
-                if trainer:
-                    try:
-                        trainer.pause()
-                    except Exception as exc:
-                        logger.debug(f"Post-restore re-pause skipped: {exc}")
-                if hp is not None:
-                    try:
-                        hp['is_training'] = False
-                    except Exception:
-                        pass
                 self._log_audit(
                     "checkpoint_restore",
                     "success",

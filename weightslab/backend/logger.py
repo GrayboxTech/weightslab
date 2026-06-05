@@ -517,33 +517,6 @@ class LoggerQueue:
                 result[graph_name][exp_hash] = entries
         return result
 
-    def ingest_per_sample(self, graph_name, exp_hash, triples):
-        """Merge external per-sample (sample_id, step, value) triples into the
-        per-sample history. Idempotent by (sample_id, step) — re-ingesting the same
-        triples is a no-op. Used to fold per-sample signals (e.g. loss) computed on
-        OTHER DDP ranks into rank 0's logger so Break-By-Slice plots cover the whole
-        universe, not just rank 0's shard."""
-        if not triples:
-            return
-        self.graph_names.add(graph_name)
-        self._signal_history_per_sample.setdefault(graph_name, {})
-        if exp_hash not in self._signal_history_per_sample[graph_name]:
-            self._signal_history_per_sample[graph_name][exp_hash] = _make_per_sample_buf()
-        buf = self._signal_history_per_sample[graph_name][exp_hash]
-        idx_map = self._sample_index.setdefault(graph_name, {}).setdefault(exp_hash, {})
-        seen = set(zip(buf["sample_ids"], buf["steps"]))
-        for sid, step, val in triples:
-            sid_s = str(sid)
-            key = (sid_s, int(step))
-            if key in seen:
-                continue
-            row = len(buf["sample_ids"])
-            buf["sample_ids"].append(sid_s)
-            buf["steps"].append(int(step))
-            buf["values"].append(float(val))
-            idx_map.setdefault(sid_s, []).append(row)
-            seen.add(key)
-
     def get_current_signaL_history_per_sample(self, graph_name: str, sample_ids: list = None, exp_hash: str = None):
         """Get current history for a specific signal."""
         if graph_name not in self._signal_history:

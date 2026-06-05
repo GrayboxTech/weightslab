@@ -420,13 +420,8 @@ class CheckpointManager:
 
         return self.current_exp_hash
 
-    # Experiment-STATE keys: runtime state, not config. Excluded from the saved HP
-    # snapshot so a restore's register_hyperparams(saved_config) can't resurrect them
-    # (e.g. overwrite the live is_training). Same set excluded from the experiment hash.
-    _STATE_ONLY_HP = ("is_training", "pause_at_step", "root_log_dir")
-
     def get_HP_snapshot(self) -> Dict[str, Any]:
-        """Get current hyperparameters snapshot from ledger (excluding experiment state)."""
+        """Get current hyperparameters snapshot from ledger."""
         try:
             hp_name = ledgers.resolve_hp_name()
             hp = ledgers.get_hyperparams(hp_name)
@@ -435,14 +430,11 @@ class CheckpointManager:
             if isinstance(hp, ledgers.Proxy) and hasattr(hp, 'get') and callable(hp.get):
                 hp = hp.get()
             if isinstance(hp, dict):
-                snap = dict(hp)
+                return hp
             elif hasattr(hp, '__dict__'):
-                snap = dict(vars(hp))
+                return vars(hp)
             else:
                 return {}
-            for k in self._STATE_ONLY_HP:        # copy first, then strip — never mutate the ledger
-                snap.pop(k, None)
-            return snap
         except Exception:
             return {}
 
@@ -671,17 +663,10 @@ class CheckpointManager:
                     rng_state = capture_rng_state()
                     restore_rng_state(rng_state)
 
-                    # Reset dataloader iterators to sync with new state.
-                    # Lazy invalidate-flag path preferred (see notes above) — avoids
-                    # tearing workers down from a non-owning thread.
+                    # Reset dataloader iterators to sync with new state
                     for loader_name in get_dataloaders():
                         loader = get_dataloader(loader_name)
-                        if loader is None:
-                            continue
-                        inv = getattr(loader, '_invalidate_iter', None)
-                        if callable(inv):
-                            inv()
-                        elif hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
+                        if hasattr(loader, 'reset_iterator') and callable(loader.reset_iterator):
                             loader.reset_iterator()
                             logger.debug(f"Reset iterator for dataloader: {loader_name}")
                 except Exception as e:
@@ -1887,34 +1872,12 @@ class CheckpointManager:
                 if hasattr(model, 'guard_training_context'):
                     del model.guard_training_context
 
-                # Identity-preserving restore: when a live model is already
-                # registered AND its state-dict (keys + tensor shapes) matches
-                # the saved weights, skip register-replace so the apply-weights
-                # branch below can load the saved weights INTO the existing
-                # object in-place. Replacing a live registered object would
-                # orphan captured references (e.g. `model = trainer.model` in a
-                # training loop), leaving the trainer to train a stale model
-                # while pause-checks read the fresh one — so `pause_at_step`
-                # would never match. When arch differs (e.g. neuron surgery
-                # between save and restore) the key set may still match while
-                # shapes don't, so we must compare both — else apply-weights
-                # would shape-mismatch on load_state_dict and hit recovery.
-                _existing = ledgers.get_model()
-                _can_inplace = False
-                try:
-                    _saved_sd = (checkpoint_data.get('weights') or {}).get('model_state_dict') or {}
-                    _exist_sd = _existing.state_dict() if hasattr(_existing, "state_dict") else {}
-                    if _exist_sd and _saved_sd and set(_exist_sd.keys()) == set(_saved_sd.keys()):
-                        _can_inplace = all(
-                            tuple(getattr(_exist_sd[k], "shape", ())) == tuple(getattr(_saved_sd[k], "shape", ()))
-                            for k in _exist_sd
-                        )
-                except Exception:
-                    _can_inplace = False
-                if not _can_inplace:
-                    ledgers.register_model(model)
-                    guard_training_context.model = model  # Train
-                    guard_testing_context.model = model  # Eval
+                # Register in ledger
+                ledgers.register_model(model)
+
+                # Set Model Training Guard
+                guard_training_context.model = model  # Train
+                guard_testing_context.model = model  # Eval
 
                 loaded_step = None
                 if checkpoint_data.get('weights') is not None:
