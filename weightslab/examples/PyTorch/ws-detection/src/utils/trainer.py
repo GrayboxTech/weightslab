@@ -12,21 +12,13 @@ warnings.filterwarnings(
 )
 
 import logging
-import tempfile
-import numpy as np
 import torch
-import yaml
 
 import weightslab as wl
 
-from weightslab.backend.logger import LoggerQueue
-
-from ultralytics.data.dataset import YOLODataset
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.cfg import get_cfg
-from ultralytics.data.utils import check_det_dataset
 
-from utils.data import YOLODatasetWL, _wl_yolo_collate as collate_fn
 from utils.criterions import (
     PerSampleDetectionLoss, PerSampleIoU,
     PerInstanceDetectionLoss, PerInstanceIoU,

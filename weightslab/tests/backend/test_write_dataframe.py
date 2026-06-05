@@ -2,7 +2,7 @@
 import csv
 import json
 import os
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -119,7 +119,6 @@ class TestWriteDataframeCsvStructure:
         _call(tmp_csv, mgr, format="csv")
         with open(tmp_csv) as fh:
             reader = csv.DictReader(fh)
-            rows = list(reader)
         assert "sample_id" in reader.fieldnames
         assert "annotation_id" in reader.fieldnames
 

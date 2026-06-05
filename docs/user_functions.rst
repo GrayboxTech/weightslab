@@ -933,3 +933,113 @@ Export per-instance IoU for a specific box::
         sample_id="img_0042",
         instance_id=1,
     )
+
+write_dataframe
+~~~~~~~~~~~~~~~
+
+**Signature**
+
+.. code-block:: python
+
+   wl.write_dataframe(
+       path=None,
+       format="json",
+       columns=None,
+       sample_id=None,
+       instance_id=None,
+   )
+
+**Purpose**
+
+Dump the WeightsLab sample dataframe to a file for offline analysis.  The
+dataframe holds one row per ``(sample_id, annotation_id)`` pair — sample-level
+metadata sits at ``annotation_id = 0``; per-instance rows (detection boxes,
+segmentation masks) sit at ``annotation_id ≥ 1``.
+
+Before reading, the function calls ``flush()`` on the dataframe manager so any
+pending in-memory writes are persisted first.
+
+**Arguments**
+
+- ``path`` *(str, optional)* — output file path **or** directory.
+
+  - ``None`` (default) — uses ``root_log_dir`` from the active checkpoint
+    manager and auto-generates a filename inside it.
+  - If *path* has a file extension, the file is written directly.
+  - If *path* has no extension or is an existing directory, a filename is
+    **auto-generated** as ``<hash>_dataframe.<format>``, where ``<hash>`` is an
+    8-character MD5 hex digest of the normalized call parameters (*columns*,
+    *sample_id*, *instance_id*).  Same filters → same filename; different
+    filters → different file.
+  - The directory is created automatically if it does not exist.
+
+- ``format`` *({"json", "csv"})* — output format.  Default ``"json"``.
+
+- ``columns`` *(str or list of str, optional)* — which columns to include
+  (index levels ``sample_id`` / ``annotation_id`` are always present):
+
+  - ``None`` / ``"all"`` — every column (default).
+  - ``"tags"`` — only columns prefixed with ``tag:`` (e.g. ``tag:loss_shape``,
+    ``tag:weather``).
+  - ``"signals"`` — only columns prefixed with ``signals`` (per-sample signals
+    logged via ``wl.watch_or_edit`` or ``wl.save_signals``,
+    e.g. ``signals_loss``, ``signals//iou``).
+  - ``"discarded"`` — only the boolean ``discarded`` column.
+  - A list mixing any of the above group names with exact column names.
+
+- ``sample_id`` *(str or list of str, optional)* — restrict to one or more
+  sample IDs (index level 0).  ``None`` keeps all.
+
+- ``instance_id`` *(int or list of int, optional)* — restrict to one or more
+  annotation IDs (index level 1).  ``0`` selects sample-level rows only; ``≥ 1``
+  selects per-instance rows.  ``None`` keeps all.
+
+**JSON output shape**
+
+Each element of the returned JSON array is one row, with ``sample_id`` and
+``annotation_id`` as regular fields:
+
+.. code-block:: json
+
+   [
+     {"sample_id": "img0", "annotation_id": 0, "discarded": false,
+      "tag:loss_shape": "monotonic", "signals_loss": 0.42},
+     {"sample_id": "img0", "annotation_id": 1, "discarded": null,
+      "tag:loss_shape": null, "signals//iou": 0.81}
+   ]
+
+**CSV output shape**
+
+``sample_id`` and ``annotation_id`` appear as the first two columns:
+
+.. code-block:: text
+
+   sample_id,annotation_id,discarded,tag:loss_shape,signals_loss,signals//iou
+   img0,0,False,monotonic,0.42,
+   img0,1,,,,0.81
+
+**Examples**
+
+Dump everything (path inferred from ``root_log_dir``)::
+
+    wl.write_dataframe()
+
+Dump only tags to CSV::
+
+    wl.write_dataframe("tags.csv", format="csv", columns="tags")
+
+Dump signals + discarded flag for two specific samples::
+
+    wl.write_dataframe(
+        "subset.json",
+        columns=["signals", "discarded"],
+        sample_id=["img_001", "img_042"],
+    )
+
+Dump the ``loss_shape`` categorical tag and signals for sample-level rows only
+(``annotation_id = 0``)::
+
+    wl.write_dataframe(
+        columns=["signals", "tag:loss_shape"],
+        instance_id=0,
+    )

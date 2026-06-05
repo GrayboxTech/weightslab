@@ -18,7 +18,7 @@ import numpy as np
 import torch as th
 
 from tqdm import tqdm
-from typing import Callable, Optional, Any, Dict
+from typing import Callable, Optional, Any
 
 from weightslab.backend.dataloader_interface import DataLoaderInterface
 from weightslab.components.checkpoint_manager import CheckpointManager
@@ -1865,12 +1865,6 @@ def save_instance_signals(
 
     step = _get_step(step=step)
 
-    # Normalize batch_ids to list of strings (matching ledger format)
-    if isinstance(batch_ids, th.Tensor):
-        batch_ids_list = [str(i) for i in batch_ids.detach().cpu().tolist()]
-    else:
-        batch_ids_list = [str(i) for i in batch_ids]
-
     # Normalize batch_idx to numpy ints (per-instance → batch-position map)
     if isinstance(batch_idx, th.Tensor):
         batch_idx_np = batch_idx.detach().cpu().numpy().astype(int).flatten()
@@ -3510,7 +3504,6 @@ def write_dataframe(
             sample_id=["img_001", "img_042"],
         )
     """
-    import csv as _csv
     import json as _json
     import os as _os
     import hashlib as _hashlib

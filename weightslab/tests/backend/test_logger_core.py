@@ -16,7 +16,6 @@ Covers all previously untested public methods:
 - load_signal_history (dict format, list format)
 """
 
-import time
 import unittest
 from unittest.mock import MagicMock
 
