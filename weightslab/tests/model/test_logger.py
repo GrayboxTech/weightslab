@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import torch as th
 
-from weightslab.utils.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue
 from weightslab.src import _log_signal
 
 
@@ -13,7 +13,7 @@ class TestLoggerQueue(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-cnn-001"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             logger = LoggerQueue(register=False)
 
         class TinyCNN(th.nn.Module):
@@ -127,7 +127,7 @@ class TestLoggerQueue(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-hash-123"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             logger = LoggerQueue(register=False)
 
         logger.add_scalars(
@@ -176,7 +176,7 @@ class TestLoggerQueue(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-hash-agg"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             logger = LoggerQueue(register=False)
 
         logger.add_scalars(
@@ -222,7 +222,7 @@ class TestLoggerQueue(unittest.TestCase):
         )
 
     def test_get_and_clear_queue_returns_incremental_items(self):
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=None):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=None):
             logger = LoggerQueue(register=False)
 
         logger.add_scalars("acc", {"acc": 0.7}, global_step=1, signal_per_sample={1: 0.7}, aggregate_by_step=False)
@@ -236,7 +236,7 @@ class TestLoggerQueue(unittest.TestCase):
         self.assertEqual(logger.get_and_clear_queue(), [])
 
     def test_load_snapshot_restores_graph_and_histories(self):
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=None):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=None):
             logger = LoggerQueue(register=False)
 
         snapshot = {
@@ -278,7 +278,7 @@ class TestLoggerQueue(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-hash-xyz"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             logger = LoggerQueue(register=False)
 
         logger.add_scalars(
@@ -297,7 +297,7 @@ class TestLoggerQueue(unittest.TestCase):
         self.assertIn(3, snapshot["signal_history"]["accuracy"]["exp-hash-xyz"])
 
     def test_clear_signal_histories_keeps_graph_names(self):
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=None):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=None):
             logger = LoggerQueue(register=False)
 
         logger.graph_names.update({"loss"})
@@ -371,7 +371,7 @@ class TestLoggerQueueEvaluationMetadata(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-base-001"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             logger = LoggerQueue(register=False)
 
         logger.start_evaluation_mode("train_loader", "exp-base-001_1", evaluation_tags=["EvalSubset", "priority"])
@@ -400,7 +400,7 @@ class TestLoggerQueueEvaluationMetadata(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-note-001"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             logger = LoggerQueue(register=False)
 
         logger.add_scalars(
@@ -429,7 +429,7 @@ class TestLoggerQueueEvaluationMetadata(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-audit-001"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             with patch("weightslab.backend.ledgers.get_hyperparams", return_value={"auditor_mode": True}):
                 logger = LoggerQueue(register=False)
 
@@ -459,7 +459,7 @@ class TestLoggerQueueEvaluationMetadata(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-normal-001"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             with patch("weightslab.backend.ledgers.get_hyperparams", return_value={"auditor_mode": False}):
                 logger = LoggerQueue(register=False)
 
@@ -480,7 +480,7 @@ class TestLoggerQueueEvaluationMetadata(unittest.TestCase):
         chkpt = MagicMock()
         chkpt.get_current_experiment_hash.return_value = "exp-eval-001"
 
-        with patch("weightslab.utils.logger.get_checkpoint_manager", return_value=chkpt):
+        with patch("weightslab.backend.logger.get_checkpoint_manager", return_value=chkpt):
             with patch("weightslab.backend.ledgers.get_hyperparams", return_value={"auditor_mode": True}):
                 logger = LoggerQueue(register=False)
 
