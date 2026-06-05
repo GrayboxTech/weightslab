@@ -9,6 +9,10 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Required gate: a lint violation here FAILS the CI run. This job has no
+  # `needs` and nothing `needs` it, so it runs in parallel with install/test/
+  # build — its failure turns the run red but does NOT stop the other jobs from
+  # running (GitHub Actions does not cancel sibling jobs on failure).
   code-quality:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
@@ -67,7 +71,9 @@ jobs:
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
-            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 --fix ./weightslab
+            # No --fix in CI: report and FAIL on any selected violation (a fix in
+            # the ephemeral runner would be discarded and silently pass the gate).
+            echo "$FILES" | xargs ruff check --select F401,F841,E9,F632,F722,F823 --ignore E501 ./weightslab
           fi
 
       - name: Pylint (errors only)
@@ -83,13 +89,15 @@ jobs:
         run: |
           FILES="${{ steps.changed-files.outputs.changed_files }}"
           if [ -n "$FILES" ]; then
+            # Advisory only (|| true): vulture at this confidence yields false
+            # positives on dynamically-referenced code (CLI entry points, gRPC
+            # handlers, framework hooks). Ruff + Pylint above are the hard gates.
             echo "$FILES" | xargs vulture --min-confidence 70 ./weightslab || true
           fi
 
   install:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
-    needs: code-quality
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
