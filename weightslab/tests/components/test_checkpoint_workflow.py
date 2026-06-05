@@ -1277,7 +1277,7 @@ class CheckpointSystemTests(unittest.TestCase):
         print(f"\n[OK] Reloading state B: {hash_a_from_manifest[:16]}...")
 
         # Use new load_state method to load and apply checkpoint in-place
-        success = self.chkpt_manager.load_state(exp_hash=target_hash)
+        _ = self.chkpt_manager.load_state(exp_hash=target_hash)
         # self.assertTrue(success, "State should be loaded successfully")
 
         print(f"[OK] Checkpoint loaded to reach target state {target_hash[:16]}")
