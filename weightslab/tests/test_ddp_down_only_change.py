@@ -41,12 +41,13 @@ class DownOnlyChangeTests(unittest.TestCase):
         # last_seen is an UP column, not DOWN_ONLY → must not trigger invalidation.
         self.assertFalse(m._down_only_changed(self._row("1", last_seen=9)))
 
-    def test_user_tags_change_detected(self):
+    def test_user_tags_not_a_down_only_column(self):
+        # 'user_tags' is no longer a DOWN_ONLY column (parallel_state.DOWN_ONLY ==
+        # {"discarded"}); it was never a real dataframe column — real tags are the
+        # boolean 'tag:xxx' columns. Changing 'user_tags' must therefore NOT trigger
+        # a down-only change / iterator invalidation.
         m = self._mgr_with(self._row("1", user_tags=["a"]))
-        self.assertTrue(m._down_only_changed(self._row("1", user_tags=["a", "b"])))
-        # Same list re-applied → no change (DDP reconcile re-apply).
-        m2 = self._mgr_with(self._row("1", user_tags=["a", "b"]))
-        self.assertFalse(m2._down_only_changed(self._row("1", user_tags=["a", "b"])))
+        self.assertFalse(m._down_only_changed(self._row("1", user_tags=["a", "b"])))
 
     def test_brand_new_down_only_column(self):
         m = self._mgr_with(self._row("1", last_seen=1))   # no 'discarded' col yet

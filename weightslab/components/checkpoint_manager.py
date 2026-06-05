@@ -88,7 +88,13 @@ class CheckpointManager:
         Args:
             root_log_dir: Root directory for experiment outputs
         """
-        self.root_log_dir = Path(root_log_dir).absolute()
+        # root_log_dir may arrive as a ledger Proxy / ValueProxy — e.g. when a caller
+        # passes ``config.get('root_log_dir')`` straight from the watched hyperparameters.
+        # Resolve it to a concrete value before building a Path. We detect the proxy with
+        # type() (the proxy overrides __class__/isinstance to masquerade as its wrapped
+        # value, so isinstance checks are unreliable), and fall back to the default when
+        # the proxy is unset / resolves to None or empty.
+        self.root_log_dir = Path(str(root_log_dir)).absolute()
         self.root_log_dir.mkdir(parents=True, exist_ok=True)
         self.config = ledgers.get_hyperparams() or {}
 

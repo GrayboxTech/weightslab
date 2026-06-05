@@ -17,7 +17,7 @@ from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
-from weightslab.data.data_utils import _filter_columns_by_patterns
+from weightslab.data.data_utils import _filter_columns_by_patterns, get_mask
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -909,6 +909,12 @@ class LedgeredDataFrameManager:
     def _should_array_be_stored(self, array_name) -> bool:
         """Check if array storage is enabled."""
         return array_name in SAMPLES_STATS_TO_SAVE_TO_H5  # Regexed signals are not considered here
+
+    def _is_array_column_to_norm(self, column_name: str, value: Any) -> bool:
+        """True if ``column_name`` is an array column whose ``value`` is an array
+        (or array proxy) that should be normalized before H5 storage. Used by
+        ``_normalize_arrays_for_storage`` to decide which cells to process."""
+        return column_name in self._array_columns and isinstance(value, (np.ndarray, ArrayH5Proxy))
 
     @staticmethod
     def _is_bbox_array(value: Any) -> bool:
