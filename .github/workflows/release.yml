@@ -187,12 +187,76 @@ jobs:
           name: dev-release-dist
           path: dist/
 
-      - name: Create GitHub pre-release with auto-generated notes
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          export VERSION="${GITHUB_REF_NAME}"
+          export VERSION_NO_V="${VERSION#v}"
+          export PYPI_URL="https://test.pypi.org/project/weightslab/${VERSION_NO_V}/"
+
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -n 1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+            PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+          else
+            RANGE="HEAD"
+            PREV_TAG_DATE="2020-01-01T00:00:00Z"
+          fi
+
+          export PRS
+          PRS=$(gh pr list --state merged --base "dev" --limit 100 \
+            --json number,title,mergedAt \
+            --jq ".[] | select(.mergedAt > \"${PREV_TAG_DATE}\") | \"- \" + .title" \
+            2>/dev/null || true)
+          [ -z "$PRS" ] && PRS="_(no pull requests found since last release)_"
+
+          export COMMITS
+          COMMITS=$(git log "${RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -50 || true)
+          [ -z "$COMMITS" ] && COMMITS="_(no commits found)_"
+
+          export CONTRIBUTORS
+          CONTRIBUTORS=$(git log "${RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
+          [ -z "$CONTRIBUTORS" ] && CONTRIBUTORS="_(no contributors found)_"
+
+          python3 << 'PYEOF'
+          import os
+          version      = os.environ["VERSION"]
+          pypi_url     = os.environ["PYPI_URL"]
+          prs          = os.environ["PRS"]
+          commits      = os.environ["COMMITS"]
+          contributors = os.environ["CONTRIBUTORS"]
+          body = (
+              f"# **Weightslab {version}**\n\n"
+              "---\n\n"
+              "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
+              " | [Graybx](https://www.graybx.com/)\n\n"
+              "---\n\n"
+              "## Welcome\n\n"
+              f"Welcome to the **{version}** release of WeightsLab. "
+              "This release was made with the idea to improve how you "
+              "Inspect Data, Edit and Evolve Neural Networks, all by Graybx:\n\n"
+              f"{prs}\n\n"
+              "One platform. Unmatched flexibility. Ultimate control.  \n"
+              f"Make sure to install our last version [on TestPyPI]({pypi_url})\n\n"
+              "Happy Training!\n\n"
+              "---\n\n"
+              "## What's Changed precisely:\n\n"
+              f"{commits}\n\n"
+              "---\n\n"
+              "## Thank you!\n\n"
+              f"{contributors}\n"
+          )
+          with open("RELEASE_NOTES.md", "w") as f:
+              f.write(body)
+          PYEOF
+
+      - name: Create GitHub pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Dev Release ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           prerelease: true
           files: dist/*
         env:
@@ -329,12 +393,76 @@ jobs:
           name: main-release-dist
           path: dist/
 
-      - name: Create GitHub release with auto-generated notes
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          export VERSION="${GITHUB_REF_NAME}"
+          export VERSION_NO_V="${VERSION#v}"
+          export PYPI_URL="https://pypi.org/project/weightslab/${VERSION_NO_V}/"
+
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -n 1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+            PREV_TAG_DATE=$(git log -1 --format="%aI" "${PREV_TAG}" 2>/dev/null || echo "2020-01-01T00:00:00Z")
+          else
+            RANGE="HEAD"
+            PREV_TAG_DATE="2020-01-01T00:00:00Z"
+          fi
+
+          export PRS
+          PRS=$(gh pr list --state merged --base "main" --limit 100 \
+            --json number,title,mergedAt \
+            --jq ".[] | select(.mergedAt > \"${PREV_TAG_DATE}\") | \"- \" + .title" \
+            2>/dev/null || true)
+          [ -z "$PRS" ] && PRS="_(no pull requests found since last release)_"
+
+          export COMMITS
+          COMMITS=$(git log "${RANGE}" --no-merges --format="- %h %s" 2>/dev/null | head -50 || true)
+          [ -z "$COMMITS" ] && COMMITS="_(no commits found)_"
+
+          export CONTRIBUTORS
+          CONTRIBUTORS=$(git log "${RANGE}" --format="%an" 2>/dev/null | sort -u | sed 's/^/- /' | head -30 || true)
+          [ -z "$CONTRIBUTORS" ] && CONTRIBUTORS="_(no contributors found)_"
+
+          python3 << 'PYEOF'
+          import os
+          version      = os.environ["VERSION"]
+          pypi_url     = os.environ["PYPI_URL"]
+          prs          = os.environ["PRS"]
+          commits      = os.environ["COMMITS"]
+          contributors = os.environ["CONTRIBUTORS"]
+          body = (
+              f"# **Weightslab {version}**\n\n"
+              "---\n\n"
+              "Follow us on [LinkedIn](https://www.linkedin.com/company/graybx-com/)"
+              " | [Graybx](https://www.graybx.com/)\n\n"
+              "---\n\n"
+              "## Welcome\n\n"
+              f"Welcome to the **{version}** release of WeightsLab. "
+              "This release was made with the idea to improve how you "
+              "Inspect Data, Edit and Evolve Neural Networks, all by Graybx:\n\n"
+              f"{prs}\n\n"
+              "One platform. Unmatched flexibility. Ultimate control.  \n"
+              f"Make sure to install our last version [on PyPI]({pypi_url})\n\n"
+              "Happy Training!\n\n"
+              "---\n\n"
+              "## What's Changed precisely:\n\n"
+              f"{commits}\n\n"
+              "---\n\n"
+              "## Thank you!\n\n"
+              f"{contributors}\n"
+          )
+          with open("RELEASE_NOTES.md", "w") as f:
+              f.write(body)
+          PYEOF
+
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           prerelease: false
           files: dist/*
         env:
