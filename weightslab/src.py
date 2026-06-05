@@ -533,14 +533,12 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Save per-instance values to dataframe with annotation_id
     if per_instance and instance_values is not None:
         try:
-            origin_resolved = origin or kwargs.get('origin')
             save_instance_signals(
                 signals={reg_name: instance_values},
                 batch_ids=batch_ids,
                 batch_idx=instance_batch_idx,
                 targets=targets,
                 step=step,
-                origin=origin_resolved,
                 log=False,  # already logged sample-level above
             )
         except Exception as e:
@@ -1772,7 +1770,6 @@ def save_instance_signals(
     batch_ids: th.Tensor | np.ndarray | list,
     batch_idx: th.Tensor | np.ndarray | list,
     step: int | None = None,
-    origin: str | None = None,
     targets: th.Tensor | np.ndarray | dict = None,
     log: bool = False,
 ):
@@ -1899,17 +1896,9 @@ def save_instance_signals(
     #
     # annotation_id is 1-based per sample (instance_id 0 is reserved for the sample
     # row): the k-th instance of a given image becomes annotation_id k (1, 2, ...).
-    instance_sample_ids: list[str] = []
-    instance_annotation_ids: list[int] = []
-    counters: Dict[int, int] = {}
-    for pos in batch_idx_np:
-        pos = int(pos)
-        if pos < 0 or pos >= len(batch_ids_list):
-            continue
-        aid = counters.get(pos, 0) + 1  # 1-based (instance_id 0 = sample row)
-        instance_sample_ids.append(batch_ids_list[pos])
-        instance_annotation_ids.append(aid)
-        counters[pos] = aid
+    instance_sample_ids: list[str] = batch_ids
+    instance_annotation_ids: list[int] = batch_idx
+
     if not instance_sample_ids:
         return
 
