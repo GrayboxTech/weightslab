@@ -168,6 +168,13 @@ class WLCompatileDetTrainer(DetectionTrainer):
                     sample_id=['11', '29', '28', '27', '22'],
                     instance_id=[1, 2, 3]
                 )
+                # Dump the sample dataframe: all signals plus the loss_shape categorical tag,
+                wl.write_dataframe(
+                    columns=["signals", "tag:loss_shape"],
+                    format='csv'
+                    # sample_id=['0', '28']
+                    # instance_id=[1, 2],
+                )
 
     def do_validate(self, loader):
         cs, m = self.criterions["val"], self.iou["val"]

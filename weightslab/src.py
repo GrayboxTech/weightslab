@@ -3438,6 +3438,246 @@ def write_history(
     return path
 
 
+def write_dataframe(
+    path: str | None = None,
+    format: str = "json",
+    columns=None,
+    sample_id=None,
+    instance_id=None,
+) -> str:
+    """Dump the WeightsLab sample dataframe to *path* as JSON or CSV.
+
+    Parameters
+    ----------
+    path : str, optional
+        Output file path **or** directory.  When omitted (``None``), the
+        ``root_log_dir`` from the active checkpoint manager is used.
+
+        - If *path* has a file extension the file is written directly.
+        - If *path* has no extension or is an existing directory, a filename is
+          auto-generated as ``<hash>_dataframe.<format>`` inside that directory.
+          ``<hash>`` is an 8-character MD5 hex digest of the normalized call
+          parameters (*columns*, *sample_id*, *instance_id*).  Same filters →
+          same filename (idempotent overwrite); different filters → different
+          file.
+        - The directory is created automatically if it does not exist.
+    format : {"json", "csv"}
+        Output format.  Default ``"json"``.
+    columns : str or list of str, optional
+        Which columns to include (index levels ``sample_id`` / ``annotation_id``
+        are always written).
+
+        - ``None`` / ``"all"`` — every column.
+        - ``"tags"`` — only columns prefixed with ``tag:`` (categorical and
+          boolean tags, e.g. ``tag:loss_shape``, ``tag:weather``).
+        - ``"signals"`` — only columns prefixed with ``signals`` (per-sample
+          signals logged by ``wl.watch_or_edit`` or ``wl.save_signals``).
+        - ``"discarded"`` — only the boolean ``discarded`` column.
+        - A list of any mix of the above group names and/or exact column names.
+    sample_id : str or list of str, optional
+        Restrict to one or more sample IDs (index level 0).  ``None`` keeps all.
+    instance_id : int or list of int, optional
+        Restrict to one or more annotation IDs (index level 1, 0 = sample row,
+        ≥ 1 = per-instance rows).  ``None`` keeps all.
+
+    Returns
+    -------
+    str
+        Absolute path of the file that was written.
+
+    Notes
+    -----
+    The function calls ``flush()`` on the dataframe manager before reading so
+    that any in-flight writes are included in the output.  Pass
+    ``instance_id=0`` to keep only sample-level rows; pass ``instance_id=[1,2]``
+    to keep specific annotation rows.
+
+    Examples
+    --------
+    Dump everything (path inferred from ``root_log_dir``)::
+
+        wl.write_dataframe()
+
+    Dump only tags to CSV::
+
+        wl.write_dataframe("tags.csv", format="csv", columns="tags")
+
+    Dump signals + discarded for specific samples::
+
+        wl.write_dataframe(
+            "subset.json",
+            columns=["signals", "discarded"],
+            sample_id=["img_001", "img_042"],
+        )
+    """
+    import csv as _csv
+    import json as _json
+    import os as _os
+    import hashlib as _hashlib
+
+    logger.debug(
+        "write_dataframe called: path=%r, format=%r, columns=%r, "
+        "sample_id=%r, instance_id=%r",
+        path, format, columns, sample_id, instance_id,
+    )
+
+    _dm = get_dataframe()
+    if _dm is None:
+        logger.warning(
+            "write_dataframe: no active dataframe manager; nothing to write. "
+            "Returning path=%r.", path or "."
+        )
+        return path or "."
+
+    # Resolve path: fall back to root_log_dir from the checkpoint manager
+    if path is None:
+        _lg = get_logger()
+        try:
+            _cm = _lg.chkpt_manager if _lg is not None else None
+            _rld = _cm.root_log_dir if _cm is not None else None
+            path = str(_rld) if _rld is not None else "."
+        except Exception as _e:
+            logger.debug("write_dataframe: failed to resolve root_log_dir (%s); "
+                         "falling back to current directory.", _e)
+            path = "."
+        logger.info("write_dataframe: no path given, using output directory %r.", path)
+
+    fmt = format.lower().strip()
+
+    # Normalize sample_id → list[str] or None
+    _sid_filter = None
+    if sample_id is not None:
+        _sid_filter = [str(sample_id)] if isinstance(sample_id, str) else [str(s) for s in sample_id]
+
+    # Normalize instance_id → list[int] or None
+    _iid_filter = None
+    if instance_id is not None:
+        _iid_filter = [int(instance_id)] if isinstance(instance_id, int) else [int(x) for x in instance_id]
+
+    # Normalize columns filter
+    _col_filter = None
+    if columns is not None and not (isinstance(columns, str) and columns.lower() == "all"):
+        _col_filter = [columns] if isinstance(columns, str) else list(columns)
+
+    logger.info(
+        "write_dataframe: resolved filters → columns=%s, sample_id=%s, instance_id=%s",
+        _col_filter if _col_filter is not None else "<all>",
+        _sid_filter if _sid_filter is not None else "<all>",
+        _iid_filter if _iid_filter is not None else "<all>",
+    )
+
+    # Resolve output path (same convention as write_history)
+    _base = _os.path.basename(path)
+    if not _os.path.splitext(_base)[1] or _os.path.isdir(path):
+        _params_key = (
+            "dataframe",
+            tuple(sorted(_col_filter)) if _col_filter is not None else None,
+            tuple(sorted(_sid_filter)) if _sid_filter is not None else None,
+            tuple(sorted(_iid_filter)) if _iid_filter is not None else None,
+        )
+        _phash = _hashlib.md5(str(_params_key).encode()).hexdigest()[:8]
+        path = _os.path.join(path, f"{_phash}_dataframe.{fmt}")
+        logger.info("write_dataframe: auto-generated filename %r (params hash %s).",
+                    _os.path.basename(path), _phash)
+    _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
+    logger.info("write_dataframe: output file → %s", _os.path.abspath(path))
+
+    # Flush pending buffer to H5 before reading
+    try:
+        _dm.flush()
+        logger.debug("write_dataframe: buffer flushed to H5.")
+    except Exception as _e:
+        logger.warning("write_dataframe: flush failed (%s); proceeding with "
+                       "in-memory data only.", _e)
+
+    # Retrieve the full dataframe
+    try:
+        _df = _dm.get_combined_df()
+    except Exception as _e:
+        logger.error("write_dataframe: failed to retrieve dataframe (%s).", _e)
+        raise
+
+    import pandas as _pd
+    if _df is None or _df.empty:
+        logger.warning("write_dataframe: dataframe is empty; writing empty output.")
+        _df = _pd.DataFrame()
+
+    df_out = _df
+
+    # Filter by sample_id (MultiIndex level 0)
+    if _sid_filter is not None and not df_out.empty:
+        _sid_set = set(_sid_filter)
+        mask = df_out.index.get_level_values(0).astype(str).isin(_sid_set)
+        df_out = df_out.loc[mask]
+        logger.debug("write_dataframe: after sample_id filter → %d row(s).", len(df_out))
+
+    # Filter by instance_id / annotation_id (MultiIndex level 1)
+    if _iid_filter is not None and not df_out.empty:
+        _iid_set = set(_iid_filter)
+        try:
+            mask = df_out.index.get_level_values(1).astype(int).isin(_iid_set)
+            df_out = df_out.loc[mask]
+        except Exception:
+            pass  # non-integer annotation_ids — skip this filter
+        logger.debug("write_dataframe: after instance_id filter → %d row(s).", len(df_out))
+
+    # Filter columns by group or exact name
+    if _col_filter is not None and not df_out.empty:
+        _selected: list = []
+        for _item in _col_filter:
+            _lc = str(_item).lower()
+            if _lc == "tags":
+                _selected += [
+                    c for c in df_out.columns
+                    if str(c).startswith("tag:") or str(c).startswith("TAG:")
+                ]
+            elif _lc == "signals":
+                _selected += [
+                    c for c in df_out.columns
+                    if str(c).lower().startswith("signals")
+                ]
+            elif _lc == "discarded":
+                if "discarded" in df_out.columns:
+                    _selected.append("discarded")
+            else:
+                if _item in df_out.columns:
+                    _selected.append(_item)
+        _selected = list(dict.fromkeys(_selected))  # deduplicate, preserve order
+        df_out = df_out[_selected] if _selected else df_out[[]]
+        logger.debug("write_dataframe: column filter → %d column(s): %s",
+                     len(_selected), _selected)
+
+    # Reset index so sample_id / annotation_id appear as regular columns in output
+    df_out = df_out.reset_index()
+
+    if fmt == "json":
+        _json_str = df_out.to_json(orient="records", default_handler=str)
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(_json.loads(_json_str), fh, indent=2)
+
+    elif fmt == "csv":
+        df_out.to_csv(path, index=False, encoding="utf-8")
+
+    else:
+        logger.error("write_dataframe: unsupported format %r (expected 'json' or 'csv').", format)
+        raise ValueError(
+            f"write_dataframe: unsupported format {format!r}. Use 'json' or 'csv'."
+        )
+
+    logger.info(
+        "write_dataframe: wrote %d row(s) × %d column(s) as %s to %s",
+        len(df_out), len(df_out.columns), fmt, _os.path.abspath(path),
+    )
+    if df_out.empty:
+        logger.warning(
+            "write_dataframe: output is empty — no rows matched the given filters "
+            "(sample_id=%r, instance_id=%r).",
+            _sid_filter, _iid_filter,
+        )
+
+    return path
+
+
 # ##############################################################################################################
 # MAIN EXAMPLES USAGE (can be called from training script to manually set)
 # ##############################################################################################################

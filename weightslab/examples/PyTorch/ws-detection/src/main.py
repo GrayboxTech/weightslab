@@ -127,6 +127,7 @@ def main():
     # 7. Training Loop
     wl.start_training(timeout=None)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
     trainer.train()
+
     wl.keep_serving()
 
 
