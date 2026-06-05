@@ -29,7 +29,7 @@ from weightslab.trainer.trainer_services import grpc_serve
 from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.utils.logs import set_log_directory
 from weightslab.utils.tools import detach_to_cpu
-from weightslab.utils.logger import LoggerQueue
+from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.backend.ledgers import register_signal
