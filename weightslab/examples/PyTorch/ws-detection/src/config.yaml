@@ -2,15 +2,13 @@
 device: auto
 experiment_name: det_YOLO_usecase
 training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
-root_log_dir: .  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
+# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
 
 # Checkppoint Manager
 checkpoint_manager:
-  load_config: true
-  load_data: true
-  load_model: false               # rebuild architecture from code (preserves model identity); don't load the structure pkl
-  dump_model_architecture: false  # skip the architecture pickle (holds signal ContextVars; unneeded — no model surgery)
-  # dump_model_state + dump_optimizer_state default true -> keep the .pt resume bundle (weights + optimizer + RNG + loader state)
+  load_config: true  # Disable loading previous checkpoint configuration to allow for changes in the current config.yaml file
+  load_data: true  # Disable loading previous checkpoint data to allow for changes in the current config.yaml file
+  load_model: true  # Disable loading previous checkpoint model weights and archi. to allow for changes in the current config.yaml file
 
 # Model config.
 model:
@@ -39,9 +37,9 @@ ledger_flush_interval: 60.0
 
 # Data
 num_classes: 2
-image_size: 640
+image_size: 320
 # data_root: ./data/data.yaml  # Uncomment and set the path to your data.yaml file.
-data_root: /home/rotaru/Desktop/GRAYBOX/datasets/TrespassColor.v6i.yolov8/data.yaml
+data_root: C:\Users\GuillaumePELLUET\Documents\Codes\weightslab_kitchen\guillaume_playground\ws-detection\data\data.yaml
 data:
   train_loader:
     batch_size: 4
