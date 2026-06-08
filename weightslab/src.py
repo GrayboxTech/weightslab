@@ -738,7 +738,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Architecture operations require dependencies to be available.
         # Keep backward-compatible behavior by enabling dependency computation
         # unless the caller explicitly disables it.
-        kwargs.setdefault('compute_dependencies', True)
         forced_model_wrapping = kwargs.pop('forced_model_wrapping', False)
 
         # Now construct the wrapper and let it register into the ledger.
