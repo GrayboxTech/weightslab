@@ -19,6 +19,20 @@ from ultralytics.data.dataset import YOLODataset
 from ultralytics.utils.ops import xywh2xyxy, xywhn2xyxy
 
 
+def _to_six_col(xyxy: np.ndarray, cls: np.ndarray) -> np.ndarray:
+    """Pack `(N, 4)` xyxy + class ids into the studio's `[N, 6]` target row:
+    `[x1, y1, x2, y2, class_id, confidence=1.0]`. Empty input → `(0, 6)`.
+    Confidence is fixed at 1.0 because targets are ground truth."""
+    n = xyxy.shape[0]
+    if n == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+    cls_col = cls.reshape(-1, 1).astype(np.float32)
+    return np.concatenate(
+        [xyxy.astype(np.float32), cls_col, np.ones((n, 1), dtype=np.float32)],
+        axis=1,
+    )
+
+
 class WLAwareDataset(YOLODataset):
     """YOLODataset that also speaks WL's preview protocol via `get_items()`."""
 
@@ -52,15 +66,8 @@ class WLAwareDataset(YOLODataset):
         r = min(new / h0, new / w0)
         nw, nh = round(w0 * r), round(h0 * r)
         padw, padh = (new - nw) / 2, (new - nh) / 2
-        bboxes_lb = xywhn2xyxy(lab["bboxes"], w=nw, h=nh, padw=padw, padh=padh) / float(new)
-
-        # Unified 6-col bbox: [x1, y1, x2, y2, class_id, confidence=1.0].
-        n = bboxes_lb.shape[0]
-        cls = lab["cls"].reshape(-1, 1).astype(np.float32)
-        target = (
-            np.concatenate([bboxes_lb.astype(np.float32), cls, np.ones((n, 1), dtype=np.float32)], axis=1)
-            if n > 0 else np.zeros((0, 6), dtype=np.float32)
-        )
+        xyxy = xywhn2xyxy(lab["bboxes"], w=nw, h=nh, padw=padw, padh=padh) / float(new)
+        target = _to_six_col(xyxy, lab["cls"])
         return None, str(i), target, {"img_path": lab["im_file"], "cls": lab["cls"]}
 
     def get_items(self, i, include_metadata=False, include_labels=False, include_images=False):
@@ -71,7 +78,6 @@ class WLAwareDataset(YOLODataset):
             if include_metadata else {}
         )
         labels = None
-
         if include_labels:
             xyxy = xywh2xyxy(data["bboxes"])
             xyxy_np = (
@@ -79,11 +85,5 @@ class WLAwareDataset(YOLODataset):
                 if hasattr(xyxy, "detach")
                 else np.asarray(xyxy, dtype=np.float32)
             )
-            cls = np.asarray(data["cls"]).reshape(-1, 1).astype(np.float32)
-            n = xyxy_np.shape[0]
-            labels = (
-                np.concatenate([xyxy_np, cls, np.ones((n, 1), dtype=np.float32)], axis=1)
-                if n > 0 else np.zeros((0, 6), dtype=np.float32)
-            )
-
+            labels = _to_six_col(xyxy_np, np.asarray(data["cls"]))
         return image, str(i), labels, metadata
