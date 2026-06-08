@@ -113,21 +113,28 @@ def _make_channels(signals):
 
 def _ship_round(signals, channels, batch):
     ids = batch["ids"]
-    for s in signals:
-        v = s.reduce(batch)
-        if v is None:
-            continue
-        kw = {"batch_ids": ids}
-        if s.preds is not None:
-            p = s.preds(batch)
-            if p is not None:
-                kw["preds"] = p
-        channels[s.name](v, **kw)
+    # Wrap reduce/preds in no_grad — signal capture is observational; running
+    # `Detect._inference` + NMS inside the train autograd graph creates tensors
+    # the graph keeps alive until backward, which compounds across steps and
+    # OOMs at batch sizes the model alone would fit.
+    with th.no_grad():
+        for s in signals:
+            v = s.reduce(batch)
+            if v is None:
+                continue
+            kw = {"batch_ids": ids}
+            if s.preds is not None:
+                p = s.preds(batch)
+                if p is not None:
+                    kw["preds"] = p
+            channels[s.name](v, **kw)
 
 
 def install_train_pipeline(model, signals: list[Signal]):
     """Sync point: `criterion.get_assigned_targets_and_loss(preds, batch)`."""
-    crit = model.criterion if getattr(model, "criterion", None) is not None else model.init_criterion()
+    if getattr(model, "criterion", None) is None:
+        model.criterion = model.init_criterion()
+    crit = model.criterion
     channels = _make_channels(signals)
     _orig = crit.get_assigned_targets_and_loss
     def _ship(preds, batch):
@@ -177,7 +184,9 @@ def _overlay_dict(nms_preds, img_hw):
 def default_train_signals(model) -> list[Signal]:
     """The 4 default UL-detection train signals: per-sample cls/box/dfl +
     live preds overlay. Compose with user signals: `default_train_signals(m) + [Signal(...)]`."""
-    crit = model.criterion if getattr(model, "criterion", None) is not None else model.init_criterion()
+    if getattr(model, "criterion", None) is None:
+        model.criterion = model.init_criterion()
+    crit = model.criterion
     bl = crit.bbox_loss
     detect_head = next((m for m in model.modules() if isinstance(m, Detect)), None)
 
