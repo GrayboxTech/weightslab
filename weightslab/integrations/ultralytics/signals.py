@@ -1,35 +1,29 @@
-"""Per-sample TRAIN + VAL signal installers — pure taps over UL, no math
-reimplementation. Every value shipped is captured from UL's existing
-computation (forward hooks, pre-hooks, or a thin tap that replaces a
-function reference with one that records its output before returning it).
+"""Per-sample signal pipelines for UL detection — pure taps over UL, no math
+reimplementation.
 
-Train signals (all routed through `get_assigned_targets_and_loss` after UL
-ran the step):
-  * train/cls_per_sample — `crit.bce` forward hook captures (bs, na, nc)
-    BCE-per-anchor; sum(1,2) → per-image.
-  * train/box_per_sample — `bbox_loss` pre-hook captures fg_mask +
-    target_scores; a tap on `ul_loss.bbox_iou` captures the per-fg-anchor
-    IoU UL computes once; we form `(1-iou)*weight` (UL's exact box-term
-    formula) and scatter per image.
-  * train/dfl_per_sample — `bbox_loss.dfl_loss` forward hook captures the
-    per-fg-anchor DFL tensor; multiply by weight (the same one UL uses)
-    and scatter per image.
-  * train preds overlay — `Detect` head forward hook captures the raw
-    training-mode preds dict (UL training skips decode). We then call
-    UL's own `Detect._inference` + `non_max_suppression` for decode/NMS.
+Each signal is a `Signal(name, flag, reduce, preds=None)` record. Capture
+primitives (`fwd_hook`, `pre_hook`, `fn_tap`, `per_call_buffer`) install a
+hook on a UL internal and return a zero-arg getter for the captured state;
+closures bind the getter into each signal's `reduce` / `preds` function.
 
-Val signals:
-  * val preds overlay — wrap `validator.update_metrics`; preds already
-    NMS'd by UL. Pure tap.
-  * val/iou_per_sample — wrap `validator._process_batch` (UL calls it per
-    image inside update_metrics) and use UL's own `box_iou` once to
-    derive a per-image mean-of-max-IoU-per-GT scalar. Reduction only.
+A *pipeline* (`install_train_pipeline`, `install_val_pipeline`) is the one
+imperative bit: it wraps a UL sync method, runs each signal's reduce after
+the original ran, and ships to a WL channel keyed by `batch["ids"]`.
 
-Discarding is enforced at the data sampler (deny-aware sampler excludes
-discarded samples from batches), so signals always log the true loss of
-whatever samples are actually in the batch.
+Adding signal N+1 is appending one `Signal(...)` record to a list. No edits
+to the orchestrator, no new hook wiring unless the new signal taps a place
+no existing signal taps yet.
+
+Public:
+    Signal, fwd_hook, pre_hook, fn_tap, per_call_buffer,
+    install_train_pipeline, install_val_pipeline,
+    default_train_signals, default_val_signals,
+    install_per_sample_signals, install_per_sample_val_signals,
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 import torch as th
 from torch.nn import Identity
@@ -44,9 +38,120 @@ import weightslab as wl
 from ._utils import normalize_post_nms_preds
 
 
-_NMS_CONF = 1e-4
-_NMS_IOU = 0.45
+# ─── capture primitives ────────────────────────────────────────────────
+# Each returns a zero-arg getter for the captured value. The hook itself
+# fires inside UL's call; the getter is read inside our reduce/preds.
 
+def fwd_hook(module) -> Callable[[], Any]:
+    """Capture the forward-pass output of `module`."""
+    box = {"v": None}
+    def _h(_m, _i, out): box["v"] = out.detach() if hasattr(out, "detach") else out
+    module.register_forward_hook(_h)
+    return lambda: box["v"]
+
+
+def pre_hook(module) -> Callable[[], Any]:
+    """Capture the positional args passed to `module.forward`."""
+    box = {"v": None}
+    def _h(_m, args): box["v"] = args
+    module.register_forward_pre_hook(_h)
+    return lambda: box["v"]
+
+
+def fn_tap(namespace, name: str) -> Callable[[], Any]:
+    """Tap a function reference in a module namespace (e.g.
+    `ul_loss.bbox_iou`). UL still does the call; we record the result."""
+    box = {"v": None}
+    _orig = getattr(namespace, name)
+    def _t(*a, **kw):
+        out = _orig(*a, **kw)
+        box["v"] = out.detach() if hasattr(out, "detach") else out
+        return out
+    setattr(namespace, name, _t)
+    return lambda: box["v"]
+
+
+def per_call_buffer(obj, name: str, mapper: Callable[[tuple, Any], Any]) -> Callable[[], list]:
+    """Accumulate one entry per call of `obj.name` via `mapper(args, ret)`.
+    Returns a getter for the accumulated list — caller is responsible for
+    clearing between rounds."""
+    buf: list = []
+    _orig = getattr(obj, name)
+    def _t(*a, **kw):
+        out = _orig(*a, **kw)
+        buf.append(mapper(a, out))
+        return out
+    setattr(obj, name, _t)
+    return lambda: buf
+
+
+# ─── signal record ─────────────────────────────────────────────────────
+
+@dataclass
+class Signal:
+    """A per-sample signal.
+
+      * `reduce(batch)` returns a (B,) tensor of per-image scalars, or
+        `None` to skip this round (e.g. no fg-anchors this step).
+      * `preds(batch)` optionally returns the studio-overlay dict
+        `{"bboxes": list_of_tensors}` to attach via the channel's
+        `preds=` kwarg.
+    """
+    name: str
+    flag: str  # "loss" | "metric"
+    reduce: Callable[[dict], Optional[th.Tensor]]
+    preds: Optional[Callable[[dict], Optional[dict]]] = None
+
+
+# ─── orchestrators ─────────────────────────────────────────────────────
+
+def _make_channels(signals):
+    return {s.name: wl.watch_or_edit(
+                Identity(), flag=s.flag, name=s.name, per_sample=True, log=True)
+            for s in signals}
+
+
+def _ship_round(signals, channels, batch):
+    ids = batch["ids"]
+    for s in signals:
+        v = s.reduce(batch)
+        if v is None:
+            continue
+        kw = {"batch_ids": ids}
+        if s.preds is not None:
+            p = s.preds(batch)
+            if p is not None:
+                kw["preds"] = p
+        channels[s.name](v, **kw)
+
+
+def install_train_pipeline(model, signals: list[Signal]):
+    """Sync point: `criterion.get_assigned_targets_and_loss(preds, batch)`."""
+    crit = model.criterion if getattr(model, "criterion", None) is not None else model.init_criterion()
+    channels = _make_channels(signals)
+    _orig = crit.get_assigned_targets_and_loss
+    def _ship(preds, batch):
+        res = _orig(preds, batch)
+        if model.training:
+            _ship_round(signals, channels, batch)
+        return res
+    crit.get_assigned_targets_and_loss = _ship
+
+
+def install_val_pipeline(validator, signals: list[Signal]):
+    """Sync point: `validator.update_metrics(preds, batch)`.
+    Note: `preds` is exposed to signal reducers by stashing on the validator
+    before the original call — signals that need it read `validator._wl_preds`."""
+    channels = _make_channels(signals)
+    _orig = validator.update_metrics
+    def _ship(preds, batch):
+        validator._wl_preds = preds  # exposed to signal reducers/predsers
+        _ship_round(signals, channels, batch)
+        return _orig(preds, batch)
+    validator.update_metrics = _ship
+
+
+# ─── helpers used by the default packs ─────────────────────────────────
 
 def _scatter(per_fg, img_of_fg, bs):
     out = th.zeros(bs, device=per_fg.device, dtype=per_fg.dtype)
@@ -54,131 +159,128 @@ def _scatter(per_fg, img_of_fg, bs):
     return out
 
 
-def _overlay_from_nms(nms_preds, img_shape):
-    """UL post-NMS → studio overlay (xyxy normalized + cls + score)."""
-    _, _, h, w = img_shape
+def _overlay_dict(nms_preds, img_hw):
+    h, w = img_hw
     scale = th.tensor([w, h, w, h], dtype=th.float32)
+    out = []
+    for p in normalize_post_nms_preds(nms_preds):
+        if p.numel() == 0:
+            out.append(th.zeros((0, 6)))
+            continue
+        pc = p.detach().cpu().float()
+        out.append(th.cat([pc[:, :4] / scale, pc[:, 5:6], pc[:, 4:5]], -1))
+    return {"bboxes": out}
+
+
+# ─── default signal packs ──────────────────────────────────────────────
+
+def default_train_signals(model) -> list[Signal]:
+    """The 4 default UL-detection train signals: per-sample cls/box/dfl +
+    live preds overlay. Compose with user signals: `default_train_signals(m) + [Signal(...)]`."""
+    crit = model.criterion if getattr(model, "criterion", None) is not None else model.init_criterion()
+    bl = crit.bbox_loss
+    detect_head = next((m for m in model.modules() if isinstance(m, Detect)), None)
+
+    get_bce = fwd_hook(crit.bce)
+    get_dfl = fwd_hook(bl.dfl_loss)
+    get_iou = fn_tap(ul_loss, "bbox_iou")
+    get_bl_args = pre_hook(bl)
+    get_det = fwd_hook(detect_head) if detect_head is not None else None
+
+    def _fg_state():
+        args = get_bl_args()
+        if args is None:
+            return None
+        fg = args[6]
+        if not fg.any():
+            return None
+        weight = args[4].sum(-1)[fg].unsqueeze(-1)
+        return fg, weight, fg.nonzero(as_tuple=False)[:, 0]
+
+    def cls_r(batch):
+        bce = get_bce()
+        return bce.sum(dim=(1, 2)) if bce is not None else None
+
+    def box_r(batch):
+        st = _fg_state()
+        iou = get_iou()
+        if st is None or iou is None:
+            return None
+        fg, w, img_of_fg = st
+        return _scatter(((1.0 - iou) * w).detach(), img_of_fg, fg.shape[0])
+
+    def dfl_r(batch):
+        st = _fg_state()
+        dfl = get_dfl()
+        if st is None or dfl is None:
+            return None
+        fg, w, img_of_fg = st
+        return _scatter((dfl * w).detach(), img_of_fg, fg.shape[0])
+
+    def overlay_p(batch):
+        if get_det is None:
+            return None
+        raw = get_det()
+        if raw is None:
+            return None
+        try:
+            y = detect_head._inference(raw)
+            nms = non_max_suppression(y, conf_thres=1e-4, iou_thres=0.45)
+            return _overlay_dict(nms, batch["img"].shape[-2:])
+        except Exception:
+            return None
+
     return [
-        th.cat([(p[:, :4] / scale).cpu().float(), p[:, 5:6].cpu(), p[:, 4:5].cpu()], -1)
-        if p.numel() else th.zeros((0, 6))
-        for p in normalize_post_nms_preds(nms_preds)
+        Signal("train/cls_per_sample", "loss", reduce=cls_r, preds=overlay_p),
+        Signal("train/box_per_sample", "loss", reduce=box_r),
+        Signal("train/dfl_per_sample", "loss", reduce=dfl_r),
     ]
 
 
+def default_val_signals(validator) -> list[Signal]:
+    """The 2 default UL-detection val signals: per-image IoU + preds overlay."""
+    def _iou_mapper(args, _out):
+        predn, pbatch = args
+        gt, pb = pbatch["bboxes"], predn["bboxes"]
+        if gt.numel() > 0 and pb.numel() > 0:
+            return float(ul_box_iou(gt, pb).max(dim=1).values.mean())
+        if gt.numel() == 0 and pb.numel() == 0:
+            return 1.0
+        return 0.0
+
+    get_iou_buf = per_call_buffer(validator, "_process_batch", _iou_mapper)
+
+    def iou_r(batch):
+        buf = get_iou_buf()
+        if len(buf) != batch["img"].shape[0]:
+            buf.clear()
+            return None
+        v = th.tensor(buf)
+        buf.clear()
+        return v
+
+    def overlay_p(batch):
+        preds = getattr(validator, "_wl_preds", None)
+        return _overlay_dict(preds, batch["img"].shape[-2:]) if preds is not None else None
+
+    def zero_r(batch):
+        return th.zeros(batch["img"].shape[0])
+
+    return [
+        Signal("val/iou_per_sample",   "metric", reduce=iou_r),
+        Signal("val/preds_per_sample", "metric", reduce=zero_r, preds=overlay_p),
+    ]
+
+
+# ─── top-level API (back-compat with the existing trainer.py calls) ────
+
 def install_per_sample_signals(model):
-    """Install per-sample TRAIN signals and live train preds overlay."""
-    crit = (model.criterion if getattr(model, "criterion", None) is not None
-            else model.init_criterion())
-    bl = crit.bbox_loss
-    detect_head = next((m for m in model.modules() if isinstance(m, Detect)), None)
-    ch = {n: wl.watch_or_edit(Identity(), flag="loss",
-                              name=f"train/{n}_per_sample",
-                              per_sample=True, log=True)
-          for n in ("cls", "box", "dfl")}
-
-    # --- taps: capture UL's intermediates without rerunning the math ---
-    def _bce_hook(m, inp, out): crit._wl_bce = out.detach()
-    crit.bce.register_forward_hook(_bce_hook)
-
-    def _bl_pre(m, args):
-        # args = (pred_dist, pred_bboxes, anchor_points, target_bboxes,
-        #         target_scores, target_scores_sum, fg_mask, imgsz, stride)
-        crit._wl_fg_mask = args[6]
-        crit._wl_target_scores = args[4]
-    bl.register_forward_pre_hook(_bl_pre)
-
-    def _dfl_hook(m, inp, out): crit._wl_dfl_per_fg = out.detach()
-    bl.dfl_loss.register_forward_hook(_dfl_hook)
-
-    # Tap UL's bbox_iou (used inside bbox_loss.forward) — capture the per-fg
-    # IoU UL computes once; do NOT recompute. Restored on first replacement
-    # if already tapped to keep idempotency.
-    _orig_bbox_iou = getattr(ul_loss, "_wl_orig_bbox_iou", ul_loss.bbox_iou)
-    ul_loss._wl_orig_bbox_iou = _orig_bbox_iou
-    def _bbox_iou_tap(*a, **kw):
-        out = _orig_bbox_iou(*a, **kw)
-        crit._wl_iou_per_fg = out.detach()
-        return out
-    ul_loss.bbox_iou = _bbox_iou_tap
-
-    if detect_head is not None:
-        def _det_hook(m, inp, out):
-            crit._wl_raw_preds = out if m.training else None
-        detect_head.register_forward_hook(_det_hook)
-
-    _orig = crit.get_assigned_targets_and_loss
-    def _ship(preds, batch):
-        for k in ("_wl_bce", "_wl_fg_mask", "_wl_target_scores",
-                  "_wl_dfl_per_fg", "_wl_iou_per_fg", "_wl_raw_preds"):
-            setattr(crit, k, None)
-        res = _orig(preds, batch)
-        if not model.training or crit._wl_bce is None:
-            return res
-
-        ids = batch["ids"]
-        bs = batch["img"].shape[0]
-
-        cls_kwargs = {"batch_ids": ids}
-        if detect_head is not None and crit._wl_raw_preds is not None:
-            try:
-                y = detect_head._inference(crit._wl_raw_preds)
-                nms = non_max_suppression(y, conf_thres=_NMS_CONF, iou_thres=_NMS_IOU)
-                cls_kwargs["preds"] = {"bboxes": _overlay_from_nms(nms, batch["img"].shape)}
-            except Exception:
-                pass
-        ch["cls"](crit._wl_bce.sum(dim=(1, 2)), **cls_kwargs)
-
-        # per-image box/dfl: scatter UL's per-fg terms into a (bs,) vector.
-        fg = crit._wl_fg_mask
-        if fg is not None and fg.any() and crit._wl_iou_per_fg is not None:
-            img_of_fg = fg.nonzero(as_tuple=False)[:, 0]
-            weight = crit._wl_target_scores.sum(-1)[fg].unsqueeze(-1)
-            box_term = ((1.0 - crit._wl_iou_per_fg) * weight).detach()
-            ch["box"](_scatter(box_term, img_of_fg, bs), batch_ids=ids)
-            if crit._wl_dfl_per_fg is not None:
-                dfl_term = (crit._wl_dfl_per_fg * weight).detach()
-                ch["dfl"](_scatter(dfl_term, img_of_fg, bs), batch_ids=ids)
-        return res
-    crit.get_assigned_targets_and_loss = _ship
+    """Default train pipeline. Equivalent to:
+        install_train_pipeline(model, default_train_signals(model))"""
+    install_train_pipeline(model, default_train_signals(model))
 
 
 def install_per_sample_val_signals(validator):
-    """Install per-sample VAL signals (preds overlay + per-image IoU)."""
-    preds_ch = wl.watch_or_edit(Identity(), flag="metric",
-                                name="val/preds_per_sample",
-                                per_sample=True, log=True)
-    iou_ch = wl.watch_or_edit(Identity(), flag="metric",
-                              name="val/iou_per_sample",
-                              per_sample=True, log=True)
-
-    # _process_batch runs per-image inside update_metrics; tap to capture
-    # one per-image IoU scalar (uses UL's box_iou — pure reduction).
-    state = {"per_img_iou": []}
-    _orig_proc = validator._process_batch
-    def _proc_tap(predn, pbatch):
-        out = _orig_proc(predn, pbatch)
-        gt = pbatch["bboxes"]
-        pb = predn["bboxes"]
-        if gt.numel() > 0 and pb.numel() > 0:
-            iou = ul_box_iou(gt, pb)
-            state["per_img_iou"].append(float(iou.max(dim=1).values.mean()))
-        elif gt.numel() == 0 and pb.numel() == 0:
-            state["per_img_iou"].append(1.0)  # vacuously correct
-        else:
-            state["per_img_iou"].append(0.0)
-        return out
-    validator._process_batch = _proc_tap
-
-    _orig_update = validator.update_metrics
-    def _tap(preds, batch):
-        state["per_img_iou"].clear()
-        _orig_update(preds, batch)
-        ids = batch["ids"]
-        preds_ch(
-            th.zeros(batch["img"].shape[0]),
-            batch_ids=ids,
-            preds={"bboxes": _overlay_from_nms(preds, batch["img"].shape)},
-        )
-        if len(state["per_img_iou"]) == batch["img"].shape[0]:
-            iou_ch(th.tensor(state["per_img_iou"]), batch_ids=ids)
-    validator.update_metrics = _tap
+    """Default val pipeline. Equivalent to:
+        install_val_pipeline(validator, default_val_signals(validator))"""
+    install_val_pipeline(validator, default_val_signals(validator))

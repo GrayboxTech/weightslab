@@ -67,7 +67,7 @@ def main():
         epochs=1000 if max_steps is None else max(1, int(max_steps)),
         batch=batch_size,
         device=device,
-        resume=False, cache=False, optimizer="SGD", lr0=0.001,
+        resume=False, cache=False, optimizer="SGD", lr0=0.001, amp=False,
         # All augs off for clean sample↔gt association in studio.
         mosaic=0.0, mixup=0.0, copy_paste=0.0,
         hsv_h=0.0, hsv_s=0.0, hsv_v=0.0,

@@ -56,6 +56,7 @@ class WLAwareTrainer(DetectionTrainer):
             trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
             trainer.model = wl.watch_or_edit(
                 trainer.model, flag="model", forced_model_wrapping=True,
+                compute_dependencies=False,
             )
 
             install_per_sample_signals(underlying)
