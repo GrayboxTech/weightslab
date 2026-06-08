@@ -39,21 +39,32 @@ import weightslab as wl
 from ._utils import normalize_post_nms_preds
 
 
-# ─── overlay tunables ──────────────────────────────────────────────────
-# Train overlay runs UL's own `non_max_suppression` over the live model
-# outputs; these knobs override `model.args.{conf,iou}` (which UL only
-# populates at predict/val time, not during training). Module-level so
-# users can rebind without subclassing.
+# ─── overlay fallback tunables ─────────────────────────────────────────
+# Train overlay's NMS pulls thresholds from `model.args.{conf,iou}` (the
+# values you'd pass through `YOLO.train(conf=..., iou=...)`). These
+# fallbacks kick in only if `model.args.{conf,iou}` is `None` — which
+# happens for training because UL only auto-populates those for predict.
 #
-#   OVERLAY_CONF_THRES — tiny so early-epoch overlays aren't empty.
-#                        Standard UL inference default would be 0.25,
-#                        which hides the model entirely while it learns.
-#   OVERLAY_IOU_THRES  — matches UL's default inference IoU.
-#   OVERLAY_MAX_DETS   — readability cap; UL's NMS otherwise produces
-#                        up to 300 boxes per image which floods studio.
-OVERLAY_CONF_THRES = 1e-4
-OVERLAY_IOU_THRES = 0.45
+#   OVERLAY_CONF_FALLBACK — tiny so early-epoch overlays aren't empty.
+#                           UL's predict default of 0.25 would hide the
+#                           model entirely while it's still learning.
+#   OVERLAY_IOU_FALLBACK  — matches UL's default inference IoU.
+#   OVERLAY_MAX_DETS      — readability cap; UL's NMS otherwise produces
+#                           up to 300 boxes per image, flooding the studio.
+OVERLAY_CONF_FALLBACK = 1e-4
+OVERLAY_IOU_FALLBACK = 0.45
 OVERLAY_MAX_DETS = 50
+
+
+def _overlay_nms_thresholds(model):
+    """Read `(conf, iou)` from `model.args` with module fallback."""
+    args = getattr(model, "args", None)
+    conf = getattr(args, "conf", None) if args is not None else None
+    iou = getattr(args, "iou", None) if args is not None else None
+    return (
+        conf if conf is not None else OVERLAY_CONF_FALLBACK,
+        iou if iou is not None else OVERLAY_IOU_FALLBACK,
+    )
 
 
 # ─── capture primitives ────────────────────────────────────────────────
@@ -287,11 +298,11 @@ def default_train_signals(model) -> list[Signal]:
     # Reuses UL's own `_inference` + `non_max_suppression` (no math rewrite).
     if detect_head is not None:
         get_det = fwd_hook(detect_head)
+        conf_thres, iou_thres = _overlay_nms_thresholds(model)
 
         def overlay_p(batch):
             y = detect_head._inference(get_det())
-            nms = non_max_suppression(y, conf_thres=OVERLAY_CONF_THRES,
-                                      iou_thres=OVERLAY_IOU_THRES)
+            nms = non_max_suppression(y, conf_thres=conf_thres, iou_thres=iou_thres)
             return _overlay_dict(nms, batch["img"].shape[-2:])
         signals[0].preds = overlay_p
 
