@@ -195,6 +195,9 @@ def _scatter(per_fg, img_of_fg, bs):
     return out
 
 
+_OVERLAY_TOPK = 10  # keep top-K boxes per image by confidence (studio readability)
+
+
 def _overlay_dict(nms_preds, img_hw):
     h, w = img_hw
     scale = th.tensor([w, h, w, h], dtype=th.float32)
@@ -204,6 +207,11 @@ def _overlay_dict(nms_preds, img_hw):
             out.append(th.zeros((0, 6)))
             continue
         pc = p.detach().cpu().float()
+        # Keep top-K by confidence (col 4). Train NMS uses a tiny conf
+        # threshold so early-training overlays aren't empty; UL's NMS in
+        # turn caps at 300 dets per image — which floods the studio.
+        if pc.shape[0] > _OVERLAY_TOPK:
+            pc = pc[pc[:, 4].argsort(descending=True)[:_OVERLAY_TOPK]]
         out.append(th.cat([pc[:, :4] / scale, pc[:, 5:6], pc[:, 4:5]], -1))
     return {"bboxes": out}
 
