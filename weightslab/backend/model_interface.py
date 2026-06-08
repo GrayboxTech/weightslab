@@ -42,7 +42,6 @@ class ModelInterface(NetworkWithOps):
             compute_dependencies: bool = False,
             weak: bool = False,
             skip_previous_auto_load: bool = False,
-            light: bool = True,
             **_
     ):
         """
@@ -79,29 +78,11 @@ class ModelInterface(NetworkWithOps):
                 reference in the ledger. Defaults to False.
             skip_previous_auto_load (bool, optional): If True, skips the automatic loading
                 of previous checkpoints during initialization. Defaults to False.
-            light (bool, optional): Strict minimal-feature mode — guarantees no
-                interactions with the wrapped model's internals. Skips
-                `init_attributes` (shallow vars() iteration), the
-                architecture-change hook, and the `CheckpointManager`
-                auto-load block (which would call `load_state_dict`). Forces
-                `compute_dependencies=False`. Retains only consistency
-                (ledger handle, age counter) and metrics (tracking_mode for
-                guard contexts). Defaults to True; opt out with `light=False`
-                to enable model surgery, attribute forwarding, and checkpoint
-                auto-load.
 
         Returns:
             None: This method initializes the object and does not return any value.
         """
-        # `light=True` is a strict minimal-feature mode: only what's needed for
-        # consistency (ledger handle, age counter) and metrics (tracking_mode
-        # for guard contexts). Skips init_attributes, architecture-change hook,
-        # and CheckpointManager auto-load. Forces compute_dependencies off.
-        if light:
-            compute_dependencies = False
-
         super(ModelInterface, self).__init__()
-        self._light = light
 
         # Sanity check of the compute_dependencies and use_onnx flags
         if compute_dependencies:
@@ -170,11 +151,8 @@ class ModelInterface(NetworkWithOps):
         # self.guard_training_context = guard_training_context
         # self.guard_testing_context = guard_testing_context
 
-        # Init attributes from super object (i.e., self.model).
-        # In light mode, skip the shallow vars() iteration — attribute access
-        # falls back to __getattr__ which already forwards to self.model.
-        if not self._light:
-            self.init_attributes(self.model)
+        # Init attributes from super object (i.e., self.model)
+        self.init_attributes(self.model)
 
         # Compute dependencies and generate graph visualization if enabled
         if compute_dependencies:
@@ -205,13 +183,10 @@ class ModelInterface(NetworkWithOps):
             if not use_onnx:
                 del self.traced_model
 
-        # Hook optimizer update on architecture change.
-        # In light mode there is no dependency graph, so architecture ops
-        # cannot fire — the hook would never run. Skip it.
-        if not self._light:
-            self.register_hook_fn_for_architecture_change(
-                lambda model: self._update_optimizer(model)
-            )
+        # Hook optimizer update on architecture change
+        self.register_hook_fn_for_architecture_change(
+            lambda model: self._update_optimizer(model)
+        )
 
         # # Set Model Training Guard
         guard_training_context.model = self
@@ -219,13 +194,6 @@ class ModelInterface(NetworkWithOps):
 
         # Set global self.hp_config
         self.hp_config = get_hyperparams()
-
-        # Light mode stops here. The CheckpointManager auto-load block below
-        # touches load_state_dict (PyTorch's recursive parameter traversal) and
-        # may attempt to restore a prior run — neither belongs to a strict
-        # consistency-and-metrics-only wrap.
-        if self._light:
-            return
 
         # Initialize checkpoint manager and attempt early auto-load before any model-dependent setup
         _checkpoint_auto_every_steps = 0
