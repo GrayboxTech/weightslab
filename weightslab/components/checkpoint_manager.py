@@ -1516,11 +1516,7 @@ class CheckpointManager:
         logger.info(f"Loading checkpoint: {latest_checkpoint.name}")
 
         try:
-            checkpoint = th.load(
-                latest_checkpoint,
-                weights_only=False,
-                map_location=th.device('cuda' if th.cuda.is_available() else 'cpu'),
-            )
+            checkpoint = th.load(latest_checkpoint, weights_only=False)
 
             # Load model state
             if model is None:
@@ -1689,11 +1685,7 @@ class CheckpointManager:
             if checkpoint_files:
                 latest_checkpoint = checkpoint_files[-1]
                 try:
-                    checkpoint = th.load(
-                        latest_checkpoint,
-                        weights_only=False,
-                        map_location=th.device('cuda' if th.cuda.is_available() else 'cpu'),
-                    )
+                    checkpoint = th.load(latest_checkpoint, weights_only=False)
                     rng_state = checkpoint.get('rng_state')
                     if rng_state:
                         result['rng_state'] = rng_state
@@ -1720,24 +1712,20 @@ class CheckpointManager:
                 checkpoint_path = model_dir / manifest_weight_checkpoint
                 if checkpoint_path.exists():
                     checkpoint_file_to_load = checkpoint_path
-                    logger.info(f"  Using weight checkpoint from manifest: {checkpoint_path}")
+                    logger.debug(f"  Using weight checkpoint from manifest: {manifest_weight_checkpoint}")
 
             # Fallback: scan for weight files (old behavior for backward compatibility)
             if checkpoint_file_to_load is None:
                 checkpoint_file_to_load = self._select_weight_checkpoint_file(exp_hash, target_step=target_step)
                 if checkpoint_file_to_load is not None:
                     if target_step is None:
-                        logger.info(f"  Using latest weight checkpoint from directory scan: {checkpoint_file_to_load}")
+                        logger.debug(f"  Using latest weight checkpoint from directory scan: {checkpoint_file_to_load.name}")
                     else:
-                        logger.info(f"  Using closest weight checkpoint for target step {target_step}: {checkpoint_file_to_load}")
+                        logger.debug(f"  Using closest weight checkpoint for target step {target_step}: {checkpoint_file_to_load.name}")
 
             if checkpoint_file_to_load:
                 try:
-                    result['weights'] = th.load(
-                        checkpoint_file_to_load,
-                        weights_only=False,
-                        map_location=th.device('cuda' if th.cuda.is_available() else 'cpu'),
-                    )
+                    result['weights'] = th.load(checkpoint_file_to_load, weights_only=False)
                     result['loaded_components'].add('weights')
                     step = result['weights'].get('step', 0)
 
@@ -1745,9 +1733,9 @@ class CheckpointManager:
                     checkpoint_rng_state = result['weights'].get('rng_state')
                     if checkpoint_rng_state:
                         result['rng_state'] = checkpoint_rng_state
-                        logger.info(f"  [OK] Loaded weights from {checkpoint_file_to_load.name} (step {step}) with RNG state")
+                        logger.info(f"  [OK] Loaded weights from step {step} with RNG state")
                     else:
-                        logger.info(f"  [OK] Loaded weights from {checkpoint_file_to_load.name} (step {step})")
+                        logger.info(f"  [OK] Loaded weights from step {step}")
 
                     # Extract dataloader iteration state if available
                     dataloader_iter_state = result['weights'].get('dataloader_iteration_state')
@@ -1872,16 +1860,6 @@ class CheckpointManager:
             logger.warning("No components were loaded")
             return False
 
-        def _param_fingerprint(m):
-            """Deterministic (n_params, sum|p|) — non-zero confirms weights actually landed."""
-            try:
-                params = [p for p in m.parameters()]
-                n = int(sum(p.numel() for p in params))
-                fp = float(sum(p.detach().float().abs().sum().item() for p in params)) if params else 0.0
-                return n, fp
-            except Exception:
-                return -1, float('nan')
-
         # Apply model (architecture + weights)
         if 'model' in checkpoint_data['loaded_components']:
             try:
@@ -1911,8 +1889,7 @@ class CheckpointManager:
                         setattr(model, 'current_step', loaded_step)
                     except Exception:
                         pass
-                n_params, fp = _param_fingerprint(model)
-                logger.info(f"[OK] Applied model architecture and weights (step {loaded_step}) — params={n_params:,}, sum|w|={fp:.4f}")
+                logger.info(f"[OK] Applied model architecture and weights (step {loaded_step})")
                 self.error_loading_checkpoint.remove('model') if 'model' in self.error_loading_checkpoint else None
             except Exception as e:
                 logger.error(f"[ERROR] Failed to apply model: {e}")
@@ -1924,23 +1901,14 @@ class CheckpointManager:
                 model = ledgers.get_model()
                 weights = checkpoint_data['weights']
                 if model and weights and 'model_state_dict' in weights:
-                    incompat = model.load_state_dict(weights['model_state_dict'])
+                    model.load_state_dict(weights['model_state_dict'])
                     step = int(weights.get('step', 0))
                     try:
                         setattr(model, 'current_step', step)
                     except Exception:
                         pass
                     model.update_optimizer() # Update optimizer with new model parameters if needed
-                    missing = list(getattr(incompat, 'missing_keys', []) or [])
-                    unexpected = list(getattr(incompat, 'unexpected_keys', []) or [])
-                    n_params, fp = _param_fingerprint(model)
-                    if missing or unexpected:
-                        logger.warning(
-                            f"[OK] Applied weights to existing model (step {step}) — params={n_params:,}, sum|w|={fp:.4f}; "
-                            f"missing={len(missing)} unexpected={len(unexpected)}"
-                        )
-                    else:
-                        logger.info(f"[OK] Applied weights to existing model (step {step}) — params={n_params:,}, sum|w|={fp:.4f}, all keys matched")
+                    logger.info(f"[OK] Applied weights to existing model (step {step})")
                     self._model_init_step = step
 
                 # Set Model Training Guard
