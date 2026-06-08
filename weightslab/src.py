@@ -33,7 +33,7 @@ from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.backend.ledgers import register_signal
-from weightslab.components.global_monitoring import pause_controller as pause_ctrl
+from weightslab.components.global_monitoring import pause_controller as pause_ctrl, get_active_origin
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
@@ -481,7 +481,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     out = original_forward(*a, **kw)
 
     # discarded samples/tainted groups from the loss tensor.
-    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
+    origin = kw.get('origin') or kwargs.get('origin') or get_active_origin()
 
     if origin and batch_ids is not None and hasattr(out, 'device') and out.ndim > 0:
         try:
