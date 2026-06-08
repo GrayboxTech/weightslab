@@ -632,10 +632,7 @@ class ModelInterface(NetworkWithOps):
 
             if val is not None:
                 try:
-                    # getattr guard: in light-mode wrapping this method can be
-                    # bound to a model that never ran __init__, so the attr may
-                    # not exist yet. Avoids a per-step AttributeError + warning.
-                    _log = getattr(self, "_checkpoint_auto_every_steps", None) != int(val)
+                    _log = self._checkpoint_auto_every_steps != int(val)
                     self._checkpoint_auto_every_steps = int(val)
                     if _log:
                         logger.debug(f"Updated checkpoint auto-dump steps ratio to {self._checkpoint_auto_every_steps} based on hyperparameters")

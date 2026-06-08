@@ -1052,12 +1052,6 @@ class CheckpointManager:
             logger.error(f"Failed to save model architecture: {e}")
             logger.debug(f"Full traceback:\n{traceback.format_exc()}")
             return None
-        finally:
-            if _saved_criterion is not None:
-                try:
-                    model.criterion = _saved_criterion
-                except Exception:
-                    pass
 
     def save_config(
         self,

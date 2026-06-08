@@ -15,37 +15,27 @@ What this trainer does for you:
     as curves through WL channels.
   * Wraps each train/val batch in WL's training/testing guard contexts.
 
-Class attributes (override by subclassing to disable expensive paths):
-  * `enable_train_overlay` (default True): run NMS on the criterion's
-    pre-NMS pred_bboxes/pred_scores each step and ship as preds= overlay.
-    Add ~30-50% per-step cost. Disable for max throughput.
-  * `enable_val_overlay` (default True): ship per-sample IoU/AP@0.5/overlay
-    each val cycle.
-  * `nms_conf_thres`, `nms_iou_thres` (defaults 1e-4 / 0.45). Default conf
-    is intentionally tiny so early-training overlays are not all empty —
-    the live overlay is a debugging signal, not a deployment threshold.
+Aggregate curves shipped via UL callbacks:
+  * `train/{box,cls,dfl}` from `trainer.loss_items`
+  * `val/{precision,recall,mAP50,mAP50-95,fitness}` from
+    `validator.metrics.results_dict`
 """
 from __future__ import annotations
 
 import torch
+from torch.nn import Identity
 
 from ultralytics.models.yolo.detect import DetectionTrainer
 
 import weightslab as wl
 from weightslab.components.global_monitoring import pause_controller
 
-from ._utils import Sink
 from .collate import wl_ul_dict_collate
 from .dataset import WLAwareDataset
 from .signals import install_per_sample_signals, install_per_sample_val_signals
 
 
 class WLAwareTrainer(DetectionTrainer):
-    enable_train_overlay: bool = True
-    enable_val_overlay: bool = True
-    nms_conf_thres: float = 1e-4
-    nms_iou_thres: float = 0.45
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         state = {"channels": {}}
@@ -54,11 +44,11 @@ class WLAwareTrainer(DetectionTrainer):
             ch = state["channels"]
             for n in ("box", "cls", "dfl"):
                 ch[f"train/{n}"] = wl.watch_or_edit(
-                    Sink(), flag="loss", name=f"train/{n}", log=True,
+                    Identity(), flag="loss", name=f"train/{n}", log=True,
                 )
             for key in ("precision", "recall", "mAP50", "mAP50-95", "fitness"):
                 ch[f"val/{key}"] = wl.watch_or_edit(
-                    Sink(), flag="metric", name=f"val/{key}", log=True,
+                    Identity(), flag="metric", name=f"val/{key}", log=True,
                 )
 
         def _on_train_start(trainer):
@@ -68,13 +58,8 @@ class WLAwareTrainer(DetectionTrainer):
                 trainer.model, flag="model", forced_model_wrapping=True,
             )
 
-            install_per_sample_signals(
-                underlying,
-                nms_conf_thres=self.nms_conf_thres,
-                nms_iou_thres=self.nms_iou_thres,
-            )
-            if self.enable_val_overlay:
-                install_per_sample_val_signals(trainer.validator)
+            install_per_sample_signals(underlying)
+            install_per_sample_val_signals(trainer.validator)
 
             _register_channels()
 
