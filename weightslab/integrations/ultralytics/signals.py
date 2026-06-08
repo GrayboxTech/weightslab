@@ -2,20 +2,21 @@
 reimplementation.
 
 Each signal is a `Signal(name, flag, reduce, preds=None)` record. Capture
-primitives (`fwd_hook`, `pre_hook`, `fn_tap`, `per_call_buffer`) install a
-hook on a UL internal and return a zero-arg getter for the captured state;
-closures bind the getter into each signal's `reduce` / `preds` function.
+primitives (`fwd_hook`, `pre_hook`, `fn_tap`, `method_call_tap`,
+`per_call_buffer`) install a hook on a UL internal and return a zero-arg
+getter for the captured state; closures bind the getter into each
+signal's `reduce` / `preds` function.
 
-A *pipeline* (`install_train_pipeline`, `install_val_pipeline`) is the one
-imperative bit: it wraps a UL sync method, runs each signal's reduce after
-the original ran, and ships to a WL channel keyed by `batch["ids"]`.
+A *pipeline* (`install_train_pipeline`, `install_val_pipeline`) is the
+one imperative bit: it wraps a UL sync method, runs each signal's reduce
+after the original ran, and ships to a WL channel keyed by `batch["ids"]`.
 
-Adding signal N+1 is appending one `Signal(...)` record to a list. No edits
-to the orchestrator, no new hook wiring unless the new signal taps a place
-no existing signal taps yet.
+Adding signal N+1 is appending one `Signal(...)` record to a list. No
+edits to the orchestrator, no new hook wiring unless the new signal taps
+a place no existing signal taps yet.
 
 Public:
-    Signal, fwd_hook, pre_hook, fn_tap, per_call_buffer,
+    Signal, fwd_hook, pre_hook, fn_tap, method_call_tap, per_call_buffer,
     install_train_pipeline, install_val_pipeline,
     default_train_signals, default_val_signals,
     install_per_sample_signals, install_per_sample_val_signals,
@@ -36,6 +37,13 @@ from ultralytics.utils.nms import non_max_suppression
 import weightslab as wl
 
 from ._utils import normalize_post_nms_preds
+
+
+# Studio readability cap: train NMS uses a tiny conf threshold so early
+# overlays aren't empty, and UL's NMS otherwise caps at 300 detections per
+# image — which floods the studio with noise. Tunable but a single shared
+# knob across train + val overlays.
+OVERLAY_MAX_DETS = 50
 
 
 # ─── capture primitives ────────────────────────────────────────────────
@@ -139,26 +147,12 @@ def _make_channels(signals):
             for s in signals}
 
 
-# Set WL_PROFILE=1 to print per-step signal-overhead in ms.
-import os as _os
-import sys as _sys
-_PROFILE = _os.environ.get("WL_PROFILE", "0") == "1"
-if _PROFILE:
-    print("[WL profile] ENABLED — avg ship time logged every 50 ships",
-          file=_sys.stderr, flush=True)
-_prof: dict = {"calls": 0, "total_ship_ms": 0.0, "total_preds_ms": 0.0,
-               "n_signals": 0}
-
-
 def _ship_round(signals, channels, batch):
+    """Iterate the signal list, ship anything the reducers produce. Wrapped
+    in `no_grad` because signal capture is observational — running e.g.
+    `Detect._inference` + NMS inside the train autograd graph would keep
+    those tensors alive until backward and compound across steps."""
     ids = batch["ids"]
-    # Wrap reduce/preds in no_grad — signal capture is observational; running
-    # `Detect._inference` + NMS inside the train autograd graph creates tensors
-    # the graph keeps alive until backward, which compounds across steps and
-    # OOMs at batch sizes the model alone would fit.
-    if _PROFILE:
-        import time
-        t0 = time.perf_counter()
     with th.no_grad():
         for s in signals:
             v = s.reduce(batch)
@@ -166,25 +160,10 @@ def _ship_round(signals, channels, batch):
                 continue
             kw = {"batch_ids": ids}
             if s.preds is not None:
-                if _PROFILE:
-                    tp = time.perf_counter()
                 p = s.preds(batch)
-                if _PROFILE:
-                    _prof["total_preds_ms"] += (time.perf_counter() - tp) * 1000
                 if p is not None:
                     kw["preds"] = p
             channels[s.name](v, **kw)
-    if _PROFILE:
-        _prof["total_ship_ms"] += (time.perf_counter() - t0) * 1000
-        _prof["calls"] += 1
-        _prof["n_signals"] = len(signals)
-        if _prof["calls"] % 50 == 0:
-            import sys
-            avg = _prof["total_ship_ms"] / _prof["calls"]
-            avg_p = _prof["total_preds_ms"] / max(1, _prof["calls"])
-            print(f"[WL profile] ship#{_prof['calls']}: avg ship={avg:.1f}ms "
-                  f"(overlay={avg_p:.1f}ms) over {_prof['n_signals']} signals",
-                  file=sys.stderr, flush=True)
 
 
 def install_train_pipeline(model, signals: list[Signal]):
@@ -224,10 +203,9 @@ def _scatter(per_fg, img_of_fg, bs):
     return out
 
 
-_OVERLAY_TOPK = 10  # keep top-K boxes per image by confidence (studio readability)
-
-
 def _overlay_dict(nms_preds, img_hw):
+    """UL post-NMS list → studio overlay dict, capped at `OVERLAY_MAX_DETS`
+    per image by confidence, coords normalised to [0,1]."""
     h, w = img_hw
     scale = th.tensor([w, h, w, h], dtype=th.float32)
     out = []
@@ -236,11 +214,8 @@ def _overlay_dict(nms_preds, img_hw):
             out.append(th.zeros((0, 6)))
             continue
         pc = p.detach().cpu().float()
-        # Keep top-K by confidence (col 4). Train NMS uses a tiny conf
-        # threshold so early-training overlays aren't empty; UL's NMS in
-        # turn caps at 300 dets per image — which floods the studio.
-        if pc.shape[0] > _OVERLAY_TOPK:
-            pc = pc[pc[:, 4].argsort(descending=True)[:_OVERLAY_TOPK]]
+        if pc.shape[0] > OVERLAY_MAX_DETS:
+            pc = pc[pc[:, 4].argsort(descending=True)[:OVERLAY_MAX_DETS]]
         out.append(th.cat([pc[:, :4] / scale, pc[:, 5:6], pc[:, 4:5]], -1))
     return {"bboxes": out}
 
@@ -248,8 +223,9 @@ def _overlay_dict(nms_preds, img_hw):
 # ─── default signal packs ──────────────────────────────────────────────
 
 def default_train_signals(model) -> list[Signal]:
-    """The 4 default UL-detection train signals: per-sample cls/box/dfl +
-    live preds overlay. Compose with user signals: `default_train_signals(m) + [Signal(...)]`."""
+    """Default UL-detection train signals: per-sample cls/box/dfl. If the
+    model exposes a `Detect` head, a live preds overlay rides on the cls
+    signal. Compose with user signals: `default_train_signals(m) + [...]`."""
     if getattr(model, "criterion", None) is None:
         model.criterion = model.init_criterion()
     crit = model.criterion
@@ -260,9 +236,11 @@ def default_train_signals(model) -> list[Signal]:
     get_iou = fn_tap(ul_loss, "bbox_iou")       # bbox_iou is a plain function
     get_dfl = method_call_tap(bl, "dfl_loss")   # DFLoss overrides __call__
     get_bl_args = pre_hook(bl)
-    get_det = fwd_hook(detect_head) if detect_head is not None else None
 
     def _fg_state():
+        # bbox_loss isn't called if every anchor is background; the
+        # downstream getters then have no fresh value, so callers must
+        # treat None as "skip this round".
         args = get_bl_args()
         if args is None:
             return None
@@ -272,48 +250,46 @@ def default_train_signals(model) -> list[Signal]:
         weight = args[4].sum(-1)[fg].unsqueeze(-1)
         return fg, weight, fg.nonzero(as_tuple=False)[:, 0]
 
-    def cls_r(batch):
-        bce = get_bce()
-        return bce.sum(dim=(1, 2)) if bce is not None else None
+    def cls_r(_batch):
+        return get_bce().sum(dim=(1, 2))
 
-    def box_r(batch):
+    def box_r(_batch):
         st = _fg_state()
-        iou = get_iou()
-        if st is None or iou is None:
+        if st is None:
             return None
         fg, w, img_of_fg = st
-        return _scatter(((1.0 - iou) * w).detach(), img_of_fg, fg.shape[0])
+        return _scatter(((1.0 - get_iou()) * w).detach(), img_of_fg, fg.shape[0])
 
-    def dfl_r(batch):
+    def dfl_r(_batch):
         st = _fg_state()
-        dfl = get_dfl()
-        if st is None or dfl is None:
+        if st is None:
             return None
         fg, w, img_of_fg = st
-        return _scatter((dfl * w).detach(), img_of_fg, fg.shape[0])
+        return _scatter((get_dfl() * w).detach(), img_of_fg, fg.shape[0])
 
-    def overlay_p(batch):
-        if get_det is None:
-            return None
-        raw = get_det()
-        if raw is None:
-            return None
-        try:
-            y = detect_head._inference(raw)
-            nms = non_max_suppression(y, conf_thres=1e-4, iou_thres=0.45)
-            return _overlay_dict(nms, batch["img"].shape[-2:])
-        except Exception:
-            return None
-
-    return [
-        Signal("train/cls_per_sample", "loss", reduce=cls_r, preds=overlay_p),
+    signals = [
+        Signal("train/cls_per_sample", "loss", reduce=cls_r),
         Signal("train/box_per_sample", "loss", reduce=box_r),
         Signal("train/dfl_per_sample", "loss", reduce=dfl_r),
     ]
 
+    # Live preds overlay on the cls signal — only if there's a Detect head.
+    # Reuses UL's own `_inference` + `non_max_suppression` (no math rewrite).
+    if detect_head is not None:
+        get_det = fwd_hook(detect_head)
+
+        def overlay_p(batch):
+            y = detect_head._inference(get_det())
+            nms = non_max_suppression(y, conf_thres=1e-4, iou_thres=0.45)
+            return _overlay_dict(nms, batch["img"].shape[-2:])
+        signals[0].preds = overlay_p
+
+    return signals
+
 
 def default_val_signals(validator) -> list[Signal]:
-    """The 2 default UL-detection val signals: per-image IoU + preds overlay."""
+    """Default UL-detection val signals: per-image IoU with live preds
+    overlay riding on the IoU signal."""
     def _iou_mapper(args, _out):
         predn, pbatch = args
         gt, pb = pbatch["bboxes"], predn["bboxes"]
@@ -335,11 +311,9 @@ def default_val_signals(validator) -> list[Signal]:
         return v
 
     def overlay_p(batch):
-        preds = getattr(validator, "_wl_preds", None)
-        return _overlay_dict(preds, batch["img"].shape[-2:]) if preds is not None else None
+        preds = validator._wl_preds
+        return _overlay_dict(preds, batch["img"].shape[-2:])
 
-    # Attach the overlay to the IoU signal so the studio sees a meaningful
-    # per-sample value distribution (constant-zero carrier ships no histogram).
     return [
         Signal("val/iou_per_sample", "metric", reduce=iou_r, preds=overlay_p),
     ]

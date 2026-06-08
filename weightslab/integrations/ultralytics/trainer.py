@@ -103,52 +103,9 @@ class WLAwareTrainer(DetectionTrainer):
                 if ul_key in rd and wl_key in ch:
                     ch[wl_key](torch.tensor([float(rd[ul_key])]))
 
-        # WL_CORRECTNESS=1: at every 50 steps print
-        #   model_sum_abs   — sum |p| over all weights. Must change → optimizer
-        #                     stepping. Constant ⇒ training is dead.
-        #   ema_sum_abs     — same on EMA. Should drift apart from model_sum_abs.
-        #   ema_model_l2    — L2 of (ema - model) flattened. Should grow then
-        #                     plateau. Stuck at 0 ⇒ EMA never updates;
-        #                     stuck at init value ⇒ EMA frozen.
-        import os as _os
-        _correctness = _os.environ.get("WL_CORRECTNESS", "0") == "1"
-        _state2 = {"step": 0}
-        if _correctness:
-            import sys
-            print("[WL correctness] ENABLED — weight/EMA snapshot every 50 steps",
-                  file=sys.stderr, flush=True)
-
-        def _on_train_batch_end_correctness(trainer):
-            if not _correctness:
-                return
-            _state2["step"] += 1
-            if _state2["step"] % 50 != 0:
-                return
-            import sys
-            mi = trainer.model
-            inner = getattr(mi, "_obj", mi)
-            inner = inner.__dict__.get("model", inner)
-            try:
-                msum = sum(p.detach().float().abs().sum().item() for p in inner.parameters())
-            except Exception as e:
-                msum = float("nan")
-            ema = getattr(getattr(trainer, "ema", None), "ema", None)
-            if ema is not None:
-                esum = sum(p.detach().float().abs().sum().item() for p in ema.parameters())
-                m_flat = torch.cat([p.detach().flatten() for p in inner.parameters()])
-                e_flat = torch.cat([p.detach().flatten() for p in ema.parameters()])
-                ediff = float((e_flat.float() - m_flat.float()).norm())
-            else:
-                esum, ediff = float("nan"), float("nan")
-            print(f"[WL correctness] step #{_state2['step']}: "
-                  f"model_sum_abs={msum:.4f} ema_sum_abs={esum:.4f} "
-                  f"||ema-model||_2={ediff:.6f}",
-                  file=sys.stderr, flush=True)
-
         self.add_callback("on_train_start",       _on_train_start)
         self.add_callback("on_train_batch_start", _on_train_batch_start)
         self.add_callback("on_train_batch_end",   _on_train_batch_end)
-        self.add_callback("on_train_batch_end",   _on_train_batch_end_correctness)
         self.add_callback("on_val_batch_start",   _on_val_batch_start)
         self.add_callback("on_val_batch_end",     _on_val_batch_end)
         self.add_callback("on_val_end",           _on_val_end)
