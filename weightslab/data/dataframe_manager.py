@@ -1314,8 +1314,8 @@ class LedgeredDataFrameManager:
     def get_discarded_sample_ids(self, sample_ids: List[Any], origin: str) -> set:
         """Return the subset of sample_ids that are marked as discarded.
 
-        Used by wl.get_active_sample_mask to exclude discarded samples from
-        per-sample loss computations (e.g. classification) during the current epoch.
+        Used by framework bridges to build a per-batch active mask and exclude
+        discarded samples from the loss (zero gradient) during the current epoch.
 
         Args:
             sample_ids: The sample IDs (UIDs) to check (as strings/ints).

@@ -33,7 +33,7 @@ from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.backend.ledgers import register_signal
-from weightslab.components.global_monitoring import pause_controller as pause_ctrl
+from weightslab.components.global_monitoring import pause_controller as pause_ctrl, get_active_origin
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
@@ -480,22 +480,16 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     # Original forward of the signal
     out = original_forward(*a, **kw)
 
-    # discarded samples/tainted groups from the loss tensor.
-    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
+    # Group-level discard masking only. Per-sample discard is now enforced at
+    # the LOSS (in the framework bridge), not post-hoc on the logged signal — so
+    # per-sample signals log the true, unmasked value even for discarded samples.
+    origin = kw.get('origin') or kwargs.get('origin') or get_active_origin()
 
-    if origin and batch_ids is not None and hasattr(out, 'device') and out.ndim > 0:
+    if origin and group_ids is not None and hasattr(out, 'device') and out.ndim > 0:
         try:
-            # Multi-sample Group Masking
-            if group_ids is not None:
-                mask = get_active_group_mask(group_ids, origin).to(out.device)
-                if len(mask) == len(out):
-                    out = out * mask
-
-            # Per-sample Individual Masking
-            else:
-                mask = get_active_sample_mask(batch_ids, origin).to(out.device)
-                if len(mask) == len(out):
-                    out = out * mask
+            mask = get_active_group_mask(group_ids, origin).to(out.device)
+            if len(mask) == len(out):
+                out = out * mask
         except Exception as e:
             logger.debug(f"Automatic backend discard masking failed: {e}")
 
@@ -1992,46 +1986,6 @@ def get_active_group_mask(
                     mask[i] = 0.0
     except Exception:
         pass  # Fail-safe: if check fails, treat all groups as active
-
-    return mask
-
-
-def get_active_sample_mask(
-    sample_ids: list[str],
-    origin: str,
-) -> th.Tensor:
-    """Return a boolean mask (one entry per sample_id) indicating active (non-discarded) samples.
-
-    This ensures that any sample marked as discarded in the UI is immediately
-    excluded from per-sample loss calculations, even if it is already in the
-    current training batch (before the sampler's next epoch refresh).
-
-    Args:
-        sample_ids: List of sample ID strings/ints for the current batch.
-        origin: Dataset split name (e.g. 'train_loader').
-
-    Returns:
-        A float tensor of shape (len(sample_ids),) with 1.0 for active samples
-        and 0.0 for discarded samples.
-    """
-    global DATAFRAME_M
-    if DATAFRAME_M is None:
-        DATAFRAME_M = get_dataframe()
-
-    sample_ids = [str(sid) for sid in sample_ids]
-    mask = th.ones(len(sample_ids), dtype=th.float32)
-
-    if DATAFRAME_M is None or not hasattr(DATAFRAME_M, 'get_discarded_sample_ids'):
-        return mask
-
-    try:
-        discarded_ids = DATAFRAME_M.get_discarded_sample_ids(sample_ids, origin)
-        if discarded_ids:
-            for i, sid in enumerate(sample_ids):
-                if sid in discarded_ids:
-                    mask[i] = 0.0
-    except Exception:
-        pass
 
     return mask
 

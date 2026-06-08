@@ -8,7 +8,9 @@ root_log_dir: .  # Empty to write in tmp directory, or specify a path to store l
 checkpoint_manager:
   load_config: true
   load_data: true
-  load_model: true
+  load_model: false               # rebuild architecture from code (preserves model identity); don't load the structure pkl
+  dump_model_architecture: false  # skip the architecture pickle (holds signal ContextVars; unneeded — no model surgery)
+  # dump_model_state + dump_optimizer_state default true -> keep the .pt resume bundle (weights + optimizer + RNG + loader state)
 
 # Model config.
 model:
