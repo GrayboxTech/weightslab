@@ -191,9 +191,24 @@ def default_train_signals(model) -> list[Signal]:
     detect_head = next((m for m in model.modules() if isinstance(m, Detect)), None)
 
     get_bce = fwd_hook(crit.bce)
-    get_dfl = fwd_hook(bl.dfl_loss)
     get_iou = fn_tap(ul_loss, "bbox_iou")
     get_bl_args = pre_hook(bl)
+
+    # DFLoss overrides __call__ directly (does NOT route through
+    # nn.Module.__call__), so register_forward_hook never fires on it.
+    # Wrap the instance with a proxy that forwards attribute access
+    # (UL reads `self.dfl_loss.reg_max`) and captures the call's output.
+    _dfl_inner = bl.dfl_loss
+    _dfl_box: dict = {"v": None}
+
+    class _DFLossTap:
+        def __getattr__(self, n): return getattr(_dfl_inner, n)
+        def __call__(self, *a, **kw):
+            out = _dfl_inner(*a, **kw)
+            _dfl_box["v"] = out.detach() if hasattr(out, "detach") else out
+            return out
+    bl.dfl_loss = _DFLossTap()
+    get_dfl = lambda: _dfl_box["v"]
     get_det = fwd_hook(detect_head) if detect_head is not None else None
 
     def _fg_state():
