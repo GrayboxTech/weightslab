@@ -39,10 +39,20 @@ import weightslab as wl
 from ._utils import normalize_post_nms_preds
 
 
-# Studio readability cap: train NMS uses a tiny conf threshold so early
-# overlays aren't empty, and UL's NMS otherwise caps at 300 detections per
-# image — which floods the studio with noise. Tunable but a single shared
-# knob across train + val overlays.
+# ─── overlay tunables ──────────────────────────────────────────────────
+# Train overlay runs UL's own `non_max_suppression` over the live model
+# outputs; these knobs override `model.args.{conf,iou}` (which UL only
+# populates at predict/val time, not during training). Module-level so
+# users can rebind without subclassing.
+#
+#   OVERLAY_CONF_THRES — tiny so early-epoch overlays aren't empty.
+#                        Standard UL inference default would be 0.25,
+#                        which hides the model entirely while it learns.
+#   OVERLAY_IOU_THRES  — matches UL's default inference IoU.
+#   OVERLAY_MAX_DETS   — readability cap; UL's NMS otherwise produces
+#                        up to 300 boxes per image which floods studio.
+OVERLAY_CONF_THRES = 1e-4
+OVERLAY_IOU_THRES = 0.45
 OVERLAY_MAX_DETS = 50
 
 
@@ -280,7 +290,8 @@ def default_train_signals(model) -> list[Signal]:
 
         def overlay_p(batch):
             y = detect_head._inference(get_det())
-            nms = non_max_suppression(y, conf_thres=1e-4, iou_thres=0.45)
+            nms = non_max_suppression(y, conf_thres=OVERLAY_CONF_THRES,
+                                      iou_thres=OVERLAY_IOU_THRES)
             return _overlay_dict(nms, batch["img"].shape[-2:])
         signals[0].preds = overlay_p
 
