@@ -75,7 +75,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 )
             self.iou[split] = wl.watch_or_edit(
                 PerSampleIoU(conf=0.25, iou_thres=0.5),
-                flag="metric", name=f"iou/{split}_sample", per_sample=True, log=True,
+                flag="metric", name=f"{split}/iou_sample", per_sample=True, log=True,
             )
 
             # Per-instance metrics (per annotation) — auto-saved by WL with annotation_id
@@ -86,7 +86,7 @@ class WLCompatileDetTrainer(DetectionTrainer):
                 )
             self.iou_per_instance[split] = wl.watch_or_edit(
                 PerInstanceIoU(conf=0.25, iou_thres=0.5),
-                flag="metric", name=f"iou/{split}_instance", per_instance=True, log=True,
+                flag="metric", name=f"{split}/iou_instance", per_instance=True, log=True,
             )
 
     def process_predictions(self, pred_raw, image, conf=0.25, cls_thresh=0.5):

@@ -33,8 +33,7 @@ from weightslab.backend.logger import LoggerQueue
 from weightslab.backend.cli import cli_serve
 from weightslab.backend import ledgers
 from weightslab.backend.ledgers import register_signal
-from weightslab.components.global_monitoring import pause_controller as pause_ctrl
-from weightslab.components import global_monitoring
+from weightslab.components.global_monitoring import pause_controller as pause_ctrl, get_active_origin
 
 
 def _rebind_caller_local(original_obj: Any, new_obj: Any) -> None:
@@ -482,7 +481,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
     out = original_forward(*a, **kw)
 
     # discarded samples/tainted groups from the loss tensor.
-    origin = kw.get('origin') or kwargs.get('origin') or global_monitoring.get_active_origin()
+    origin = kw.get('origin') or kwargs.get('origin') or get_active_origin()
 
     if origin and batch_ids is not None and hasattr(out, 'device') and out.ndim > 0:
         try:
@@ -739,7 +738,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
         # Architecture operations require dependencies to be available.
         # Keep backward-compatible behavior by enabling dependency computation
         # unless the caller explicitly disables it.
-        kwargs.setdefault('compute_dependencies', True)
         forced_model_wrapping = kwargs.pop('forced_model_wrapping', False)
 
         # Now construct the wrapper and let it register into the ledger.

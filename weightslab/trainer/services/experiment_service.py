@@ -644,7 +644,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     logger.debug("Could not persist logger snapshot after note update", exc_info=True)
 
             # Log to audit trail
-            self._log_audit_event(
+            self._log_audit(
                 "note_write",
                 "success",
                 {
