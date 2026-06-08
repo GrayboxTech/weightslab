@@ -1,9 +1,7 @@
-import subprocess
 import unittest
 from unittest.mock import patch
 
 import graphviz
-import torch
 import torch.nn as nn
 from torch.fx import symbolic_trace
 

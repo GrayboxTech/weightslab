@@ -13,7 +13,6 @@ Combined into a 24-byte hash that allows tracking what changed between versions.
 import hashlib
 import json
 import logging
-from time import time
 import torch as th
 
 from typing import Any, Dict, Optional, Set
@@ -237,6 +236,7 @@ class ExperimentHashGenerator:
         config_cp.pop('root_log_dir', None)
         config_cp.pop('is_training', None)
         config_cp.pop('pause_at_step', None)
+        # config_cp.pop('auditor_mode', None)  # Audit should be another state
 
         try:
             # Sort keys for deterministic hashing

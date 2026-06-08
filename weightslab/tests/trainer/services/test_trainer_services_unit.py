@@ -12,6 +12,9 @@ from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.trainer.services.data_service import (
     DataService,
     SampleEditType,
+)
+# create_data_stat / generate_thumbnail now live in data_image_utils.
+from weightslab.trainer.services.data_image_utils import (
     create_data_stat,
     generate_thumbnail,
 )
@@ -68,14 +71,17 @@ class TestExperimentServiceUnit(unittest.TestCase):
 
     def test_get_latest_logger_data_break_by_slices(self):
         signal_logger = MagicMock()
-        signal_logger.get_signal_history_per_sample.return_value = {
-            "test/loss": {
-                "exp": [
-                    {"sample_id": "11", "model_age": 3, "metric_value": 0.3, "experiment_hash": "exp"},
-                    {"sample_id": "12", "model_age": 3, "metric_value": 0.6, "experiment_hash": "exp"},
-                ]
-            }
-        }
+        # break-by-slices reads compact (sample_id, step, value, hash) tuples via
+        # query_per_sample (filtered by the tag-derived sample_ids), then aggregates
+        # the matching samples into a single MEAN curve per experiment_hash.
+        _pts = [("11", 3, 0.3, "exp"), ("12", 3, 0.6, "exp")]
+
+        def _qps(graph_name, sample_ids=None, exp_hash=None):
+            wanted = {str(s) for s in sample_ids} if sample_ids is not None else None
+            return [t for t in _pts if wanted is None or str(t[0]) in wanted]
+
+        signal_logger.query_per_sample.side_effect = _qps
+        signal_logger.get_evaluation_marker_hashes.return_value = []
         df_manager = MagicMock()
         df_manager.get_df_view.return_value = pd.DataFrame(
             {"tag:hard": [True, False]},
@@ -94,9 +100,11 @@ class TestExperimentServiceUnit(unittest.TestCase):
         )
         response = service.GetLatestLoggerData(request, None)
 
+        # Only sample 11 is 'hard'-tagged → mean curve over {11} = one aggregated point.
         self.assertEqual(len(response.points), 1)
-        self.assertEqual(response.points[0].sample_id, "11")
+        self.assertEqual(response.points[0].sample_id, "")  # aggregated, not a single sample
         self.assertEqual(response.points[0].metric_name, "test/loss")
+        self.assertAlmostEqual(response.points[0].metric_value, 0.3, places=5)
 
     def test_restore_checkpoint_missing_manager(self):
         ctx = _DummyCtx(components={"trainer": None, "hyperparams": {}})

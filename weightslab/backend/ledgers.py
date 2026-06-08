@@ -1060,6 +1060,19 @@ class Ledger:
             self._proxies_loggers.clear()
             self._proxies_signals.clear()
 
+        # Also reset the module-level sample-UID state so a freshly registered
+        # dataset numbers its samples from 0 again. Without this, a previous
+        # session/test leaves `_UID_CNT` advanced and the next dataset's auto-
+        # assigned UIDs are offset (a cross-session/cross-test contamination).
+        # Lazy import: data_samples_with_ops imports this module, so importing it
+        # here at call time (not module load) avoids a circular import.
+        try:
+            from weightslab.data import data_samples_with_ops as _dswo
+            _dswo._UID_CNT = 0
+            _dswo._GLOBAL_UID_REGISTRY.clear()
+        except Exception:
+            pass
+
     def snapshot(self) -> Dict[str, List[str]]:
         """Return the current keys for all registries (a lightweight snapshot)."""
         with self._lock:

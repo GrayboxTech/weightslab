@@ -103,6 +103,10 @@ class ModelInterface(NetworkWithOps):
         super(ModelInterface, self).__init__()
         self._light = light
 
+        # Sanity check of the compute_dependencies and use_onnx flags
+        if compute_dependencies:
+            raise ValueError("compute_dependencies functionality is disabled for now and will be re-enabled in a future release. Please set compute_dependencies=False for now.")
+
         # Reinit IDS when instanciating a new torch model
         NeuronWiseOperations().reset_id()
 

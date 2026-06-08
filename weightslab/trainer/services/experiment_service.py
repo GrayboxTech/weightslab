@@ -1,8 +1,10 @@
+import os
 import time
 import types
 import logging
 import threading
 import grpc
+import pandas as pd
 
 import weightslab.proto.experiment_service_pb2 as pb2
 import weightslab.proto.experiment_service_pb2_grpc as pb2_grpc
@@ -11,6 +13,7 @@ from weightslab.components.global_monitoring import weightslab_rlock, try_acquir
 from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_representation, get_layer_representations, get_data_set_representation
 from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name, get_hyperparams
 from weightslab.backend import ledgers
+from weightslab.backend.audit_logger import AuditLogger
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 from weightslab.trainer.services.agent_service import AgentService
@@ -22,6 +25,54 @@ from weightslab.components.evaluation_controller import eval_controller
 logger = logging.getLogger(__name__)
 
 
+# Default cap on the number of per-sample logger points returned per sample in the
+# break-by-slices view. A run with 10k tagged samples × 10k steps would otherwise
+# stream 100M points. Override with the WL_MAX_POINTS_PER_SAMPLE env variable
+# (see docs/configuration.rst). Set to 0 (or a negative value) to disable the cap.
+_DEFAULT_MAX_POINTS_PER_SAMPLE = 200
+
+
+def _max_points_per_sample() -> int:
+    """Read WL_MAX_POINTS_PER_SAMPLE; 0/negative/invalid disables the cap (returns 0)."""
+    raw = os.getenv("WL_MAX_POINTS_PER_SAMPLE")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_POINTS_PER_SAMPLE
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "WL_MAX_POINTS_PER_SAMPLE=%r is not an integer — using default %d",
+            raw, _DEFAULT_MAX_POINTS_PER_SAMPLE,
+        )
+        return _DEFAULT_MAX_POINTS_PER_SAMPLE
+    return max(0, val)
+
+
+def _downsample_uniform(series, max_points: int):
+    """Reduce a per-sample, step-ordered ``series`` to at most ``max_points`` items.
+
+    Uses evenly-spaced index selection that ALWAYS keeps the first and last point
+    (so the curve's endpoints — start and most-recent value — are preserved) and
+    samples the interior uniformly. This is a cheap, shape-preserving downsample;
+    it does not invent interpolated values, it picks a representative subset of the
+    real logged points. ``max_points <= 0`` means "no cap" (returns ``series``).
+    """
+    n = len(series)
+    if max_points <= 0 or n <= max_points:
+        return series
+    if max_points == 1:
+        return [series[-1]]
+    # Evenly spaced indices across [0, n-1], inclusive of both endpoints.
+    seen = set()
+    picked = []
+    for i in range(max_points):
+        idx = round(i * (n - 1) / (max_points - 1))
+        if idx not in seen:
+            seen.add(idx)
+            picked.append(series[idx])
+    return picked
+
+
 class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     """
     Domain-level experiment service that orchestrates model/data services
@@ -31,7 +82,7 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     # Limit concurrent GetLatestLoggerData calls to 3 to avoid piling up under slow I/O
     _logger_data_semaphore = threading.Semaphore(3)
 
-    def __init__(self, ctx):
+    def __init__(self, ctx, root_log_dir: str = None):
         self._ctx = ctx
         self.model_service = ModelService(ctx)
         self.data_service = DataService(ctx)
@@ -39,6 +90,33 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         # Per-instance in-flight counter for GetLatestLoggerData
         self._logger_data_in_flight = 0
         self._logger_data_counter_lock = threading.Lock()
+
+        # Initialize audit logger
+        self.audit_logger = None
+        if root_log_dir:
+            try:
+                self.audit_logger = AuditLogger(root_log_dir, ctx.exp_name or "default")
+            except Exception as e:
+                logger.warning(f"Failed to initialize audit logger: {e}")
+
+    def _log_audit(
+        self,
+        action_type: str,
+        status: str,
+        details: dict = None,
+        error: str = None,
+    ) -> None:
+        """Helper to log audit events if logger is available."""
+        if self.audit_logger:
+            try:
+                self.audit_logger.log_event(
+                    action_type=action_type,
+                    status=status,
+                    details=details,
+                    error=error,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to log audit event: {e}")
 
     def _kick_eval_worker(self) -> None:
         """Best-effort trigger of backend-thread evaluation execution."""
@@ -133,37 +211,48 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                     if mask is not None:
                         filtered_df = df[mask]
                         # Normalize to strings because logger sample_id is serialized as text.
-                        sample_ids = {str(sid) for sid in filtered_df.index.tolist()}
+                        if isinstance(filtered_df.index, pd.MultiIndex):
+                            sample_ids = {str(sid) for sid in filtered_df.index.get_level_values(SampleStatsEx.SAMPLE_ID.value).tolist()}
+                        else:
+                            sample_ids = {str(sid) for sid in filtered_df.index.tolist()}
 
-            # Get per-sample history from signal_logger
-            history_per_sample = signal_logger.get_signal_history_per_sample()
+            if not graph_name or not sample_ids:
+                return pb2.GetLatestLoggerDataResponse(points=[])
 
-            if history_per_sample is None:
-                return pb2.GetLatestLoggerDataResponse(points=[])  # No per-sample history available
+            # Query only this signal's compact arrays instead of inflating the whole
+            # per-sample history into dicts (which OOMs on large signals). Eval/audit
+            # per-sample data lives under eval-marker hashes, so derive audit_mode.
+            now = int(time.time())
+            eval_hashes = set(signal_logger.get_evaluation_marker_hashes())
 
-            # Collect all points for matching samples, filtered by graph_name if specified
-            if graph_name not in history_per_sample:
-                return pb2.GetLatestLoggerDataResponse(points=[])  # No data for this graph_name
+            # AGGREGATE: numpy-vectorized mean per (exp_hash, step) over matching samples.
+            # aggregate_per_sample_by_step uses np.unique + np.bincount — ~100× faster
+            # than a Python loop for large sample counts.
+            per_hash = signal_logger.aggregate_per_sample_by_step(
+                graph_name, sample_ids=sample_ids
+            )
+            # Normalise None keys that come from experiments with no hash
+            per_hash = {(h if h is not None else "N.A."): v for h, v in per_hash.items()}
 
-            # Collect points for the specified graph_name and sample_ids
-            sample_data_by_hash = history_per_sample[graph_name]
-            if sample_ids:
-                # Filter by sample_ids if tags were specified
-                for sid in sample_ids:
-                    for _, signals in sample_data_by_hash.items():
-                        for data in signals:
-                            if str(data.get("sample_id", "")) == sid:
-                                points.append(
-                                    pb2.LoggerDataPoint(
-                                        metric_name=graph_name,
-                                        model_age=data.get("model_age", 0),
-                                        metric_value=data.get("metric_value", 0.0),
-                                        experiment_hash=data.get("experiment_hash", "N.A."),
-                                        timestamp=int(data.get("timestamp", time.time())),
-                                        sample_id=sid,
-                                        audit_mode=bool(data.get("audit_mode", False)),
-                                    )
-                                )
+            # Still cap each returned curve's length (a run can have 10k+ steps);
+            # WL_MAX_POINTS_PER_SAMPLE bounds points per returned curve (endpoints kept).
+            max_points = _max_points_per_sample()
+            for exp_hash, series in per_hash.items():
+                series.sort(key=lambda sv: sv[0])  # order by step (model age)
+                series = _downsample_uniform(series, max_points)
+                audit = exp_hash in eval_hashes
+                for step, mean_val in series:
+                    points.append(
+                        pb2.LoggerDataPoint(
+                            metric_name=graph_name,
+                            model_age=step,
+                            metric_value=mean_val,
+                            experiment_hash=exp_hash,
+                            timestamp=now,
+                            sample_id="",  # aggregated mean curve — not a single sample
+                            audit_mode=audit,
+                        )
+                    )
 
             return pb2.GetLatestLoggerDataResponse(points=points)
 
@@ -337,6 +426,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # Reply
             if success:
                 logger.info(f"Successfully restored checkpoint: {experiment_hash}")
+                self._log_audit(
+                    "checkpoint_restore",
+                    "success",
+                    {
+                        "checkpoint_id": experiment_hash,
+                        "checkpoint_step": target_step,
+                        "weights_only": load_weights_only,
+                    },
+                )
                 return pb2.RestoreCheckpointResponse(
                     success=True,
                     message=(
@@ -347,12 +445,24 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 )
             else:
                 logger.warning(f"Failed to restore checkpoint: {experiment_hash}")
+                self._log_audit(
+                    "checkpoint_restore",
+                    "failed",
+                    {"checkpoint_id": experiment_hash},
+                    error=f"Failed to restore checkpoint {experiment_hash}",
+                )
                 return pb2.RestoreCheckpointResponse(
                     success=False,
                     message=f"Failed to restore checkpoint {experiment_hash}"
                 )
         except Exception as e:
             logger.error(f"Error during checkpoint restore: {str(e)}")
+            self._log_audit(
+                "checkpoint_restore",
+                "failed",
+                {"checkpoint_id": experiment_hash},
+                error=str(e),
+            )
             return pb2.RestoreCheckpointResponse(
                 success=False,
                 message=f"Error: {str(e)}"
@@ -372,6 +482,11 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         use_full_set = bool(request.use_full_set)
 
         if not split_name:
+            self._log_audit(
+                "evaluation_start",
+                "failed",
+                error="split_name is required",
+            )
             return pb2.TriggerEvaluationResponse(
                 success=False,
                 message="split_name is required",
@@ -389,11 +504,25 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 "[ExperimentService] TriggerEvaluation accepted: split=%s tags=%s full=%s",
                 split_name, tags, use_full_set,
             )
+            self._log_audit(
+                "evaluation_start",
+                "success",
+                {
+                    "eval_mode": split_name,
+                    "tags": tags,
+                    "use_full_set": use_full_set,
+                },
+            )
             return pb2.TriggerEvaluationResponse(
                 success=True,
                 message=f"Evaluation on '{split_name}' requested",
             )
         else:
+            self._log_audit(
+                "evaluation_start",
+                "failed",
+                error="Evaluation already in progress",
+            )
             return pb2.TriggerEvaluationResponse(
                 success=False,
                 message="Evaluation already in progress",
@@ -514,6 +643,18 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 except Exception:
                     logger.debug("Could not persist logger snapshot after note update", exc_info=True)
 
+            # Log to audit trail
+            self._log_audit_event(
+                "note_write",
+                "success",
+                {
+                    "metric_name": metric_name,
+                    "model_age": model_age,
+                    "note_text": note_text,
+                    "note_action": "saved" if note_text.strip() else "cleared",
+                },
+            )
+
             return pb2.CommandResponse(
                 success=True,
                 message=(
@@ -548,53 +689,70 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
             # Update HP
             try:
                 hp_now = None
+                hp_changes = {}
                 if hyper_parameters.HasField("training_steps_to_do"):
+                    hp_changes["training_steps_to_do"] = hyper_parameters.training_steps_to_do
                     set_hyperparam(
                         name=hp_name,
                         key_path="training_steps_to_do",
                         value=hyper_parameters.training_steps_to_do
                     )
                 if hyper_parameters.HasField("learning_rate"):
+                    hp_changes["learning_rate"] = hyper_parameters.learning_rate
                     set_hyperparam(
                         name=hp_name,
                         key_path="optimizer.lr",
                         value=hyper_parameters.learning_rate
                     )
                 if hyper_parameters.HasField("batch_size"):
+                    hp_changes["batch_size"] = hyper_parameters.batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.train_loader.batch_size",
                         value=hyper_parameters.batch_size
                     )
                 if hasattr(hyper_parameters, 'val_batch_size') and hyper_parameters.HasField("val_batch_size"):
+                    hp_changes["val_batch_size"] = hyper_parameters.val_batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.val_loader.batch_size",
                         value=hyper_parameters.val_batch_size
                     )
                 elif hasattr(hyper_parameters, 'eval_batch_size') and hyper_parameters.HasField("eval_batch_size"):
+                    hp_changes["val_batch_size"] = hyper_parameters.eval_batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.val_loader.batch_size",
                         value=hyper_parameters.eval_batch_size
                     )
                 if hyper_parameters.HasField("test_batch_size"):
+                    hp_changes["test_batch_size"] = hyper_parameters.test_batch_size
                     set_hyperparam(
                         name=hp_name,
                         key_path="data.test_loader.batch_size",
                         value=hyper_parameters.test_batch_size
                     )
                 if hyper_parameters.HasField("full_eval_frequency"):
+                    hp_changes["full_eval_frequency"] = hyper_parameters.full_eval_frequency
                     set_hyperparam(
                         name=hp_name,
                         key_path="eval_full_to_train_steps_ratio",
                         value=hyper_parameters.full_eval_frequency
                     )
                 if hyper_parameters.HasField("checkpont_frequency"):
+                    hp_changes["checkpont_frequency"] = hyper_parameters.checkpont_frequency
                     set_hyperparam(
                         name=hp_name,
                         key_path="experiment_dump_to_train_steps_ratio",
                         value=hyper_parameters.checkpont_frequency
+                    )
+
+                # Log HP changes if any
+                if hp_changes:
+                    self._log_audit(
+                        "hp_change",
+                        "success",
+                        {"changed_params": hp_changes},
                     )
 
                 # Process evaluation_mode toggle (UI button switch)
@@ -605,6 +763,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                             name=hp_name,
                             key_path="evaluation_mode",
                             value=incoming_eval,
+                        )
+                        self._log_audit(
+                            "mode_switch",
+                            "success",
+                            {
+                                "from_mode": "train",
+                                "to_mode": "evaluation" if incoming_eval else "train",
+                                "evaluation_mode": incoming_eval,
+                            },
                         )
                         if incoming_eval:
                             # Switching to eval mode implies pausing training
@@ -666,6 +833,15 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                                 set_hyperparam(name=hp_name, key_path="is_training", value=False)
                             mode_label = "AUDIT" if incoming_audit else "TRAIN"
                             logger.info(f"\n[WeightsLab] UI Command: Switch to {mode_label} Mode")
+                            self._log_audit(
+                                "mode_switch",
+                                "success",
+                                {
+                                    "from_mode": "audit" if current_audit else "train",
+                                    "to_mode": "audit" if incoming_audit else "train",
+                                    "auditor_mode": incoming_audit,
+                                },
+                            )
 
                         # Always update the stored value (harmless no-op if unchanged)
                         set_hyperparam(
@@ -703,9 +879,19 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         if desired_is_training:
                             logger.info("\n[WeightsLab] UI Command: RESUME")
                             trainer.resume()
+                            self._log_audit(
+                                "resume",
+                                "success",
+                                {"trainer_state": "running"},
+                            )
                         else:
                             logger.info("\n[WeightsLab] UI Command: PAUSE")
                             trainer.pause()
+                            self._log_audit(
+                                "pause",
+                                "success",
+                                {"trainer_state": "paused"},
+                            )
 
                         # Set training state and pause/resume accordingly
                         set_hyperparam(

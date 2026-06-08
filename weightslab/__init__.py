@@ -11,7 +11,7 @@ import os
 import logging
 import threading
 
-from .src import watch_or_edit, serve, keep_serving, save_signals, save_group_signals, tag_samples, discard_samples, get_samples_by_tag, get_discarded_samples, signal, eval_fn, compute_signals, SignalContext, clear_all, run_pending_evaluation, trigger_pending_evaluation_async
+from .src import watch_or_edit, start_training, serve, keep_serving, save_signals, save_instance_signals, save_group_signals, tag_samples, register_categorical_tag, set_categorical_tag, discard_samples, get_samples_by_tag, get_discarded_samples, signal, eval_fn, compute_signals, SignalContext, clear_all, run_pending_evaluation, trigger_pending_evaluation_async, query_signal_history, query_sample_history, query_instance_history, write_history, write_dataframe, get_current_experiment_hash
 from .backend.ledgers import GLOBAL_LEDGER as ledger
 from .art import _BANNER
 from .utils.logs import setup_logging, set_log_directory
@@ -85,6 +85,7 @@ __all__ = [
     "serve",
     "keep_serving",
     "save_signals",
+    "save_instance_signals",
     "save_group_signals",
     "signal",
     "compute_signals",
@@ -102,6 +103,15 @@ __all__ = [
   	"guard_training_context",
     "guard_testing_context",
     "ledger",
+	"start_training",
+	"register_categorical_tag",
+	"set_categorical_tag",
+    "get_current_experiment_hash",
+    "query_signal_history",
+    "query_sample_history",
+    "query_instance_history",
+    "write_history",
+    "write_dataframe",
 
     "_BANNER",
     "__version__",

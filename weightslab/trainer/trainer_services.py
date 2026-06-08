@@ -286,10 +286,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
     which in turn uses smaller sub-services (model/data/etc.).
     """
 
-    def __init__(self, exp_name: str = None, exp_service: ExperimentService | None = None):
+    def __init__(self, exp_name: str = None, exp_service: ExperimentService | None = None, root_log_dir: str = None):
         if exp_service is None:
             ctx = ExperimentContext(exp_name=exp_name)
-            exp_service = ExperimentService(ctx=ctx)
+            exp_service = ExperimentService(ctx=ctx, root_log_dir=root_log_dir)
             self._ctx = ctx
         self._exp_service = exp_service
 
@@ -556,7 +556,19 @@ def grpc_serve(
                 )
                 logger.info("[gRPC] Server object created")
                 server_manager.set_server(server)
-                servicer = trainer.ExperimentServiceServicer()
+
+                # Get root_log_dir from checkpoint_manager if available
+                root_log_dir = None
+                try:
+                    from weightslab.backend.ledgers import get_checkpoint_manager
+                    checkpoint_mgr = get_checkpoint_manager()
+                    if checkpoint_mgr and hasattr(checkpoint_mgr, 'root_log_dir'):
+                        root_log_dir = str(checkpoint_mgr.root_log_dir)
+                        logger.debug(f"[gRPC] Using root_log_dir from checkpoint_manager: {root_log_dir}")
+                except Exception as e:
+                    logger.debug(f"[gRPC] Could not get root_log_dir from checkpoint_manager: {e}")
+
+                servicer = trainer.ExperimentServiceServicer(root_log_dir=root_log_dir)
                 pb2_grpc.add_ExperimentServiceServicer_to_server(servicer, server)
                 logger.info("[gRPC] Servicer added")
 
