@@ -139,12 +139,22 @@ def _make_channels(signals):
             for s in signals}
 
 
+# Set WL_PROFILE=1 to print per-step signal-overhead in ms.
+import os as _os
+_PROFILE = _os.environ.get("WL_PROFILE", "0") == "1"
+_prof: dict = {"calls": 0, "total_ship_ms": 0.0, "total_preds_ms": 0.0,
+               "n_signals": 0}
+
+
 def _ship_round(signals, channels, batch):
     ids = batch["ids"]
     # Wrap reduce/preds in no_grad — signal capture is observational; running
     # `Detect._inference` + NMS inside the train autograd graph creates tensors
     # the graph keeps alive until backward, which compounds across steps and
     # OOMs at batch sizes the model alone would fit.
+    if _PROFILE:
+        import time
+        t0 = time.perf_counter()
     with th.no_grad():
         for s in signals:
             v = s.reduce(batch)
@@ -152,10 +162,25 @@ def _ship_round(signals, channels, batch):
                 continue
             kw = {"batch_ids": ids}
             if s.preds is not None:
+                if _PROFILE:
+                    tp = time.perf_counter()
                 p = s.preds(batch)
+                if _PROFILE:
+                    _prof["total_preds_ms"] += (time.perf_counter() - tp) * 1000
                 if p is not None:
                     kw["preds"] = p
             channels[s.name](v, **kw)
+    if _PROFILE:
+        _prof["total_ship_ms"] += (time.perf_counter() - t0) * 1000
+        _prof["calls"] += 1
+        _prof["n_signals"] = len(signals)
+        if _prof["calls"] % 50 == 0:
+            import sys
+            avg = _prof["total_ship_ms"] / _prof["calls"]
+            avg_p = _prof["total_preds_ms"] / max(1, _prof["calls"])
+            print(f"[WL profile] step #{_prof['calls']}: avg ship={avg:.1f}ms "
+                  f"(overlay={avg_p:.1f}ms) over {_prof['n_signals']} signals",
+                  file=sys.stderr, flush=True)
 
 
 def install_train_pipeline(model, signals: list[Signal]):
@@ -309,12 +334,10 @@ def default_val_signals(validator) -> list[Signal]:
         preds = getattr(validator, "_wl_preds", None)
         return _overlay_dict(preds, batch["img"].shape[-2:]) if preds is not None else None
 
-    def zero_r(batch):
-        return th.zeros(batch["img"].shape[0])
-
+    # Attach the overlay to the IoU signal so the studio sees a meaningful
+    # per-sample value distribution (constant-zero carrier ships no histogram).
     return [
-        Signal("val/iou_per_sample",   "metric", reduce=iou_r),
-        Signal("val/preds_per_sample", "metric", reduce=zero_r, preds=overlay_p),
+        Signal("val/iou_per_sample", "metric", reduce=iou_r, preds=overlay_p),
     ]
 
 
