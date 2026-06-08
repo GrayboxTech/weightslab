@@ -76,7 +76,11 @@ def method_call_tap(obj, attr: str) -> Callable[[], Any]:
     whose `__call__` is NOT routed through `nn.Module.__call__` (so
     `register_forward_hook` never fires on it — UL's `DFLoss` is the case
     in point). Replace `obj.attr` with a proxy that forwards attribute
-    access to the original and intercepts the call."""
+    access to the original and intercepts the call.
+
+    If `obj` is an `nn.Module` and `attr` is a registered child module,
+    `setattr` would reject our non-Module proxy; pop the child from
+    `_modules` first and then write through `__dict__` directly."""
     inner = getattr(obj, attr)
     box: dict = {"v": None}
 
@@ -86,7 +90,12 @@ def method_call_tap(obj, attr: str) -> Callable[[], Any]:
             out = inner(*a, **kw)
             box["v"] = out.detach() if hasattr(out, "detach") else out
             return out
-    setattr(obj, attr, _Tap())
+
+    if isinstance(obj, th.nn.Module) and attr in obj._modules:
+        del obj._modules[attr]
+        obj.__dict__[attr] = _Tap()
+    else:
+        setattr(obj, attr, _Tap())
     return lambda: box["v"]
 
 
