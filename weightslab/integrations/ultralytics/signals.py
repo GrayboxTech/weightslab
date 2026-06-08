@@ -141,7 +141,11 @@ def _make_channels(signals):
 
 # Set WL_PROFILE=1 to print per-step signal-overhead in ms.
 import os as _os
+import sys as _sys
 _PROFILE = _os.environ.get("WL_PROFILE", "0") == "1"
+if _PROFILE:
+    print("[WL profile] ENABLED — avg ship time logged every 50 ships",
+          file=_sys.stderr, flush=True)
 _prof: dict = {"calls": 0, "total_ship_ms": 0.0, "total_preds_ms": 0.0,
                "n_signals": 0}
 
@@ -178,7 +182,7 @@ def _ship_round(signals, channels, batch):
             import sys
             avg = _prof["total_ship_ms"] / _prof["calls"]
             avg_p = _prof["total_preds_ms"] / max(1, _prof["calls"])
-            print(f"[WL profile] step #{_prof['calls']}: avg ship={avg:.1f}ms "
+            print(f"[WL profile] ship#{_prof['calls']}: avg ship={avg:.1f}ms "
                   f"(overlay={avg_p:.1f}ms) over {_prof['n_signals']} signals",
                   file=sys.stderr, flush=True)
 

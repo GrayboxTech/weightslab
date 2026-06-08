@@ -113,6 +113,10 @@ class WLAwareTrainer(DetectionTrainer):
         import os as _os
         _correctness = _os.environ.get("WL_CORRECTNESS", "0") == "1"
         _state2 = {"step": 0}
+        if _correctness:
+            import sys
+            print("[WL correctness] ENABLED — weight/EMA snapshot every 50 steps",
+                  file=sys.stderr, flush=True)
 
         def _on_train_batch_end_correctness(trainer):
             if not _correctness:
