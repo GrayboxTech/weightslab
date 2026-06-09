@@ -134,6 +134,7 @@ class WLAwareTrainer(DetectionTrainer):
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         dataset = self.build_dataset(dataset_path, mode, batch_size)
         dataset.__class__ = WLAwareDataset
+        dataset.rect = False  # val geometry matches train (square letterbox to imgsz)
         is_train = (mode == "train")
 
         # Get data configuration from ledger
