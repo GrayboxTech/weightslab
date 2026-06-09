@@ -765,7 +765,11 @@ class LedgeredDataFrameManager:
             arr = np.asanyarray(value)
         except Exception:
             return False
-        return arr.ndim == 2 and arr.shape[0] >= 1 and arr.shape[-1] in (4, 5, 6)
+        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in (4, 5, 6)
+
+    @staticmethod
+    def _is_empty(value: Any) -> bool:
+        return 0 in value.shape
 
     def _should_store_array_separately(self, value: Any) -> bool:
         """Determine if a value should be stored in array H5."""
@@ -1483,7 +1487,7 @@ class LedgeredDataFrameManager:
                 # Keep bounding-box coordinates as-is: do NOT rasterize them into a
                 # segmentation mask here (boxes are drawn in Weights Studio from the
                 # raw coordinates). Only dense arrays go through get_mask.
-                if self._is_bbox_array(value):
+                if self._is_bbox_array(value) or self._is_empty(value):
                     continue
                 # GP: Not sure about this part - Maybe remove this and draw BB in WS
                 if dataset is None:
