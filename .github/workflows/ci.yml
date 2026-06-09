@@ -139,7 +139,7 @@ jobs:
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
           python -m pip install pytorch_lightning
-          python -m unittest discover -s ./weightslab/tests -p "test_.py" -t . -v
+          python -m unittest discover -s ./weightslab/tests -p "test_*.py" -t . -v
 
       # TODO (GP): WL CI do not find WS CI for now; token or visibility problem ??
       # - name: Trigger WeightsStudio CI

@@ -27,7 +27,7 @@ is_training: false  # Start training immediately or not
 
 # Serving
 serving_grpc: true
-serving_cli: false
+serving_cli: true
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
