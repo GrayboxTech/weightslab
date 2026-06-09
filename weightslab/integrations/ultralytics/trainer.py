@@ -126,6 +126,8 @@ class WLAwareTrainer(DetectionTrainer):
         # so loader len reflects the active set. ({}, 0.0) unpacks cleanly into
         # UL's `{**self.metrics, ...}` which (None, None) does not.
         if len(self.test_loader) == 0:
+            print("[WLAwareTrainer] val skipped: all val samples are discarded",
+                  flush=True)
             return {}, 0.0
         return super().validate()
 
