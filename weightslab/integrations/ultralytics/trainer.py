@@ -134,13 +134,18 @@ class WLAwareTrainer(DetectionTrainer):
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         dataset = self.build_dataset(dataset_path, mode, batch_size)
         dataset.__class__ = WLAwareDataset
-        dataset.rect = False  # val geometry matches train (square letterbox to imgsz)
         is_train = (mode == "train")
 
         # Get data configuration from ledger
         data_cfg = ledgers.get_hyperparams()
         loader_name = "train_loader" if is_train else (data_cfg.get('data', {}).get('loader_name', 'val_loader') if not isinstance(data_cfg.get('data'), str) else 'val_loader')
         cfg = data_cfg.get('data', {}).get(loader_name, {}) if not isinstance(data_cfg.get('data'), str) else {}
+
+        # Respect ledger-configured rect mode. Default False so val and train
+        # share the same square letterbox geometry — UL otherwise hardcodes
+        # rect=True for val, giving non-square per-batch padding that differs
+        # from train.
+        dataset.rect = cfg.get('rect', False)
         loader = wl.watch_or_edit(
             dataset,
             flag="data",
