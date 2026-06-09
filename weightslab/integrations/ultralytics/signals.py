@@ -274,19 +274,23 @@ def default_train_signals(model) -> list[Signal]:
     def cls_r(_batch):
         return get_bce().sum(dim=(1, 2))
 
+    def _fresh(val, w):
+        # A tapped value is only this step's if it pairs 1:1 with the fg
+        # weights captured by the bbox_loss pre-hook. When this step assigns
+        # zero foreground, bbox_loss is skipped (loss.py: `if fg_mask.sum()`)
+        # so the taps stay stale — and `get_iou` in particular may hold an
+        # EMA-validation value (validator.py runs `model.loss` on the EMA
+        # model, refreshing the *global* bbox_iou tap but not this train
+        # instance's pre-hook). Mismatched lengths ⇒ stale ⇒ skip the round.
+        return val is not None and val.shape[0] == w.shape[0]
+
     def box_r(_batch):
         st = _fg_state()
         if st is None:
             return None
         fg, w, img_of_fg = st
         iou = get_iou()
-        # UL has a second `bbox_iou` call site in `tal.py` (TaskAligned
-        # assigner). It lives in a different module namespace so our
-        # `fn_tap(ul_loss, "bbox_iou")` doesn't see it — but some UL
-        # builds re-export bbox_iou paths in ways that make our cache
-        # disagree with bbox_loss's fg selection. Skip the round if the
-        # shapes don't match, rather than crash mid-train.
-        if iou is None or iou.shape[0] != w.shape[0]:
+        if not _fresh(iou, w):
             return None
         return _scatter(((1.0 - iou) * w).detach(), img_of_fg, fg.shape[0])
 
@@ -296,7 +300,7 @@ def default_train_signals(model) -> list[Signal]:
             return None
         fg, w, img_of_fg = st
         dfl = get_dfl()
-        if dfl is None or dfl.shape[0] != w.shape[0]:
+        if not _fresh(dfl, w):
             return None
         return _scatter((dfl * w).detach(), img_of_fg, fg.shape[0])
 
