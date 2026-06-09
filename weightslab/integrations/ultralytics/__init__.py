@@ -15,15 +15,18 @@ Minimal user surface:
     from ultralytics import YOLO
     from weightslab.integrations.ultralytics import WLAwareTrainer
 
-    wl.watch_or_edit(LoggerQueue(), flag="logger", name="exp", log_dir="./logs")
     wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg)
     wl.serve()
 
     YOLO(cfg["model"]).train(
         trainer=WLAwareTrainer,
         data=cfg["data_root"], imgsz=640, epochs=1000, batch=4,
+        project="./logs", name="exp",  # → WL log_dir/name
+        workers=0,                     # WL invariant (parent-process uid counter)
     )
     wl.keep_serving()
+
+See README.md for the supported-setup matrix.
 """
 from .dataset import WLAwareDataset
 from .trainer import WLAwareTrainer
