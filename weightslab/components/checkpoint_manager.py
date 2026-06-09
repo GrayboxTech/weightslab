@@ -805,7 +805,7 @@ class CheckpointManager:
         # Get checkpoint manager hp
         manager_hp = config.get('checkpoint_manager', {}) if config else {}
         enable_checkpoints = manager_hp.get('enable_checkpoints', True)
-        dump_model_architecture = manager_hp.get('dump_model_architecture', True)
+        dump_model_architecture = manager_hp.get('dump_model_architecture', False)  # Set to false by default
         dump_model_state = manager_hp.get('dump_model_state', True)
         dump_optimizer_state = manager_hp.get('dump_optimizer_state', True)
         dump_data_state = manager_hp.get('dump_data_state', True)
@@ -1910,6 +1910,17 @@ class CheckpointManager:
                     model.update_optimizer() # Update optimizer with new model parameters if needed
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
                     self._model_init_step = step
+
+                    if 'optimizer_state_dict' in weights:
+                        try:
+                            optimizer = get_optimizer()
+                            if hasattr(optimizer, 'get') and callable(optimizer.get):
+                                optimizer = optimizer.get()
+                            if optimizer is not None:
+                                optimizer.load_state_dict(weights['optimizer_state_dict'])
+                                logger.info("Loaded optimizer state")
+                        except Exception as e:
+                            logger.warning(f"Could not load optimizer state: {e}")
 
                 # Set Model Training Guard
                 guard_training_context.model = model  # Train

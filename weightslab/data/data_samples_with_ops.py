@@ -704,9 +704,9 @@ class DataSampleTrackingWrapper(Dataset):
         unique_ids = np.asanyarray(unique_ids, dtype=object)  # Use object dtype for string UIDs
         return unique_ids, unique_id_to_index
 
-    def _get_df_view(self, limit: int = -1) -> pd.DataFrame:
+    def _get_df_view(self, limit: int = -1, column: str = None, value: str = None) -> pd.DataFrame:
         """Convenience accessor for this split's ledger slice."""
-        return get_dataframe().get_df_view(self._dataset_split, limit=limit)
+        return get_dataframe().get_df_view(column=column, limit=limit, value=value)
 
     def _get_value(self, sample_id: int, key: str):
         return get_dataframe().get_value(self._dataset_split, sample_id, key)

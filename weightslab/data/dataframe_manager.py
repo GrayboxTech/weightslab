@@ -1412,12 +1412,15 @@ class LedgeredDataFrameManager:
             return None
         return row[column]
 
-    def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False) -> pd.DataFrame:
+    def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False, value: str = None) -> pd.DataFrame:
         with self._lock:
             if self._df.empty:
                 return pd.DataFrame()
             if column is not None and ((not isinstance(column, (list, set, tuple)) and column in self._df.columns) or (isinstance(column, (list, set, tuple)))):
-                subset = self._df[column]
+                if value is not None:
+                    subset = self._df[self._df[column] == value]
+                else:
+                    subset = self._df[column]
             else:
                 subset = self._df
         if limit > 0:
@@ -2445,10 +2448,11 @@ def create_ledger_manager():
 
     return None
 
-# Global LedgeredDataFrameManager instance
-# TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
+# # Global LedgeredDataFrameManager instance
+# # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
+# from weightslab.backend import ledgers
 # LM = create_ledger_manager()
 # try:
-#     register_dataframe(LM)
+#     ledgers.register_dataframe(LM)
 # except Exception as e:
 #     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

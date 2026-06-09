@@ -36,6 +36,8 @@ from ultralytics.utils.nms import non_max_suppression
 
 import weightslab as wl
 
+from weightslab.utils.tools import filter_kwargs_for_callable
+
 from ._utils import normalize_post_nms_preds
 
 
@@ -243,7 +245,7 @@ def _overlay_dict(nms_preds, img_hw):
 
 # ─── default signal packs ──────────────────────────────────────────────
 
-def default_train_signals(model) -> list[Signal]:
+def default_train_signals(model, signals_cfg: dict = {}) -> list[Signal]:
     """Default UL-detection train signals: per-sample cls/box/dfl. If the
     model exposes a `Detect` head, a live preds overlay rides on the cls
     signal. Compose with user signals: `default_train_signals(m) + [...]`."""
@@ -274,19 +276,35 @@ def default_train_signals(model) -> list[Signal]:
     def cls_r(_batch):
         return get_bce().sum(dim=(1, 2))
 
+    def _fresh(val, w):
+        # A tapped value is only this step's if it pairs 1:1 with the fg
+        # weights captured by the bbox_loss pre-hook. When this step assigns
+        # zero foreground, bbox_loss is skipped (loss.py: `if fg_mask.sum()`)
+        # so the taps stay stale — and `get_iou` in particular may hold an
+        # EMA-validation value (validator.py runs `model.loss` on the EMA
+        # model, refreshing the *global* bbox_iou tap but not this train
+        # instance's pre-hook). Mismatched lengths ⇒ stale ⇒ skip the round.
+        return val is not None and val.shape[0] == w.shape[0]
+
     def box_r(_batch):
         st = _fg_state()
         if st is None:
             return None
         fg, w, img_of_fg = st
-        return _scatter(((1.0 - get_iou()) * w).detach(), img_of_fg, fg.shape[0])
+        iou = get_iou()
+        if not _fresh(iou, w):
+            return None
+        return _scatter(((1.0 - iou) * w).detach(), img_of_fg, fg.shape[0])
 
     def dfl_r(_batch):
         st = _fg_state()
         if st is None:
             return None
         fg, w, img_of_fg = st
-        return _scatter((get_dfl() * w).detach(), img_of_fg, fg.shape[0])
+        dfl = get_dfl()
+        if not _fresh(dfl, w):
+            return None
+        return _scatter((dfl * w).detach(), img_of_fg, fg.shape[0])
 
     signals = [
         Signal("train/cls_per_sample", "loss", reduce=cls_r),
@@ -298,18 +316,26 @@ def default_train_signals(model) -> list[Signal]:
     # Reuses UL's own `_inference` + `non_max_suppression` (no math rewrite).
     if detect_head is not None:
         get_det = fwd_hook(detect_head)
+        nms_cfg = filter_kwargs_for_callable(non_max_suppression, signals_cfg.get('nms', signals_cfg.get('train_nms', {})))
         conf_thres, iou_thres = _overlay_nms_thresholds(model)
+        conf_thres = conf_thres if nms_cfg.get('conf_thres') is None else nms_cfg.get('conf_thres')
+        iou_thres = iou_thres if nms_cfg.get('iou_thres') is None else nms_cfg.get('iou_thres')
+        nms_cfg['conf_thres'] = conf_thres
+        nms_cfg['iou_thres'] = iou_thres
 
         def overlay_p(batch):
             y = detect_head._inference(get_det())
-            nms = non_max_suppression(y, conf_thres=conf_thres, iou_thres=iou_thres)
+            nms = non_max_suppression(
+                y,
+                **nms_cfg
+            )
             return _overlay_dict(nms, batch["img"].shape[-2:])
         signals[0].preds = overlay_p
 
     return signals
 
 
-def default_val_signals(validator) -> list[Signal]:
+def default_val_signals(validator, signals_cfg: dict = {}) -> list[Signal]:
     """Default UL-detection val signals: per-image IoU with live preds
     overlay riding on the IoU signal."""
     def _iou_mapper(args, _out):
@@ -343,13 +369,13 @@ def default_val_signals(validator) -> list[Signal]:
 
 # ─── top-level API (back-compat with the existing trainer.py calls) ────
 
-def install_per_sample_signals(model):
+def install_per_sample_signals(model, signals_cfg: dict = {}):
     """Default train pipeline. Equivalent to:
         install_train_pipeline(model, default_train_signals(model))"""
-    install_train_pipeline(model, default_train_signals(model))
+    install_train_pipeline(model, default_train_signals(model, signals_cfg=signals_cfg))
 
 
-def install_per_sample_val_signals(validator):
+def install_per_sample_val_signals(validator, signals_cfg: dict = {}):
     """Default val pipeline. Equivalent to:
         install_val_pipeline(validator, default_val_signals(validator))"""
-    install_val_pipeline(validator, default_val_signals(validator))
+    install_val_pipeline(validator, default_val_signals(validator, signals_cfg=signals_cfg))

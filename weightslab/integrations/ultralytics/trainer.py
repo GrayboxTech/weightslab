@@ -29,6 +29,7 @@ from ultralytics.models.yolo.detect import DetectionTrainer
 
 import weightslab as wl
 from weightslab.components.global_monitoring import pause_controller
+from weightslab.backend import ledgers
 
 from .collate import wl_ul_dict_collate
 from .dataset import WLAwareDataset
@@ -59,16 +60,16 @@ class WLAwareTrainer(DetectionTrainer):
                 compute_dependencies=False,
             )
 
-            install_per_sample_signals(underlying)
-            install_per_sample_val_signals(trainer.validator)
+            # Get signals configuration from ledger
+            signals_cfg = ledgers.get_hyperparams().get('signals_cfg', {})
+            install_per_sample_signals(underlying, signals_cfg)
+            install_per_sample_val_signals(trainer.validator, signals_cfg)
 
             _register_channels()
 
             @wl.eval_fn
             def _validate(loader):
                 trainer.validator(model=(trainer.ema.ema if trainer.ema else trainer.model))
-
-            pause_controller.resume(force=True)
 
         def _on_train_batch_start(trainer):
             wl.guard_training_context.__enter__()
@@ -119,15 +120,29 @@ class WLAwareTrainer(DetectionTrainer):
         dataset = self.build_dataset(dataset_path, mode, batch_size)
         dataset.__class__ = WLAwareDataset
         is_train = (mode == "train")
+
+        # Get data configuration from ledger
+        data_cfg = ledgers.get_hyperparams()
+        loader_name = "train_loader" if is_train else (data_cfg.get('data', {}).get('loader_name', 'val_loader') if not isinstance(data_cfg.get('data'), str) else 'val_loader')
+        cfg = data_cfg.get('data', {}).get(loader_name, {}) if not isinstance(data_cfg.get('data'), str) else {}
         loader = wl.watch_or_edit(
-            dataset, flag="data",
-            loader_name="train_loader" if is_train else "val_loader",
-            batch_size=batch_size, shuffle=is_train,
-            num_workers=0, drop_last=False,
-            is_training=is_train, compute_hash=False,
+            dataset,
+            flag="data",
+            loader_name=loader_name,
+            batch_size=cfg.get('batch_size', batch_size),
+            shuffle=is_train,
+            num_workers=cfg.get('num_workers', 0),
+            drop_last=cfg.get('drop_last', False),
+            is_training=is_train,
+            compute_hash=cfg.get('compute_hash', False),
             collate_fn=wl_ul_dict_collate,
-            preload_labels=True, preload_metadata=True,
+            preload_labels=cfg.get('preload_labels', True),
+            preload_metadata=cfg.get('preload_metadata', True),
         )
+
+        # Test
+        l = len(loader)
+
         if not hasattr(loader, "reset"):
             loader.reset = lambda *a, **k: None
         return loader

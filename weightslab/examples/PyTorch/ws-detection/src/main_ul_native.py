@@ -50,7 +50,6 @@ def main():
     model_name = cfg["model"]["name"]
     data_root = str(cfg["data_root"])
     image_size = cfg.get("image_size")
-    batch_size = cfg["data"]["train_loader"]["batch_size"]
     device = cfg["device"]
     max_steps = cfg.get("training_steps_to_do")
     serving_grpc = cfg.get("serving_grpc", True)
@@ -65,9 +64,12 @@ def main():
         data=data_root,
         imgsz=image_size,
         epochs=1000 if max_steps is None else max(1, int(max_steps)),
-        batch=batch_size,
         device=device,
-        resume=False, cache=False, optimizer="SGD", lr0=0.001, amp=False,
+        resume=False,
+        cache=False,
+        optimizer="SGD",
+        lr0=0.001,
+        amp=False,
         # All augs off for clean sample↔gt association in studio.
         mosaic=0.0, mixup=0.0, copy_paste=0.0,
         hsv_h=0.0, hsv_s=0.0, hsv_v=0.0,
@@ -76,7 +78,7 @@ def main():
         auto_augment=None,
     )
 
-    wl.keep_serving()
+    wl.keep_serving()  # Keep main thread alive to analyze training results directly
 
 
 if __name__ == "__main__":

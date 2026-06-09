@@ -265,6 +265,18 @@ class ModelInterface(NetworkWithOps):
                                         restore_rng_state(checkpoint_rng_state)
                                         logger.debug(f"Restored RNG state from checkpoint")
 
+                                    # Restore optimizer state
+                                    if 'optimizer_state_dict' in weights:
+                                        try:
+                                            optimizer = get_optimizer()
+                                            if hasattr(optimizer, 'get') and callable(optimizer.get):
+                                                optimizer = optimizer.get()
+                                            if optimizer is not None:
+                                                optimizer.load_state_dict(weights.get('optimizer_state_dict'))
+                                                logger.info("Loaded optimizer state")
+                                        except Exception as e:
+                                            logger.warning(f"Could not load optimizer state: {e}")
+
                                     logger.info(f"Auto-loaded model weights from checkpoint {latest_hash[:16]} (step {self.current_step})")
                                 except Exception as e:
                                     logger.warning(f"Failed to load weights state dict: {e}")
