@@ -21,6 +21,67 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 # -------------------------- Utils Functions ---------------------------------
 # ----------------------------------------------------------------------------
+
+def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Reset DataFrame index levels into columns, skipping any level whose name
+    is already a column.
+
+    Plain ``df.reset_index()`` raises ``ValueError: cannot insert X, already
+    exists`` when a MultiIndex level name (e.g. ``sample_id`` or
+    ``annotation_id``) has already been materialised as a column — which
+    happens after ``_normalize_for_read`` in the H5 store.  This helper only
+    promotes the levels that are actually missing from the column namespace.
+    """
+    import pandas as _pd
+    if not isinstance(df, _pd.DataFrame) or not isinstance(df.index, _pd.MultiIndex):
+        # Single-level index: only reset if the name isn't already a column.
+        if df.index.name and df.index.name in df.columns:
+            return df
+        return df.reset_index()
+    missing = [n for n in df.index.names if n and n not in df.columns]
+    if not missing:
+        # All levels already present as columns — nothing to promote.
+        return df
+    return df.reset_index(level=missing)
+
+def _random_preds_like_batch(batch, batch_size, device=None):
+    """Generate random (N, 6) predictions in [x1,y1,x2,y2,cls,score] normalized format.
+
+    Mirrors the per-image instance count and class ids from the GT batch so the
+    predictions are structurally compatible with the loss/metric helpers.
+    """
+    batch_idx = batch['batch_idx'].squeeze(-1).long()
+    cls = batch['cls'].squeeze(-1).long()
+    num_classes = max(1, int(cls.max().item()) + 1) if len(cls) > 0 else 1
+    result = []
+    for i in range(batch_size):
+        mask = batch_idx == i
+        n = int(mask.sum())
+        if n == 0:
+            # No GT for this image: randomly emit 0–5 predictions when the image
+            # index is even, otherwise stay empty (simulates sporadic false positives).
+            if i % 2 == 0:
+                n = torch.randint(0, 6, (1,)).item()
+            if n == 0:
+                result.append(torch.zeros((0, 6), device=device))
+                continue
+            cls_i = torch.randint(0, num_classes, (n, 1), device=device).float()
+            xy = torch.rand(n, 2, device=device)
+            wh = torch.rand(n, 2, device=device) * (1 - xy)
+            boxes = torch.cat([xy, xy + wh], dim=1).clamp(0, 1)
+            scores = torch.rand(n, 1, device=device)
+            result.append(torch.cat([boxes, cls_i, scores], dim=1))
+            continue
+        # Random xyxy boxes: sample x1<x2, y1<y2 uniformly in [0,1]
+        xy = torch.rand(n, 2, device=device)
+        wh = torch.rand(n, 2, device=device) * (1 - xy)
+        boxes = torch.cat([xy, xy + wh], dim=1).clamp(0, 1)
+        cls_i = cls[mask].float().unsqueeze(1).to(device)
+        scores = torch.rand(n, 1, device=device)
+        result.append(torch.cat([boxes, cls_i, scores], dim=1))
+    return result
+
+
 def normalize_config(obj: Any) -> Any:
     """Recursively normalize a config dict for JSON/YAML serialization."""
     if isinstance(obj, dict):
@@ -581,6 +642,26 @@ def array_id_2bytes(
             return int.from_bytes(digest8, byteorder="big", signed=False) % (10**8)
         else:
             return int.from_bytes(digest8, byteorder="big", signed=False)
+
+
+def detach_to_cpu(obj: Any) -> Any:
+    """Recursively detach tensors from the compute graph and move them to CPU.
+
+    Handles:
+      - ``torch.Tensor``        → ``.detach().cpu()``
+      - ``dict``                → recurse into values, preserve keys
+      - ``list`` / ``tuple``    → recurse element-wise, preserve type
+      - anything else           → returned as-is
+    """
+    if isinstance(obj, th.Tensor):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: detach_to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [detach_to_cpu(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(detach_to_cpu(v) for v in obj)
+    return obj
 
 
 def filter_kwargs_for_callable(func, kwargs):

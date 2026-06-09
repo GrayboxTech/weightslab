@@ -1,4 +1,6 @@
+import os
 import time
+import traceback
 import threading
 import logging
 import traceback
@@ -11,6 +13,7 @@ from typing import Dict, Sequence, Any, List
 
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.h5_array_store import H5ArrayStore
+from weightslab.data.sample_stats import SampleStatsEx
 from weightslab.data.array_proxy import ArrayH5Proxy, convert_dataframe_to_proxies
 from weightslab.data.data_utils import _filter_columns_by_patterns, get_mask
 from weightslab.backend.ledgers import get_dataloaders, get_dataloader
@@ -27,11 +30,50 @@ pd.set_option('future.no_silent_downcasting', True)
 logger = logging.getLogger(__name__)  # Set up logger
 
 
+def _safe_update(target: pd.DataFrame, source: pd.DataFrame) -> None:
+    """In-place update of ``target`` from ``source``, immune to the pandas
+    internal AssertionError that ``DataFrame.update()`` raises when the source
+    dtype is incompatible with the target column (e.g. float into int, or any
+    type into a categorical column).
+
+    For each column in ``source``:
+      1. Categorical columns in ``target`` are widened to ``object`` upfront —
+         pandas raises ``AssertionError`` (not a catchable exception) when you
+         assign a value that is not already in the category list.
+      2. Try a direct ``loc`` assignment (fast path, preserves dtype).
+      3. On any exception, widen the target column to ``object`` and retry.
+
+    Only non-NaN values from ``source`` overwrite ``target`` (same semantics
+    as ``DataFrame.update(overwrite=True)``).
+    """
+    common_idx = target.index.intersection(source.index)
+    if common_idx.empty:
+        return
+    for col in source.columns:
+        if col not in target.columns:
+            target[col] = np.nan
+        # Categorical columns must be widened before assignment — pandas raises
+        # an uncatchable AssertionError when the value is not in the category list.
+        if hasattr(target[col], 'cat'):
+            target[col] = target[col].astype(object)
+        src = source.loc[common_idx, col]
+        mask = src.notna()
+        if not mask.any():
+            continue
+        try:
+            target.loc[common_idx[mask.values], col] = src[common_idx].values
+        except Exception:
+            target[col] = target[col].astype(object)
+            idx_to_write = common_idx[mask.values]
+            target.loc[idx_to_write, col] = src[mask].values
+
+
 class LedgeredDataFrameManager:
     """Central in-memory ledger shared across all loaders/splits.
 
-    Indexing strategy: single-level index on `sample_id`. The `origin` is kept
-    as a normal column to simplify downstream operations.
+    Indexing strategy: multi-level index on (sample_id, annotation_id).
+    The `origin` is kept as a normal column to simplify downstream operations.
+    Sample-level metadata is duplicated on every annotation row.
     """
 
     def __init__(self, flush_interval: float = 3.0, flush_max_rows: int = 100, enable_flushing_threads: bool = True, enable_h5_persistence: bool = True):
@@ -49,6 +91,10 @@ class LedgeredDataFrameManager:
         self._flush_queue_count = 0
         self._dense_store: Dict[str, Dict[int, np.ndarray]] = {}
         self._buffer: Dict[int, Dict[str, Any]] = {}  # {sample_id: {col: value}}
+        # Registry of categorical tags: tag_name (without "tag:" prefix) -> ordered
+        # list of allowed category values. Distinguishes multi-value string tags
+        # (e.g. weather -> [rainy, sunny]) from the legacy boolean tags.
+        self._categorical_tags: Dict[str, List[str]] = {}
         self._enable_flushing_threads = enable_flushing_threads
         self._enable_h5_persistence = enable_h5_persistence
         self.first_init = True
@@ -77,6 +123,171 @@ class LedgeredDataFrameManager:
                     array_path = store.get_path().parent / "arrays.h5"
                     self._array_store = H5ArrayStore(array_path)
                     self._array_store.recover()
+                # Restore any previously persisted categorical tag registry.
+                self._load_tag_registry()
+
+    @staticmethod
+    def _count_instances(target: Any) -> int:
+        """Detect number of instances in a sample based on target/prediction.
+
+        Rules:
+        1. If target is a list/tuple of array-like items → len(target) instances
+           Example: [array([x1,y1,x2,y2]), array([x1,y1,x2,y2]), ...] = multiple bboxes
+           Example: [mask1, mask2, mask3] = multiple masks
+           Example: ['cat', 'dog'] = multiple labels
+
+        2. If target is a single numpy array/tensor → 1 instance
+           Example: array([x1, y1, x2, y2]) = single bbox
+           Example: array([[...], [...]]) = single instance (could be multi-channel, image, etc.)
+           Example: [0, 1, 1, 0] = single label
+
+        3. Otherwise → 1 instance (default)
+        """
+        if target is None:
+            return 1
+
+        # List/tuple of items → check if it's a list of instances
+        if isinstance(target, (list, tuple)):
+            if len(target) == 0:
+                return 1
+
+            # If the list contains array-like items, it's a list of instances
+            first_item = target[0]
+            if isinstance(first_item, (np.ndarray, torch.Tensor, list)):
+                # List of arrays/lists → each is an instance
+                return len(target)
+
+            # List of scalars (e.g., class indices) → could be 1 instance or multiple
+            # Conservative: treat as single instance if all are scalars
+            # Unless all items are single-value arrays
+            try:
+                # Check if all items are scalar-like
+                all_scalar = all(isinstance(item, (int, float, np.integer, np.floating)) for item in target)
+                if all_scalar:
+                    return 1  # Single instance with multiple values
+            except Exception:
+                pass
+
+            # Default for lists: treat as list of instances
+            return len(target)
+
+        # Single numpy array or tensor → 1 instance
+        if isinstance(target, (np.ndarray, torch.Tensor)):
+            return 1
+
+        # Default: single instance
+        return 1
+
+    @staticmethod
+    def _instance_targets_list(target: Any) -> list:
+        """Return the SEPARATE per-instance targets for a sample (rows 1..N).
+
+        Only a list/tuple of array-like items represents multiple instances
+        (e.g. detection boxes, per-object masks) → one entry per instance.
+        A single array/tensor/scalar/label is the sample's OWN target and lives
+        on the sample row (instance_id 0), so it yields no separate instance rows.
+
+        - list/tuple of array-likes  → the list (one entry per instance, rows 1..N)
+        - everything else            → ``[]`` (single-target / classification → only the sample row)
+        """
+        if isinstance(target, (list, tuple)) and len(target) > 0 \
+                and isinstance(target[0], (np.ndarray, torch.Tensor, list)):
+            return list(target)
+        return []
+
+    def _expand_records_to_multi_index(self, records: List[Dict[str, Any]]) -> pd.DataFrame:
+        """Build the ``(sample_id, annotation_id)`` multi-indexed frame DIRECTLY from
+        a list of per-sample record dicts — without first materializing a per-sample
+        DataFrame and then re-expanding it.
+
+        For each record, the instance count is read from its ``target`` and the
+        per-instance dense columns (``SampleStats.MODEL_INOUT_LIST``) are exploded
+        so row ``(sample_id, k)`` holds element ``k`` (one tensor → numpy); all other
+        keys are duplicated across the instances. This is the fast path for
+        ``register_split`` (one DataFrame construction instead of two).
+        """
+        if not records:
+            return pd.DataFrame()
+
+        SID = SampleStats.Ex.SAMPLE_ID.value
+        ANNOT = SampleStats.Ex.INSTANCE_ID.value
+        TARGET = SampleStats.Ex.TARGET.value
+        io_cols = set(SampleStats.MODEL_INOUT_LIST)
+
+        # Column set in first-seen order (union across records; SID/ANNOT excluded).
+        keys: List[str] = []
+        seen = set()
+        for rec in records:
+            for key in rec.keys():
+                if key not in seen and key not in (SID, ANNOT):
+                    seen.add(key)
+                    keys.append(key)
+
+        # Build COLUMN arrays directly (dict-of-lists → DataFrame is much faster than
+        # constructing from per-row dicts, and avoids the intermediate per-sample frame).
+        #
+        # Convention: instance_id 0 is the CANONICAL SAMPLE ROW (per-sample
+        # predictions/targets/signals; target left empty here, filled by the
+        # per-sample save or reconstructed by the UI collapse). instance_id 1..N
+        # hold the N per-instance targets.
+        columns: Dict[str, list] = {key: [] for key in keys}
+        sample_ids: List[Any] = []
+        annotation_ids: List[int] = []
+
+        for rec in records:
+            sid = self._normalize_sample_id(rec.get(SID))
+            inst_targets = self._instance_targets_list(rec.get(TARGET))
+            n_inst = len(inst_targets)
+            total = n_inst + 1  # +1 for the sample row at instance_id 0
+
+            sample_ids.extend([sid] * total)
+            annotation_ids.extend(range(total))  # 0 (sample), 1..N (instances)
+
+            for key in keys:
+                val = rec.get(key)
+                col = columns[key]
+                if key == TARGET:
+                    if n_inst > 0:
+                        # Multi-instance: sample row (IID 0) target empty (per-sample
+                        # aggregate filled later / by the UI collapse); instance rows
+                        # (IID 1..N) hold the per-instance targets (→numpy).
+                        col.append(None)
+                        col.extend(self._tensor_to_numpy(t) for t in inst_targets)
+                    else:
+                        # Single-target / classification: the sample's own target lives
+                        # on the sample row (IID 0); no separate instance rows.
+                        col.append(self._tensor_to_numpy(val))
+                else:
+                    # Every other column (predictions, origin, metadata, tags, signals,
+                    # ...) is sample-level → stored ONLY on the sample row (instance_id 0).
+                    # Instance rows (instance_id >= 1) carry just their target at init;
+                    # their per-instance signals are filled in during training.
+                    col.append(self._tensor_to_numpy(val) if key in io_cols else val)
+                    col.extend([None] * n_inst)
+
+        out = pd.DataFrame(columns)
+        out.index = pd.MultiIndex.from_arrays([sample_ids, annotation_ids], names=[SID, ANNOT])
+        return out
+
+    def _expand_dataframe_with_annotations(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Expand a sample-level frame to a ``(sample_id, annotation_id)`` multi-index.
+
+        Convention (single source of truth — delegates to
+        ``_expand_records_to_multi_index``): instance_id 0 is the canonical SAMPLE
+        row; instance_id 1..N hold the N per-instance targets. Sample-level columns
+        are duplicated across all rows.
+        """
+        if df.empty:
+            return df
+
+        SID = SampleStats.Ex.SAMPLE_ID.value
+        work = df
+        # Make sure sample_id is reachable as a column for the records builder.
+        if not isinstance(work.index, pd.MultiIndex) and work.index.name != SID:
+            work = work.copy()
+            work.index.name = SID
+        records = work.reset_index().to_dict("records")
+        return self._expand_records_to_multi_index(records)
 
     def _normalize_sample_id(self, sample_id: Any) -> Any:
         """Normalize incoming sample IDs while preserving numeric IDs when possible."""
@@ -95,18 +306,31 @@ class LedgeredDataFrameManager:
         return str(sample_id)
 
     def _coerce_sample_id_for_index(self, sample_id: Any) -> Any:
-        """Coerce sample_id to match current dataframe index representation."""
+        """Coerce sample_id to match current dataframe index representation.
+
+        For multi-index (sample_id, annotation_id), returns sample_id component.
+        """
         sid = self._normalize_sample_id(sample_id)
 
         if self._df.empty:
             return sid
 
-        if sid in self._df.index:
-            return sid
-
-        sid_str = str(sid)
-        if sid_str in self._df.index:
-            return sid_str
+        # Check if multi-index
+        if isinstance(self._df.index, pd.MultiIndex):
+            # Get level 0 (sample_id level) values
+            level_0_values = self._df.index.get_level_values(0)
+            if sid in level_0_values:
+                return sid
+            sid_str = str(sid)
+            if sid_str in level_0_values:
+                return sid_str
+        else:
+            # Fallback for single-index
+            if sid in self._df.index:
+                return sid
+            sid_str = str(sid)
+            if sid_str in self._df.index:
+                return sid_str
 
         return sid
 
@@ -151,15 +375,150 @@ class LedgeredDataFrameManager:
         """Get the array store instance."""
         return self._array_store
 
+    # ------------------------------------------------------------------
+    # Categorical tag registry
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _tag_name_from_col(col: Any) -> str | None:
+        """Return the tag name from a ``tag:<name>`` column, else None."""
+        prefix = SampleStats.Ex.TAG.value + ":"
+        s = str(col)
+        return s[len(prefix):] if s.startswith(prefix) else None
+
+    @staticmethod
+    def _clean_categories(categories) -> List[str]:
+        """Normalize a list of category values to non-empty unique strings (order-preserving)."""
+        out = []
+        for c in (categories or []):
+            if c is None or isinstance(c, bool):
+                continue
+            s = str(c).strip()
+            if s == "" or s.lower() == "nan":
+                continue
+            out.append(s)
+        return list(dict.fromkeys(out))
+
+    def _merge_categories(self, name: str, categories, replace: bool = False) -> List[str]:
+        """Merge categories into the registry for ``name``. Caller must hold self._lock."""
+        cats = self._clean_categories(categories)
+        existing = [] if replace else self._categorical_tags.get(name, [])
+        self._categorical_tags[name] = list(dict.fromkeys([*existing, *cats]))
+        return list(self._categorical_tags[name])
+
+    def register_categorical_tag(self, name: str, categories=None, replace: bool = False) -> List[str]:
+        """Declare (or extend) a categorical tag and its allowed category values.
+
+        ``name`` may be given with or without the ``tag:`` prefix. Returns the
+        resulting ordered category list. Persists the registry to H5.
+        """
+        name = str(name).strip()
+        prefix = SampleStats.Ex.TAG.value + ":"
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        if not name:
+            return []
+        with self._lock:
+            result = self._merge_categories(name, categories or [], replace=replace)
+        self._persist_tag_registry()
+        return result
+
+    def get_categorical_tags(self) -> Dict[str, List[str]]:
+        """Return a copy of the categorical tag registry: {tag_name: [categories]}."""
+        with self._lock:
+            return {k: list(v) for k, v in self._categorical_tags.items()}
+
+    def is_categorical_tag(self, name: str) -> bool:
+        prefix = SampleStats.Ex.TAG.value + ":"
+        name = str(name)
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        with self._lock:
+            return name in self._categorical_tags
+
+    def _auto_register_categorical_tags(self, df: pd.DataFrame) -> None:
+        """Detect string-valued ``tag:<name>`` columns and register their values.
+
+        Boolean tags are ignored. Works for both object/string columns (collect
+        unique values) and already-categorical columns (read the full category
+        list, preserving values absent from the current data).
+        """
+        if df is None or df.empty:
+            return
+        changed = False
+        with self._lock:
+            for col in df.columns:
+                name = self._tag_name_from_col(col)
+                if name is None:
+                    continue
+                s = df[col]
+                if isinstance(s.dtype, pd.CategoricalDtype):
+                    cats = s.dtype.categories.tolist()
+                    if any(isinstance(c, bool) for c in cats):
+                        continue  # boolean-style categorical → not a categorical tag
+                    candidate = cats
+                elif pd.api.types.is_bool_dtype(s.dtype):
+                    continue
+                elif s.dtype == object or pd.api.types.is_string_dtype(s.dtype):
+                    non_null = s.dropna()
+                    candidate = [v for v in non_null.unique().tolist() if not isinstance(v, bool)]
+                else:
+                    continue
+                cleaned = self._clean_categories(candidate)
+                if not cleaned:
+                    continue
+                before = self._categorical_tags.get(name)
+                self._merge_categories(name, cleaned)
+                if self._categorical_tags.get(name) != before:
+                    changed = True
+        if changed:
+            self._persist_tag_registry()
+
+    def _persist_tag_registry(self) -> None:
+        if not self._enable_h5_persistence or self._store is None:
+            return
+        try:
+            reg = self.get_categorical_tags()
+            self._store.save_tag_registry(reg)
+        except Exception as e:
+            logger.debug(f"[LedgeredDataFrameManager] Failed to persist tag registry: {e}")
+
+    def _load_tag_registry(self) -> None:
+        if self._store is None:
+            return
+        try:
+            reg = self._store.load_tag_registry()
+            if reg:
+                with self._lock:
+                    for name, cats in reg.items():
+                        self._merge_categories(name, cats)
+        except Exception as e:
+            logger.debug(f"[LedgeredDataFrameManager] Failed to load tag registry: {e}")
+
     def register_split(self, origin: str, df: List | pd.DataFrame, store: H5DataFrameStore | None = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
-        logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {len(df)} samples.")
+        # Build the annotation-expanded (sample_id, annotation_id) frame.
+        # Fast path: when given a list of record dicts, construct the EXPANDED frame
+        # directly (one DataFrame construction) instead of building a per-sample frame
+        # and then re-expanding it.
+        if isinstance(df, pd.DataFrame):
+            num_samples_before = len(df)
+            logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {num_samples_before} samples.")
+            df_expanded = self._expand_dataframe_with_annotations(df)
+        else:
+            records = list(df)
+            num_samples_before = len(records)
+            logger.info(f"[LedgeredDataFrameManager] Registering split '{origin}' with {num_samples_before} samples.")
+            df_expanded = self._expand_records_to_multi_index(records)
+
+        num_rows_after = len(df_expanded)
+        logger.info(f"[LedgeredDataFrameManager] After annotation expansion: {num_samples_before} samples → {num_rows_after} annotation rows.")
+
         with self._lock:
             if store is not None:
                 self.set_store(store)
             self._origin_revisions.setdefault(str(origin), 0)
 
-        # Upsert initial data
-        self.upsert_df(df, origin)
+        # Upsert expanded data
+        self.upsert_df(df_expanded, origin)
 
         # Load existing persisted data if needed
         if self._store is not None and self._df is not None:
@@ -169,13 +528,21 @@ class LedgeredDataFrameManager:
         self._ensure_flush_thread()
 
     def _load_existing_data(self, origin: str = None, autoload_arrays: bool | list | set = False, return_proxies: bool = True, use_cache: bool = True):
+        # Restore the categorical tag registry so loaded string-valued tag columns
+        # get their full allowed category set (not just the values present on disk).
+        self._load_tag_registry()
         loaded_df = self._store.load_all(origin) if self._store else pd.DataFrame()
 
         if not loaded_df.empty:
-            # Ensure single-level index on sample_id
+            # Ensure multi-level index on (sample_id, annotation_id) if available
             if "sample_id" in loaded_df.columns:
                 try:
-                    loaded_df = loaded_df.set_index("sample_id")
+                    if "annotation_id" in loaded_df.columns:
+                        loaded_df = loaded_df.set_index(['sample_id', 'annotation_id'])
+                    else:
+                        # Expand to multi-index if not already
+                        loaded_df = loaded_df.set_index("sample_id")
+                        loaded_df = self._expand_dataframe_with_annotations(loaded_df)
                 except Exception:
                     pass
 
@@ -190,25 +557,48 @@ class LedgeredDataFrameManager:
                         return_proxies=return_proxies,
                     )
 
-                # Merge with right override: loaded_df wins on overlapping sample_ids
+                # Normalize the loaded sample_id level to str so it matches the
+                # in-memory index (which was normalized at registration).
+                if isinstance(loaded_df.index, pd.MultiIndex):
+                    loaded_df.index = pd.MultiIndex.from_arrays(
+                        [pd.Index([self._normalize_sample_id(v) for v in loaded_df.index.get_level_values(0)]),
+                         loaded_df.index.get_level_values(1)],
+                        names=['sample_id', 'annotation_id'],
+                    )
+
+                # A previous run can persist a sample's instances all collapsed onto
+                # annotation_id 0 (e.g. (12, 0) repeated). Recover them as distinct
+                # rows BEFORE the merge — otherwise index.difference dedups the key and
+                # the rows survive stuck at annotation_id 0 instead of becoming 0..N.
+                # loaded_df = self._repair_duplicate_annotation_ids(loaded_df)
+
+                # Merge with right override: loaded_df wins on overlapping rows.
                 all_cols = self._df.columns.union(loaded_df.columns)
                 if self._df.empty:
                     self._df = loaded_df.reindex(columns=all_cols)
                 else:
-                    self._df = self._df.reindex(columns=all_cols)  # set columns first to avoid SettingWithCopyWarning
-
-                    # Process the loaded df
+                    self._df = self._df.reindex(columns=all_cols)
                     loaded_df = loaded_df.reindex(columns=all_cols)
-                    loaded_df = loaded_df.reset_index()
-                    loaded_df['sample_id'] = loaded_df['sample_id'].astype(str)  # Ensure str index
-                    loaded_df = loaded_df.set_index('sample_id')
 
-                    # Override existing rows
-                    self._df.update(loaded_df)
-                    # Note: We NO LONGER concat missing_idx here.
-                    # If a sample_id is in H5 but not in our current self._df (which was just seeded
-                    # with the current dataset's IDs), it means it's a stale/ghost record.
-                    # We skip it to keep the session clean.
+                    # 1) Update rows present in BOTH (loaded wins on non-null values).
+                    _safe_update(self._df, loaded_df)
+
+                    # 2) Append rows that exist ONLY in the loaded df. This is the key
+                    #    fix: a freshly-registered loader has just the sample row
+                    #    (annotation_id == 0) per sample, while the persisted df from a
+                    #    previous run also has the instance rows (annotation_id >= 1).
+                    #    Those instance rows must be added back, not dropped. Use a
+                    #    boolean mask (not .loc[difference]) so duplicate keys can't be
+                    #    re-expanded by the label lookup.
+                    new_rows = loaded_df[~loaded_df.index.isin(self._df.index)]
+                    if not new_rows.empty:
+                        self._df = pd.concat([self._df, new_rows])
+
+                    # Keep the (sample_id, annotation_id) index clean and grouped.
+                    if self._df.index.has_duplicates:
+                        self._df = self._df[~self._df.index.duplicated(keep='last')]
+                    if isinstance(self._df.index, pd.MultiIndex):
+                        self._df = self._df.sort_index()
             else:
                 logger.warning(f"[LedgeredDataFrameManager] Loaded data missing 'sample_id' column for origin={origin}. Skipping load.")
 
@@ -216,35 +606,54 @@ class LedgeredDataFrameManager:
         if df_local is None or (isinstance(df_local, pd.DataFrame) and df_local.empty) or len(df_local) == 0:
             return
 
-        # Normalize incoming frame: ensure `origin` column and sample_id index
-        df_norm = df_local if isinstance(df_local, pd.DataFrame) else pd.DataFrame(df_local).set_index('sample_id')
-        if origin is not None and "origin" not in df_norm.columns:
-            df_norm["origin"] = origin
+        # Normalize incoming frame
+        df_norm = df_local if isinstance(df_local, pd.DataFrame) else pd.DataFrame(df_local)
 
-        # Ensure sample_id index matches existing frame type or coerces to int
-        if "sample_id" in df_norm.columns:
+        # Check if already multi-indexed or needs expansion
+        if isinstance(df_norm.index, pd.MultiIndex):
+            # Already has multi-index (sample_id, annotation_id)
+            pass
+        elif 'sample_id' in df_norm.columns and 'annotation_id' in df_norm.columns:
+            # Columns exist but not yet indexed
+            df_norm = df_norm.set_index(['sample_id', 'annotation_id'])
+        elif 'sample_id' in df_norm.columns:
+            # sample_id is a column, set as index and expand
             try:
-                df_norm = df_norm.set_index("sample_id")
+                df_norm = df_norm.set_index('sample_id')
+                df_norm = self._expand_dataframe_with_annotations(df_norm)
             except Exception:
                 pass
         else:
-            # If index isn't sample_id, try to rename it
-            if df_norm.index.name != "sample_id":
-                try:
-                    df_norm.index.name = "sample_id"
-                except Exception:
-                    pass
+            # sample_id is already the index (or some other index)
+            if df_norm.index.name is None or df_norm.index.name != 'sample_id':
+                df_norm.index.name = 'sample_id'
+            # Expand to multi-index
+            try:
+                df_norm = self._expand_dataframe_with_annotations(df_norm)
+            except Exception as e:
+                logger.debug(f"[LedgeredDataFrameManager] Failed to expand dataframe with annotations: {e}")
 
-        # Normalize index values to avoid int/str mismatches for sample IDs
-        try:
-            df_norm.index = pd.Index([self._normalize_sample_id(v) for v in df_norm.index], name="sample_id")
-        except Exception:
-            pass
+        # Normalize sample_id values in multi-index
+        if isinstance(df_norm.index, pd.MultiIndex) and df_norm.index.nlevels >= 1:
+            level_0_normalized = pd.Index([self._normalize_sample_id(v) for v in df_norm.index.get_level_values(0)])
+            try:
+                if df_norm.index.nlevels == 2:
+                    df_norm.index = pd.MultiIndex.from_arrays(
+                        [level_0_normalized, df_norm.index.get_level_values(1)],
+                        names=['sample_id', 'annotation_id']
+                    )
+            except Exception:
+                pass
+
+        # # Recover any sample whose instances collapsed onto a single annotation_id
+        # # (e.g. duplicate (12, 0) rows) into distinct (12, 0..N) rows before merging,
+        # # so the intersection/difference merge below can't pull duplicate keys back.
+        # df_norm = self._repair_duplicate_annotation_ids(df_norm)
 
         with self._lock:
             affected_origins = self._collect_affected_origins(df_norm, origin=origin)
 
-            # Align columns: Ensure the global dataframe has all columns present in the update
+            # Align columns
             missing_cols = df_norm.columns.difference(self._df.columns)
             if len(missing_cols) > 0:
                 self._df = self._df.reindex(columns=self._df.columns.union(missing_cols))
@@ -260,40 +669,61 @@ class LedgeredDataFrameManager:
                     try:
                         self._df[col] = self._df[col].astype(target_dtype)
                     except Exception:
-                        # Keep pandas-inferred dtype as fallback
                         pass
 
             if self._df.empty:
-                # Optimized initial load: just use the normalized dataframe
-                # Ensure we use a copy to avoid side effects
                 self._df = df_norm.copy()
             else:
-                # Right-preferred upsert: df_norm overrides existing, adds new rows
-                # Only update columns present in df_norm, keep other columns/values from self._df
+                # Right-preferred upsert with multi-index support
                 existing_idx = df_norm.index.intersection(self._df.index)
                 all_cols = df_norm.columns
                 if len(existing_idx) > 0:
+                    # Widen any categorical target columns to object before assigning:
+                    # writing a value outside a Categorical's category list raises
+                    # "Cannot setitem on a Categorical with a new category". The
+                    # _optimize_dataframe_memory pass below re-applies categorical dtypes.
+                    for col in all_cols:
+                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                            self._df[col] = self._df[col].astype(object)
                     self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 
-                # Append rows that do not exist yet
-                missing_idx = df_norm.index.difference(self._df.index)
-                if len(missing_idx) > 0:
-                    self._df = pd.concat([self._df, df_norm.loc[missing_idx]])
+                # Append rows that do not exist yet. Use a boolean mask (not
+                # .loc[difference]) so a duplicate key in df_norm can't be
+                # re-expanded into multiple rows by the label lookup.
+                new_rows = df_norm[~df_norm.index.isin(self._df.index)]
+                if not new_rows.empty:
+                    self._df = pd.concat([self._df, new_rows])
 
-            logger.debug(f"[LedgeredDataFrameManager] Global DataFrame updated: {len(self._df)} rows, {len(self._df.columns)} columns.")
+            logger.debug(f"[LedgeredDataFrameManager] Global DataFrame updated: {len(self._df)} rows, {len(self._df.columns)} columns. Index: {self._df.index.names}")
 
             # Set missing cols value for bool
             for col in missing_cols:
                 if df_norm[col].dtype == bool:
                     self._df[col] = self._df[col].fillna(False).astype(bool)
 
-            # Flag index to be flushed later (outside lock) to minimize lock time
-            self.mark_dirty_batch(df_norm.index.tolist(), force_flush=force_flush)
+            # Auto-register any string-valued tag: columns as categorical tags
+            # (e.g. dataset metadata declaring tag:weather = "rainy"/"sunny").
+            self._auto_register_categorical_tags(df_norm)
+
+            # Optimize memory by converting repetitive columns to categorical
+            self._df = self._optimize_dataframe_memory(self._df)
+
+            # Mark dirty for flush (handle multi-index)
+            if isinstance(df_norm.index, pd.MultiIndex):
+                sample_ids = df_norm.index.get_level_values(0).unique().tolist()
+            else:
+                sample_ids = df_norm.index.tolist()
+            self.mark_dirty_batch(sample_ids, force_flush=force_flush)
             self._bump_origin_revisions(affected_origins)
 
     def mark_dirty(self, sample_id: int):
+        """Mark sample as dirty for H5 flush.
+
+        For multi-index, marks the sample_id (all annotations).
+        """
         with self._lock:
-            self._pending.add(self._coerce_sample_id_for_index(sample_id))
+            normalized_id = self._coerce_sample_id_for_index(sample_id)
+            self._pending.add(normalized_id)
 
     def drop_column(self, column: str):
         with self._lock:
@@ -315,18 +745,48 @@ class LedgeredDataFrameManager:
         """Check if array storage is enabled."""
         return array_name in SAMPLES_STATS_TO_SAVE_TO_H5  # Regexed signals are not considered here
 
+    def _is_array_column_to_norm(self, column_name: str, value: Any) -> bool:
+        """True if ``column_name`` is an array column whose ``value`` is an array
+        (or array proxy) that should be normalized before H5 storage. Used by
+        ``_normalize_arrays_for_storage`` to decide which cells to process."""
+        return column_name in self._array_columns and isinstance(value, (np.ndarray, ArrayH5Proxy))
+
+    @staticmethod
+    def _is_bbox_array(value: Any) -> bool:
+        """True if ``value`` looks like bounding-box COORDINATES rather than a dense
+        mask / feature map.
+
+        Box rows are ``(x1, y1, x2, y2[, conf][, cls])`` → a 2-D array whose last
+        dim is 4..6. Dense masks are ``(H, W)`` with large trailing dims, so they
+        never collide with this shape. Used to keep detection targets/predictions
+        as raw coordinates (not rasterized to a mask, not spilled to the array H5).
+        """
+        try:
+            arr = np.asanyarray(value)
+        except Exception:
+            return False
+        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in (4, 5, 6)
+
+    @staticmethod
+    def _is_empty(value: Any) -> bool:
+        return 0 in value.shape
+
     def _should_store_array_separately(self, value: Any) -> bool:
         """Determine if a value should be stored in array H5."""
         if value is None:
             return False
         try:
             arr = np.asanyarray(value)
+            # Keep bounding-box coordinates inline in the dataframe — they are small,
+            # meaningful as-is, and must NOT be spilled to the array H5 as a proxy.
+            if self._is_bbox_array(arr):
+                return False
             # Store arrays with size > 1 separately
             return arr.size > 1 and (arr.ndim >= 1 and (arr.shape[0] >= 28 or arr.shape[-1] >= 28))
         except Exception:
             return False
 
-    def _extract_arrays_for_storage(self, sample_id: int, data: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    def _extract_arrays_for_storage(self, sample_id: int, data: pd.DataFrame) -> Dict[str, np.ndarray]:
         """
         Extract arrays that should be stored separately.
 
@@ -339,13 +799,42 @@ class LedgeredDataFrameManager:
             if col not in data:
                 continue
 
-            value = data[col]
+            inst_values = data[col]
+            for value in inst_values:
+                if self._should_array_be_stored(col) and self._should_store_array_separately(value):
+                    try:
+                        arrays_to_store[col] = np.asanyarray(value)
+                    except Exception as e:
+                        logger.warning(f"[LedgeredDataFrameManager] Failed to convert {col} to array for sample {sample_id}: {e}")
+
+        return arrays_to_store
+
+    def _extract_arrays_from_row(self, row_key: Any, row: pd.Series) -> Dict[str, np.ndarray]:
+        """Extract the array-valued cells of a SINGLE row to store separately.
+
+        Unlike :meth:`_extract_arrays_for_storage` (which collapses a whole
+        sample's annotation rows and so loses per-instance arrays), this works on
+        one ``(sample_id, annotation_id)`` row at a time — required for multi-index
+        frames where each instance row carries its own ``target`` array.
+
+        Cells already holding an :class:`ArrayH5Proxy` are skipped: their array is
+        already persisted, so the caller just reuses ``proxy.path_ref``.
+
+        Returns:
+            Dict of {column_name: ndarray} for arrays to store in the array H5.
+        """
+        arrays_to_store: Dict[str, np.ndarray] = {}
+        for col in self._array_columns:
+            if col not in row:
+                continue
+            value = row[col]
+            if isinstance(value, ArrayH5Proxy):
+                continue
             if self._should_array_be_stored(col) and self._should_store_array_separately(value):
                 try:
                     arrays_to_store[col] = np.asanyarray(value)
                 except Exception as e:
-                    logger.warning(f"[LedgeredDataFrameManager] Failed to convert {col} to array for sample {sample_id}: {e}")
-
+                    logger.warning(f"[LedgeredDataFrameManager] Failed to convert {col} to array for {row_key}: {e}")
         return arrays_to_store
 
     def _safe_array_value(self, value: Any) -> Any:
@@ -438,7 +927,7 @@ class LedgeredDataFrameManager:
                 return False
             try:
                 return not np.isnan(v)
-            except (TypeError, ValueError):
+            except (RuntimeError, TypeError, ValueError):
                 return True
 
         def index_batch(obj, batch_index, rec=False):
@@ -448,6 +937,8 @@ class LedgeredDataFrameManager:
                 return obj[batch_index]
             if isinstance(obj, (torch.Tensor, np.ndarray)) and obj.shape[0] == 0:
                 return obj[batch_index]
+            if obj is None:
+                return obj
             return obj[batch_index]
 
         # Build all records BEFORE acquiring lock (faster)
@@ -461,14 +952,30 @@ class LedgeredDataFrameManager:
             # Process data to store
             ## Prediction
             if preds is not None:
-                pred = index_batch(preds, batch_index)
+                pred = None
+                # Match batch formating in targets (dict) - ul formating
+                if isinstance(preds, dict) and 'bboxes' in preds:
+                    pred = preds['bboxes']
+                    pred = index_batch(pred, batch_index)
+                else:
+                    pred = index_batch(preds, batch_index)
                 pred = pred if is_meaningful(pred) else None  # Replace nan by None
                 if pred is not None:
                     rec[SampleStats.Ex.PREDICTION.value] = self._normalize_preds_raw_uint16(pred)  # Not normalized as already integer
             ## Target
             if targets is not None:
-                target = index_batch(targets, batch_index)
-                target = target if is_meaningful(target) else None  # Replace nan by None
+                target = None
+                # Match batch formating in targets (dict) - ul formating
+                if isinstance(targets, dict) and 'batch_idx' in targets:
+                    if batch_index in targets['batch_idx']:
+                        mask = targets['batch_idx'].ravel()==batch_index
+                        if 'bboxes' in targets:
+                            target = targets['bboxes'][mask]
+                        if 'cls' in targets:
+                            target = torch.cat((target, targets['cls'][mask]), -1)
+                else:
+                    target = index_batch(targets, batch_index)
+                    target = target if is_meaningful(target) else None  # Replace nan by None
                 if target is not None:
                     rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
             ## Step
@@ -494,50 +1001,220 @@ class LedgeredDataFrameManager:
             self.first_init = False
             self.flush_async()
 
-    def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any]):
+    def enqueue_instance_batch(
+        self,
+        sample_ids: Sequence[Any],
+        annotation_ids: Sequence[int],
+        losses: Dict[str, Any] | None,
+        step: int | None = None,
+        targets: np.ndarray | dict | None = None,
+    ):
+        """Enqueue per-instance signals indexed by (sample_id, annotation_id).
+
+        Unlike `enqueue_batch` which stores one row per sample_id, this writes one
+        value per (sample_id, annotation_id) pair. Each signal value array must
+        align with `sample_ids` and `annotation_ids` (same length).
+
+        Args:
+            sample_ids: Sequence of sample IDs, one per instance (length N).
+            annotation_ids: Sequence of annotation IDs within each sample (length N).
+            losses: Dict of {signal_name: array-like of length N}.
+            step: Current training step (optional).
+            targets: Target values for each instance (optional).
+
+        Note: instance rows (annotation_id >= 1) do NOT carry an origin — the flush
+        derives each row's origin from its sample's annotation_id 0 row for routing.
+        """
+        if sample_ids is None or len(sample_ids) == 0:
+            return
+        if annotation_ids is None or len(annotation_ids) != len(sample_ids):
+            return
+        if not losses and targets is None:
+            return
+
+        self._ensure_flush_thread()
+
+        # Normalize loss arrays to numpy once (one scalar per instance).
+        normalized_losses: Dict[str, np.ndarray] = {}
+        for name, values in (losses or {}).items():
+            try:
+                arr = values.detach().cpu().numpy() if hasattr(values, 'detach') else np.asarray(values)
+                if arr.ndim > 1:
+                    arr = arr.reshape(arr.shape[0], -1).mean(axis=1)
+                normalized_losses[name] = arr
+            except Exception:
+                continue
+
+        def _meaningful(v):
+            if v is None:
+                return False
+            try:
+                return not np.isnan(v)
+            except (TypeError, ValueError):
+                return True
+
+        def _index_target(obj, i):
+            """Pick the i-th instance target from a list/array/dict-of-arrays."""
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return {k: _index_target(v, i) for k, v in obj.items()}
+            try:
+                return obj[i]
+            except (IndexError, KeyError, TypeError):
+                return None
+
+        # Build per-instance records keyed by (sample_id, annotation_id) and enqueue
+        # them into the SAME buffer as enqueue_batch. Only the flush path mutates the
+        # dataframe — it handles sample-wise and instance-wise records together.
+        records_to_add: Dict[Any, Dict[str, Any]] = {}
+        if targets is not None and isinstance(targets, dict):
+            # If targets is a dict, we assume it's a dict of arrays (e.g. {'bboxes': [...], 'cls': [...]}) for detection
+            targets_rav = None
+        else:
+            targets_rav = [tar for _targets in targets for tar in _targets] if targets is not None else None
+        batch_index_d, batch_index = {}, -1
+        for i, (sid, aid) in enumerate(zip(sample_ids, annotation_ids)):
+            # Skip first aid as it s the whole signal, not per instance
+            if aid == 0:
+                continue
+
+            if sid not in batch_index_d:
+                batch_index += 1
+                batch_index_d[sid] = batch_index
+            sid_n = self._normalize_sample_id(sid)
+            aid_i = int(aid)
+            rec: Dict[str, Any] = {
+                "sample_id": sid_n,
+                SampleStats.Ex.INSTANCE_ID.value: aid_i,
+            }
+            # NOTE: origin is intentionally NOT written onto instance rows — instance
+            # rows (instance_id >= 1) hold only their per-instance target + signals.
+            # The flush derives each row's origin from its sample's IID 0 row for routing.
+
+            # Per-instance scalar signals (losses/metrics) are a FLAT, sample-major
+            # vector aligned 1:1 with the (sample_id, annotation_id) iteration order,
+            # so the i-th value belongs to this i-th instance — regardless of whether
+            # `targets` is a dict (detection) or a nested list (segmentation). Index
+            # strictly by i; never by the per-sample counter.
+            for name, arr in normalized_losses.items():
+                if i < len(arr):
+                    try:
+                        rec[name] = float(arr[i])
+                    except Exception:
+                        rec[name] = None
+
+            # Per-instance target (e.g. one mask / box per annotation).
+            # if inst_target := _index_target(targets_rav, i):
+            if targets_rav is None:
+                target = None
+
+                # Match batch formating in targets (dict) - ul formating
+                if isinstance(targets, dict) and 'batch_idx' in targets:
+                    if batch_index in targets['batch_idx']:
+                        mask = targets['batch_idx'].numpy().ravel()==batch_index
+                        if mask.any():
+                            usid = list(dict.fromkeys(sample_ids))
+                            if targets['batch_idx'][mask].ravel().shape[0] > 0:
+                                bid = int(targets['batch_idx'][mask].ravel()[0].item())
+                            if sid == usid[bid]:
+                                if 'bboxes' in targets:
+                                    target = targets['bboxes'][mask][aid_i-1]  # aid start to 1 for instance rows
+                                if 'cls' in targets:
+                                    target = torch.cat((target, targets['cls'][mask][aid_i-1]), -1)  # aid start to 1 for instance rows
+                if target is not None:
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
+            else:
+                # Nested-list targets are flattened sample-major (targets_rav), so the
+                # i-th flat entry is this i-th instance's target — index by i, not the
+                # per-sample counter.
+                inst_target = _index_target(targets_rav, i)
+                if _meaningful(inst_target):
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(inst_target)
+
+            # Update last seen for every sample
+            if step is not None:
+                rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
+
+            records_to_add[(sid_n, aid_i)] = rec
+
+        with self._buffer_lock:
+            for key, record in records_to_add.items():
+                self._buffer.setdefault(key, {}).update(record)
+            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init
+
+        if should_flush:
+            self.first_init = False
+            self.flush_async()
+
+    def update_values(self, origin: str, sample_id: int, updates: Dict[str, Any], annotation_id: int = 0):
+        """Update values for a sample (or specific annotation if multi-index).
+
+        For multi-index, updates all annotations of the sample by default (annotation_id=None)
+        or a specific annotation (annotation_id=int).
+        """
         if not updates:
             return
         with self._lock:
             idx = self._coerce_sample_id_for_index(sample_id)
             if self._df.empty:
-                row_data = {"origin": origin, "sample_id": idx, **updates}
-                self._df = pd.DataFrame([row_data]).set_index("sample_id")
+                row_data = {"origin": origin, **updates}
+                if isinstance(self._df.index, pd.MultiIndex):
+                    df_local = pd.DataFrame([row_data])
+                    df_local.index = pd.MultiIndex.from_tuples([(idx, annotation_id)], names=['sample_id', 'annotation_id'])
+                    self._df = df_local
+                else:
+                    df_local = pd.DataFrame([row_data])
+                    df_local.index = pd.Index([idx], name="sample_id")
+                    self._df = df_local
             else:
                 all_cols = self._df.columns.union(updates.keys())
                 if len(all_cols) != len(self._df.columns):
                     self._df = self._df.reindex(columns=all_cols)
-                # Find matching row for this origin and sample_id; if none, create it
-                if "origin" in self._df.columns:
-                    mask = (self._df.index == idx) & (self._df["origin"] == origin)
+
+                # Handle multi-index case
+                if isinstance(self._df.index, pd.MultiIndex) and self._df.index.nlevels >= 2:
+                    if annotation_id is not None:
+                        mask = (self._df.index.get_level_values(0) == idx) & (self._df.index.get_level_values(1) == annotation_id)
+                    else:
+                        mask = self._df.index.get_level_values(0) == idx
                 else:
-                    mask = (self._df.index == idx)
+                    # Single-index fallback
+                    if "origin" in self._df.columns:
+                        mask = (self._df.index == idx) & (self._df["origin"] == origin)
+                    else:
+                        mask = (self._df.index == idx)
+
                 if mask.any():
-                    # Handle multiple column updates by constructing Series
-                    # This supports both single-valued updates and array-valued updates
+                    # Widen categorical target columns to object before assignment so a
+                    # new value (e.g. a fresh categorical-tag category) doesn't raise
+                    # "Cannot setitem on a Categorical with a new category".
+                    for col in updates.keys():
+                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                            self._df[col] = self._df[col].astype(object)
                     if len(updates) == 1:
-                        # Single column update - use original logic
                         values = np.asanyarray(list(updates.values())[0])
                         if values.ndim == 0:
                             values = np.asanyarray([values])
-                        elif values.ndim == 1:
-                            pass
-                        else:
+                        elif values.ndim > 1:
                             values = values.squeeze(tuple(range(values.ndim-1)))
                         self._df.loc[mask, list(updates.keys())] = values
                     else:
-                        # Multiple column updates - use Series for proper alignment
                         update_series = pd.Series(updates)
                         self._df.loc[mask, update_series.index] = update_series.values
                 else:
                     # Create new row
                     row_data = {"origin": origin, **updates}
                     df_local = pd.DataFrame([row_data])
-                    df_local.index = pd.Index([idx], name="sample_id")
+                    if isinstance(self._df.index, pd.MultiIndex):
+                        df_local.index = pd.MultiIndex.from_tuples([(idx, annotation_id)], names=['sample_id', 'annotation_id'])
+                    else:
+                        df_local.index = pd.Index([idx], name="sample_id")
                     # Align columns and assign
                     df_local = df_local.reindex(columns=self._df.columns.union(df_local.columns))
                     if len(self._df.columns) != len(df_local.columns):
                         self._df = self._df.reindex(columns=df_local.columns)
-                    self._df.loc[df_local.index, df_local.columns] = df_local
+                    self._df = pd.concat([self._df, df_local])
             self._bump_origin_revisions([origin])
 
     def get_origin_revision(self, origin: str) -> int:
@@ -611,11 +1288,10 @@ class LedgeredDataFrameManager:
         Returns:
             A set of group_id strings that are tainted (contain a discarded member).
         """
-        tainted = set()
-        from weightslab.data.sample_stats import SampleStatsEx
         discard_col = SampleStatsEx.DISCARDED.value
         group_col = SampleStats.Ex.GROUP_ID.value
         origin_col = SampleStats.Ex.ORIGIN.value
+        tainted = set()
 
         with self._lock:
             if self._df.empty:
@@ -652,11 +1328,10 @@ class LedgeredDataFrameManager:
         Returns:
             A set of sample_id strings that are discarded.
         """
-        discarded_ids = set()
-        from weightslab.data.sample_stats import SampleStatsEx
         discard_col = SampleStatsEx.DISCARDED.value
         origin_col = SampleStats.Ex.ORIGIN.value
 
+        discarded_ids = set()
         with self._lock:
             if self._df.empty or discard_col not in self._df.columns:
                 return discarded_ids
@@ -664,8 +1339,14 @@ class LedgeredDataFrameManager:
             # Convert all sample_ids to strings for lookup
             s_ids = [str(sid) for sid in sample_ids]
 
-            # Efficient lookup: only check samples existing in index
-            existing_mask = self._df.index.isin(s_ids)
+            # Efficient lookup: only check samples existing in index.
+            # With MultiIndex (sample_id, annotation_id), isin() matches tuples,
+            # not scalars — must check level 0 explicitly.
+            if isinstance(self._df.index, pd.MultiIndex):
+                level0 = self._df.index.get_level_values(0).astype(str)
+                existing_mask = level0.isin(s_ids)
+            else:
+                existing_mask = self._df.index.astype(str).isin(s_ids)
             if not existing_mask.any():
                 return discarded_ids
 
@@ -679,30 +1360,54 @@ class LedgeredDataFrameManager:
             if slice_df.empty:
                 return discarded_ids
 
-            # Find samples that are discarded
-            discarded = slice_df[slice_df[discard_col] == True].index.tolist()
+            # Find samples that are discarded. Extract sample_id from level 0
+            # (not the full tuple) so the result set contains plain string ids.
+            disc_mask = slice_df[discard_col] == True
+            if isinstance(slice_df.index, pd.MultiIndex):
+                discarded = slice_df.index.get_level_values(0)[disc_mask].tolist()
+            else:
+                discarded = slice_df.index[disc_mask].tolist()
             discarded_ids = set(str(sid) for sid in discarded)
 
         return discarded_ids
 
-    def get_row(self, origin: str, sample_id: int) -> pd.Series | None:
+    def get_row(self, origin: str, sample_id: int, annotation_id: int = None) -> pd.Series | pd.DataFrame | None:
+        """Get row(s) by sample_id and optional annotation_id.
+
+        With multi-index:
+        - If annotation_id is None, returns all annotations for the sample (DataFrame)
+        - If annotation_id is specified, returns single annotation row (Series)
+        """
         with self._lock:
             if self._df.empty:
                 return None
             idx = self._coerce_sample_id_for_index(sample_id)
             try:
-                row = self._df.loc[idx]
+                if isinstance(self._df.index, pd.MultiIndex) and self._df.index.nlevels >= 2:
+                    # Multi-index: (sample_id, annotation_id)
+                    if annotation_id is not None:
+                        row = self._df.loc[(idx, annotation_id)]
+                    else:
+                        row = self._df.loc[idx]
+                else:
+                    # Single-index fallback
+                    row = self._df.loc[idx]
+
                 if isinstance(row, pd.DataFrame):
-                    # Multiple rows with same sample_id; filter by origin
+                    # Multiple rows; filter by origin if available
                     if "origin" in row.columns:
                         row = row[row["origin"] == origin]
-                    # Return first match if multiple
-                    try:
-                        return row.iloc[0]
-                    except Exception:
+                    if row.empty:
                         return None
+                    # Return first match if annotation_id not specified
+                    if annotation_id is None:
+                        try:
+                            return row.iloc[0]
+                        except Exception:
+                            return None
+                    return row.iloc[0] if len(row) > 0 else None
                 return row
-            except KeyError:
+            except (KeyError, TypeError):
                 return None
 
     def get_value(self, origin: str, sample_id: int, column: str):
@@ -711,12 +1416,15 @@ class LedgeredDataFrameManager:
             return None
         return row[column]
 
-    def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False) -> pd.DataFrame:
+    def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False, value: str = None) -> pd.DataFrame:
         with self._lock:
             if self._df.empty:
                 return pd.DataFrame()
             if column is not None and ((not isinstance(column, (list, set, tuple)) and column in self._df.columns) or (isinstance(column, (list, set, tuple)))):
-                subset = self._df[column]
+                if value is not None:
+                    subset = self._df[self._df[column] == value]
+                else:
+                    subset = self._df[column]
             else:
                 subset = self._df
         if limit > 0:
@@ -768,53 +1476,241 @@ class LedgeredDataFrameManager:
     def _normalize_arrays_for_storage(self, row: pd.Series) -> Any:
         """Normalize array columns to use get_mask before H5 storage."""
         dataset = None
+        # When the dataframe is multi-indexed, row.name is a (sample_id, annotation_id)
+        # tuple — extract just the sample_id for dataset lookup.
+        sample_id = row.name[0] if isinstance(row.name, tuple) else row.name
         for col in row.index:
             value = row[col]
 
             # Process and norm np array
             if self._is_array_column_to_norm(col, value):
+                # Keep bounding-box coordinates as-is: do NOT rasterize them into a
+                # segmentation mask here (boxes are drawn in Weights Studio from the
+                # raw coordinates). Only dense arrays go through get_mask.
+                if self._is_bbox_array(value) or self._is_empty(value):
+                    continue
                 # GP: Not sure about this part - Maybe remove this and draw BB in WS
                 if dataset is None:
                     loader = self._get_loader_by_origin(row.get("origin"))
                     dataset = getattr(loader, "wrapped_dataset", None)
                 try:
-                    dataset_index = dataset.get_index_from_sample_id(row.name) if dataset is not None else None
+                    dataset_index = dataset.get_index_from_sample_id(sample_id) if dataset is not None else None
                     row[col] = get_mask(value, dataset=dataset, dataset_index=dataset_index)
                 except Exception as e:
-                    logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={row.name}: {e}")
+                    traceback.print_exc() if os.environ['WEIGHTSLAB_LOG_LEVEL'] == 'DEBUG' else None
+                    logger.debug(f"[_normalize_arrays_for_storage] Failed to normalize array for column={col}, sample_id={sample_id}: {e}")
         return row
 
+    def _broadcast_to_multi_index(self, df_updates: pd.DataFrame, target_df: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Map single-level (sample_id) per-sample records onto the canonical
+        sample row ``(sample_id, 0)``.
+
+        Per-sample data (predictions, targets, per-sample signals) lives on
+        instance_id 0; per-instance rows (instance_id >= 1) are written separately
+        via the instance path. So a per-sample update targets only ``(sample_id, 0)``
+        (created if absent), never the instance rows.
+
+        Args:
+            df_updates: single-level (sample_id) frame.
+            target_df: only used to detect whether the destination is multi-indexed
+                (defaults to ``self._df``; caller must then hold ``self._lock``).
+        """
+        target = self._df if target_df is None else target_df
+        if df_updates.empty or not isinstance(target.index, pd.MultiIndex):
+            return df_updates
+
+        out = df_updates.copy()
+        out.index = pd.MultiIndex.from_arrays(
+            [df_updates.index, [0] * len(df_updates)],
+            names=[SampleStats.Ex.SAMPLE_ID.value, SampleStats.Ex.INSTANCE_ID.value],
+        )
+        return out
+
+    # ------------------------------------------------------------------
+    # Mixed (sample-wise + instance-wise) buffer handling
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _buffer_key(rec: Dict[str, Any]):
+        """Buffer key for a record: ``(sample_id, annotation_id)`` for per-instance
+        records, plain ``sample_id`` for per-sample ones."""
+        aid = rec.get(SampleStats.Ex.INSTANCE_ID.value)
+        return (rec.get("sample_id"), aid) if aid is not None else rec.get("sample_id")
+
+    def _split_buffer_records(self, records: List[Dict[str, Any]]):
+        """Split buffered records into (sample_level_df, instance_level_df).
+
+        Per-instance records carry an ``annotation_id`` key and become a
+        ``(sample_id, annotation_id)`` multi-indexed frame; per-sample records
+        become a ``sample_id``-indexed frame. Either frame may be empty.
+        """
+        annot = SampleStats.Ex.INSTANCE_ID.value
+        sample_recs = [r for r in records if annot not in r]
+        instance_recs = [r for r in records if annot in r]
+
+        sample_df = pd.DataFrame()
+        if sample_recs:
+            sample_df = self._densify_model_io_columns(pd.DataFrame(sample_recs).set_index("sample_id"))
+
+        instance_df = pd.DataFrame()
+        if instance_recs:
+            idf = pd.DataFrame(instance_recs)
+            idf["sample_id"] = idf["sample_id"].apply(self._normalize_sample_id)
+            idf[annot] = idf[annot].astype(int)
+            instance_df = self._densify_model_io_columns(idf.set_index(["sample_id", annot]))
+
+        return sample_df, instance_df
+
+    @staticmethod
+    def _tensor_to_numpy(value):
+        """Detach a torch tensor (any device, incl. CUDA) to a CPU numpy array.
+
+        Non-tensor values pass through unchanged so it is safe to map over a
+        mixed object column (arrays, lists, None, NaN).
+        """
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        return value
+
+    def _densify_model_io_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert CUDA/torch tensors to numpy for the dense model-IO columns
+        (``SampleStats.MODEL_INOUT_LIST``: prediction / prediction_raw / target).
+
+        Done at buffer→DataFrame build time so no GPU tensors are held in the
+        ledger (frees VRAM) and downstream array-store / H5 serialization always
+        sees numpy arrays.
+        """
+        if df is None or df.empty:
+            return df
+        for col in SampleStats.MODEL_INOUT_LIST:
+            if col in df.columns:
+                df[col] = df[col].map(self._tensor_to_numpy)
+        return df
+
+    def _ensure_multi_index_locked(self):
+        """Promote a single-level (sample_id) df to (sample_id, annotation_id=0).
+
+        Needed before merging per-instance updates into a not-yet-expanded df.
+        Caller must hold ``self._lock``.
+        """
+        if not self._df.empty and not isinstance(self._df.index, pd.MultiIndex):
+            self._df.index = pd.MultiIndex.from_arrays(
+                [self._df.index, [0] * len(self._df)],
+                names=['sample_id', SampleStats.Ex.INSTANCE_ID.value],
+            )
+
+    def _apply_updates_frame_locked(self, df_updates: pd.DataFrame, broadcast: bool) -> pd.Index:
+        """Merge one updates frame into ``self._df`` (masked, non-NaN wins).
+
+        Caller MUST hold ``self._lock``. When ``broadcast`` is True a single-level
+        (sample_id) frame is fanned out across each sample's annotation rows.
+        Returns the index of rows actually written (for dirty-marking / array norm).
+        """
+        if df_updates is None or df_updates.empty:
+            return pd.Index([])
+
+        # Ensure columns exist
+        new_cols = df_updates.columns.difference(self._df.columns)
+        if len(new_cols) > 0:
+            self._df = self._df.reindex(columns=self._df.columns.union(new_cols))
+
+        # Sample-level updates fan out across each sample's annotation rows.
+        if broadcast and isinstance(self._df.index, pd.MultiIndex):
+            df_updates = self._broadcast_to_multi_index(df_updates)
+
+        # Create any missing rows (union is unique by construction).
+        missing_idx = df_updates.index.difference(self._df.index)
+        if len(missing_idx) > 0:
+            self._df = self._df.reindex(index=self._df.index.union(missing_idx))
+        if self._df.index.has_duplicates:
+            self._df = self._df[~self._df.index.duplicated(keep='last')]
+
+        # Widen categorical target columns so a new value doesn't raise
+        # "Cannot setitem on a Categorical with a new category".
+        for col in df_updates.columns:
+            if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                self._df[col] = self._df[col].astype(object)
+
+        # Masked update: only overwrite where df_updates is non-NaN.
+        mask = df_updates.notna()
+        self._df.loc[df_updates.index, df_updates.columns] = (
+            self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
+        )
+        return df_updates.index
+
+    def _merge_buffer_frames_into(self, df: pd.DataFrame, sample_df: pd.DataFrame, instance_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge buffered sample/instance frames into a COPY ``df`` (read path).
+
+        Used by ``get_combined_df`` to surface not-yet-flushed buffer entries.
+        Does not touch ``self._df``.
+        """
+        frames = []
+        df_is_multi = isinstance(df.index, pd.MultiIndex) and df.index.nlevels >= 2
+
+        if df.empty:
+            if not instance_df.empty:
+                frames.append(instance_df)
+                if not sample_df.empty:
+                    frames.append(self._broadcast_to_multi_index(sample_df, target_df=instance_df))
+            elif not sample_df.empty:
+                frames.append(sample_df)
+            if not frames:
+                return df
+            merged = pd.concat(frames)
+            return merged[~merged.index.duplicated(keep='last')]
+
+        if df_is_multi:
+            if not sample_df.empty:
+                frames.append(self._broadcast_to_multi_index(sample_df, target_df=df))
+            if not instance_df.empty:
+                frames.append(instance_df)
+        else:
+            # Base df is still single-level: keep sample rows; flatten instance
+            # rows to sample level (best effort) so values remain visible.
+            if not sample_df.empty:
+                frames.append(sample_df)
+            if not instance_df.empty:
+                inst_flat = instance_df.copy()
+                inst_flat.index = inst_flat.index.get_level_values(0)
+                inst_flat.index.name = "sample_id"
+                frames.append(inst_flat)
+
+        if not frames:
+            return df
+
+        buffer_df = pd.concat(frames)
+        buffer_df = buffer_df[~buffer_df.index.duplicated(keep='last')]
+        _safe_update(df, buffer_df)
+        new_rows = buffer_df.index.difference(df.index)
+        if not new_rows.empty:
+            df = pd.concat([df, buffer_df.loc[new_rows]])
+        return df
+
     def _apply_buffer_records(self, records: List[Dict[str, Any]]):
+        """Apply buffered records (sample-wise AND instance-wise) to the DataFrame.
+
+        This is the ONLY place the buffer mutates ``self._df``. Records are split
+        into a per-sample frame (broadcast across each sample's annotations) and a
+        per-instance ``(sample_id, annotation_id)`` frame (written to the exact rows).
+        """
         if not records:
             return
 
         current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
         logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applying {len(records)} buffered records to Global DataFrame.")
 
-        # Extract sample IDs and build df_updates OUTSIDE the lock (fast)
         sample_ids = [rec["sample_id"] for rec in records]
-        df_updates = pd.DataFrame(records).set_index("sample_id")
+        sample_df, instance_df = self._split_buffer_records(records)
 
         # Hold lock only for the actual DataFrame update (minimize lock time)
         with self._lock:
-            # Ensure columns exist (vectorized, no Python loop)
-            if not set(df_updates.columns).issubset(self._df.columns):
-                self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
-
-            # Ensure target rows exist before masked update
-            missing_idx = df_updates.index.difference(self._df.index)
-            if len(missing_idx) > 0:
-                # Precreate empty rows so loc assignment does not fail
-                self._df = pd.concat(
-                    [self._df, pd.DataFrame(index=missing_idx, columns=self._df.columns)],
-                    copy=False,
-                )
-
-            # Vectorized masked update: only overwrite where df_updates has non-NaN
-            mask = df_updates.notna()
-            self._df.loc[df_updates.index, df_updates.columns] = (
-                self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
-            )
+            # Apply instance rows FIRST: they establish/extend the (sample_id,
+            # annotation_id) multi-index that the sample-level broadcast relies on.
+            if not instance_df.empty:
+                self._ensure_multi_index_locked()
+                self._apply_updates_frame_locked(instance_df, broadcast=False)
+            self._apply_updates_frame_locked(sample_df, broadcast=True)
+            # Keep newly-added signal columns float32 and empty object cells as None.
+            self._df = self._optimize_dataframe_memory(self._df)
 
         # Mark all as pending for h5 flush (outside lock)
         self.mark_dirty_batch(sample_ids)
@@ -827,46 +1723,46 @@ class LedgeredDataFrameManager:
         if not records:
             return
 
-        # Build df_updates OUTSIDE any lock
         sample_ids = [rec["sample_id"] for rec in records]
-        df_updates = pd.DataFrame(records).set_index("sample_id")
+        sample_df, instance_df = self._split_buffer_records(records)
 
         # Try to acquire main lock with short timeout
         if not self._lock.acquire(timeout=0.001):
-            # Can't get lock, put records back in buffer for next cycle
+            # Can't get lock, put records back in buffer for next cycle (preserve keys).
             with self._buffer_lock:
                 for rec in records:
-                    sid = rec["sample_id"]
-                    if sid in self._buffer:
-                        self._buffer[sid].update(rec)
+                    key = self._buffer_key(rec)
+                    if key in self._buffer:
+                        self._buffer[key].update(rec)
                     else:
-                        self._buffer[sid] = rec
+                        self._buffer[key] = rec
             return
 
         try:
-            # Quick DataFrame update while holding lock
-            if not set(df_updates.columns).issubset(self._df.columns):
-                self._df = self._df.reindex(columns=self._df.columns.union(df_updates.columns))
-
-            missing_idx = df_updates.index.difference(self._df.index)
-            if len(missing_idx) > 0:
-                self._df = self._df.reindex(index=self._df.index.append(missing_idx))
-
-            mask = df_updates.notna()
-            self._df.loc[df_updates.index, df_updates.columns] = (
-                self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
-            )
+            # Instance rows first (establish the multi-index), then sample broadcast.
+            written_i = pd.Index([])
+            if not instance_df.empty:
+                self._ensure_multi_index_locked()
+                written_i = self._apply_updates_frame_locked(instance_df, broadcast=False)
+            written_s = self._apply_updates_frame_locked(sample_df, broadcast=True)
+            applied_index = written_s.append(written_i) if len(written_i) else written_s
+            update_cols = sample_df.columns.union(instance_df.columns)
+            # Keep newly-added signal columns float32 and empty object cells as None.
+            self._df = self._optimize_dataframe_memory(self._df)
         finally:
             self._lock.release()
 
-        # Det to seg conversion - pre-fetch dataset once for efficiency
-        if df_updates.index.size > 0:
-            normalized_rows = self._df.loc[df_updates.index].apply(
+        # Det→seg conversion / array normalization over all written rows.
+        if applied_index is not None and len(applied_index) > 0:
+            if applied_index.has_duplicates:
+                applied_index = applied_index[~applied_index.duplicated()]
+            normalized_rows = self._df.loc[applied_index].apply(
                 lambda row: self._normalize_arrays_for_storage(row),
                 axis=1
             )
-            cols_to_update = df_updates.columns.intersection(self._df.columns)
-            self._df.loc[df_updates.index, cols_to_update] = normalized_rows[cols_to_update]
+            cols_to_update = update_cols.intersection(self._df.columns)
+            if len(cols_to_update) > 0:
+                self._df.loc[applied_index, cols_to_update] = normalized_rows[cols_to_update]
 
         # Mark dirty outside lock
         self.mark_dirty_batch(sample_ids)
@@ -924,50 +1820,79 @@ class LedgeredDataFrameManager:
         if data_snapshot is None or data_snapshot.empty:
             return
 
-        # Array processing (no locks)
+        # Array processing (no locks).
+        #
+        # Each row is handled INDIVIDUALLY (per (sample_id, annotation_id)) so that
+        # a multi-index frame's per-instance arrays don't collide: instance rows
+        # (annotation_id >= 1) get a composite array-store key "sample_id__annot",
+        # while the canonical sample row (annotation_id 0) keeps the bare sample_id
+        # key for backward compatibility with single-index data.
         if self._array_store is not None and self._enable_h5_persistence:
-            arrays_to_store = {}
-            for sample_id in work:
-                if sample_id not in data_snapshot.index:
-                    continue
-                row_data = data_snapshot.loc[sample_id].to_dict() if isinstance(data_snapshot.loc[sample_id], pd.Series) else data_snapshot.loc[sample_id]
-                arrays = self._extract_arrays_for_storage(sample_id, row_data)
+            is_multi = isinstance(data_snapshot.index, pd.MultiIndex)
+            arrays_to_store: Dict[str, Dict[str, np.ndarray]] = {}
+            rowkey_to_index: Dict[str, Any] = {}
+
+            for idx, row in data_snapshot.iterrows():
+                if is_multi:
+                    sample_id, annot = idx[0], int(idx[1])
+                else:
+                    sample_id, annot = idx, 0
+                row_key = str(sample_id) if annot == 0 else f"{sample_id}__{annot}"
+
+                # A cell already holding an ArrayH5Proxy is already persisted —
+                # reuse its path_ref string for the H5 snapshot instead of
+                # re-storing the array (and never write a proxy object to H5).
+                for col in self._array_columns:
+                    if col in data_snapshot.columns and isinstance(row[col], ArrayH5Proxy):
+                        data_snapshot.at[idx, col] = row[col].path_ref
+
+                arrays = self._extract_arrays_from_row(row_key, row)
                 if arrays:
-                    arrays_to_store[sample_id] = arrays
+                    arrays_to_store[row_key] = arrays
+                    rowkey_to_index[row_key] = idx
 
             if arrays_to_store:
                 path_refs = self._array_store.save_arrays_batch(arrays_to_store, preserve_original=False)
                 if path_refs:
-                    # === FOR H5 FILE: Store path references (strings for lightweight persistence) ===
-                    # Update snapshot with path refs strings so H5 gets lightweight references
-                    for sample_id in path_refs:
-                        for col_name, path_ref in path_refs[sample_id].items():
-                            if sample_id in data_snapshot.index and col_name in data_snapshot.columns and path_ref is not None:
-                                data_snapshot.loc[sample_id, col_name] = path_ref
+                    # === FOR H5 FILE: store path reference strings (lightweight) at the exact row ===
+                    for row_key, col_refs in path_refs.items():
+                        idx = rowkey_to_index.get(row_key)
+                        if idx is None:
+                            continue
+                        for col_name, path_ref in col_refs.items():
+                            if path_ref is not None and col_name in data_snapshot.columns:
+                                data_snapshot.at[idx, col_name] = path_ref
 
-                    # === FOR IN-MEMORY DF: Store ArrayH5Proxy objects (lazy-loaded access) ===
-                    # Update main df with ArrayH5Proxy objects instead of strings
-                    # This allows users to access arrays on-demand via proxy.load()
+                    # === FOR IN-MEMORY DF: store ArrayH5Proxy objects (lazy-loaded access) at the exact row ===
                     if self._lock.acquire(timeout=0.001):
                         try:
-                            for sample_id in path_refs:
-                                for col_name, path_ref in path_refs[sample_id].items():
-                                    if col_name in self._df.columns and path_ref is not None:
-                                        # Create ArrayH5Proxy for lazy loading
-                                        proxy = ArrayH5Proxy(path_ref, array_store=self._array_store)
-                                        # Use .at for scalar assignment to avoid pandas array broadcasting issues
-                                        mask = self._df.index == sample_id
-                                        for idx in self._df.index[mask]:
-                                            self._df.at[idx, col_name] = proxy
+                            for row_key, col_refs in path_refs.items():
+                                idx = rowkey_to_index.get(row_key)
+                                if idx is None or idx not in self._df.index:
+                                    continue
+                                for col_name, path_ref in col_refs.items():
+                                    if path_ref is not None and col_name in self._df.columns:
+                                        # .at scalar assignment to the precise (sample_id, annotation_id) row.
+                                        self._df.at[idx, col_name] = ArrayH5Proxy(path_ref, array_store=self._array_store)
                         except Exception as e:
                             logger.warning(f"[LedgeredDataFrameManager] Error updating array proxies: {e}")
                         finally:
                             self._lock.release()
 
         # Write to H5 (no locks, pure I/O)
-        # data_snapshot now contains path reference strings for H5 persistence
+        # data_snapshot now contains path reference strings for H5 persistence.
+        # Instance rows (instance_id >= 1) carry no origin of their own — derive each
+        # row's origin from its sample's IID 0 row so it routes to the correct split.
+        if "origin" in data_snapshot.columns and isinstance(data_snapshot.index, pd.MultiIndex):
+            origin_col = data_snapshot["origin"]
+            if origin_col.isna().any():
+                per_sample_origin = origin_col.dropna().groupby(level=0).first()
+                filled = data_snapshot.index.get_level_values(0).map(per_sample_origin)
+                data_snapshot = data_snapshot.copy()
+                data_snapshot["origin"] = origin_col.where(origin_col.notna(), pd.Series(filled, index=data_snapshot.index))
+
         if "origin" in data_snapshot.columns:
-            origins = data_snapshot["origin"].unique()
+            origins = data_snapshot["origin"].dropna().unique()
         else:
             origins = ["unknown"]
 
@@ -979,6 +1904,145 @@ class LedgeredDataFrameManager:
                 logger.debug(f'[{datetime.now().strftime("%H:%M:%S.%f")[:-3]}] [LedgeredDataFrameManager] Flushed {written} rows (origin={origin}) to H5 store.')
             except Exception as e:
                 logger.error(f"[LedgeredDataFrameManager] Error flushing to H5: {e}")
+
+    def _optimize_dataframe_memory(self, df: pd.DataFrame, categorical_tags: Dict[str, List[str]] | None = None) -> pd.DataFrame:
+        """Optimize dataframe memory by converting repetitive string columns to categorical.
+
+        Categorical dtype compresses repeated values: instead of storing each string,
+        stores integer codes pointing to a category dictionary.
+
+        Args:
+            df: Dataframe to optimize
+            categorical_tags: Optional dict mapping tag names to their possible values.
+                Example: {'weather': ['rain', 'sun', 'cloudy'], 'time_of_day': ['dawn', 'day', 'dusk']}
+                Tags are currently boolean columns (tag:xxxx with bool), but this supports
+                future categorical tags with predefined values.
+
+        Example savings:
+        - ['train', 'train', 'test', 'train'] → codes [0,0,1,0] + categories dict
+        - ~90% memory reduction for highly repetitive columns
+
+        Note: Boolean tag columns (tag:xxxx with dtype bool) are already space-efficient (~1 bit each)
+        and are NOT converted to categorical.
+        """
+        if df.empty:
+            return df
+
+        # Default to the registered categorical tags when none are passed explicitly.
+        if categorical_tags is None:
+            categorical_tags = self._categorical_tags
+
+        # === 1) Downcast float64 signal columns to float32 ===
+        # Per-sample / per-instance signal scalars (loss & metric values) don't need
+        # float64 precision, so this halves the cost of every ``signals//*`` column
+        # with no practical loss for monitoring. Numeric dtype is preserved (NaNs
+        # stay NaN). Done before categorical conversion below.
+        for col in df.columns:
+            if str(col).startswith("signals") and df[col].dtype == np.float64:
+                try:
+                    df[col] = df[col].astype(np.float32)
+                except Exception as e:
+                    logger.debug(f"[LedgeredDataFrameManager] float32 downcast failed for '{col}': {e}")
+
+        # === 2) Replace NaN with None in OBJECT columns ONLY ===
+        # This never changes a column's dtype (object stays object) and is skipped
+        # for numeric/bool/categorical columns — replacing NaN in a float column
+        # would force it to object (8-byte pointers + broken numeric ops), which
+        # costs MORE memory, so we deliberately don't touch those. On object columns
+        # it just turns empty cells into the None singleton instead of a stray
+        # float('nan'). isna() treats both as missing, so NA semantics are unchanged.
+        #
+        # Vectorized boolean assignment: ``df.loc[na_mask, col] = None`` writes the
+        # None singleton into every NaN cell of an object column in one shot (works
+        # even when other cells hold arrays / ArrayH5Proxy objects, since isna()
+        # treats those as non-missing).
+        #
+        # MUST run before the categorical conversion below: once a column is frozen
+        # into a Categorical, its missing cells are stuck as NaN (categorical code
+        # -1) and can no longer be set to a plain None — so we clean object cells to
+        # None here first, while they are still plain object dtype.
+        for col in df.columns:
+            na_mask = df[col].isna()
+            if na_mask.any():
+                df.loc[na_mask, col] = None
+
+        # === 3) Categorical conversion (LAST step) ===
+        # Columns that are typically repetitive (good candidates for categorical)
+        categorical_candidates = [
+            SampleStats.Ex.ORIGIN.value,  # Alias for origin (if different column name)
+            SampleStats.Ex.TASK_TYPE.value,  # Task type (e.g. 'classification', 'segmentation')
+        ]
+
+        for col in categorical_candidates:
+            if col not in df.columns:
+                continue
+
+            # Skip boolean columns (already space-efficient: ~1 bit per value)
+            if df[col].dtype == 'bool' or df[col].dtype == 'boolean':
+                continue
+
+            # Only convert to categorical if:
+            # 1. Column contains strings (object dtype)
+            # 2. Number of unique values < 50% of total rows (good compression ratio)
+            if df[col].dtype == 'object':
+                n_unique = df[col].nunique()
+                # Use unique sample count, not row count — with MultiIndex each
+                # sample has multiple annotation rows which would inflate n_rows
+                # and make the ratio appear better than it really is.
+                if isinstance(df.index, pd.MultiIndex):
+                    n_rows = df.index.get_level_values(0).nunique()
+                else:
+                    n_rows = len(df)
+                compression_ratio = n_unique / n_rows if n_rows > 0 else 1.0
+
+                if compression_ratio < 0.5 and n_unique > 1:  # Worth compressing if < 50% unique
+                    try:
+                        df[col] = df[col].astype('category')
+                        logger.debug(
+                            f"[LedgeredDataFrameManager] Optimized column '{col}': "
+                            f"{n_unique} categories from {n_rows} rows ({compression_ratio*100:.1f}% unique)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"[LedgeredDataFrameManager] Failed to optimize column '{col}': {e}")
+
+        # Handle dynamic categorical tags (future feature)
+        # Tags can be boolean (current) or categorical with predefined values (future)
+        # Example: tag:weather → 'rain', 'sun', 'cloudy' (not boolean)
+        if categorical_tags:
+            for tag_name, categories in categorical_tags.items():
+                col_name = f'{SampleStats.Ex.TAG.value}:{tag_name}'
+                if col_name not in df.columns or not categories:
+                    continue
+
+                col = df[col_name]
+
+                # Skip if boolean (legacy boolean tag — already space-efficient)
+                if pd.api.types.is_bool_dtype(col.dtype):
+                    continue
+
+                # Already categorical: just make sure every allowed category is present
+                # (so values absent from current data still survive the H5 round-trip).
+                if isinstance(col.dtype, pd.CategoricalDtype):
+                    missing = [c for c in categories if c not in col.dtype.categories]
+                    if missing:
+                        try:
+                            df[col_name] = col.cat.add_categories(missing)
+                        except Exception as e:
+                            logger.debug(f"[LedgeredDataFrameManager] add_categories failed for '{col_name}': {e}")
+                    continue
+
+                try:
+                    # Convert string column to categorical with the full allowed set.
+                    # Values not in `categories` become NaN (treated as unset).
+                    df[col_name] = pd.Categorical(col, categories=categories)
+                    logger.debug(
+                        f"[LedgeredDataFrameManager] Converted categorical tag '{col_name}': "
+                        f"{len(categories)} categories"
+                    )
+                except Exception as e:
+                    logger.debug(f"[LedgeredDataFrameManager] Failed to optimize categorical tag '{col_name}': {e}")
+
+        return df
 
     def _ensure_flush_thread(self):
         if not self._enable_flushing_threads or (self._flush_thread and self._flush_thread.is_alive()):
@@ -1033,33 +2097,17 @@ class LedgeredDataFrameManager:
         Includes buffered records that haven't been flushed to the main store yet.
         """
         with self._lock:
-            if self._df.empty:
-                # Still try to build from buffer if possible
-                with self._buffer_lock:
-                    if not self._buffer:
-                        return pd.DataFrame()
-                    df = pd.DataFrame(list(self._buffer.values())).set_index("sample_id")
-            else:
-                df = self._df.copy()
+            df = self._df.copy() if not self._df.empty else pd.DataFrame()
 
-        # Merge pending buffer updates for immediate visibility
+        # Merge pending buffer updates (sample-wise + instance-wise) for immediate visibility.
         with self._buffer_lock:
-            if self._buffer:
-                buffer_df = pd.DataFrame(list(self._buffer.values()))
-                if not buffer_df.empty:
-                    buffer_df["sample_id"] = buffer_df["sample_id"].apply(self._normalize_sample_id)
-                    buffer_df = buffer_df.set_index("sample_id")
+            records = list(self._buffer.values()) if self._buffer else []
+        if records:
+            sample_df, instance_df = self._split_buffer_records(records)
+            df = self._merge_buffer_frames_into(df, sample_df, instance_df)
 
-                    # Align and update
-                    if not df.empty:
-                        # Vectorized update
-                        df.update(buffer_df)
-                        # Add completely new rows from buffer
-                        new_rows = buffer_df.index.difference(df.index)
-                        if not new_rows.empty:
-                            df = pd.concat([df, buffer_df.loc[new_rows]])
-                    else:
-                        df = buffer_df
+        if df.empty:
+            return df
 
         if self._array_store is not None and not df.empty:
             df = convert_dataframe_to_proxies(
@@ -1072,6 +2120,167 @@ class LedgeredDataFrameManager:
             )
 
         return df
+
+    def get_collapse_annotations_to_samples_df(self, iid: str = None) -> pd.DataFrame:
+        """Collapse a (sample_id, annotation_id) multi-index df to one row per sample.
+
+        The shared dataframe manager now expands every sample into one row per
+        instance/annotation using a ``(sample_id, annotation_id)`` MultiIndex.
+        The studio UI and the agent, however, are sample-centric: they expect a
+        single row per sample.  This helper folds the annotation rows back down:
+
+        - Sample-level columns (metadata, target, prediction, tags, ...) are
+          duplicated identically on every annotation row, so we keep the first.
+        - Per-instance columns (those whose value varies between annotations of
+          the same sample, e.g. per-bbox losses written by
+          ``enqueue_instance_batch`` under the ``signals//`` prefix) are:
+            * aggregated to a per-sample scalar on the column itself using the
+              configured method (``self._instance_aggregation`` — "mean" or "max"),
+              so sorting/filtering by that column stays meaningful, and
+            * preserved in full in an ``_instance_signals`` dict column shaped as
+              ``{annotation_id: {column: value, ...}, ...}`` so the user keeps
+              access to every per-instance value.
+        - An ``annotation_count`` column records how many instances each sample has.
+
+        Performance: this is optimised for the common case where most samples have a
+        single instance and only a few are multi-instance. Singletons take the cheap
+        first-occurrence row directly (their single instance value *is* the sample
+        value); the per-instance dict + mean/max aggregation run only over the rows of
+        multi-instance samples. Consequently ``_instance_signals`` is present only for
+        multi-instance samples — for a single-instance sample the value already lives in
+        the collapsed column, so no per-instance information is lost.
+
+        Returns a single-level ``sample_id``-indexed dataframe (origin stays a
+        column). Dataframes that are not annotation-expanded are returned as-is.
+        """
+        df = self.get_combined_df()
+
+        SID = SampleStatsEx.SAMPLE_ID.value
+        ANNOT = SampleStatsEx.INSTANCE_ID.value
+
+        has_annot_index = isinstance(df.index, pd.MultiIndex) and ANNOT in (df.index.names or [])
+        has_annot_col = ANNOT in df.columns
+
+        if not has_annot_index and not has_annot_col:
+            # Not annotation-expanded (legacy single-instance layout) — nothing to do.
+            return df
+
+        try:
+            # ``get_combined_df`` already hands us a fresh copy, so we never deep-copy
+            # the full annotation-expanded frame. Per-row sample/annotation ids are read
+            # straight off the index (or columns) as numpy arrays — no reindex of ``df``.
+            if has_annot_index:
+                if SID not in (df.index.names or []):
+                    return df  # Cannot locate the sample level — leave untouched.
+                sid_arr = df.index.get_level_values(SID).to_numpy()
+                annot_arr = np.asarray(df.index.get_level_values(ANNOT).to_numpy())
+            else:
+                annot_arr = np.asarray(df[ANNOT].to_numpy())
+                if SID in df.columns:
+                    sid_arr = np.asarray(df[SID].to_numpy())
+                else:
+                    sid_arr = np.asarray(df.index.to_numpy())
+
+            try:
+                annot_int = annot_arr.astype(int)
+            except (TypeError, ValueError):
+                annot_int = np.array([int(a) if a is not None else 0 for a in annot_arr])
+
+            # The canonical per-sample row is instance_id 0. Use it as the base (kept as
+            # the MAIN value); instance rows (instance_id >= 1) only fill its NaN cells.
+            base_pos = np.flatnonzero(annot_int == 0)
+            if base_pos.size == 0:
+                # No sample rows (only instance rows) — fall back to first occurrence.
+                base_pos = np.flatnonzero(~pd.Index(sid_arr).duplicated())
+            base = df.iloc[base_pos]
+            if has_annot_index:
+                base = base.droplevel(ANNOT)
+            else:
+                base = base.copy()
+                base.index = pd.Index(sid_arr[base_pos], name=SID)
+
+            # Instance rows (instance_id >= 1) — the per-instance annotations.
+            inst_mask = annot_int >= 1
+            inst_pos = np.flatnonzero(inst_mask)
+
+            # annotation_count = number of instance rows (>= 1) per sample.
+            if inst_pos.size:
+                inst_counts = pd.Series(sid_arr[inst_mask]).value_counts()
+                base["annotation_count"] = inst_counts.reindex(base.index).fillna(0).astype(int)
+            else:
+                base["annotation_count"] = 0
+
+            if inst_pos.size:
+                sub = df.iloc[inst_pos]
+                sub_sid = sid_arr[inst_mask]
+                sub_annot = annot_int[inst_mask]
+
+                # Per-instance signal columns: numeric columns that carry any value on the
+                # instance rows (written by enqueue_instance_batch). Array/io/meta excluded.
+                exclude = {
+                    SampleStatsEx.TARGET.value,
+                    SampleStatsEx.PREDICTION.value,
+                    SampleStatsEx.PREDICTION_RAW.value,
+                    SampleStatsEx.ORIGIN.value,
+                    SampleStatsEx.TASK_TYPE.value,
+                    ANNOT, SID, "_instance_signals", "annotation_count",
+                }
+                per_instance_cols = [
+                    c for c in df.columns
+                    if c not in exclude
+                    and pd.api.types.is_numeric_dtype(df[c].dtype)
+                    and bool(sub[c].notna().any())
+                ]
+
+                if per_instance_cols:
+                    # Build {annotation_id: {col: value}} over the instance rows in one pass
+                    # (native python lists; ``v != v`` NaN test; keys stringified up front).
+                    col_lists = {c: sub[c].tolist() for c in per_instance_cols}
+                    sub_sid_list = sub_sid.tolist()
+                    aid_keys = [str(int(a)) for a in sub_annot.tolist()]
+
+                    signals_map: dict = {}
+                    for i in range(len(sub_sid_list)):
+                        vals = None
+                        for c in per_instance_cols:
+                            v = col_lists[c][i]
+                            if v is None or v != v:  # None or NaN
+                                continue
+                            if vals is None:
+                                vals = {}
+                            vals[c] = v
+                        if vals:
+                            sid = sub_sid_list[i]
+                            per_sample = signals_map.get(sid)
+                            if per_sample is None:
+                                per_sample = signals_map[sid] = {}
+                            per_sample[aid_keys[i]] = vals
+
+                    if signals_map:
+                        base["_instance_signals"] = pd.Series(signals_map).reindex(base.index)
+
+                    # Keep instance_id 0 as the MAIN value; only fill its NaN cells by
+                    # aggregating instance rows (mean/max per self._instance_aggregation).
+                    agg_method = getattr(self, "_instance_aggregation", "mean")
+                    try:
+                        aggregated = sub[per_instance_cols].groupby(sub_sid, sort=False).agg(
+                            "max" if agg_method == "max" else "mean"
+                        )
+                        for c in per_instance_cols:
+                            if c not in base.columns:
+                                base[c] = np.nan
+                            agg_c = aggregated[c].reindex(base.index)
+                            base[c] = base[c].where(base[c].notna(), agg_c)
+                    except Exception as agg_err:
+                        logger.debug(f"[_collapse_annotations_to_samples] {agg_method} aggregation skipped: {agg_err}")
+
+            if ANNOT in base.columns:
+                base = base.drop(columns=[ANNOT])
+
+            return base
+        except Exception as e:
+            logger.debug(f"[_collapse_annotations_to_samples] collapse failed, returning raw df: {e}")
+            return df
 
     def _coerce_df_for_h5(self, df: pd.DataFrame) -> pd.DataFrame:
         df2 = df
@@ -1243,10 +2452,11 @@ def create_ledger_manager():
 
     return None
 
-# Global LedgeredDataFrameManager instance
-# TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
+# # Global LedgeredDataFrameManager instance
+# # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
+# from weightslab.backend import ledgers
 # LM = create_ledger_manager()
 # try:
-#     register_dataframe(LM)
+#     ledgers.register_dataframe(LM)
 # except Exception as e:
 #     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

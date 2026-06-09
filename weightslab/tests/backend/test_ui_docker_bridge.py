@@ -1,7 +1,6 @@
 import argparse
 import os
 import unittest
-import logging
 from unittest.mock import patch, MagicMock
 
 from weightslab.ui_docker_bridge import (
@@ -126,7 +125,6 @@ class TestUiSecureEnvironment(unittest.TestCase):
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
     def test_ui_secure_environment_success(self, mock_gen_certs, mock_cert_manager):
         """Test successful secure environment setup."""
-        from pathlib import Path
         from unittest.mock import MagicMock
 
         mock_manager_instance = MagicMock()
@@ -398,12 +396,24 @@ class TestMainCLI(unittest.TestCase):
 class TestUserOnboardingFlow(unittest.TestCase):
     """Integration-like tests for the user onboarding flow."""
 
+    @patch("weightslab.ui_docker_bridge._run_shell_script", return_value=0)
+    @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
+    @patch("weightslab.ui_docker_bridge.CertAuthManager")
     @patch("weightslab.ui_docker_bridge.docker_info")
     @patch("weightslab.ui_docker_bridge.docker_stop")
-    @patch("weightslab.ui_docker_bridge.docker_launch_secure")
-    @patch("weightslab.ui_docker_bridge.ui_secure_environment")
-    def test_complete_onboarding_workflow(self, mock_se, mock_launch, mock_stop, mock_info):
+    def test_complete_onboarding_workflow(self, mock_stop, mock_info, mock_cert_manager, mock_gen_certs, mock_run_shell):
         """Test a complete user onboarding workflow: setup -> launch -> check -> stop."""
+        # Mock certificate manager to prevent actual cert generation and installation
+        mock_manager_instance = MagicMock()
+        mock_certs_dir = MagicMock()
+        mock_certs_dir.mkdir = MagicMock()
+        mock_manager_instance.certs_dir = mock_certs_dir
+        mock_manager_instance.setup_tls_environment.return_value = {"TLS_KEY": "/fake/key"}
+        mock_manager_instance.setup_auth_environment.return_value = {"AUTH_TOKEN": "token123"}
+        mock_manager_instance.check_and_apply.return_value = (True, "Secure env ready")
+        mock_cert_manager.return_value = mock_manager_instance
+        mock_cert_manager.from_env_or_default.return_value = mock_manager_instance
+
         # Step 1: Setup secure environment
         args_se = argparse.Namespace(
             certs_dir=None,
@@ -417,20 +427,21 @@ class TestUserOnboardingFlow(unittest.TestCase):
             force_certs=False,
             dev=False,
             test=False,
+            unsecure=False,
         )
 
         # Step 3: Get info
         args_info = argparse.Namespace()
 
         # Step 4: Stop docker
-        args_stop = argparse.Namespace()
+        args_stop_args = argparse.Namespace()
 
         # All commands should be callable without raising
         try:
             ui_secure_environment(args_se)
             docker_launch_secure(args_launch)
             docker_info(args_info)
-            docker_stop(args_stop)
+            docker_stop(args_stop_args)
         except Exception as e:
             self.fail(f"Onboarding workflow failed: {e}")
 

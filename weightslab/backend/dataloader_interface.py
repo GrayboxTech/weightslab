@@ -16,16 +16,15 @@ It also supports:
 - checkpoint-based data loading and reproducible iterator restoration
 """
 import os
-import threading
 import torch
 import logging
+import pandas as pd
 from typing import Any, Iterator, Optional
 
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from weightslab.data.data_samples_with_ops import DataSampleTrackingWrapper
 from weightslab.utils import filter_kwargs_for_callable, restore_rng_state
-from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend.ledgers import (
     register_dataloader,
     get_hyperparams,
@@ -136,25 +135,47 @@ class WeightsLabDataSampler(Sampler):
         # this set are yielded.  None = no filter (normal behaviour).
         self._eval_allow_list: Optional[set] = None
 
-    def _get_deny_listed_uids(self) -> set:
+    def _get_deny_listed_uids(self, origin: str = None) -> set:
         """Get set of deny-listed UIDs from tracked dataset."""
         deny_listed_uids = set()
         if self.tracked_dataset is not None and hasattr(self.tracked_dataset, "_get_df_view"):
             try:
-                df_view = self.tracked_dataset._get_df_view()
+                if origin is not None:
+                    df_view = self.tracked_dataset._get_df_view(column='origin', value=origin)
+                else:
+                    df_view = self.tracked_dataset._get_df_view()  # get all by default
+
                 if not df_view.empty and SampleStatsEx.DISCARDED.value in df_view.columns:
-                    deny_listed_uids = {
-                        str(uid)
-                        for uid in df_view[df_view[SampleStatsEx.DISCARDED.value] == True].index
-                    }
+                    discarded_rows = df_view[df_view[SampleStatsEx.DISCARDED.value] == True]
+
+                    # Handle multi-index: get level 0 (sample_id) values
+                    if isinstance(discarded_rows.index, pd.MultiIndex):
+                        deny_listed_uids = {
+                            str(uid)
+                            for uid in discarded_rows.index.get_level_values(0).unique()
+                        }
+                    else:
+                        # Single-level index
+                        deny_listed_uids = {
+                            str(uid)
+                            for uid in discarded_rows.index
+                        }
             except Exception:
                 pass
         return deny_listed_uids
 
+    def _get_current_origin(self):
+        try:
+            origin = getattr(self.tracked_dataset, "_dataset_split", None)
+            return origin
+        except Exception:
+            pass
+        return None
+
     def _get_deny_list_revision(self) -> Optional[tuple[str, int]]:
         """Return a cheap revision token for discard-state refreshes."""
         try:
-            origin = getattr(self.tracked_dataset, "_dataset_split", None)
+            origin = self._get_current_origin()
             df_manager = get_dataframe()
             if origin and df_manager is not None and hasattr(df_manager, "get_origin_revision"):
                 return ("origin", int(df_manager.get_origin_revision(origin)))
@@ -176,7 +197,7 @@ class WeightsLabDataSampler(Sampler):
         if not force and revision is not None and revision == self._deny_list_revision:
             return self._deny_listed_uids_cache
 
-        self._deny_listed_uids_cache = self._get_deny_listed_uids()
+        self._deny_listed_uids_cache = self._get_deny_listed_uids(origin=self._get_current_origin())
         self._deny_list_revision = revision
         return self._deny_listed_uids_cache
 
@@ -771,7 +792,6 @@ class DataLoaderInterface:
         5. Next next(loader): calls __iter__() which DOES reset (epoch exhausted)
         """
         self._sync_batch_size_from_ledger()
-        self._wait_if_paused()
 
         # Only reset iterator if:
         # 1. Not initialized yet (no _iterator attribute)
@@ -828,7 +848,6 @@ class DataLoaderInterface:
 
         try:
             res = self._next_batch()
-            self._wait_if_paused()
             return res
         except StopIteration:
             # Mark that epoch is exhausted; next __next__ call will reset
@@ -874,25 +893,6 @@ class DataLoaderInterface:
             # Don't let ledger issues break basic iteration
             return
 
-    def _wait_if_paused(self) -> None:
-        """If the global pause controller is paused, wait until resumed."""
-        try:
-            # Only the evaluation worker thread itself bypasses pause — this way
-            # training threads still respect the pause state even while eval runs,
-            # and only the batches fetched by the eval thread are unblocked.
-            if threading.current_thread().name == "WL-EvalWorker":
-                return
-
-            pause_controller.wait_if_paused()
-            if self.model != None:
-                m_age = self.model.get_age()
-                if m_age > 0 and m_age == self.hp.get("pause_at_step", -1):
-                    logger.info("Model is paused as model aged; waiting for resume...")
-                    pause_controller.pause()
-        except Exception:
-            # Fail-open if pause controller is not available
-            pass
-
     # -------------------------------------------------------------------------
     # Batch iteration helpers
     # -------------------------------------------------------------------------
@@ -905,8 +905,12 @@ class DataLoaderInterface:
         With num_workers > 0, cleanup of worker processes happens during reset
         (which is called by __next__).
         """
-        if self._iterator is None:
+        if not hasattr(self, '_iterator') or self._iterator is None:
             self._reset_iterator()
+
+        # Check if iterator is empty, i.e., everything discarded
+        if len(self.dataloader) == 0:
+            raise StopIteration
 
         # Generate batch - will raise StopIteration if epoch is exhausted
         try:

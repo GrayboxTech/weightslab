@@ -188,6 +188,139 @@ class TestWeighlabsWatchdogGrpc(unittest.TestCase):
         self.assertFalse(watchdog._thread.is_alive(), "Watchdog thread must exit after stop()")
 
 
+class TestWatchdogConfigurability(unittest.TestCase):
+    """The watchdog's thresholds must be honored as configured."""
+
+    def test_per_lock_timeout_overrides_global_threshold(self):
+        """A per-lock set_timeout() must take precedence over the global threshold."""
+        lock = MonitoredRLock()
+        lock.set_timeout(0.05)  # this lock is allowed only 50ms, regardless of global
+        released = threading.Event()
+        started = threading.Event()
+
+        def holder():
+            lock.acquire()
+            started.set()
+            try:
+                for _ in range(1500):
+                    time.sleep(0.02)
+            except _WatchdogInterrupt:
+                pass
+            finally:
+                lock.release()
+                released.set()
+
+        t = threading.Thread(target=holder, daemon=True)
+        t.start()
+        started.wait(timeout=2.0)
+
+        # Global threshold is huge — only the per-lock timeout can fire.
+        watchdog = WeighlabsWatchdog(stuck_threshold_s=100.0, poll_interval_s=0.05)
+        watchdog.register_lock("short_lock", lock)
+        watchdog.start()
+        fired = released.wait(timeout=3.0)
+        watchdog.stop()
+
+        self.assertTrue(fired, "per-lock timeout must fire even when the global threshold is high")
+        self.assertFalse(lock.is_held())
+        t.join(timeout=2.0)
+
+    def test_restart_threshold_requires_n_consecutive_unhealthy(self):
+        """restart_threshold=N must require N unhealthy ticks before requesting restart."""
+        watchdog = WeighlabsWatchdog(stuck_threshold_s=0.01, poll_interval_s=0.03, restart_threshold=3)
+        watchdog.start()
+        rpc_id = watchdog.rpc_state.begin("/test/SlowMethod")
+        time.sleep(0.3)  # many poll cycles → unhealthy count climbs past 3
+        watchdog.stop()
+        watchdog.rpc_state.end(rpc_id)
+
+        self.assertGreaterEqual(watchdog._unhealthy_count, 3)
+        self.assertTrue(watchdog.server_manager.should_restart())
+
+    def test_lock_not_interrupted_during_evaluation(self):
+        """While evaluation is in progress, a long-held lock must NOT be interrupted."""
+        from unittest.mock import patch
+
+        lock = MonitoredRLock()
+        interrupted = threading.Event()
+        started = threading.Event()
+
+        def holder():
+            lock.acquire()
+            started.set()
+            try:
+                for _ in range(40):
+                    time.sleep(0.02)  # ~0.8s, far over the threshold
+            except _WatchdogInterrupt:
+                interrupted.set()
+            finally:
+                lock.release()
+
+        with patch("weightslab.components.global_monitoring.is_in_evaluation", return_value=True):
+            t = threading.Thread(target=holder, daemon=True)
+            t.start()
+            started.wait(timeout=2.0)
+            watchdog = WeighlabsWatchdog(stuck_threshold_s=0.05, poll_interval_s=0.05)
+            watchdog.register_lock("eval_lock", lock)
+            watchdog.start()
+            time.sleep(0.4)  # let several poll cycles run
+            watchdog.stop()
+
+        t.join(timeout=2.0)
+        self.assertFalse(interrupted.is_set(), "lock must not be interrupted during evaluation")
+
+
+class TestWatchdogEvalThreadMonitoring(unittest.TestCase):
+    """Thread liveness monitoring: a dead eval worker with an active controller
+    must be flagged via mark_error()."""
+
+    class _FakeController:
+        def __init__(self):
+            self.error_msg = None
+
+        def is_running(self):
+            return True
+
+        def is_pending(self):
+            return False
+
+        def get_status(self):
+            return "running"
+
+        def mark_error(self, msg):
+            self.error_msg = msg
+
+    def test_dead_worker_with_running_controller_is_marked_error(self):
+        controller = self._FakeController()
+        dead_thread = threading.Thread(target=lambda: None)
+        dead_thread.start()
+        dead_thread.join()  # now not alive
+
+        watchdog = WeighlabsWatchdog(poll_interval_s=0.05)
+        watchdog.register_eval_monitor(lambda: controller, lambda: dead_thread)
+        watchdog.start()
+        time.sleep(0.2)
+        watchdog.stop()
+
+        self.assertIsNotNone(controller.error_msg, "dead eval worker must be marked as error")
+
+    def test_alive_worker_not_marked_error(self):
+        controller = self._FakeController()
+        stop = threading.Event()
+        alive_thread = threading.Thread(target=lambda: stop.wait(2.0), daemon=True)
+        alive_thread.start()
+
+        watchdog = WeighlabsWatchdog(poll_interval_s=0.05)
+        watchdog.register_eval_monitor(lambda: controller, lambda: alive_thread)
+        watchdog.start()
+        time.sleep(0.2)
+        watchdog.stop()
+        stop.set()
+        alive_thread.join(timeout=2.0)
+
+        self.assertIsNone(controller.error_msg, "a live eval worker must not be flagged")
+
+
 class TestGrpcServerManager(unittest.TestCase):
 
     def test_restart_flag_cycle(self):

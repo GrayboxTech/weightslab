@@ -1,6 +1,5 @@
 import unittest
 
-import torch
 import torch.nn as nn
 
 from weightslab.utils.computational_graph import (

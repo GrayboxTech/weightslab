@@ -531,7 +531,7 @@ class TestAgentPromptUnit(unittest.TestCase):
         )
 
         with mock.patch.object(agent_mod, "ChatOpenAI", _FakeChatModel), mock.patch.object(agent_mod, "ChatOllama", _FakeChatModel):
-            agent = agent_mod.DataManipulationAgent(ctx)
+            agent_mod.DataManipulationAgent(ctx)
 
         # First filter: keep only train
         filt_cond = agent_mod.Condition(column="origin", op="==", value="train")

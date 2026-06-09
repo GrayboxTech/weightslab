@@ -4,7 +4,6 @@ Tests all CLI commands to ensure they work correctly.
 """
 
 import unittest
-import json
 import socket
 import time
 from unittest.mock import MagicMock

@@ -8,22 +8,19 @@ import numpy as np
 import pandas as pd
 import threading
 
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
 from torch.utils.data import Dataset, Subset
-from weightslab.utils.tools import array_id_2bytes
+from weightslab.utils.tools import array_id_2bytes, safe_reset_index
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from weightslab.data.h5_dataframe_store import H5DataFrameStore
 from weightslab.data.dataframe_manager import create_ledger_manager
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
 from weightslab.data.data_utils import (
     _detect_dataset_split,
-    get_mask,
-    load_label,
-    load_metadata,
-    load_uid
+    get_mask
 )
 from weightslab.data.sample_stats import (
     SampleStats,
@@ -366,6 +363,7 @@ class DataSampleTrackingWrapper(Dataset):
                 row = SampleStats.DEFAULTS.copy()
                 row.update({
                     SampleStatsEx.SAMPLE_ID.value: sid,
+                    # SampleStatsEx.INSTANCE_ID.value: str(0),  # Added later in the preprocessing during df registration
                     SampleStatsEx.ORIGIN.value: split,
                     SampleStatsEx.GROUP_ID.value: str(group_id),
                     SampleStatsEx.MEMBER_RANK.value: rank
@@ -683,10 +681,11 @@ class DataSampleTrackingWrapper(Dataset):
 
                 # Generate the ID
                 uid = array_id_2bytes(data_array, return_hex=False, tronc_1byte=True)
+                uid = str(uid)  # Convert to string for consistent handling
                 return idx, uid
             except Exception as e:
                 logger.warning(f"Failed to generate ID for sample {idx}: {e}")
-                return idx, idx  # Fallback to index as ID
+                return idx, str(idx)  # Fallback to index as ID
 
         # Use ThreadPoolExecutor; track progress on completed tasks.
         with ThreadPoolExecutor(thread_name_prefix="unique_id_generator") as executor:
@@ -702,9 +701,9 @@ class DataSampleTrackingWrapper(Dataset):
         unique_ids = np.asanyarray(unique_ids, dtype=object)  # Use object dtype for string UIDs
         return unique_ids, unique_id_to_index
 
-    def _get_df_view(self, limit: int = -1) -> pd.DataFrame:
+    def _get_df_view(self, limit: int = -1, column: str = None, value: str = None) -> pd.DataFrame:
         """Convenience accessor for this split's ledger slice."""
-        return get_dataframe().get_df_view(self._dataset_split, limit=limit)
+        return get_dataframe().get_df_view(column=column, limit=limit, value=value)
 
     def _get_value(self, sample_id: int, key: str):
         return get_dataframe().get_value(self._dataset_split, sample_id, key)
@@ -952,9 +951,7 @@ class DataSampleTrackingWrapper(Dataset):
         """Convert DataFrame to list of records."""
         with self._df_lock:
             df = self._get_df_view(limit=limit)
-            # Ensure sample_id is a column (not just index)
-            if 'sample_id' not in df.columns:
-                df = df.reset_index()  # Bring sample_id into columns
+            df = safe_reset_index(df)
             # Convert NaN to None to match previous behavior
             return df.where(pd.notnull(df), None).to_dict(orient="records")
 

@@ -3,7 +3,6 @@
 import os
 import logging
 import subprocess
-import json
 from pathlib import Path
 from typing import Optional, Tuple
 

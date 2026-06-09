@@ -3,7 +3,7 @@ from typing import Any, Optional
 from enum import Enum
 import contextvars
 
-from threading import Event, Lock
+from threading import Event
 import threading
 import time
 import logging
@@ -194,10 +194,31 @@ class GuardContext:
         self.model = None
         self._context_token = None
 
+    def _maybe_pause_at_step(self):
+        # Explicit "pause at step N": flag the pause before the lock is taken so
+        # wait_if_paused() blocks lock-free; pause() zeroes pause_at_step (fires once).
+        if not self.for_training:
+            return
+        try:
+            model = get_model()
+            if model == None:
+                return
+            m_age = model.get_age()
+            if m_age <= 0:
+                return
+            hp = get_hyperparams(resolve_hp_name())
+            if not hp or m_age != hp.get("pause_at_step", -1):
+                return
+            logger.info(f"Reached pause_at_step={m_age}; pausing training.")
+            pause_controller.pause()
+        except Exception:
+            pass
+
     def __enter__(self):
         """
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
+        self._maybe_pause_at_step()
         pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
 
@@ -260,7 +281,8 @@ class GuardContext:
             self._context_token = None
 
         if exc_type is RuntimeError:
-            logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__")
+            logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__:")
+            traceback.print_exc() if os.getenv("WL_DEBUG", "0") == "1" else None
             self.architecture_guard.__exit__(exc_type, exc_value, traceback)
             return True  # suppress the exception
 

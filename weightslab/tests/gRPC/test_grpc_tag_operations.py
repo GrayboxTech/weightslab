@@ -163,7 +163,8 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             cls.model,
             flag="model",
             device=DEVICE,
-            skip_previous_auto_load=True
+            skip_previous_auto_load=True,
+            compute_dependencies=False,  # dependency analysis is currently disabled
         )
 
         # Register dataloader

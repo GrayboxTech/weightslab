@@ -4,8 +4,7 @@ import os
 import tempfile
 import pytest
 from pathlib import Path
-import socket
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 
 from weightslab.security import CertAuthManager
 from weightslab.ui_docker_bridge import (

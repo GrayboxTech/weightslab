@@ -66,6 +66,12 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
       All environment variables for WeightsLab and Weights Studio with defaults and explanations.
 
+   .. grid-item-card:: 📡 gRPC Communication
+      :link: grpc/index
+      :link-type: doc
+
+      All RPC handlers, parameters, and behavior. Comprehensive audit logging for user interactions.
+
 .. admonition:: Weightslab in one sentence
    :class: note
 
@@ -89,6 +95,7 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
    hyperparameters
    logger
    usecases
+   segmentation_usecase
    pytorch_lightning
    weights_studio
 
@@ -99,3 +106,4 @@ Weightslab is a Python SDK to inspect, monitor, and edit training behavior for c
 
    user_functions
    configuration
+   grpc/index
