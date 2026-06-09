@@ -697,13 +697,14 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                         key_path="training_steps_to_do",
                         value=hyper_parameters.training_steps_to_do
                     )
-                if hyper_parameters.HasField("learning_rate"):
-                    hp_changes["learning_rate"] = hyper_parameters.learning_rate
-                    set_hyperparam(
-                        name=hp_name,
-                        key_path="optimizer.lr",
-                        value=hyper_parameters.learning_rate
-                    )
+                # TODO (GP): Disabled with modelling for now.
+                # if hyper_parameters.HasField("learning_rate"):
+                #     hp_changes["learning_rate"] = hyper_parameters.learning_rate
+                #     set_hyperparam(
+                #         name=hp_name,
+                #         key_path="optimizer.lr",
+                #         value=hyper_parameters.learning_rate
+                #     )
                 if hyper_parameters.HasField("batch_size"):
                     hp_changes["batch_size"] = hyper_parameters.batch_size
                     set_hyperparam(

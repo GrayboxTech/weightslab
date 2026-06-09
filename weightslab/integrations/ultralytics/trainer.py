@@ -69,7 +69,11 @@ class WLAwareTrainer(DetectionTrainer):
 
             @wl.eval_fn
             def _validate(loader):
+                pause_controller.resume(force=True)
                 trainer.validator(model=(trainer.ema.ema if trainer.ema else trainer.model))
+                pause_controller.pause()
+
+            pause_controller.resume(force=True)
 
         def _on_train_batch_start(trainer):
             wl.guard_training_context.__enter__()

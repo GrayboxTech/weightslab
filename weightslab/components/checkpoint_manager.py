@@ -1864,7 +1864,7 @@ class CheckpointManager:
         if 'model' in checkpoint_data['loaded_components']:
             try:
                 model = checkpoint_data['model']  # Include model architecture, weights, and optimizer state at this level
-                model.update_optimizer()  # Update optimizer with new model parameters if needed
+                # model.update_optimizer()  # Update optimizer with new model parameters if needed
 
                 # Remove existing locks
                 if hasattr(model, 'guard_testing_context'):
@@ -1907,10 +1907,10 @@ class CheckpointManager:
                         setattr(model, 'current_step', step)
                     except Exception:
                         pass
-                    model.update_optimizer() # Update optimizer with new model parameters if needed
+                    # model.update_optimizer() # Update optimizer with new model parameters if needed
+
                     logger.info(f"[OK] Applied weights to existing model (step {step})")
                     self._model_init_step = step
-
                     if 'optimizer_state_dict' in weights:
                         try:
                             optimizer = get_optimizer()
@@ -1956,7 +1956,7 @@ class CheckpointManager:
                             setattr(model, 'current_step', step)
                         except Exception:
                             pass
-                        model.update_optimizer()  # Update optimizer with new model parameters if needed
+                        # model.update_optimizer()  # Update optimizer with new model parameters if needed
                         logger.info(f"[OK] Applied weights to reloaded model (step {step})")
                         self._model_init_step = step
                         logger.info("Successfully recovered by reloading full checkpoint with architecture and weights")
