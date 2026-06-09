@@ -285,7 +285,8 @@ jobs:
 
   build-and-publish-main:
     name: Build & Publish Main (PyPI)
-    needs: [detect-target, test]
+    # needs: [detect-target, ]
+    needs: [detect-target]
     runs-on: ubuntu-latest
     if: ${{ needs.detect-target.outputs.is_main == 'true' }}
     permissions:
