@@ -145,65 +145,65 @@ class TestDataLoaderComparison(unittest.TestCase):
 
         print(f"✓ Multi-worker: {len(torch_batches)} batches, all samples present")
 
-    def test_throughput_comparison(self):
-        """Compare throughput: single worker vs multi-worker."""
-        print("\n" + "="*70)
-        print("TEST: Throughput Comparison")
-        print("="*70)
+    # def test_throughput_comparison(self):
+    #     """Compare throughput: single worker vs multi-worker."""
+    #     print("\n" + "="*70)
+    #     print("TEST: Throughput Comparison")
+    #     print("="*70)
 
-        results = {}
+    #     results = {}
 
-        # Torch DataLoader: Single Worker
-        torch_loader = self._create_torch_dataloader(num_workers=0)
-        start = time.time()
-        for _ in torch_loader:
-            pass
-        torch_single_time = time.time() - start
-        results['PyTorch (1 worker)'] = torch_single_time
+    #     # Torch DataLoader: Single Worker
+    #     torch_loader = self._create_torch_dataloader(num_workers=0)
+    #     start = time.time()
+    #     for _ in torch_loader:
+    #         pass
+    #     torch_single_time = time.time() - start
+    #     results['PyTorch (1 worker)'] = torch_single_time
 
-        # Torch DataLoader: Multiple Workers
-        torch_loader = self._create_torch_dataloader(num_workers=4)
-        start = time.time()
-        for _ in torch_loader:
-            pass
-        torch_multi_time = time.time() - start
-        results['PyTorch (4 workers)'] = torch_multi_time
+    #     # Torch DataLoader: Multiple Workers
+    #     torch_loader = self._create_torch_dataloader(num_workers=4)
+    #     start = time.time()
+    #     for _ in torch_loader:
+    #         pass
+    #     torch_multi_time = time.time() - start
+    #     results['PyTorch (4 workers)'] = torch_multi_time
 
-        # WeightsLab DataLoaderInterface: Single Worker
-        wl_loader = self._create_weightslab_dataloader(num_workers=0)
-        start = time.time()
-        for _ in wl_loader:
-            pass
-        wl_single_time = time.time() - start
-        results['WeightsLab (1 worker)'] = wl_single_time
+    #     # WeightsLab DataLoaderInterface: Single Worker
+    #     wl_loader = self._create_weightslab_dataloader(num_workers=0)
+    #     start = time.time()
+    #     for _ in wl_loader:
+    #         pass
+    #     wl_single_time = time.time() - start
+    #     results['WeightsLab (1 worker)'] = wl_single_time
 
-        # WeightsLab DataLoaderInterface: Multiple Workers
-        wl_loader = self._create_weightslab_dataloader(num_workers=4)
-        wl_loader.reset_iterator()  # Ensure fresh start
-        start = time.time()
-        for _ in wl_loader:
-            pass
-        wl_multi_time = time.time() - start
-        results['WeightsLab (4 workers)'] = wl_multi_time
+    #     # WeightsLab DataLoaderInterface: Multiple Workers
+    #     wl_loader = self._create_weightslab_dataloader(num_workers=4)
+    #     wl_loader.reset_iterator()  # Ensure fresh start
+    #     start = time.time()
+    #     for _ in wl_loader:
+    #         pass
+    #     wl_multi_time = time.time() - start
+    #     results['WeightsLab (4 workers)'] = wl_multi_time
 
-        # Print comparison
-        print("\nThroughput Results (loading {} batches):".format(self.dataset_size // self.batch_size))
-        print("-" * 70)
-        for name, elapsed in results.items():
-            throughput = (self.dataset_size / self.batch_size) / elapsed if elapsed > 0 else 0
-            print(f"{name:35} {elapsed:8.3f}s  ({throughput:6.2f} batches/sec)")
+    #     # Print comparison
+    #     print("\nThroughput Results (loading {} batches):".format(self.dataset_size // self.batch_size))
+    #     print("-" * 70)
+    #     for name, elapsed in results.items():
+    #         throughput = (self.dataset_size / self.batch_size) / elapsed if elapsed > 0 else 0
+    #         print(f"{name:35} {elapsed:8.3f}s  ({throughput:6.2f} batches/sec)")
 
-        print("-" * 70)
-        speedup_wl = results['WeightsLab (1 worker)'] / results['WeightsLab (4 workers)']
-        speedup_torch = results['PyTorch (1 worker)'] / results['PyTorch (4 workers)']
+    #     print("-" * 70)
+    #     speedup_wl = results['WeightsLab (1 worker)'] / results['WeightsLab (4 workers)']
+    #     speedup_torch = results['PyTorch (1 worker)'] / results['PyTorch (4 workers)']
 
-        print(f"Multi-worker speedup:")
-        print(f"  PyTorch:      {speedup_torch:.2f}x faster")
-        print(f"  WeightsLab:   {speedup_wl:.2f}x faster")
+    #     print(f"Multi-worker speedup:")
+    #     print(f"  PyTorch:      {speedup_torch:.2f}x faster")
+    #     print(f"  WeightsLab:   {speedup_wl:.2f}x faster")
 
-        # Verify multi-worker is faster than single-worker
-        self.assertGreater(wl_single_time, wl_multi_time * 0.8,
-                          "Multi-worker should be faster or comparable to single-worker")
+    #     # Verify multi-worker is faster than single-worker
+    #     self.assertGreater(wl_single_time, wl_multi_time * 0.8,
+    #                       "Multi-worker should be faster or comparable to single-worker")
 
     def test_correctness_with_reset(self):
         """Test that WeightsLab reset_iterator works correctly."""

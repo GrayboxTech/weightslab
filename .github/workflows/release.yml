@@ -213,7 +213,7 @@ jobs:
 
           export PRS_JSON
           PRS_JSON=$(gh pr list --state merged --base "dev" --limit 100 \
-            --json number,title,mergedAt,url,author \
+            --json number,title,mergedAt,url,author,body \
             2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
@@ -227,12 +227,17 @@ jobs:
             prs_data = json.loads(os.environ.get("PRS_JSON", "[]"))
           except Exception:
             prs_data = []
+          def _pr_entry(pr):
+            line = f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
+            desc = " ".join((pr.get("body") or "").split())  # collapse newlines/whitespace
+            if desc:
+              if len(desc) > 512:
+                desc = desc[:509].rstrip() + "..."
+              line += f"\n\n  > {desc}"
+            return line
           filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
           if filtered:
-            prs_lines = "\n".join(
-              f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
-              for pr in filtered
-            )
+            prs_lines = "\n".join(_pr_entry(pr) for pr in filtered)
             seen, clabels = set(), []
             for pr in filtered:
               login = pr.get("author", {}).get("login", "")
@@ -436,7 +441,7 @@ jobs:
 
           export PRS_JSON
           PRS_JSON=$(gh pr list --state merged --base "main" --limit 100 \
-            --json number,title,mergedAt,url,author \
+            --json number,title,mergedAt,url,author,body \
             2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
@@ -450,12 +455,17 @@ jobs:
             prs_data = json.loads(os.environ.get("PRS_JSON", "[]"))
           except Exception:
             prs_data = []
+          def _pr_entry(pr):
+            line = f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
+            desc = " ".join((pr.get("body") or "").split())  # collapse newlines/whitespace
+            if desc:
+              if len(desc) > 512:
+                desc = desc[:509].rstrip() + "..."
+              line += f"\n\n  > {desc}"
+            return line
           filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
           if filtered:
-            prs_lines = "\n".join(
-              f"- [#{pr['number']}]({pr['url']}) {pr['title']} — {pr['mergedAt'][:10]}"
-              for pr in filtered
-            )
+            prs_lines = "\n".join(_pr_entry(pr) for pr in filtered)
             seen, clabels = set(), []
             for pr in filtered:
               login = pr.get("author", {}).get("login", "")

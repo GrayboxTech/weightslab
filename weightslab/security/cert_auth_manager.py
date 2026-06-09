@@ -10,7 +10,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_user_profile() -> str:
-    """Get user profile directory."""
+    """Get the user's home directory.
+
+    On Windows, prefer the native profile (USERPROFILE / expanduser) and ignore
+    HOME: shells like Git Bash and WSL set HOME to a Unix-style path
+    (e.g. /mnt/c/Users/... or /c/Users/...) that is not a valid Windows
+    filesystem path and corrupts both cert storage and Docker bind mounts.
+    """
+    if os.name == 'nt':
+        return os.environ.get('USERPROFILE') or os.path.expanduser('~')
     return os.environ.get('HOME') or os.path.expanduser('~')
 
 
