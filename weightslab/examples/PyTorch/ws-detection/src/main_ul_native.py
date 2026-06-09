@@ -1,10 +1,8 @@
 """Minimal YOLO ↔ WeightsLab integration example.
 
-Uses `weightslab.integrations.ultralytics.WLAwareTrainer` — the framework
-integration handles loader wrapping, per-sample signals, and the studio
-overlay automatically. This file is the user's entrypoint: load config,
-register the logger + hyperparameters, start WL services, hand the trainer
-class to UL's `YOLO.train()`.
+`WLAwareTrainer` handles loader wrapping, the logger, per-sample signals,
+and the studio overlay. The user file just loads config, registers
+hyperparameters, starts WL services, and hands the trainer to UL.
 """
 import os
 os.environ.setdefault("WL_PRELOAD_IMAGE_OVERVIEW", "0")
@@ -25,7 +23,6 @@ warnings.filterwarnings(
 )
 
 import weightslab as wl
-from weightslab.backend.logger import LoggerQueue
 from weightslab.integrations.ultralytics import WLAwareTrainer
 from ultralytics import YOLO
 
@@ -45,8 +42,6 @@ def main():
 
     # Read raw config values BEFORE wrapping so YOLO.train kwargs are plain
     # Python (avoids ProxyValue.__gt__ during max()/comparisons).
-    exp_name = cfg["experiment_name"]
-    log_dir = cfg["root_log_dir"]
     model_name = cfg["model"]["name"]
     data_root = str(cfg["data_root"])
     image_size = cfg.get("image_size")
@@ -54,8 +49,9 @@ def main():
     max_steps = cfg.get("training_steps_to_do")
     serving_grpc = cfg.get("serving_grpc", True)
     serving_cli = cfg.get("serving_cli", False)
+    project = cfg["root_log_dir"]
+    name = cfg["experiment_name"]
 
-    wl.watch_or_edit(LoggerQueue(), flag="logger", name=exp_name, log_dir=log_dir)
     wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg, poll_interval=1.0)
     wl.serve(serving_grpc=serving_grpc, serving_cli=serving_cli)
 
@@ -65,6 +61,7 @@ def main():
         imgsz=image_size,
         epochs=1000 if max_steps is None else max(1, int(max_steps)),
         device=device,
+        project=project, name=name,  # → UL save_dir → WL logger log_dir/name
         resume=False,
         cache=False,
         optimizer="SGD",

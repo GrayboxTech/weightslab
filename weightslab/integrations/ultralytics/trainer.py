@@ -28,6 +28,7 @@ from torch.nn import Identity
 from ultralytics.models.yolo.detect import DetectionTrainer
 
 import weightslab as wl
+from weightslab.backend.logger import LoggerQueue
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend import ledgers
 
@@ -53,6 +54,10 @@ class WLAwareTrainer(DetectionTrainer):
                 )
 
         def _on_train_start(trainer):
+            wl.watch_or_edit(
+                LoggerQueue(), flag="logger",
+                name=trainer.save_dir.name, log_dir=str(trainer.save_dir.parent),
+            )
             underlying = trainer.model
             trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
             trainer.model = wl.watch_or_edit(
@@ -115,12 +120,16 @@ class WLAwareTrainer(DetectionTrainer):
         self.add_callback("on_val_batch_end",     _on_val_batch_end)
         self.add_callback("on_val_end",           _on_val_end)
 
+    def validate(self):
+        # UL's metrics.process does np.concatenate([]) → ValueError when val
+        # is fully discarded. WL's sampler subtracts deny-listed uids in __len__,
+        # so loader len reflects the active set. ({}, 0.0) unpacks cleanly into
+        # UL's `{**self.metrics, ...}` which (None, None) does not.
+        if len(self.test_loader) == 0:
+            return {}, 0.0
+        return super().validate()
+
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
-        """Both train and val go through `wl.watch_or_edit(flag='data')` —
-        the canonical WL pattern. Each loader gets its own
-        `DataSampleTrackingWrapper` with its own uid range from the global
-        `_UID_CNT` counter, so train and val never collide in the shared
-        ledger."""
         dataset = self.build_dataset(dataset_path, mode, batch_size)
         dataset.__class__ = WLAwareDataset
         is_train = (mode == "train")
@@ -143,9 +152,6 @@ class WLAwareTrainer(DetectionTrainer):
             preload_labels=cfg.get('preload_labels', True),
             preload_metadata=cfg.get('preload_metadata', True),
         )
-
-        # Test
-        l = len(loader)
 
         if not hasattr(loader, "reset"):
             loader.reset = lambda *a, **k: None
