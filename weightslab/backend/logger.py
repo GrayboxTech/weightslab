@@ -1,69 +1,88 @@
-import torch as th
+"""DuckDB-backed signal history logger.
+
+``LoggerQueue`` is a thin interface that maps the logger's public methods onto
+a DuckDB database holding three history tables:
+
+* ``signals``       — aggregated training-curve points (one row per averaged
+                      step entry / evaluation marker).
+* ``per_sample``    — per-sample signal values ``(sample_id, step, value)``.
+* ``per_instance``  — per-instance values ``(sample_id, annotation_id, step, value)``
+                      for detection / segmentation.
+
+Design notes
+------------
+* **Hot path is RAM, reads hit DuckDB.** ``add_scalars`` /
+  ``add_instance_scalars`` only append to in-memory staging lists (O(1), no SQL).
+  Rows are bulk-inserted into DuckDB lazily — right before any query, snapshot,
+  delete or update — via a single vectorized ``INSERT ... SELECT``. This keeps
+  per-step logging cheap while letting DuckDB do the heavy aggregation
+  (``GROUP BY step`` over millions of rows) in native code — exactly what
+  break-by-slices needs.
+* **Transient runtime state stays in Python.** The live-streaming pending queue,
+  the per-step aggregation buffer and the evaluation accumulator are small and
+  short-lived, so they remain plain Python structures.
+* **Persistence.** ``db_path`` defaults to ``":memory:"``. Pass a file path to
+  back the history with an on-disk DuckDB file. Either way ``save_snapshot`` /
+  ``load_snapshot`` round-trip the full history as a plain dict, so the
+  checkpoint manager's snapshotting is unchanged.
+* **Thread-safety.** A single DuckDB connection is guarded by an ``RLock``;
+  staging appends and flushes take the same lock.
+"""
+
+import json
+import threading
 import time
-from array import array as _array
-from copy import deepcopy
+
+import duckdb
+import pandas as pd
+import torch as th
 
 from weightslab.backend.ledgers import get_logger, register_logger, get_checkpoint_manager
 
 
-def _make_per_sample_buf():
-    """Compact storage for per-sample signals: three typed C arrays.
+# Column order for each table's staging buffer / bulk insert.
+_SIGNAL_COLS = [
+    "metric_name", "experiment_hash", "step", "metric_value", "timestamp",
+    "audit_mode", "is_evaluation_marker", "split_name", "evaluation_tags",
+    "point_note", "seq",
+]
+_SAMPLE_COLS = ["metric_name", "experiment_hash", "sample_id", "step", "value", "seq"]
+_INSTANCE_COLS = [
+    "metric_name", "experiment_hash", "sample_id", "annotation_id", "step", "value", "seq",
+]
 
-    Uses array.array instead of a list of dicts to reduce memory by ~20-40x:
-    - list of dicts:  ~400-600 bytes/entry (Python dict overhead + 6 string keys)
-    - compact arrays: 12 bytes/entry (int32 + int32 + float32)
-
-    Fields:
-        sample_ids: list of str  - dataset sample index
-        steps:      signed int32 - global training step
-        values:     float32      - signal value at that step for that sample
-    """
-    return {
-        "sample_ids": [],  # str
-        "steps":      _array('i'),  # int32, 4 bytes each
-        "values":     _array('f'),  # float32, 4 bytes each
-    }
-
-
-def _make_per_instance_buf():
-    """Compact storage for per-instance signals: four typed C arrays.
-
-    Fields:
-        sample_ids:      list of str  - dataset sample index
-        annotation_ids:  signed int32 - instance index within sample (1-based)
-        steps:           signed int32 - global training step
-        values:          float32      - signal value at that step for that instance
-    """
-    return {
-        "sample_ids":     [],           # str
-        "annotation_ids": _array('i'),  # int32, 4 bytes each
-        "steps":          _array('i'),  # int32, 4 bytes each
-        "values":         _array('f'),  # float32, 4 bytes each
-    }
+# Auto-flush staged rows to DuckDB once the combined staging buffers exceed this
+# many rows, to bound memory during long runs that never read history.
+_STAGE_FLUSH_THRESHOLD = 50_000
 
 
 class LoggerQueue:
-    def __init__(self, register: bool = True) -> None:
+    def __init__(self, register: bool = True, db_path: str = ":memory:") -> None:
         self.graph_names = set()
         self._current_step_buffer = {}
         self._last_step = None
-        self._signal_history = {}  # Keep all signals in memory for persistence
-        self._signal_history_per_sample = {}  # Keep all signals per sample in memory for persistence
-        self._signal_history_per_instance = {}  # Keep all signals per instance in memory for persistence
-        # Reverse indices: O(1) lookup by sample_id or (sample_id, annotation_id)
-        # Structure: {graph_name: {exp_hash: {sample_id: [row_indices]}}}
-        self._sample_index = {}
-        # Structure: {graph_name: {exp_hash: {(sample_id, annotation_id): [row_indices]}}}
-        self._instance_index = {}
-        self._pending_queue = []  # Queue for new signals waiting to be sent to WeightsStudio
+
+        # Live-streaming queue of new points waiting to be sent to WeightsStudio.
+        self._pending_queue = []
         self._buffered_step = None
 
-        # Evaluation mode state
+        # Evaluation mode state (transient).
         self._eval_mode_active: bool = False
         self._eval_mode_hash: str = ""
         self._eval_mode_split: str = ""
         self._eval_mode_tags: list[str] = []
         self._eval_accum: dict = {}  # {graph_name: [sum, count]}
+
+        # DuckDB connection + write-staging buffers.
+        self._lock = threading.RLock()
+        self._db_path = db_path
+        self._conn = duckdb.connect(database=db_path)
+        self._stage_signals: list = []
+        self._stage_sample: list = []
+        self._stage_instance: list = []
+        self._seq = 0
+        self._ensure_tables()
+        self._restore_runtime_state_from_db()
 
         lg = None
         if register:
@@ -76,27 +95,155 @@ class LoggerQueue:
         # Init checkpoint manager for experiment hash retrieval (if available)
         self.chkpt_manager = get_checkpoint_manager()
 
-    def __len__(self):
-        """Return logger length."""
-        len_history = 0
-        for k in self._signal_history:
-            for exp_hash in self._signal_history[k]:
-                l = len(self._signal_history[k][exp_hash])
-                len_history = max(len_history, l)
-        return len_history
+    # ------------------------------------------------------------------
+    # DuckDB plumbing
+    # ------------------------------------------------------------------
+    def _ensure_tables(self) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS signals (
+                    metric_name VARCHAR,
+                    experiment_hash VARCHAR,
+                    step INTEGER,
+                    metric_value DOUBLE,
+                    timestamp BIGINT,
+                    audit_mode BOOLEAN,
+                    is_evaluation_marker BOOLEAN,
+                    split_name VARCHAR,
+                    evaluation_tags VARCHAR,
+                    point_note VARCHAR,
+                    seq BIGINT
+                );
+                CREATE TABLE IF NOT EXISTS per_sample (
+                    metric_name VARCHAR,
+                    experiment_hash VARCHAR,
+                    sample_id VARCHAR,
+                    step INTEGER,
+                    value REAL,
+                    seq BIGINT
+                );
+                CREATE TABLE IF NOT EXISTS per_instance (
+                    metric_name VARCHAR,
+                    experiment_hash VARCHAR,
+                    sample_id VARCHAR,
+                    annotation_id INTEGER,
+                    step INTEGER,
+                    value REAL,
+                    seq BIGINT
+                );
+                """
+            )
 
-    # Clear history method (can be called by WeightsLabCallback at the start of a new experiment to reset state,
-    # while preserving graph names which are derived from signals and may be needed for future signals after clearing history)
+    def _restore_runtime_state_from_db(self) -> None:
+        """Repopulate seq counter and graph names from an existing (file) DB."""
+        with self._lock:
+            max_seq = self._conn.execute(
+                """
+                SELECT max(m) FROM (
+                    SELECT max(seq) AS m FROM signals
+                    UNION ALL SELECT max(seq) FROM per_sample
+                    UNION ALL SELECT max(seq) FROM per_instance
+                )
+                """
+            ).fetchone()[0]
+            self._seq = (int(max_seq) + 1) if max_seq is not None else 0
+
+            for tbl in ("signals", "per_sample", "per_instance"):
+                for (name,) in self._conn.execute(
+                    f"SELECT DISTINCT metric_name FROM {tbl}"
+                ).fetchall():
+                    if name is not None:
+                        self.graph_names.add(name)
+
+    def _next_seq(self) -> int:
+        s = self._seq
+        self._seq += 1
+        return s
+
+    def _maybe_autoflush(self) -> None:
+        if (len(self._stage_signals) + len(self._stage_sample)
+                + len(self._stage_instance)) >= _STAGE_FLUSH_THRESHOLD:
+            self._flush_stage()
+
+    def _flush_stage(self) -> None:
+        """Bulk-insert all staged rows into DuckDB and clear the buffers."""
+        with self._lock:
+            if self._stage_signals:
+                df = pd.DataFrame(self._stage_signals, columns=_SIGNAL_COLS)
+                self._conn.register("_stg_sig", df)
+                self._conn.execute("INSERT INTO signals SELECT * FROM _stg_sig")
+                self._conn.unregister("_stg_sig")
+                self._stage_signals = []
+            if self._stage_sample:
+                df = pd.DataFrame(self._stage_sample, columns=_SAMPLE_COLS)
+                self._conn.register("_stg_ps", df)
+                self._conn.execute("INSERT INTO per_sample SELECT * FROM _stg_ps")
+                self._conn.unregister("_stg_ps")
+                self._stage_sample = []
+            if self._stage_instance:
+                df = pd.DataFrame(self._stage_instance, columns=_INSTANCE_COLS)
+                self._conn.register("_stg_pi", df)
+                self._conn.execute("INSERT INTO per_instance SELECT * FROM _stg_pi")
+                self._conn.unregister("_stg_pi")
+                self._stage_instance = []
+
+    def _stage_signal_row(self, graph_name, exp_hash, step, metric_value, timestamp,
+                          audit_mode, is_marker, split_name, eval_tags, point_note):
+        self._stage_signals.append((
+            graph_name, exp_hash, int(step), float(metric_value), int(timestamp),
+            bool(audit_mode), bool(is_marker), split_name or "",
+            json.dumps(list(eval_tags or [])), point_note or "", self._next_seq(),
+        ))
+        self._maybe_autoflush()
+
+    def _stage_sample_row(self, graph_name, exp_hash, sample_id, step, value):
+        self._stage_sample.append((
+            graph_name, exp_hash, str(sample_id), int(step), float(value), self._next_seq(),
+        ))
+        self._maybe_autoflush()
+
+    def _stage_instance_row(self, graph_name, exp_hash, sample_id, annotation_id, step, value):
+        self._stage_instance.append((
+            graph_name, exp_hash, str(sample_id), int(annotation_id), int(step),
+            float(value), self._next_seq(),
+        ))
+        self._maybe_autoflush()
+
+    @staticmethod
+    def _hash_filter(exp_hash, params, table_alias=""):
+        """Append an experiment-hash WHERE fragment. ``None`` means 'all hashes'."""
+        if exp_hash is None:
+            return ""
+        params.append(exp_hash)
+        col = f"{table_alias}experiment_hash" if table_alias else "experiment_hash"
+        return f" AND {col} = ?"
+
+    def __len__(self):
+        """Max number of distinct steps recorded for any (metric, hash) curve."""
+        with self._lock:
+            self._flush_stage()
+            row = self._conn.execute(
+                """
+                SELECT max(cnt) FROM (
+                    SELECT count(DISTINCT step) AS cnt
+                    FROM signals GROUP BY metric_name, experiment_hash
+                )
+                """
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
     def clear_signal_histories(self):
-        """Clear signal histories."""
-        # Note: We do not clear graph names here as they are derived from signals and may be needed for future signals after clearing history.
-        self._signal_history.clear()
-        self._signal_history_per_sample.clear()
-        self._signal_history_per_instance.clear()
-        self._sample_index.clear()
-        self._instance_index.clear()
-        self._current_step_buffer.clear()
-        self._buffered_step = None
+        """Clear all signal histories (keeps graph names and runtime buffers reset)."""
+        with self._lock:
+            self._stage_signals = []
+            self._stage_sample = []
+            self._stage_instance = []
+            self._conn.execute("DELETE FROM signals")
+            self._conn.execute("DELETE FROM per_sample")
+            self._conn.execute("DELETE FROM per_instance")
+            self._current_step_buffer.clear()
+            self._buffered_step = None
 
     def _to_float(self, value):
         if isinstance(value, th.Tensor):
@@ -111,7 +258,6 @@ class LoggerQueue:
         2. Check hyperparams auditor_mode (fallback for legacy/hyperparams-based control)
         """
         try:
-            # First priority: check registered model interface
             from weightslab.backend.ledgers import get_model
             model = get_model()
             if model is not None and hasattr(model, 'audit_mode'):
@@ -120,7 +266,6 @@ class LoggerQueue:
             pass
 
         try:
-            # Fallback: check hyperparams auditor_mode
             from weightslab.backend.ledgers import get_hyperparams
             hp = get_hyperparams()
             if hp is not None:
@@ -129,27 +274,33 @@ class LoggerQueue:
             pass
         return False
 
-    def _append_history_entry(self, graph_name, exp_hash, global_step, metric_value, audit_mode=None):
+    def _append_history_entry(self, graph_name, exp_hash, global_step, metric_value,
+                              audit_mode=None, is_marker=False, split_name="",
+                              evaluation_tags=None):
+        """Stage a signals row and return the live-queue entry dict."""
         if audit_mode is None:
             audit_mode = self._get_audit_mode()
 
+        timestamp = int(time.time())
         signal_entry = {
             "model_age": global_step,
             "metric_name": graph_name,
             "metric_value": metric_value,
             "experiment_hash": exp_hash,
-            "timestamp": int(time.time()),
+            "timestamp": timestamp,
             "audit_mode": audit_mode,
         }
+        if is_marker:
+            signal_entry["is_evaluation_marker"] = True
+            signal_entry["split_name"] = split_name
+            signal_entry["evaluation_tags"] = list(evaluation_tags or [])
 
-        if graph_name not in self._signal_history:
-            self._signal_history[graph_name] = {}
-        if exp_hash not in self._signal_history[graph_name]:
-            self._signal_history[graph_name][exp_hash] = {}
-        if global_step not in self._signal_history[graph_name][exp_hash]:
-            self._signal_history[graph_name][exp_hash][global_step] = []
-
-        self._signal_history[graph_name][exp_hash][global_step].append(signal_entry)
+        with self._lock:
+            self._stage_signal_row(
+                graph_name, exp_hash, global_step, metric_value, timestamp,
+                bool(audit_mode), bool(is_marker), split_name,
+                list(evaluation_tags or []), "",
+            )
         return signal_entry
 
     def _flush_current_step_buffer(self, add_to_queue: bool):
@@ -179,21 +330,27 @@ class LoggerQueue:
     def get_next_evaluation_count(self, base_hash: str) -> int:
         """Return the next unused evaluation index for *base_hash*.
 
-        Scans the current signal history for keys of the form
+        Scans recorded experiment hashes for keys of the form
         ``<base_hash>_<integer>`` and returns max(found) + 1 (or 1 if none).
         """
         prefix = base_hash + "_"
         max_count = 0
-        for gname in self._signal_history:
-            for hash_key in self._signal_history[gname]:
-                if isinstance(hash_key, str) and hash_key.startswith(prefix):
-                    suffix = hash_key[len(prefix):]
-                    try:
-                        count = int(suffix)
-                        if count > max_count:
-                            max_count = count
-                    except ValueError:
-                        pass
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                "SELECT DISTINCT experiment_hash FROM signals "
+                "WHERE experiment_hash LIKE ?",
+                [prefix + "%"],
+            ).fetchall()
+        for (hash_key,) in rows:
+            if isinstance(hash_key, str) and hash_key.startswith(prefix):
+                suffix = hash_key[len(prefix):]
+                try:
+                    count = int(suffix)
+                    if count > max_count:
+                        max_count = count
+                except ValueError:
+                    pass
         return max_count + 1
 
     def start_evaluation_mode(self, split_name: str, eval_hash: str, evaluation_tags=None) -> None:
@@ -205,10 +362,6 @@ class LoggerQueue:
 
         Per-sample history *is* still updated (for Break-By-Slice on eval
         results), using *eval_hash* as the experiment key.
-
-        Args:
-            split_name: Human-readable split name (e.g. ``"train_loader"``).
-            eval_hash:  Modified experiment hash (e.g. ``"abc123_1"``).
         """
         self._flush_current_step_buffer(add_to_queue=True)
         self._eval_mode_active = True
@@ -224,9 +377,6 @@ class LoggerQueue:
         since ``start_evaluation_mode()``, writes each one into the signal
         history under *eval_hash* and into the pending queue, then resets
         evaluation-mode state.
-
-        Args:
-            model_age: Current model age (training step) at time of evaluation.
 
         Returns:
             Dict mapping graph_name → averaged value for all signals seen.
@@ -248,26 +398,16 @@ class LoggerQueue:
             results[graph_name] = avg
             self.graph_names.add(graph_name)
 
-            # Store in signal history under eval_hash
-            if graph_name not in self._signal_history:
-                self._signal_history[graph_name] = {}
-            if eval_hash not in self._signal_history[graph_name]:
-                self._signal_history[graph_name][eval_hash] = {}
-            if model_age not in self._signal_history[graph_name][eval_hash]:
-                self._signal_history[graph_name][eval_hash][model_age] = []
-
-            entry = {
-                "model_age": model_age,
-                "metric_name": graph_name,
-                "metric_value": avg,
-                "experiment_hash": eval_hash,
-                "timestamp": int(time.time()),
-                "is_evaluation_marker": True,
-                "split_name": split_name,
-                "evaluation_tags": evaluation_tags,
-                "audit_mode": audit_mode,
-            }
-            self._signal_history[graph_name][eval_hash][model_age].append(entry)
+            entry = self._append_history_entry(
+                graph_name=graph_name,
+                exp_hash=eval_hash,
+                global_step=model_age,
+                metric_value=avg,
+                audit_mode=audit_mode,
+                is_marker=True,
+                split_name=split_name,
+                evaluation_tags=evaluation_tags,
+            )
             self._pending_queue.append(entry)
 
         self._eval_accum = {}
@@ -277,12 +417,7 @@ class LoggerQueue:
         return results
 
     def abort_evaluation_mode(self) -> None:
-        """Abort evaluation mode and drop all in-progress evaluation data.
-
-        This is used when an evaluation is canceled or timed out.
-        It clears the accumulation buffer and removes any per-sample history
-        that may have been written under the in-flight evaluation hash.
-        """
+        """Abort evaluation mode and drop all in-progress evaluation data."""
         if not self._eval_mode_active:
             return
 
@@ -304,19 +439,10 @@ class LoggerQueue:
         if not eval_hash:
             return
 
-        # Remove any marker/history entries tied to the evaluation hash.
-        for graph_name in list(self._signal_history.keys()):
-            try:
-                self._signal_history[graph_name].pop(eval_hash, None)
-            except Exception:
-                pass
-
-        # Remove per-sample traces recorded under the same hash.
-        for graph_name in list(self._signal_history_per_sample.keys()):
-            try:
-                self._signal_history_per_sample[graph_name].pop(eval_hash, None)
-            except Exception:
-                pass
+        with self._lock:
+            self._flush_stage()
+            self._conn.execute("DELETE FROM signals WHERE experiment_hash = ?", [eval_hash])
+            self._conn.execute("DELETE FROM per_sample WHERE experiment_hash = ?", [eval_hash])
 
         # Drop queued points that reference this hash.
         self._pending_queue = [
@@ -335,109 +461,124 @@ class LoggerQueue:
         - Evaluation mode active: accumulate into internal buffer; per-sample history
           still gets written under the eval hash for Break-By-Slice support.
         """
-        self.graph_names.add(graph_name)
-        self._last_step = global_step
+        with self._lock:
+            self.graph_names.add(graph_name)
+            self._last_step = global_step
 
-        # ----------------------------------------------------------------
-        # Evaluation-mode interception
-        # ----------------------------------------------------------------
-        if self._eval_mode_active:
-            # Collect scalar values to accumulate
-            values: list = []
-            if aggregate_by_step and signal_per_sample and isinstance(signal_per_sample, dict):
-                values = [self._to_float(v) for v in signal_per_sample.values()]
-            elif signal and isinstance(signal, dict):
-                values = [self._to_float(v) for _, v in signal.items()]
+            # ------------------------------------------------------------
+            # Evaluation-mode interception
+            # ------------------------------------------------------------
+            if self._eval_mode_active:
+                values: list = []
+                if aggregate_by_step and signal_per_sample and isinstance(signal_per_sample, dict):
+                    values = [self._to_float(v) for v in signal_per_sample.values()]
+                elif signal and isinstance(signal, dict):
+                    values = [self._to_float(v) for _, v in signal.items()]
 
-            if values:
-                if graph_name not in self._eval_accum:
-                    self._eval_accum[graph_name] = [0.0, 0]
-                self._eval_accum[graph_name][0] += sum(values)
-                self._eval_accum[graph_name][1] += len(values)
+                if values:
+                    if graph_name not in self._eval_accum:
+                        self._eval_accum[graph_name] = [0.0, 0]
+                    self._eval_accum[graph_name][0] += sum(values)
+                    self._eval_accum[graph_name][1] += len(values)
 
-            # Still store per-sample signals under eval_hash (for Break-By-Slice)
-            if signal_per_sample and isinstance(signal_per_sample, dict):
-                eval_hash = self._eval_mode_hash
-                if graph_name not in self._signal_history_per_sample:
-                    self._signal_history_per_sample[graph_name] = {}
-                if eval_hash not in self._signal_history_per_sample[graph_name]:
-                    self._signal_history_per_sample[graph_name][eval_hash] = _make_per_sample_buf()
-                buf = self._signal_history_per_sample[graph_name][eval_hash]
+                # Still store per-sample signals under eval_hash (for Break-By-Slice)
+                if signal_per_sample and isinstance(signal_per_sample, dict):
+                    eval_hash = self._eval_mode_hash
+                    step_i = int(global_step)
+                    for sid, value in signal_per_sample.items():
+                        self._stage_sample_row(graph_name, eval_hash, sid, step_i, self._to_float(value))
+
+                return  # Do NOT add to normal history during evaluation mode
+            # ------------------------------------------------------------
+
+            exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None
+
+            if self._buffered_step is not None and global_step != self._buffered_step:
+                self._flush_current_step_buffer(add_to_queue=True)
+
+            if not aggregate_by_step and self._current_step_buffer:
+                self._flush_current_step_buffer(add_to_queue=True)
+
+            # Update per-sample signal history
+            if isinstance(signal_per_sample, dict) and len(signal_per_sample):
                 step_i = int(global_step)
-                idx_map = self._sample_index.setdefault(graph_name, {}).setdefault(eval_hash, {})
                 for sid, value in signal_per_sample.items():
-                    row = len(buf["sample_ids"])
-                    buf["sample_ids"].append(sid)
-                    buf["steps"].append(step_i)
-                    buf["values"].append(self._to_float(value))
-                    idx_map.setdefault(str(sid), []).append(row)
+                    self._stage_sample_row(graph_name, exp_hash, sid, step_i, self._to_float(value))
 
-            return  # Do NOT add to normal history during evaluation mode
-        # ----------------------------------------------------------------
+            metric_values = []
+            if isinstance(signal_per_sample, dict) and aggregate_by_step and len(signal_per_sample):
+                for value in signal_per_sample.values():
+                    metric_values.append(self._to_float(value))
+            else:
+                for _, line_value in signal.items():
+                    metric_values.append(self._to_float(line_value))
 
-        exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None
+            if aggregate_by_step:
+                if metric_values:
+                    self._buffered_step = global_step
+                    buffer_key = (global_step, graph_name, exp_hash)
+                    if buffer_key not in self._current_step_buffer:
+                        self._current_step_buffer[buffer_key] = {"sum": 0.0, "count": 0}
+                    self._current_step_buffer[buffer_key]["sum"] += sum(metric_values)
+                    self._current_step_buffer[buffer_key]["count"] += len(metric_values)
+                return
 
-        if self._buffered_step is not None and global_step != self._buffered_step:
-            self._flush_current_step_buffer(add_to_queue=True)
+            # Update averaged signal history immediately. Only emit when we have at
+            # least one valid metric value (signals carrying only per-sample data are
+            # stored separately in per_sample).
+            signal_entry = None
+            if len(metric_values) > 0:
+                signal_entry = self._append_history_entry(
+                    graph_name=graph_name,
+                    exp_hash=exp_hash,
+                    global_step=global_step,
+                    metric_value=sum(metric_values) / len(metric_values) if len(metric_values) > 1 else metric_values[0],
+                )
 
-        if not aggregate_by_step and self._current_step_buffer:
-            self._flush_current_step_buffer(add_to_queue=True)
+            if signal_entry is not None:
+                self._pending_queue.append(signal_entry)
 
-        # Update per-sample signal history with compact array storage
-        if isinstance(signal_per_sample, dict) and len(signal_per_sample):
-            if graph_name not in self._signal_history_per_sample:
-                self._signal_history_per_sample[graph_name] = {}
-            if exp_hash not in self._signal_history_per_sample[graph_name]:
-                self._signal_history_per_sample[graph_name][exp_hash] = _make_per_sample_buf()
+    def ingest_per_sample(self, graph_name: str, exp_hash, triples) -> None:
+        """Insert per-sample ``(sample_id, step, value)`` triples, de-duplicating
+        on ``(sample_id, step)`` within ``(graph_name, exp_hash)``.
 
-            buf = self._signal_history_per_sample[graph_name][exp_hash]
-            step_i = int(global_step)
-            idx_map = self._sample_index.setdefault(graph_name, {}).setdefault(exp_hash, {})
-            for sid, value in signal_per_sample.items():
-                row = len(buf["sample_ids"])
-                buf["sample_ids"].append(sid)
-                buf["steps"].append(step_i)
-                buf["values"].append(self._to_float(value))
-                idx_map.setdefault(str(sid), []).append(row)
+        Unlike ``add_scalars`` (which always appends), this is idempotent on the
+        ``(sample_id, step)`` key: the first value wins and later duplicates are
+        ignored. Useful for back-filling / importing history without creating
+        repeated points.
 
-        metric_values = []
-        if isinstance(signal_per_sample, dict) and aggregate_by_step and len(signal_per_sample):
-            for value in signal_per_sample.values():
-                metric_values.append(self._to_float(value))
-        else:
-            for _, line_value in signal.items():
-                metric_values.append(self._to_float(line_value))
-
-        if aggregate_by_step:
-            if metric_values:
-                self._buffered_step = global_step
-                buffer_key = (global_step, graph_name, exp_hash)
-                if buffer_key not in self._current_step_buffer:
-                    self._current_step_buffer[buffer_key] = {"sum": 0.0, "count": 0}
-                self._current_step_buffer[buffer_key]["sum"] += sum(metric_values)
-                self._current_step_buffer[buffer_key]["count"] += len(metric_values)
+        Args:
+            graph_name: Signal name.
+            exp_hash: Experiment hash (``None`` allowed).
+            triples: Iterable of ``(sample_id, step, value)``.
+        """
+        triples = list(triples)
+        if not triples:
             return
 
-        # Update averaged signal history immediately
-        signal_entry = None
+        with self._lock:
+            self.graph_names.add(graph_name)
+            self._flush_stage()
 
-        # Only add to history if we have at least one valid metric value (otherwise we may end up with empty/invalid entries from signals that only contain per-sample values, which are stored separately in _signal_history_per_sample)
-        if len(metric_values) > 0:
-             signal_entry = self._append_history_entry(
-                graph_name=graph_name,
-                exp_hash=exp_hash,
-                global_step=global_step,
-                metric_value=sum(metric_values) / len(metric_values) if len(metric_values) > 1 else metric_values[0],
-            )
+            # Existing (sample_id, step) keys for this (graph, hash).
+            params = [graph_name]
+            sql = "SELECT sample_id, step FROM per_sample WHERE metric_name = ?"
+            sql += self._hash_filter(exp_hash, params)
+            seen = {(str(s), int(t)) for s, t in self._conn.execute(sql, params).fetchall()}
 
-        # Add signal to pending queue for live incremental update to WeightsStudio
-        if signal_entry is not None:
-            self._pending_queue.append(signal_entry)
+            for sid, step, value in triples:
+                key = (str(sid), int(step))
+                if key in seen:
+                    continue
+                seen.add(key)
+                self._stage_sample_row(graph_name, exp_hash, sid, step, self._to_float(value))
 
-    # Print methods for debugging/inspection of logger state
+    # ------------------------------------------------------------------
+    # Print helpers (debug)
+    # ------------------------------------------------------------------
     def print_history(self):
-        """Print all items in history."""
-        for metric_name, experiments in self._signal_history.items():
+        history = self.get_signal_history()
+        for metric_name, experiments in history.items():
             print(f"Metric: {metric_name}")
             for exp_hash, steps in experiments.items():
                 print(f"  Experiment Hash: {exp_hash}")
@@ -445,133 +586,145 @@ class LoggerQueue:
                     print(f"    Step: {step}")
                     for signal in signals:
                         print(f"      Signal: {signal}")
-        return self._signal_history
+        return history
 
     def print_history_per_sample(self):
-        """Print all items in per-sample history."""
-        for metric_name, exps in self._signal_history_per_sample.items():
+        history = self.get_signal_history_per_sample()
+        for metric_name, exps in history.items():
             print(f"Metric: {metric_name}")
-            for exp_hash, buf in exps.items():
+            for exp_hash, entries in exps.items():
                 print(f"  Experiment Hash: {exp_hash}")
-                for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
-                    print(f"    Sample ID: {sid}, Step: {step}, Value: {val}")
-        return self._signal_history_per_sample
+                for e in entries:
+                    print(f"    Sample ID: {e['sample_id']}, Step: {e['model_age']}, Value: {e['metric_value']}")
+        return history
 
     def print_buffer(self):
-        """Print current step buffer contents."""
         print(f"Current step: {self._last_step}")
         print(f"Buffered metrics: {self._current_step_buffer}")
         return self._current_step_buffer
 
-    # Accessor methods for retrieving logger state (e.g. for checkpoint saving or programmatic access)
+    # ------------------------------------------------------------------
+    # Accessors
+    # ------------------------------------------------------------------
     def get_graph_names(self):
-        """
-            Get list of all graph names encountered in signals.
-            Returns:
-                List of graph names.
-        """
+        """Get list of all graph names encountered in signals."""
         return list(self.graph_names)
 
+    def list_sample_signal_names(self) -> list:
+        """Distinct signal names that have per-sample history."""
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute("SELECT DISTINCT metric_name FROM per_sample").fetchall()
+        return [r[0] for r in rows]
+
+    def list_instance_signal_names(self) -> list:
+        """Distinct signal names that have per-instance history."""
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute("SELECT DISTINCT metric_name FROM per_instance").fetchall()
+        return [r[0] for r in rows]
+
     def get_signal_history(self):
-        """Retrieve all accumulated signals from memory."""
-        # self._flush_current_step_buffer(add_to_queue=False)  # History should already be up to date since we flush on step change and on add_scalars when not aggregating by step, but we can flush here as well to be safe before retrieving history for checkpoint saving
-        return deepcopy(self._signal_history)
+        """Reconstruct aggregated history as ``{metric: {hash: {step: [entry, ...]}}}``."""
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                """
+                SELECT metric_name, experiment_hash, step, metric_value, timestamp,
+                       audit_mode, is_evaluation_marker, split_name, evaluation_tags, point_note
+                FROM signals ORDER BY seq
+                """
+            ).fetchall()
+
+        result: dict = {}
+        for (metric, h, step, val, ts, audit, marker, split, tags, note) in rows:
+            entry = {
+                "model_age": step,
+                "metric_name": metric,
+                "metric_value": val,
+                "experiment_hash": h,
+                "timestamp": int(ts) if ts is not None else 0,
+                "audit_mode": bool(audit),
+                "is_evaluation_marker": bool(marker),
+                "split_name": split or "",
+                "evaluation_tags": json.loads(tags) if tags else [],
+            }
+            if note:
+                entry["point_note"] = note
+            result.setdefault(metric, {}).setdefault(h, {}).setdefault(step, []).append(entry)
+        return result
 
     def get_current_signaL_history(self, graph_name: str, meta: bool = False):
-        """Get current history for a specific signal."""
-        if graph_name not in self._signal_history:
+        """Get current-hash aggregated history for a specific signal."""
+        if graph_name not in self.graph_names:
             return {}
 
-        # Get Current Hash
         exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None
 
-        # Process history
+        with self._lock:
+            self._flush_stage()
+            params = [graph_name]
+            sql = "SELECT step, metric_value FROM signals WHERE metric_name = ?"
+            sql += self._hash_filter(exp_hash, params)
+            sql += " ORDER BY seq"
+            rows = self._conn.execute(sql, params).fetchall()
+
         if meta:
-            return self._signal_history.get(graph_name, {}).get(exp_hash, {})
-        else:
-            history = self._signal_history.get(graph_name, {}).get(exp_hash, {})
-            result = []
-            for _, entries in history.items():
-                for entry in entries:
-                    result.append({
-                        "model_age": entry.get("model_age"),
-                        "metric_value": entry.get("metric_value"),
-                    })
-            return result
+            steps: dict = {}
+            for step, val in rows:
+                steps.setdefault(step, []).append({
+                    "model_age": step, "metric_value": val,
+                })
+            return steps
+
+        return [{"model_age": step, "metric_value": val} for step, val in rows]
 
     def get_signal_history_per_sample(self):
-        """Reconstruct per-sample history as list-of-dicts from compact array storage."""
-        result = {}
-        for graph_name, exps in self._signal_history_per_sample.items():
-            result[graph_name] = {}
-            for exp_hash, buf in exps.items():
-                entries = []
-                for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
-                    entries.append({
-                        "sample_id": sid,
-                        "model_age": step,
-                        "metric_name": graph_name,
-                        "metric_value": float(val),
-                        "experiment_hash": exp_hash,
-                    })
-                result[graph_name][exp_hash] = entries
+        """Per-sample history as ``{metric: {hash: [entry, ...]}}``."""
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                "SELECT metric_name, experiment_hash, sample_id, step, value "
+                "FROM per_sample ORDER BY seq"
+            ).fetchall()
+
+        result: dict = {}
+        for (metric, h, sid, step, val) in rows:
+            result.setdefault(metric, {}).setdefault(h, []).append({
+                "sample_id": sid,
+                "model_age": step,
+                "metric_name": metric,
+                "metric_value": float(val),
+                "experiment_hash": h,
+            })
         return result
 
     def get_current_signaL_history_per_sample(self, graph_name: str, sample_ids: list = None, exp_hash: str = None):
-        """Get current history for a specific signal."""
-        if graph_name not in self._signal_history:
+        """Get current-hash per-sample history for a specific signal."""
+        if graph_name not in self.graph_names:
             return {}
 
-        # Get Current Hash
         exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager and exp_hash is None else exp_hash
-
-        # Return history for the specified graph name, filtered by sample IDs and experiment hash if provided.  If meta=True, returns raw history dict; otherwise returns list of (sample_id, step, value) tuples.
-        result = self.query_per_sample(
-            graph_name,
-            sample_ids=sample_ids,
-            exp_hash=exp_hash
-        )
-        return result
+        return self.query_per_sample(graph_name, sample_ids=sample_ids, exp_hash=exp_hash)
 
     def query_per_sample(self, graph_name: str, sample_ids=None, exp_hash=None):
-        """Efficiently query per-sample history for specific sample IDs.
+        """Query per-sample history.
 
-        Returns a dict mapping sample_id → list of {model_age, signal_value} dicts,
-        filtered by sample_ids and optionally by experiment hash.
-        Much faster than get_signal_history_per_sample() for targeted queries
-        (e.g., "show me only samples with label 8").
-
-        Args:
-            graph_name: Signal name (e.g., "loss", "accuracy").
-            sample_ids: Collection of sample IDs to filter by. If None, returns all.
-            exp_hash: Specific experiment hash to query. If None, queries all hashes.
-
-        Returns:
-            List of (sample_id, step, value, experiment_hash) tuples.
+        Returns a list of ``(sample_id, step, value, experiment_hash)`` tuples,
+        filtered by *sample_ids* and optionally *exp_hash* (``None`` = all hashes).
         """
-        if graph_name not in self._signal_history_per_sample:
-            return []
+        with self._lock:
+            self._flush_stage()
+            params = [graph_name]
+            sql = "SELECT sample_id, step, value, experiment_hash FROM per_sample WHERE metric_name = ?"
+            sql += self._hash_filter(exp_hash, params)
+            if sample_ids is not None:
+                sql += " AND sample_id IN (SELECT UNNEST(?))"
+                params.append([str(s) for s in sample_ids])
+            sql += " ORDER BY seq"
+            rows = self._conn.execute(sql, params).fetchall()
 
-        exps = self._signal_history_per_sample[graph_name]
-        hashes = [exp_hash] if exp_hash is not None else list(exps.keys())
-        # Stored ids are ints; callers pass str (df index is str-normalized) — compare as str.
-        sid_set = {str(s) for s in sample_ids} if sample_ids is not None else None
-
-        results = []
-        for h in hashes:
-            buf = exps.get(h)
-            if buf is None:
-                continue
-            if sid_set is None:
-                for sid, step, val in zip(buf["sample_ids"], buf["steps"], buf["values"]):
-                    results.append((sid, step, float(val), h))
-            else:
-                idx_map = self._sample_index.get(graph_name, {}).get(h, {})
-                for sid in sid_set:
-                    for row in idx_map.get(sid, []):
-                        results.append((sid, buf["steps"][row], float(buf["values"][row]), h))
-
-        return results
+        return [(sid, int(step), float(val), h) for (sid, step, val, h) in rows]
 
     def query_per_instance(
         self,
@@ -585,52 +738,24 @@ class LoggerQueue:
         Returns a list of ``(sample_id, annotation_id, step, value, exp_hash)``
         tuples.  Any of *sample_id*, *annotation_id*, *exp_hash* may be ``None``
         to return all values along that dimension.
-
-        Args:
-            graph_name: Signal name (e.g. ``"confidence"``).
-            sample_id: Filter to a single sample. ``None`` returns all samples.
-            annotation_id: Filter to a single instance (1-based). ``None`` = all.
-            exp_hash: Filter to one experiment hash. ``None`` = all.
         """
-        if graph_name not in self._signal_history_per_instance:
-            return []
+        with self._lock:
+            self._flush_stage()
+            params = [graph_name]
+            sql = ("SELECT sample_id, annotation_id, step, value, experiment_hash "
+                   "FROM per_instance WHERE metric_name = ?")
+            sql += self._hash_filter(exp_hash, params)
+            if sample_id is not None:
+                sql += " AND sample_id = ?"
+                params.append(str(sample_id))
+            if annotation_id is not None:
+                sql += " AND annotation_id = ?"
+                params.append(int(annotation_id))
+            sql += " ORDER BY seq"
+            rows = self._conn.execute(sql, params).fetchall()
 
-        exps = self._signal_history_per_instance[graph_name]
-        hashes = [exp_hash] if exp_hash is not None else list(exps.keys())
-        sid_filter = str(sample_id) if sample_id is not None else None
-        aid_filter = int(annotation_id) if annotation_id is not None else None
-
-        results = []
-        for h in hashes:
-            buf = exps.get(h)
-            if buf is None:
-                continue
-            if sid_filter is None and aid_filter is None:
-                # No filter: full scan
-                for sid, aid, step, val in zip(
-                    buf["sample_ids"], buf["annotation_ids"], buf["steps"], buf["values"]
-                ):
-                    results.append((str(sid), int(aid), int(step), float(val), h))
-            elif sid_filter is not None and aid_filter is not None:
-                # Both filters: O(1) index lookup
-                idx_map = self._instance_index.get(graph_name, {}).get(h, {})
-                for row in idx_map.get((sid_filter, aid_filter), []):
-                    results.append((sid_filter, aid_filter, int(buf["steps"][row]), float(buf["values"][row]), h))
-            elif sid_filter is not None:
-                # Sample filter only: collect all annotation_ids for this sample
-                idx_map = self._instance_index.get(graph_name, {}).get(h, {})
-                for (sid_k, aid_k), rows in idx_map.items():
-                    if sid_k == sid_filter:
-                        for row in rows:
-                            results.append((sid_filter, aid_k, int(buf["steps"][row]), float(buf["values"][row]), h))
-            else:
-                # annotation_id filter only: scan index keys
-                idx_map = self._instance_index.get(graph_name, {}).get(h, {})
-                for (sid_k, aid_k), rows in idx_map.items():
-                    if aid_k == aid_filter:
-                        for row in rows:
-                            results.append((sid_k, aid_filter, int(buf["steps"][row]), float(buf["values"][row]), h))
-        return results
+        return [(str(sid), int(aid), int(step), float(val), h)
+                for (sid, aid, step, val, h) in rows]
 
     def aggregate_per_sample_by_step(
         self,
@@ -640,58 +765,29 @@ class LoggerQueue:
     ) -> dict:
         """Return mean signal value per step, aggregated over matching samples.
 
-        Uses numpy vectorized operations instead of a Python loop — ~100× faster
-        than iterating ``query_per_sample`` results for large sample counts.
-
-        Args:
-            graph_name: Signal name.
-            sample_ids: Samples to include. ``None`` = all samples.
-            exp_hash: Filter to one experiment hash. ``None`` = all hashes.
+        DuckDB performs the ``GROUP BY step`` average natively, which scales to
+        millions of rows far better than a Python loop — this is the path used
+        by break-by-slices.
 
         Returns:
-            ``{exp_hash: [(step, mean_value), ...]}`` — one sorted series per hash.
+            ``{exp_hash: [(step, mean_value), ...]}`` — one step-sorted series
+            per hash.
         """
-        import numpy as _np
+        with self._lock:
+            self._flush_stage()
+            params = [graph_name]
+            sql = ("SELECT experiment_hash, step, avg(value) AS mean_value "
+                   "FROM per_sample WHERE metric_name = ?")
+            sql += self._hash_filter(exp_hash, params)
+            if sample_ids is not None:
+                sql += " AND sample_id IN (SELECT UNNEST(?))"
+                params.append([str(s) for s in sample_ids])
+            sql += " GROUP BY experiment_hash, step ORDER BY experiment_hash, step"
+            rows = self._conn.execute(sql, params).fetchall()
 
-        if graph_name not in self._signal_history_per_sample:
-            return {}
-
-        exps = self._signal_history_per_sample[graph_name]
-        hashes = [exp_hash] if exp_hash is not None else list(exps.keys())
-        sid_set = {str(s) for s in sample_ids} if sample_ids is not None else None
-
-        result = {}
-        for h in hashes:
-            buf = exps.get(h)
-            if buf is None:
-                continue
-
-            # Convert typed C arrays to numpy with zero-copy (frombuffer gives a read-only view)
-            steps_np  = _np.frombuffer(buf["steps"],  dtype=_np.int32).copy()
-            values_np = _np.frombuffer(buf["values"], dtype=_np.float32).copy()
-
-            if sid_set is not None:
-                idx_map = self._sample_index.get(graph_name, {}).get(h, {})
-                rows = []
-                for sid in sid_set:
-                    rows.extend(idx_map.get(sid, []))
-                if not rows:
-                    continue
-                row_idx = _np.array(rows, dtype=_np.intp)
-                steps_np  = steps_np[row_idx]
-                values_np = values_np[row_idx]
-
-            if len(steps_np) == 0:
-                continue
-
-            # Vectorized group-by step → mean
-            unique_steps, inverse = _np.unique(steps_np, return_inverse=True)
-            sums   = _np.bincount(inverse, weights=values_np.astype(_np.float64))
-            counts = _np.bincount(inverse)
-            means  = sums / counts
-
-            result[h] = list(zip(unique_steps.tolist(), means.tolist()))
-
+        result: dict = {}
+        for (h, step, mean_val) in rows:
+            result.setdefault(h, []).append((int(step), float(mean_val)))
         return result
 
     def add_instance_scalars(
@@ -703,11 +799,10 @@ class LoggerQueue:
         global_step: int,
         exp_hash: str | None = None,
     ) -> None:
-        """Record per-instance scalar values in compact storage.
+        """Record per-instance scalar values.
 
-        Call this from ``save_instance_signals`` once per scalar signal per
-        batch.  Each element of *sample_ids*, *annotation_ids*, *values*
-        corresponds to one detection / segmentation instance.
+        Each element of *sample_ids*, *annotation_ids*, *values* corresponds to
+        one detection / segmentation instance.
 
         Args:
             graph_name: Signal name (e.g. ``"confidence"``).
@@ -724,76 +819,63 @@ class LoggerQueue:
                 else None
             )
 
-        if graph_name not in self._signal_history_per_instance:
-            self._signal_history_per_instance[graph_name] = {}
-        if exp_hash not in self._signal_history_per_instance[graph_name]:
-            self._signal_history_per_instance[graph_name][exp_hash] = _make_per_instance_buf()
-
-        buf = self._signal_history_per_instance[graph_name][exp_hash]
-        step_i = int(global_step)
-        idx_map = self._instance_index.setdefault(graph_name, {}).setdefault(exp_hash, {})
         try:
             import numpy as _np
             vals = _np.asarray(values, dtype=_np.float32).ravel()
         except Exception:
             vals = [float(v) for v in values]
 
-        for sid, aid, val in zip(sample_ids, annotation_ids, vals):
-            row = len(buf["sample_ids"])
-            sid_s, aid_i = str(sid), int(aid)
-            buf["sample_ids"].append(sid_s)
-            buf["annotation_ids"].append(aid_i)
-            buf["steps"].append(step_i)
-            buf["values"].append(float(val))
-            idx_map.setdefault((sid_s, aid_i), []).append(row)
+        with self._lock:
+            step_i = int(global_step)
+            for sid, aid, val in zip(sample_ids, annotation_ids, vals):
+                self._stage_instance_row(graph_name, exp_hash, sid, aid, step_i, float(val))
 
     def get_signal_history_per_instance(self) -> dict:
-        """Reconstruct per-instance history as list-of-dicts from compact array storage."""
-        result = {}
-        for graph_name, exps in self._signal_history_per_instance.items():
-            result[graph_name] = {}
-            for exp_hash, buf in exps.items():
-                entries = []
-                for sid, aid, step, val in zip(
-                    buf["sample_ids"], buf["annotation_ids"], buf["steps"], buf["values"]
-                ):
-                    entries.append({
-                        "sample_id":       str(sid),
-                        "annotation_id":   int(aid),
-                        "model_age":       int(step),
-                        "metric_name":     graph_name,
-                        "metric_value":    float(val),
-                        "experiment_hash": exp_hash,
-                    })
-                result[graph_name][exp_hash] = entries
+        """Per-instance history as ``{metric: {hash: [entry, ...]}}``."""
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                "SELECT metric_name, experiment_hash, sample_id, annotation_id, step, value "
+                "FROM per_instance ORDER BY seq"
+            ).fetchall()
+
+        result: dict = {}
+        for (metric, h, sid, aid, step, val) in rows:
+            result.setdefault(metric, {}).setdefault(h, []).append({
+                "sample_id": str(sid),
+                "annotation_id": int(aid),
+                "model_age": int(step),
+                "metric_name": metric,
+                "metric_value": float(val),
+                "experiment_hash": h,
+            })
         return result
 
     def save_snapshot(self) -> dict:
-        """Build a serializable snapshot of the logger state."""
+        """Build a serializable snapshot of the logger state (compact format)."""
         self._flush_current_step_buffer(add_to_queue=False)
 
-        # Compact serialization: store parallel lists instead of list-of-dicts
-        per_sample_compact = {}
-        for graph_name, exps in self._signal_history_per_sample.items():
+        per_sample_compact: dict = {}
+        for graph_name, exps in self.get_signal_history_per_sample().items():
             per_sample_compact[graph_name] = {}
-            for exp_hash, buf in exps.items():
+            for exp_hash, entries in exps.items():
                 per_sample_compact[graph_name][exp_hash] = {
                     "_compact": True,
-                    "sample_ids": list(buf["sample_ids"]),
-                    "steps":      list(buf["steps"]),
-                    "values":     list(buf["values"]),
+                    "sample_ids": [e["sample_id"] for e in entries],
+                    "steps": [e["model_age"] for e in entries],
+                    "values": [e["metric_value"] for e in entries],
                 }
 
-        per_instance_compact = {}
-        for graph_name, exps in self._signal_history_per_instance.items():
+        per_instance_compact: dict = {}
+        for graph_name, exps in self.get_signal_history_per_instance().items():
             per_instance_compact[graph_name] = {}
-            for exp_hash, buf in exps.items():
+            for exp_hash, entries in exps.items():
                 per_instance_compact[graph_name][exp_hash] = {
-                    "_compact":       True,
-                    "sample_ids":     list(buf["sample_ids"]),
-                    "annotation_ids": list(buf["annotation_ids"]),
-                    "steps":          list(buf["steps"]),
-                    "values":         list(buf["values"]),
+                    "_compact": True,
+                    "sample_ids": [e["sample_id"] for e in entries],
+                    "annotation_ids": [e["annotation_id"] for e in entries],
+                    "steps": [e["model_age"] for e in entries],
+                    "values": [e["metric_value"] for e in entries],
                 }
 
         return {
@@ -803,32 +885,34 @@ class LoggerQueue:
             "signal_history_per_instance": per_instance_compact,
         }
 
-    # ------------------------------------------------------------------
-    # Convenience: list all evaluation-marker hashes in history
-    # ------------------------------------------------------------------
     def get_evaluation_marker_hashes(self) -> list:
-        """Return all experiment hashes that correspond to evaluation markers."""
+        """Return all experiment hashes of the form ``<base>_<int>`` in history."""
+        with self._lock:
+            self._flush_stage()
+            rows = self._conn.execute(
+                "SELECT DISTINCT experiment_hash FROM signals WHERE experiment_hash IS NOT NULL"
+            ).fetchall()
+
         hashes = set()
-        for gname in self._signal_history:
-            for hash_key in self._signal_history[gname]:
-                if isinstance(hash_key, str) and "_" in hash_key:
-                    # Check that the suffix is a pure integer
-                    suffix = hash_key.rsplit("_", 1)[-1]
-                    try:
-                        int(suffix)
-                        hashes.add(hash_key)
-                    except ValueError:
-                        pass
+        for (hash_key,) in rows:
+            if isinstance(hash_key, str) and "_" in hash_key:
+                suffix = hash_key.rsplit("_", 1)[-1]
+                try:
+                    int(suffix)
+                    hashes.add(hash_key)
+                except ValueError:
+                    pass
         return sorted(hashes)
 
     def get_and_clear_queue(self):
         """Get pending queue and clear it (for incremental updates to WeightsStudio)."""
-        queue_copy = list(self._pending_queue)
-        self._pending_queue.clear()
+        with self._lock:
+            queue_copy = list(self._pending_queue)
+            self._pending_queue.clear()
         return queue_copy
 
     def set_point_note(self, metric_name: str, experiment_hash: str, model_age: int, note: str) -> bool:
-        """Attach or clear a note for a specific signal point identified by metric/hash/step."""
+        """Attach or clear a note for a signal point identified by metric/hash/step."""
         metric_name = str(metric_name or "")
         experiment_hash = str(experiment_hash or "")
         if not metric_name or not experiment_hash:
@@ -836,55 +920,64 @@ class LoggerQueue:
 
         normalized_step = int(model_age)
         cleaned_note = str(note or "").strip()
-        updated = False
 
-        entries = (
-            self._signal_history.get(metric_name, {})
-            .get(experiment_hash, {})
-            .get(normalized_step, [])
-        )
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if cleaned_note:
-                entry["point_note"] = cleaned_note
-            else:
-                entry.pop("point_note", None)
-            updated = True
+        with self._lock:
+            self._flush_stage()
+            matched = self._conn.execute(
+                "SELECT count(*) FROM signals "
+                "WHERE metric_name = ? AND experiment_hash = ? AND step = ?",
+                [metric_name, experiment_hash, normalized_step],
+            ).fetchone()[0]
+            if matched:
+                self._conn.execute(
+                    "UPDATE signals SET point_note = ? "
+                    "WHERE metric_name = ? AND experiment_hash = ? AND step = ?",
+                    [cleaned_note, metric_name, experiment_hash, normalized_step],
+                )
 
-        for entry in self._pending_queue:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("metric_name", "")) != metric_name:
-                continue
-            if str(entry.get("experiment_hash", "")) != experiment_hash:
-                continue
-            try:
-                if int(entry.get("model_age", -1)) != normalized_step:
+            for entry in self._pending_queue:
+                if not isinstance(entry, dict):
                     continue
-            except Exception:
-                continue
-            if cleaned_note:
-                entry["point_note"] = cleaned_note
-            else:
-                entry.pop("point_note", None)
+                if str(entry.get("metric_name", "")) != metric_name:
+                    continue
+                if str(entry.get("experiment_hash", "")) != experiment_hash:
+                    continue
+                try:
+                    if int(entry.get("model_age", -1)) != normalized_step:
+                        continue
+                except Exception:
+                    continue
+                if cleaned_note:
+                    entry["point_note"] = cleaned_note
+                else:
+                    entry.pop("point_note", None)
 
-        return updated
+        return bool(matched)
 
-    # Logger saving/loading methods for checkpoint persistence (used in WeightsLabCallback)
+    # ------------------------------------------------------------------
+    # Snapshot loading (checkpoint persistence)
+    # ------------------------------------------------------------------
     def load_signal_history(self, signals):
-        """Load signal history into memory (supports legacy and nested formats)."""
+        """Load aggregated signal history (supports legacy list and nested dict)."""
         if not signals:
             return
 
-        def _append_signal_entry(metric_name, exp_hash, step, signal_entry):
-            if metric_name not in self._signal_history:
-                self._signal_history[metric_name] = {}
-            if exp_hash not in self._signal_history[metric_name]:
-                self._signal_history[metric_name][exp_hash] = {}
-            if step not in self._signal_history[metric_name][exp_hash]:
-                self._signal_history[metric_name][exp_hash][step] = []
-            self._signal_history[metric_name][exp_hash][step].append(signal_entry)
+        def _stage_entry(metric_name, exp_hash, step, entry):
+            try:
+                step_i = int(step)
+            except (TypeError, ValueError):
+                return
+            with self._lock:
+                self._stage_signal_row(
+                    metric_name, exp_hash, step_i,
+                    float(entry.get("metric_value", 0.0)),
+                    int(entry.get("timestamp", int(time.time()))),
+                    bool(entry.get("audit_mode", False)),
+                    bool(entry.get("is_evaluation_marker", False)),
+                    entry.get("split_name", ""),
+                    entry.get("evaluation_tags", []),
+                    entry.get("point_note", "") or "",
+                )
 
         if isinstance(signals, dict):
             for metric_name, experiments in signals.items():
@@ -895,23 +988,10 @@ class LoggerQueue:
                     if not isinstance(steps, dict):
                         continue
                     for step_key, entries in steps.items():
-                        step = step_key
-                        if isinstance(step_key, str):
-                            try:
-                                step = int(step_key)
-                            except Exception:
-                                step = step_key
-
                         entries_list = entries if isinstance(entries, list) else [entries]
                         for entry in entries_list:
-                            if not isinstance(entry, dict):
-                                continue
-                            signal_entry = dict(entry)
-                            signal_entry.setdefault("metric_name", metric_name)
-                            signal_entry.setdefault("model_age", step)
-                            signal_entry.setdefault("experiment_hash", exp_hash)
-                            signal_entry.setdefault("timestamp", int(time.time()))
-                            _append_signal_entry(metric_name, exp_hash, step, signal_entry)
+                            if isinstance(entry, dict):
+                                _stage_entry(metric_name, exp_hash, step_key, entry)
             return
 
         if isinstance(signals, list):
@@ -921,91 +1001,71 @@ class LoggerQueue:
                 metric_name = signal.get("metric_name")
                 if not metric_name:
                     continue
-                exp_hash = signal.get("experiment_hash")
-                step = signal.get("model_age")
-                signal_entry = dict(signal)
-                signal_entry.setdefault("metric_name", metric_name)
-                signal_entry.setdefault("model_age", step)
-                signal_entry.setdefault("experiment_hash", exp_hash)
-                signal_entry.setdefault("timestamp", int(time.time()))
                 self.graph_names.add(metric_name)
-                _append_signal_entry(metric_name, exp_hash, step, signal_entry)
+                _stage_entry(
+                    metric_name,
+                    signal.get("experiment_hash"),
+                    signal.get("model_age", 0),
+                    signal,
+                )
 
     def load_signal_history_per_sample(self, signals_per_sample):
-        """Load per-sample history into compact array storage.
+        """Load per-sample history.
 
         Handles three formats:
-          - New compact:  {graph_name: {exp_hash: {"_compact": True, "sample_ids": [...], "steps": [...], "values": [...]}}}
-          - Legacy list:  {graph_name: {exp_hash: [{sample_id, model_age, metric_value, ...}, ...]}}
-          - Legacy dict:  {graph_name: {sample_id_as_key: {model_age, metric_value, ...}}}  → stored under None key
+          - Compact:     {graph: {hash: {"_compact": True, "sample_ids": [...], "steps": [...], "values": [...]}}}
+          - Legacy list: {graph: {hash: [{sample_id, model_age, metric_value, ...}, ...]}}
+          - Legacy dict: {graph: {sample_id_as_key: {model_age, metric_value, ...}}}  → stored under None hash
         """
         if not signals_per_sample:
             return
 
         for metric_name, samples_by_exp in signals_per_sample.items():
             self.graph_names.add(metric_name)
-            if metric_name not in self._signal_history_per_sample:
-                self._signal_history_per_sample[metric_name] = {}
-
             if not isinstance(samples_by_exp, dict):
                 continue
 
             for exp_hash, entries in samples_by_exp.items():
-                # --- New compact format ---
+                # --- Compact format ---
                 if isinstance(entries, dict) and entries.get("_compact"):
-                    if exp_hash not in self._signal_history_per_sample[metric_name]:
-                        self._signal_history_per_sample[metric_name][exp_hash] = _make_per_sample_buf()
-                    buf = self._signal_history_per_sample[metric_name][exp_hash]
-                    ids   = entries.get("sample_ids", [])
+                    ids = entries.get("sample_ids", [])
                     steps = entries.get("steps", [])
-                    vals  = entries.get("values", [])
-                    idx_map = self._sample_index.setdefault(metric_name, {}).setdefault(exp_hash, {})
-                    for s, t, v in zip(ids, steps, vals):
-                        try:
-                            row = len(buf["sample_ids"])
-                            sid_s = str(s)
-                            buf["sample_ids"].append(sid_s)
-                            buf["steps"].append(int(t))
-                            buf["values"].append(float(v))
-                            idx_map.setdefault(sid_s, []).append(row)
-                        except (TypeError, ValueError):
-                            pass
+                    vals = entries.get("values", [])
+                    with self._lock:
+                        for s, t, v in zip(ids, steps, vals):
+                            try:
+                                self._stage_sample_row(metric_name, exp_hash, s, int(t), float(v))
+                            except (TypeError, ValueError):
+                                pass
 
-                # --- Legacy list-of-dicts format ---
+                # --- Legacy list-of-dicts ---
                 elif isinstance(entries, list):
-                    if exp_hash not in self._signal_history_per_sample[metric_name]:
-                        self._signal_history_per_sample[metric_name][exp_hash] = _make_per_sample_buf()
-                    buf = self._signal_history_per_sample[metric_name][exp_hash]
-                    idx_map = self._sample_index.setdefault(metric_name, {}).setdefault(exp_hash, {})
-                    for entry in entries:
-                        if not isinstance(entry, dict):
-                            continue
+                    with self._lock:
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            try:
+                                self._stage_sample_row(
+                                    metric_name, exp_hash,
+                                    entry.get("sample_id", -1),
+                                    int(entry.get("model_age", 0)),
+                                    float(entry.get("metric_value", 0.0)),
+                                )
+                            except (TypeError, ValueError):
+                                pass
+
+                # --- Legacy single-dict (exp_hash key was actually the sample_id) ---
+                elif isinstance(entries, dict):
+                    sid = str(exp_hash) if isinstance(exp_hash, (int, float)) else str(-1)
+                    with self._lock:
                         try:
-                            row = len(buf["sample_ids"])
-                            sid_s = str(entry.get("sample_id", -1))
-                            buf["sample_ids"].append(sid_s)
-                            buf["steps"].append(int(entry.get("model_age", 0)))
-                            buf["values"].append(float(entry.get("metric_value", 0.0)))
-                            idx_map.setdefault(sid_s, []).append(row)
+                            self._stage_sample_row(
+                                metric_name, None, sid,
+                                int(entries.get("model_age", 0)),
+                                float(entries.get("metric_value", 0.0)),
+                            )
                         except (TypeError, ValueError):
                             pass
-
-                # --- Legacy single-dict format (exp_hash key was actually the sample_id) ---
-                elif isinstance(entries, dict):
-                    null_key = None
-                    if null_key not in self._signal_history_per_sample[metric_name]:
-                        self._signal_history_per_sample[metric_name][null_key] = _make_per_sample_buf()
-                    buf = self._signal_history_per_sample[metric_name][null_key]
-                    idx_map = self._sample_index.setdefault(metric_name, {}).setdefault(null_key, {})
-                    try:
-                        row = len(buf["sample_ids"])
-                        sid = str(exp_hash) if isinstance(exp_hash, (int, float)) else str(-1)
-                        buf["sample_ids"].append(sid)
-                        buf["steps"].append(int(entries.get("model_age", 0)))
-                        buf["values"].append(float(entries.get("metric_value", 0.0)))
-                        idx_map.setdefault(sid, []).append(row)
-                    except (TypeError, ValueError):
-                        pass
 
     def load_signal_history_per_instance(self, signals_per_instance: dict) -> None:
         """Load per-instance history from a compact snapshot dict."""
@@ -1013,46 +1073,28 @@ class LoggerQueue:
             return
         for metric_name, exps in signals_per_instance.items():
             self.graph_names.add(metric_name)
-            if metric_name not in self._signal_history_per_instance:
-                self._signal_history_per_instance[metric_name] = {}
             if not isinstance(exps, dict):
                 continue
             for exp_hash, entries in exps.items():
                 if not (isinstance(entries, dict) and entries.get("_compact")):
                     continue
-                if exp_hash not in self._signal_history_per_instance[metric_name]:
-                    self._signal_history_per_instance[metric_name][exp_hash] = _make_per_instance_buf()
-                buf  = self._signal_history_per_instance[metric_name][exp_hash]
-                ids  = entries.get("sample_ids", [])
+                ids = entries.get("sample_ids", [])
                 aids = entries.get("annotation_ids", [])
                 steps = entries.get("steps", [])
-                vals  = entries.get("values", [])
-                idx_map = self._instance_index.setdefault(metric_name, {}).setdefault(exp_hash, {})
-                for s, a, t, v in zip(ids, aids, steps, vals):
-                    try:
-                        row = len(buf["sample_ids"])
-                        sid_s, aid_i = str(s), int(a)
-                        buf["sample_ids"].append(sid_s)
-                        buf["annotation_ids"].append(aid_i)
-                        buf["steps"].append(int(t))
-                        buf["values"].append(float(v))
-                        idx_map.setdefault((sid_s, aid_i), []).append(row)
-                    except (TypeError, ValueError):
-                        pass
+                vals = entries.get("values", [])
+                with self._lock:
+                    for s, a, t, v in zip(ids, aids, steps, vals):
+                        try:
+                            self._stage_instance_row(metric_name, exp_hash, s, int(a), int(t), float(v))
+                        except (TypeError, ValueError):
+                            pass
 
     def load_snapshot(self, snapshot: dict):
         """Restore logger state from a snapshot dict."""
         if not snapshot:
             return
 
-        graph_names = snapshot.get("graph_names", [])
-        self.graph_names.update(graph_names)
-
-        signals = snapshot.get("signal_history", [])
-        self.load_signal_history(signals)
-
-        signals_per_sample = snapshot.get("signal_history_per_sample", {})
-        self.load_signal_history_per_sample(signals_per_sample)
-
-        signals_per_instance = snapshot.get("signal_history_per_instance", {})
-        self.load_signal_history_per_instance(signals_per_instance)
+        self.graph_names.update(snapshot.get("graph_names", []))
+        self.load_signal_history(snapshot.get("signal_history", []))
+        self.load_signal_history_per_sample(snapshot.get("signal_history_per_sample", {}))
+        self.load_signal_history_per_instance(snapshot.get("signal_history_per_instance", {}))

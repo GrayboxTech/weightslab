@@ -39,6 +39,17 @@ def _add(lg, sig, sid, step, val, aggregate_by_step=False):
                    aggregate_by_step=aggregate_by_step)
 
 
+def _seed_eval_hash(lg, exp_hash, sig="loss", val=0.5, step=1):
+    """Write an aggregated marker under *exp_hash* via the evaluation lifecycle.
+
+    Replaces white-box seeding of the (now DuckDB-backed) history dict.
+    """
+    lg.start_evaluation_mode("val", exp_hash)
+    lg.add_scalars(sig, {sig: val}, step,
+                   signal_per_sample=None, aggregate_by_step=False)
+    lg.stop_evaluation_mode(model_age=step)
+
+
 # ---------------------------------------------------------------------------
 # 1. __len__
 # ---------------------------------------------------------------------------
@@ -82,22 +93,24 @@ class TestGetNextEvaluationCount(unittest.TestCase):
 
     def test_existing_h1_1_returns_2(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1_1": {}}
+        _seed_eval_hash(lg, "h1_1")
         self.assertEqual(lg.get_next_evaluation_count("h1"), 2)
 
     def test_existing_h1_1_and_h1_3_returns_4(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1_1": {}, "h1_3": {}}
+        _seed_eval_hash(lg, "h1_1")
+        _seed_eval_hash(lg, "h1_3")
         self.assertEqual(lg.get_next_evaluation_count("h1"), 4)
 
     def test_non_int_suffix_is_ignored(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1_abc": {}, "h1_1": {}}
+        _seed_eval_hash(lg, "h1_abc")
+        _seed_eval_hash(lg, "h1_1")
         self.assertEqual(lg.get_next_evaluation_count("h1"), 2)
 
     def test_different_base_hash_not_counted(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h2_5": {}}
+        _seed_eval_hash(lg, "h2_5")
         self.assertEqual(lg.get_next_evaluation_count("h1"), 1)
 
 
@@ -126,7 +139,8 @@ class TestEvaluationMode(unittest.TestCase):
         lg.add_scalars("loss", {"loss": 0.4}, 10,
                        signal_per_sample=None, aggregate_by_step=False)
         self.assertIn("loss", lg._eval_accum)
-        self.assertNotIn("loss", lg._signal_history)
+        # Nothing written to the aggregated history during evaluation mode
+        self.assertEqual(lg.get_signal_history(), {})
 
     def test_add_scalars_during_eval_accumulates_values(self):
         lg = _lg()
@@ -147,15 +161,15 @@ class TestEvaluationMode(unittest.TestCase):
         results = lg.stop_evaluation_mode(model_age=10)
         self.assertIn("loss", results)
         self.assertAlmostEqual(results["loss"], 0.5, places=5)
-        # Written into _signal_history under eval_hash
-        self.assertIn("h1_1", lg._signal_history.get("loss", {}))
+        # Written into history under eval_hash
+        self.assertIn("h1_1", lg.get_signal_history().get("loss", {}))
 
     def test_stop_emits_is_evaluation_marker(self):
         lg = _lg()
         lg.start_evaluation_mode("val", "h1_1")
         lg.add_scalars("loss", {"loss": 0.5}, 10, signal_per_sample=None, aggregate_by_step=False)
         lg.stop_evaluation_mode(model_age=10)
-        entries = lg._signal_history["loss"]["h1_1"][10]
+        entries = lg.get_signal_history()["loss"]["h1_1"][10]
         self.assertTrue(entries[0].get("is_evaluation_marker"))
 
     def test_stop_adds_to_pending_queue(self):
@@ -190,7 +204,7 @@ class TestEvaluationMode(unittest.TestCase):
         lg.start_evaluation_mode("val", "h1_1", evaluation_tags=["hard", "easy"])
         lg.add_scalars("loss", {"loss": 0.5}, 1, signal_per_sample=None, aggregate_by_step=False)
         lg.stop_evaluation_mode(model_age=1)
-        entry = lg._signal_history["loss"]["h1_1"][1][0]
+        entry = lg.get_signal_history()["loss"]["h1_1"][1][0]
         self.assertEqual(entry["split_name"], "val")
         self.assertEqual(entry["evaluation_tags"], ["hard", "easy"])
 
@@ -230,7 +244,7 @@ class TestAbortEvaluationMode(unittest.TestCase):
                        signal_per_sample={"img0": 0.5}, aggregate_by_step=True)
         lg.abort_evaluation_mode()
         # Per-sample history under "h1_1" should be gone
-        self.assertNotIn("h1_1", lg._signal_history_per_sample.get("loss", {}))
+        self.assertEqual(lg.query_per_sample("loss", exp_hash="h1_1"), [])
 
     def test_abort_removes_queue_entries_for_eval_hash(self):
         lg = _lg()
@@ -253,21 +267,24 @@ class TestRemoveEvaluationHash(unittest.TestCase):
 
     def test_removes_from_signal_history(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1_1": {1: []}, "h1": {1: []}}
+        _seed_eval_hash(lg, "h1_1")
+        _seed_eval_hash(lg, "h1")
         lg.remove_evaluation_hash("h1_1")
-        self.assertNotIn("h1_1", lg._signal_history["loss"])
-        self.assertIn("h1", lg._signal_history["loss"])
+        hist = lg.get_signal_history()["loss"]
+        self.assertNotIn("h1_1", hist)
+        self.assertIn("h1", hist)
 
     def test_removes_from_per_sample_history(self):
         lg = _lg()
         _add(lg, "loss", "s0", 1, 0.5)
-        # manually inject an eval hash entry
-        from array import array as _array
-        lg._signal_history_per_sample["loss"]["h1_1"] = {
-            "sample_ids": ["s0"], "steps": _array('i', [1]), "values": _array('f', [0.5])
-        }
+        # write per-sample data under an eval hash via evaluation mode
+        lg.start_evaluation_mode("val", "h1_1")
+        lg.add_scalars("loss", {"loss": 0.5}, 1,
+                       signal_per_sample={"s0": 0.5}, aggregate_by_step=True)
+        lg._eval_mode_active = False
+        self.assertEqual(len(lg.query_per_sample("loss", exp_hash="h1_1")), 1)
         lg.remove_evaluation_hash("h1_1")
-        self.assertNotIn("h1_1", lg._signal_history_per_sample["loss"])
+        self.assertEqual(lg.query_per_sample("loss", exp_hash="h1_1"), [])
 
     def test_removes_matching_entries_from_queue(self):
         lg = _lg()
@@ -281,9 +298,9 @@ class TestRemoveEvaluationHash(unittest.TestCase):
 
     def test_empty_hash_is_noop(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1": {}}
+        _seed_eval_hash(lg, "h1")
         lg.remove_evaluation_hash("")
-        self.assertIn("h1", lg._signal_history["loss"])
+        self.assertIn("h1", lg.get_signal_history()["loss"])
 
     def test_missing_hash_does_not_raise(self):
         lg = _lg()
@@ -300,8 +317,9 @@ class TestAddScalars(unittest.TestCase):
         lg = _lg()
         lg.add_scalars("loss", {"loss": 0.5}, 1,
                        signal_per_sample={"s0": 0.5}, aggregate_by_step=False)
-        self.assertIn(None, lg._signal_history.get("loss", {}))
-        self.assertEqual(lg._signal_history["loss"][None][1][0]["metric_value"], 0.5)
+        hist = lg.get_signal_history()
+        self.assertIn(None, hist.get("loss", {}))
+        self.assertEqual(hist["loss"][None][1][0]["metric_value"], 0.5)
 
     def test_immediate_mode_adds_to_queue(self):
         lg = _lg()
@@ -314,7 +332,7 @@ class TestAddScalars(unittest.TestCase):
         lg.add_scalars("loss", {"loss": 0.5}, 1,
                        signal_per_sample={"s0": 0.5}, aggregate_by_step=True)
         # Not in history yet — buffered
-        self.assertNotIn("loss", lg._signal_history)
+        self.assertEqual(lg.get_signal_history(), {})
         self.assertIn((1, "loss", None), lg._current_step_buffer)
 
     def test_aggregate_mode_step_change_flushes_to_history(self):
@@ -327,7 +345,7 @@ class TestAddScalars(unittest.TestCase):
         lg.add_scalars("loss", {"loss": 0.9}, 2,
                        signal_per_sample={"s0": 0.9}, aggregate_by_step=True)
         # Step 1 should now be averaged in history
-        entries = lg._signal_history["loss"][None][1]
+        entries = lg.get_signal_history()["loss"][None][1]
         self.assertAlmostEqual(entries[0]["metric_value"], 0.5, places=5)
 
     def test_aggregate_mode_averages_multiple_calls_same_step(self):
@@ -338,7 +356,7 @@ class TestAddScalars(unittest.TestCase):
         # Force flush
         lg.add_scalars("acc", {"acc": 0.9}, 2,
                        signal_per_sample=None, aggregate_by_step=False)
-        entries = lg._signal_history["loss"][None][1]
+        entries = lg.get_signal_history()["loss"][None][1]
         self.assertAlmostEqual(entries[0]["metric_value"], 0.4, places=5)
 
     def test_per_sample_written_even_in_aggregate_mode(self):
@@ -397,9 +415,9 @@ class TestIngestPerSample(unittest.TestCase):
         lg = _lg()
         lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.4)])
         lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.9)])  # duplicate ignored
-        # index should still point to exactly 1 row
-        idx = lg._sample_index["loss"]["h1"]["s0"]
-        self.assertEqual(len(idx), 1)
+        # exactly one row should remain queryable for (s0, h1)
+        rows = lg.query_per_sample("loss", sample_ids=["s0"], exp_hash="h1")
+        self.assertEqual(len(rows), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -474,9 +492,10 @@ class TestGetSignalHistory(unittest.TestCase):
         lg = _lg()
         _add(lg, "loss", "s0", 1, 0.5)
         hist = lg.get_signal_history()
-        # Mutate the copy — internal state must not change
+        # Mutate the returned copy — a fresh read must not reflect the mutation
         hist["loss"][None][1][0]["metric_value"] = 999.0
-        self.assertNotEqual(lg._signal_history["loss"][None][1][0]["metric_value"], 999.0)
+        fresh = lg.get_signal_history()
+        self.assertNotEqual(fresh["loss"][None][1][0]["metric_value"], 999.0)
 
     def test_empty_when_nothing_added(self):
         lg = _lg()
@@ -526,7 +545,9 @@ class TestGetEvaluationMarkerHashes(unittest.TestCase):
 
     def test_returns_eval_hashes(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1_1": {}, "h1_2": {}, "h1": {}}
+        _seed_eval_hash(lg, "h1_1")
+        _seed_eval_hash(lg, "h1_2")
+        _seed_eval_hash(lg, "h1")
         hashes = lg.get_evaluation_marker_hashes()
         self.assertIn("h1_1", hashes)
         self.assertIn("h1_2", hashes)
@@ -534,12 +555,15 @@ class TestGetEvaluationMarkerHashes(unittest.TestCase):
 
     def test_returns_sorted(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1_3": {}, "h1_1": {}, "h1_2": {}}
+        _seed_eval_hash(lg, "h1_3")
+        _seed_eval_hash(lg, "h1_1")
+        _seed_eval_hash(lg, "h1_2")
         self.assertEqual(lg.get_evaluation_marker_hashes(), ["h1_1", "h1_2", "h1_3"])
 
     def test_non_int_suffix_excluded(self):
         lg = _lg()
-        lg._signal_history["loss"] = {"h1_abc": {}, "h1_1": {}}
+        _seed_eval_hash(lg, "h1_abc")
+        _seed_eval_hash(lg, "h1_1")
         hashes = lg.get_evaluation_marker_hashes()
         self.assertNotIn("h1_abc", hashes)
         self.assertIn("h1_1", hashes)
@@ -617,7 +641,7 @@ class TestSetPointNote(unittest.TestCase):
         _add(lg, "loss", "s0", 5, 0.4)
         result = lg.set_point_note("loss", "run1", 5, "my note")
         self.assertTrue(result)
-        entry = lg._signal_history["loss"]["run1"][5][0]
+        entry = lg.get_signal_history()["loss"]["run1"][5][0]
         self.assertEqual(entry["point_note"], "my note")
 
     def test_clear_note_with_empty_string(self):
@@ -625,7 +649,7 @@ class TestSetPointNote(unittest.TestCase):
         _add(lg, "loss", "s0", 5, 0.4)
         lg.set_point_note("loss", "run1", 5, "my note")
         lg.set_point_note("loss", "run1", 5, "")
-        entry = lg._signal_history["loss"]["run1"][5][0]
+        entry = lg.get_signal_history()["loss"]["run1"][5][0]
         self.assertNotIn("point_note", entry)
 
     def test_updates_pending_queue_entry(self):
@@ -666,9 +690,10 @@ class TestLoadSignalHistory(unittest.TestCase):
                 }
             }
         })
-        self.assertIn("loss", lg._signal_history)
-        self.assertIn("h1", lg._signal_history["loss"])
-        self.assertEqual(lg._signal_history["loss"]["h1"][1][0]["metric_value"], 0.5)
+        hist = lg.get_signal_history()
+        self.assertIn("loss", hist)
+        self.assertIn("h1", hist["loss"])
+        self.assertEqual(hist["loss"]["h1"][1][0]["metric_value"], 0.5)
 
     def test_dict_format_string_step_key_converted_to_int(self):
         lg = _lg()
@@ -680,7 +705,7 @@ class TestLoadSignalHistory(unittest.TestCase):
                 }
             }
         })
-        self.assertIn(42, lg._signal_history["loss"]["h1"])
+        self.assertIn(42, lg.get_signal_history()["loss"]["h1"])
 
     def test_list_format_loads_correctly(self):
         lg = _lg()
@@ -688,21 +713,22 @@ class TestLoadSignalHistory(unittest.TestCase):
             {"metric_name": "acc", "experiment_hash": "h1", "model_age": 3,
              "metric_value": 0.9, "timestamp": 0},
         ])
-        self.assertIn("acc", lg._signal_history)
-        self.assertEqual(lg._signal_history["acc"]["h1"][3][0]["metric_value"], 0.9)
+        hist = lg.get_signal_history()
+        self.assertIn("acc", hist)
+        self.assertEqual(hist["acc"]["h1"][3][0]["metric_value"], 0.9)
 
     def test_list_format_skips_entries_without_metric_name(self):
         lg = _lg()
         lg.load_signal_history([
             {"experiment_hash": "h1", "model_age": 1, "metric_value": 0.5},
         ])
-        self.assertEqual(lg._signal_history, {})
+        self.assertEqual(lg.get_signal_history(), {})
 
     def test_empty_input_is_noop(self):
         lg = _lg()
         lg.load_signal_history({})
         lg.load_signal_history([])
-        self.assertEqual(lg._signal_history, {})
+        self.assertEqual(lg.get_signal_history(), {})
 
     def test_adds_to_graph_names(self):
         lg = _lg()
@@ -718,7 +744,7 @@ class TestLoadSignalHistory(unittest.TestCase):
             {"metric_name": "loss", "model_age": 5, "metric_value": 0.1},
         ])
         # experiment_hash defaults to None
-        self.assertIn(None, lg._signal_history["loss"])
+        self.assertIn(None, lg.get_signal_history()["loss"])
 
 
 if __name__ == "__main__":
