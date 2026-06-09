@@ -69,7 +69,7 @@ dependencies = [
 [project.optional-dependencies]
 # Optional: ultralytics onboarding
 ultralytics = [
-  ultralytics==8.4.16
+  ultralytics>=8.4.16
 ]
 
 # Optional: runtime backend for ONNX model execution
