@@ -765,7 +765,11 @@ class LedgeredDataFrameManager:
             arr = np.asanyarray(value)
         except Exception:
             return False
-        return arr.ndim == 2 and arr.shape[0] >= 1 and arr.shape[-1] in (4, 5, 6)
+        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in (4, 5, 6)
+
+    @staticmethod
+    def _is_empty(value: Any) -> bool:
+        return 0 in value.shape
 
     def _should_store_array_separately(self, value: Any) -> bool:
         """Determine if a value should be stored in array H5."""
@@ -1412,12 +1416,15 @@ class LedgeredDataFrameManager:
             return None
         return row[column]
 
-    def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False) -> pd.DataFrame:
+    def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False, value: str = None) -> pd.DataFrame:
         with self._lock:
             if self._df.empty:
                 return pd.DataFrame()
             if column is not None and ((not isinstance(column, (list, set, tuple)) and column in self._df.columns) or (isinstance(column, (list, set, tuple)))):
-                subset = self._df[column]
+                if value is not None:
+                    subset = self._df[self._df[column] == value]
+                else:
+                    subset = self._df[column]
             else:
                 subset = self._df
         if limit > 0:
@@ -1480,7 +1487,7 @@ class LedgeredDataFrameManager:
                 # Keep bounding-box coordinates as-is: do NOT rasterize them into a
                 # segmentation mask here (boxes are drawn in Weights Studio from the
                 # raw coordinates). Only dense arrays go through get_mask.
-                if self._is_bbox_array(value):
+                if self._is_bbox_array(value) or self._is_empty(value):
                     continue
                 # GP: Not sure about this part - Maybe remove this and draw BB in WS
                 if dataset is None:
@@ -2445,10 +2452,11 @@ def create_ledger_manager():
 
     return None
 
-# Global LedgeredDataFrameManager instance
-# TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
+# # Global LedgeredDataFrameManager instance
+# # TODO (GP): Future behavior is HP init from WL __init__ with config file as sys args
+# from weightslab.backend import ledgers
 # LM = create_ledger_manager()
 # try:
-#     register_dataframe(LM)
+#     ledgers.register_dataframe(LM)
 # except Exception as e:
 #     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")
