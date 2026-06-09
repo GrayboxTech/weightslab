@@ -25,7 +25,9 @@ from __future__ import annotations
 import torch
 from torch.nn import Identity
 
+from ultralytics.data import build_yolo_dataset
 from ultralytics.models.yolo.detect import DetectionTrainer
+from ultralytics.utils.torch_utils import unwrap_model
 
 import weightslab as wl
 from weightslab.backend.logger import LoggerQueue
@@ -119,6 +121,16 @@ class WLAwareTrainer(DetectionTrainer):
         self.add_callback("on_val_batch_start",   _on_val_batch_start)
         self.add_callback("on_val_batch_end",     _on_val_batch_end)
         self.add_callback("on_val_end",           _on_val_end)
+
+    def build_dataset(self, img_path, mode="train", batch=None):
+        # UL hardcodes `rect=mode=='val'` so val uses per-batch rect_shape
+        # padding (e.g. 224×352) while train uses square (320×320). Same
+        # bbox in normalised coords lands in different absolute positions
+        # across splits. Force `rect=False` so val matches train geometry.
+        gs = max(int(unwrap_model(self.model).stride.max()), 32)
+        return build_yolo_dataset(
+            self.args, img_path, batch, self.data, mode=mode, rect=False, stride=gs,
+        )
 
     def validate(self):
         # UL's metrics.process does np.concatenate([]) → ValueError when val
