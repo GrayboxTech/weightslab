@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import threading
 
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from pathlib import Path
 from enum import Enum
 from typing import Callable, Any, Set, Dict, Optional
@@ -20,10 +20,7 @@ from weightslab.data.dataframe_manager import create_ledger_manager
 from weightslab.backend.ledgers import get_hyperparams, resolve_hp_name, register_dataframe, get_dataframe
 from weightslab.data.data_utils import (
     _detect_dataset_split,
-    get_mask,
-    load_label,
-    load_metadata,
-    load_uid
+    get_mask
 )
 from weightslab.data.sample_stats import (
     SampleStats,

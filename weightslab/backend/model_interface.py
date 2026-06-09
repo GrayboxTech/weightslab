@@ -571,7 +571,7 @@ class ModelInterface(NetworkWithOps):
 
             # Robust LR extraction: handle both OptimizerInterface and raw torch optimizers
             if hasattr(opt, 'get_lr'):
-                lr = opt.get_lr()
+                lrs = opt.get_lr()
             elif hasattr(opt, 'param_groups'):
                 lrs = [i['lr'] for i in opt.param_groups]
             else:
@@ -585,7 +585,7 @@ class ModelInterface(NetworkWithOps):
             optimizer_class = type(opt.optimizer)
             _optimizer = optimizer_class(
                 model.parameters(),
-                lr=lr
+                lr=lrs
             )
 
             wl.watch_or_edit(_optimizer, flag='optimizer')
