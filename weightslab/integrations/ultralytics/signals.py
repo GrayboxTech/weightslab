@@ -279,14 +279,26 @@ def default_train_signals(model) -> list[Signal]:
         if st is None:
             return None
         fg, w, img_of_fg = st
-        return _scatter(((1.0 - get_iou()) * w).detach(), img_of_fg, fg.shape[0])
+        iou = get_iou()
+        # UL has a second `bbox_iou` call site in `tal.py` (TaskAligned
+        # assigner). It lives in a different module namespace so our
+        # `fn_tap(ul_loss, "bbox_iou")` doesn't see it — but some UL
+        # builds re-export bbox_iou paths in ways that make our cache
+        # disagree with bbox_loss's fg selection. Skip the round if the
+        # shapes don't match, rather than crash mid-train.
+        if iou is None or iou.shape[0] != w.shape[0]:
+            return None
+        return _scatter(((1.0 - iou) * w).detach(), img_of_fg, fg.shape[0])
 
     def dfl_r(_batch):
         st = _fg_state()
         if st is None:
             return None
         fg, w, img_of_fg = st
-        return _scatter((get_dfl() * w).detach(), img_of_fg, fg.shape[0])
+        dfl = get_dfl()
+        if dfl is None or dfl.shape[0] != w.shape[0]:
+            return None
+        return _scatter((dfl * w).detach(), img_of_fg, fg.shape[0])
 
     signals = [
         Signal("train/cls_per_sample", "loss", reduce=cls_r),
