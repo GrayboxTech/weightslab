@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -139,6 +140,23 @@ def _convert_to_git_bash_path(win_path: str) -> str:
     return p
 
 
+def _to_docker_host_path(path) -> str:
+    """Return a path that Docker Desktop can bind-mount.
+
+    On Windows, normalize WSL (/mnt/c/...) and Git Bash (/c/...) forms — and
+    native paths that Path() mangled into \\mnt\\c\\... — to C:/... form.
+    Docker Desktop cannot resolve /mnt-style sources and silently mounts an
+    empty directory, which crashes Envoy on missing certs. On Linux/macOS the
+    path is returned unchanged.
+    """
+    p = str(path).replace('\\', '/')
+    if _is_windows():
+        m = re.match(r'^/mnt/([a-zA-Z])/(.*)$', p) or re.match(r'^/([a-zA-Z])/(.*)$', p)
+        if m:
+            return f"{m.group(1).upper()}:/{m.group(2)}"
+    return p
+
+
 def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None) -> int:
     """Run a shell script using bash with proper environment variable passing."""
 
@@ -259,17 +277,31 @@ def ui_launch(args):
         if _is_windows() and '\\' in weightslab_root:
             weightslab_root = _convert_to_git_bash_path(weightslab_root)
 
+        # Docker Desktop (Windows) bind mounts need a host-native path
+        # (e.g. C:/Users/...), NOT the /mnt/c Unix path used for the bash
+        # script's own file checks. as_posix() yields C:/... on Windows and a
+        # normal /abs/path on Linux/macOS — correct for docker compose on every
+        # platform. The bash script writes this into .env for the compose mount.
+        certs_dir_host = _to_docker_host_path(manager.certs_dir)
+
         bootstrap_env_vars = {
             'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
+            'WEIGHTSLAB_CERTS_DIR_HOST': certs_dir_host,
             'WEIGHTSLAB_ROOT': weightslab_root
         }
         logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
+        logger.info(f"WEIGHTSLAB_CERTS_DIR_HOST={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR_HOST']}")
         logger.info(f"WEIGHTSLAB_ROOT={bootstrap_env_vars['WEIGHTSLAB_ROOT']}")
         exit_code = _run_shell_script(bootstrap_script, [], bootstrap_env_vars)
         if exit_code != 0:
             logger.warning(f"Bootstrap script exited with code {exit_code}, continuing anyway...")
     else:
         logger.warning(f"Bootstrap script not found: {bootstrap_script}")
+
+    # docker compose gives an exported env var precedence over .env. Force the
+    # host-native certs path here so our compose call below bind-mounts the real
+    # folder (a stray /mnt/c value would mount an empty dir and crash Envoy).
+    os.environ["WEIGHTSLAB_CERTS_DIR"] = _to_docker_host_path(manager.certs_dir)
 
     _compose_cmd(
         _get_compose_file(),
@@ -387,11 +419,20 @@ def ui_launch_secure(args):
     if _is_windows() and '\\' in weightslab_root:
         weightslab_root = _convert_to_git_bash_path(weightslab_root)
 
+    # Docker Desktop (Windows) bind mounts need a host-native path
+    # (e.g. C:/Users/...), NOT the /mnt/c Unix path used for the bash script's
+    # own file checks. as_posix() yields C:/... on Windows and a normal
+    # /abs/path on Linux/macOS — correct for docker compose on every platform.
+    # The bash script writes this into .env for the compose mount.
+    certs_dir_host = _to_docker_host_path(manager.certs_dir)
+
     bootstrap_env_vars = {
         'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
+        'WEIGHTSLAB_CERTS_DIR_HOST': certs_dir_host,
         'WEIGHTSLAB_ROOT': weightslab_root
     }
     logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
+    logger.info(f"WEIGHTSLAB_CERTS_DIR_HOST={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR_HOST']}")
     logger.info(f"WEIGHTSLAB_ROOT={bootstrap_env_vars['WEIGHTSLAB_ROOT']}")
     exit_code = _run_shell_script(bootstrap_script, script_args, bootstrap_env_vars)
     if exit_code != 0:
