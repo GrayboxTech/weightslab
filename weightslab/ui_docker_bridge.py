@@ -21,6 +21,35 @@ logger = logging.getLogger(__name__)
 _FRONTEND_IMAGE = "graybx/weightslab"
 _STACK_CONTAINERS = ("weights_studio_envoy", "weights_studio_frontend")
 
+# TLS/auth env vars that are *derived* from cert-file presence in
+# WEIGHTSLAB_CERTS_DIR. WEIGHTSLAB_CERTS_DIR is the single source of truth; these
+# are computed by the deploy pipeline (build-and-deploy.sh + the compose `auto`
+# logic) from the actual files. They are stripped before launching so a stale or
+# pre-set value can never override the file-based decision.
+_DERIVED_DEPLOY_ENV_VARS = (
+    "GRPC_TLS_ENABLED",
+    "GRPC_TLS_REQUIRE_CLIENT_AUTH",
+    "GRPC_TLS_CERT_FILE",
+    "GRPC_TLS_KEY_FILE",
+    "GRPC_TLS_CA_FILE",
+    "ENVOY_UPSTREAM_TLS",
+    "ENVOY_DOWNSTREAM_TLS",
+    "WS_SERVER_PROTOCOL",
+    "VITE_SERVER_PROTOCOL",
+    "VITE_DEV_SERVER_HTTPS",
+    "WL_ENABLE_GRPC_AUTH_TOKEN",
+    "VITE_WL_ENABLE_GRPC_AUTH_TOKEN",
+    "GRPC_AUTH_TOKEN",
+    "VITE_GRPC_AUTH_TOKEN",
+)
+
+
+def _strip_derived_deploy_env() -> None:
+    """Drop derived TLS/auth env vars so the deploy pipeline decides solely from
+    cert-file presence in WEIGHTSLAB_CERTS_DIR (the single source of truth)."""
+    for key in _DERIVED_DEPLOY_ENV_VARS:
+        os.environ.pop(key, None)
+
 
 def _banner() -> str:
     """Return the WeightsLab ASCII banner, or a plain title if art is unavailable."""
@@ -278,8 +307,18 @@ def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None
         return 1
 
 
-def _generate_certs_with_fallback(force_certs: bool = False) -> int:
-    """Try shell script first, fall back to PowerShell on Windows if it fails."""
+def _generate_certs_with_fallback(force_certs: bool = False, certs_dir=None) -> int:
+    """Try shell script first, fall back to PowerShell on Windows if it fails.
+
+    ``certs_dir`` is forwarded to the generation scripts as ``WEIGHTSLAB_CERTS_DIR``
+    so certs land in the single source-of-truth directory (the scripts default to
+    ``~/.weightslab-certs`` when it is not provided). The host-native path
+    (``C:/...`` on Windows) is understood by both Git Bash and PowerShell.
+    """
+    env_vars = None
+    if certs_dir is not None:
+        env_vars = {'WEIGHTSLAB_CERTS_DIR': _to_docker_host_path(certs_dir)}
+
     cert_script = str(_get_cert_script())
     if not Path(cert_script).exists():
         logger.warning(f"Shell script not found: {cert_script}")
@@ -289,7 +328,7 @@ def _generate_certs_with_fallback(force_certs: bool = False) -> int:
             script_args.append('--force-create-certs')
 
         logger.info("Attempting certificate generation with shell script...")
-        exit_code = _run_shell_script(cert_script, script_args)
+        exit_code = _run_shell_script(cert_script, script_args, env_vars)
         if exit_code == 0:
             return 0
         logger.warning(f"Shell script failed (exit code {exit_code})")
@@ -306,7 +345,7 @@ def _generate_certs_with_fallback(force_certs: bool = False) -> int:
         if force_certs:
             script_args.append('-ForceCreateCerts')
 
-        exit_code = _run_powershell_script(cert_script_ps1, script_args)
+        exit_code = _run_powershell_script(cert_script_ps1, script_args, env_vars)
         return exit_code
     else:
         logger.error("Neither shell nor PowerShell script could generate certificates")
@@ -314,34 +353,31 @@ def _generate_certs_with_fallback(force_certs: bool = False) -> int:
 
 
 def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) -> bool:
-    """Generate certs + auth token if missing (or forced) and export env vars.
+    """Generate certs + auth token in ``manager.certs_dir`` if missing (or forced).
 
-    Returns True when a secure environment is active, False if generation failed
-    and the caller should fall back to unsecured mode.
+    Does NOT export any TLS/auth env vars: the launch pipeline derives TLS purely
+    from cert-file presence in ``WEIGHTSLAB_CERTS_DIR`` (the single source of
+    truth). Returns True if certs are present afterwards, False otherwise.
     """
     if manager.has_valid_certs() and not force_certs:
         logger.info(f"✓ Using existing certificates in {manager.certs_dir}")
-    else:
-        logger.info(
-            "Regenerating certificates (--force-certs)..."
-            if force_certs
-            else "No certificates found — generating them now..."
-        )
-        exit_code = _generate_certs_with_fallback(force_certs=force_certs)
-        if exit_code != 0:
-            logger.warning(
-                "Certificate generation failed — continuing in unsecured mode"
-            )
-            return False
+        manager.get_or_create_auth_token()
+        return True
 
+    logger.info(
+        "Regenerating certificates (--force-certs)..."
+        if force_certs
+        else "No certificates found — generating them now..."
+    )
     manager.certs_dir.mkdir(parents=True, exist_ok=True)
+    exit_code = _generate_certs_with_fallback(force_certs=force_certs, certs_dir=manager.certs_dir)
+    if exit_code != 0:
+        logger.warning("Certificate generation failed — continuing in unsecured mode")
+        return False
+
     manager.get_or_create_auth_token()
-    env_vars = manager.setup_tls_environment()
-    env_vars.update(manager.setup_auth_environment())
-    for key, value in env_vars.items():
-        os.environ[key] = value
-    logger.info(f"✓ Secure environment ready ({manager.certs_dir})")
-    return True
+    logger.info(f"✓ Certificates ready in {manager.certs_dir}")
+    return manager.has_valid_certs()
 
 
 def _remove_docker_image(image: str) -> None:
@@ -430,6 +466,12 @@ def ui_launch(args):
     else:
         _clean_stale_docker_resources()
 
+    # Single source of truth: the deploy pipeline (build-and-deploy.sh + the
+    # compose `auto` logic) derives TLS/auth solely from cert-file presence in
+    # WEIGHTSLAB_CERTS_DIR. Strip any pre-set/derived TLS env so it cannot
+    # override that file-based decision.
+    _strip_derived_deploy_env()
+
     # Run bootstrap script to setup environment
     bootstrap_script = str(_get_bootstrap_script())
     if Path(bootstrap_script).exists():
@@ -488,45 +530,49 @@ def ui_launch(args):
         ["up", "-d", "--pull", "always"],
     )
     port = os.environ.get("VITE_PORT", "5173")
-    protocol = "http" if no_certs else "https"
+    # HTTPS iff cert files actually exist in WEIGHTSLAB_CERTS_DIR — the same
+    # file-presence rule the deploy pipeline applies.
+    secured = (not no_certs) and manager.has_valid_certs()
+    protocol = "https" if secured else "http"
     logger.info(f"Weights Studio UI is running at: {protocol}://localhost:{port}")
 
 
 def ui_secure_environment(args):
-    """Generate TLS certificates and gRPC auth token (one-time setup)."""
+    """`weightslab se`: create a certs directory with certs + gRPC token.
+
+    The directory is the single source of truth — WEIGHTSLAB_CERTS_DIR is exported
+    for this process and the user is asked to export it globally. Everything else
+    (TLS on/off, auth on/off) is derived from the files in that directory by the
+    backend and the deploy pipeline, so this command does not set any other env.
+    """
     logger.info("Setting up secure environment...")
 
     force_certs = getattr(args, "force_certs", False)
     no_auth = getattr(args, "no_auth", False)
     certs_dir = getattr(args, "certs_dir", None)
 
-    exit_code = _generate_certs_with_fallback(force_certs=force_certs)
+    # Resolve the target directory first (no filesystem work in __init__), so we
+    # can point the generation scripts at it via WEIGHTSLAB_CERTS_DIR.
+    manager = CertAuthManager(certs_dir=certs_dir, enable_auth=not no_auth)
+
+    exit_code = _generate_certs_with_fallback(force_certs=force_certs, certs_dir=manager.certs_dir)
     if exit_code != 0:
         logger.error("Certificate generation failed")
         sys.exit(1)
 
-    manager = CertAuthManager(certs_dir=certs_dir, enable_auth=not no_auth)
-
-    # Ensure certs directory exists
     manager.certs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Get or create auth token
     manager.get_or_create_auth_token()
 
-    # Set environment variables
-    env_vars = manager.setup_tls_environment()
-    env_vars.update(manager.setup_auth_environment())
-
-    for key, value in env_vars.items():
-        os.environ[key] = value
+    # Export ONLY the single source of truth for this process.
+    os.environ["WEIGHTSLAB_CERTS_DIR"] = str(manager.certs_dir)
 
     logger.info("✓ Certificates generated successfully")
     logger.info("✓ gRPC auth token created")
     logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
+    logger.info(f"✓ WEIGHTSLAB_CERTS_DIR exported for this process: {manager.certs_dir}")
     logger.info("")
-    logger.info("These variables are exported for this process only. To persist")
-    logger.info("them across shells, set WEIGHTSLAB_CERTS_DIR yourself, e.g.:")
-    logger.info(f"   (bash)    echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc")
+    logger.info("Export it globally so new shells and the training backend find it:")
+    logger.info(f"   (bash)    echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc && source ~/.bashrc")
     logger.info(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
     logger.info("Then launch the UI with: weightslab ui launch")
 
@@ -535,19 +581,19 @@ def ui_docker_secure_environment(args):
     """Setup secure environment AND launch Docker (both in one command)."""
     logger.info("Setting up secure environment...")
 
-    exit_code = _generate_certs_with_fallback(force_certs=args.force_certs)
+    no_auth = getattr(args, "no_auth", False)
+    force_certs = getattr(args, "force_certs", False)
+    manager = CertAuthManager.from_env_or_default(enable_auth=not no_auth)
+
+    exit_code = _generate_certs_with_fallback(force_certs=force_certs, certs_dir=manager.certs_dir)
     if exit_code == 0:
-        manager = CertAuthManager.from_env_or_default(enable_auth=not args.no_auth)
-
-        # Ensure certs directory exists
+        # Ensure certs directory exists and the token is present.
         manager.certs_dir.mkdir(parents=True, exist_ok=True)
+        manager.get_or_create_auth_token()
 
-        # Set environment variables
-        env_vars = manager.setup_tls_environment()
-        env_vars.update(manager.setup_auth_environment())
-
-        for key, value in env_vars.items():
-            os.environ[key] = value
+        # Export ONLY the single source of truth; TLS/auth are derived from the
+        # files by ui_launch_secure / the deploy pipeline.
+        os.environ["WEIGHTSLAB_CERTS_DIR"] = str(manager.certs_dir)
 
         logger.info("✓ Certificates and auth token generated successfully")
         logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")

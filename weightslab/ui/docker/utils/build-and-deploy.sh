@@ -73,68 +73,62 @@ else
     echo "WEIGHTSLAB_CERTS_DIR is empty, skipping cert check"
 fi
 
-# Respect environment variables if explicitly set (for E2E tests)
-VITE_DEV_SERVER_HTTPS="${VITE_DEV_SERVER_HTTPS:-unset}"
-VITE_SERVER_PROTOCOL="${VITE_SERVER_PROTOCOL:-unset}"
-ENVOY_UPSTREAM_TLS="${ENVOY_UPSTREAM_TLS:-unset}"
-ENVOY_DOWNSTREAM_TLS="${ENVOY_DOWNSTREAM_TLS:-unset}"
-
-# Detect TLS (unless overridden by environment)
-if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "UNSECURE mode: HTTP (no TLS)"
+# ---------------------------------------------------------------------------
+# Single source of truth: TLS + gRPC auth are derived SOLELY from the presence
+# of cert files in WEIGHTSLAB_CERTS_DIR. Any inherited VITE_*/ENVOY_* values are
+# intentionally ignored and recomputed here, so a stale or pre-set env var can
+# never force HTTPS without certs (which would crash Envoy on an empty mount) or
+# vice versa. `--unsecure` (or an empty WEIGHTSLAB_CERTS_DIR) forces everything
+# off.
+# ---------------------------------------------------------------------------
+if [ "$FORCE_UNSECURE" = "1" ] || [ -z "$WEIGHTSLAB_CERTS_DIR" ]; then
+    echo "Unsecured mode: HTTP, no auth (no certs directory)"
     VITE_DEV_SERVER_HTTPS=0
     VITE_SERVER_PROTOCOL=http
     ENVOY_UPSTREAM_TLS=off
     ENVOY_DOWNSTREAM_TLS=off
-elif [ "$VITE_SERVER_PROTOCOL" != "unset" ]; then
-    # Environment variables are already set, use them
-    echo "Using environment-provided protocol settings"
-    [ "$VITE_DEV_SERVER_HTTPS" = "unset" ] && VITE_DEV_SERVER_HTTPS=0
-    [ "$ENVOY_UPSTREAM_TLS" = "unset" ] && ENVOY_UPSTREAM_TLS=off
-    [ "$ENVOY_DOWNSTREAM_TLS" = "unset" ] && ENVOY_DOWNSTREAM_TLS=off
-elif [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.crt" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.key" ]; then
-    echo "TLS certificates found - building with HTTPS support"
-    VITE_DEV_SERVER_HTTPS=1
-    VITE_SERVER_PROTOCOL=https
-    ENVOY_UPSTREAM_TLS=on
-    ENVOY_DOWNSTREAM_TLS=on
+    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
+    VITE_GRPC_AUTH_TOKEN=""
 else
-    echo "TLS certificates not found - building for HTTP mode"
-    VITE_DEV_SERVER_HTTPS=0
-    VITE_SERVER_PROTOCOL=http
-    ENVOY_UPSTREAM_TLS=off
-    ENVOY_DOWNSTREAM_TLS=off
+    # Downstream HTTPS (browser <-> Envoy): needs the Envoy server cert + key.
+    if [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.crt" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.key" ]; then
+        echo "Envoy server cert found in $WEIGHTSLAB_CERTS_DIR - enabling HTTPS"
+        VITE_DEV_SERVER_HTTPS=1
+        VITE_SERVER_PROTOCOL=https
+        ENVOY_DOWNSTREAM_TLS=on
+    else
+        echo "No Envoy server cert in $WEIGHTSLAB_CERTS_DIR - HTTP (no downstream TLS)"
+        VITE_DEV_SERVER_HTTPS=0
+        VITE_SERVER_PROTOCOL=http
+        ENVOY_DOWNSTREAM_TLS=off
+    fi
+
+    # Upstream mTLS (Envoy <-> backend gRPC): needs the Envoy client cert + CA.
+    if [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-client.crt" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-client.key" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/ca.crt" ]; then
+        echo "Envoy client cert + CA found - enabling upstream TLS"
+        ENVOY_UPSTREAM_TLS=on
+    else
+        echo "No Envoy client cert/CA - upstream plaintext"
+        ENVOY_UPSTREAM_TLS=off
+    fi
+
+    # gRPC auth token.
+    if [ -f "$TOKEN_FILE" ]; then
+        echo "gRPC token found - enabling auth"
+        VITE_WL_ENABLE_GRPC_AUTH_TOKEN=1
+        VITE_GRPC_AUTH_TOKEN=$(cat "$TOKEN_FILE")
+    else
+        echo "gRPC token not found - auth disabled"
+        VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
+        VITE_GRPC_AUTH_TOKEN=""
+    fi
 fi
 
-# Export all environment variables for docker compose
+# Export all derived variables for docker compose
 export VITE_DEV_SERVER_HTTPS
 export VITE_SERVER_PROTOCOL
 export ENVOY_UPSTREAM_TLS
 export ENVOY_DOWNSTREAM_TLS
-
-# Detect gRPC token
-VITE_WL_ENABLE_GRPC_AUTH_TOKEN="${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-unset}"
-VITE_GRPC_AUTH_TOKEN="${VITE_GRPC_AUTH_TOKEN:-}"
-
-if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "UNSECURE mode: auth disabled"
-    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
-    VITE_GRPC_AUTH_TOKEN=""
-elif [ "$VITE_WL_ENABLE_GRPC_AUTH_TOKEN" != "unset" ]; then
-    # Environment variable is already set, use it
-    echo "Using environment-provided auth settings"
-    true
-elif [ -f "$TOKEN_FILE" ]; then
-    echo "gRPC token found - enabling auth"
-    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=1
-    VITE_GRPC_AUTH_TOKEN=$(cat "$TOKEN_FILE")
-else
-    echo "gRPC token not found - auth disabled"
-    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
-    VITE_GRPC_AUTH_TOKEN=""
-fi
-
-# Export auth variables for docker compose
 export VITE_WL_ENABLE_GRPC_AUTH_TOKEN
 export VITE_GRPC_AUTH_TOKEN
 
