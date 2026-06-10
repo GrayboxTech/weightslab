@@ -30,6 +30,24 @@ Create and activate a virtual environment, then install WeightsLab in editable m
    python -m pip install weightslab
 
 
+Try the bundled example
+------------------------
+
+To see WeightsLab working end to end without writing any code, start the bundled
+classification (cls) example. It trains a small model and serves it until you
+stop it with ``Ctrl+C``:
+
+.. code-block:: bash
+
+   weightslab example start
+
+Then, in another terminal, launch the UI and open https://localhost:5173:
+
+.. code-block:: bash
+
+   weightslab ui launch
+
+
 Optional: build docs locally
 ----------------------------
 

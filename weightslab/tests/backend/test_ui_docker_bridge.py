@@ -2,7 +2,9 @@ import argparse
 import contextlib
 import io
 import os
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from weightslab.ui_docker_bridge import (
@@ -11,11 +13,13 @@ from weightslab.ui_docker_bridge import (
     _compose_cmd,
     _ensure_certificates,
     _generate_certs_with_fallback,
+    _get_example_dir,
     _remove_docker_image,
     _strip_derived_deploy_env,
     _DERIVED_DEPLOY_ENV_VARS,
     _FRONTEND_IMAGE,
     _STACK_CONTAINERS,
+    example_start,
     main,
     ui_drop,
     ui_launch,
@@ -561,6 +565,17 @@ class TestMainCLI(unittest.TestCase):
             main()
         mock_info.assert_called_once()
 
+    @patch("weightslab.ui_docker_bridge.example_start")
+    def test_main_dispatches_example_start(self, mock_example):
+        """Test 'example start' command."""
+        with patch("sys.argv", ["weightslab", "example", "start"]):
+            main()
+        mock_example.assert_called_once()
+
+    def test_main_example_without_action_does_not_crash(self):
+        with patch("sys.argv", ["weightslab", "example"]):
+            main()  # should print example help, not raise
+
     def test_main_help_does_not_crash(self):
         with patch("sys.argv", ["weightslab", "help"]):
             main()  # should not raise
@@ -789,6 +804,41 @@ class TestSingleSourceOfTruth(unittest.TestCase):
                 ui_launch(argparse.Namespace())
         self.assertTrue(any("http://localhost:5173" in m for m in log_context.output))
         self.assertFalse(any("https://localhost:5173" in m for m in log_context.output))
+
+
+class TestExampleStart(unittest.TestCase):
+    """`weightslab example start` runs the bundled classification example."""
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_example_start_runs_classification(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
+            example_start(argparse.Namespace())
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[0], sys.executable)
+        main_py = cmd[1].replace("\\", "/")
+        self.assertTrue(main_py.endswith("examples/PyTorch/ws-classification/main.py"), main_py)
+        cwd = mock_run.call_args.kwargs["cwd"].replace("\\", "/")
+        self.assertTrue(cwd.endswith("examples/PyTorch/ws-classification"), cwd)
+        self.assertTrue(any("classification (cls) example" in m for m in log_context.output))
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_example_start_propagates_nonzero_exit(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=3)
+        with self.assertRaises(SystemExit) as ctx:
+            example_start(argparse.Namespace())
+        self.assertEqual(ctx.exception.code, 3)
+
+    @patch("weightslab.ui_docker_bridge._get_example_dir", return_value=Path("/does/not/exist"))
+    def test_example_start_errors_when_missing(self, _mock_dir):
+        with self.assertRaises(SystemExit) as ctx:
+            example_start(argparse.Namespace())
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_example_dir_points_at_bundled_example(self):
+        # The bundled classification example must actually ship with the package.
+        self.assertTrue((_get_example_dir("ws-classification") / "main.py").exists())
 
 
 class TestBannerAndHelp(unittest.TestCase):

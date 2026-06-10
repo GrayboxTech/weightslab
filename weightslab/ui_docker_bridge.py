@@ -91,11 +91,15 @@ commands:
   ui docker stop           Stop the Docker containers.
   ui docker info           Show the current certs / Docker configuration.
 
+  example start            Run the bundled classification (cls) example
+                           (foreground; stop with Ctrl+C).
+
 examples:
   weightslab se                       # one-time secure setup
   weightslab ui launch                # certs-if-missing + clean + launch
   weightslab ui launch --no-certs     # unsecured launch (HTTP)
   weightslab ui launch --force-certs  # regenerate certs, then launch
+  weightslab example start            # run the classification demo
   weightslab ui stop                  # stop the UI
 """
 
@@ -743,6 +747,37 @@ def docker_info(args):
         logger.info(f"{key}={value}")
 
 
+def _get_example_dir(name: str = "ws-classification") -> Path:
+    """Path to a bundled PyTorch example directory."""
+    return Path(__file__).parent / 'examples' / 'PyTorch' / name
+
+
+def example_start(args):
+    """`weightslab example start`: run the bundled classification (cls) example.
+
+    Runs the example's main.py with the current Python interpreter, from its own
+    directory so it resolves its sibling config.yaml. Runs in the foreground
+    (the script serves until you stop it with Ctrl+C).
+    """
+    example_dir = _get_example_dir("ws-classification")
+    main_py = example_dir / "main.py"
+    if not main_py.exists():
+        logger.error(f"Classification example not found: {main_py}")
+        sys.exit(1)
+
+    logger.info("Starting the WeightsLab classification (cls) example...")
+    logger.info(f"   {main_py}")
+    logger.info("In another terminal, launch the UI with: weightslab ui launch")
+    logger.info("Then open https://localhost:5173 — stop the example with Ctrl+C.")
+    try:
+        result = subprocess.run([sys.executable, str(main_py)], cwd=str(example_dir))
+    except KeyboardInterrupt:
+        logger.info("Example stopped.")
+        return
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser (banner + detailed command reference)."""
     parser = argparse.ArgumentParser(
@@ -798,13 +833,18 @@ def _build_parser() -> argparse.ArgumentParser:
     docker_sub.add_parser("stop", help="Stop Docker containers")
     docker_sub.add_parser("info", help="Show configuration")
 
+    # Example commands
+    example_parser = sub.add_parser("example", help="Run a bundled WeightsLab example")
+    example_sub = example_parser.add_subparsers(dest="example_action")
+    example_sub.add_parser("start", help="Start the bundled classification (cls) example")
+
     sub.add_parser("help", help="Show this help message")
 
-    return parser, ui_parser, docker_parser
+    return parser, ui_parser, docker_parser, example_parser
 
 
 def main():
-    parser, ui_parser, docker_parser = _build_parser()
+    parser, ui_parser, docker_parser, example_parser = _build_parser()
     args = parser.parse_args()
 
     ui_actions = {
@@ -835,6 +875,11 @@ def main():
             ui_actions[args.action](args)
         else:
             ui_parser.print_help()
+    elif args.command == "example":
+        if getattr(args, "example_action", None) == "start":
+            example_start(args)
+        else:
+            example_parser.print_help()
     else:
         parser.print_help()
 

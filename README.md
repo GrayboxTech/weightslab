@@ -84,6 +84,12 @@ weightslab ui launch
 
 `weightslab ui launch` is the one-command path: it **generates TLS certificates + a gRPC auth token if you don't have them yet**, removes any stale weightslab/weights_studio Docker resources that could break the launch, then starts the UI stack. To run unsecured (HTTP, no auth), use `weightslab ui launch --no-certs`.
 
+Want to see it working end to end without writing any code? Start the bundled classification demo (it trains and serves until you stop it with `Ctrl+C`):
+```bash
+weightslab example start
+```
+Then run `weightslab ui launch` in another terminal and open `https://localhost:5173`.
+
 Run `weightslab`, `weightslab help`, or `weightslab -h` at any time to see the banner and the full command reference.
 
 > [!IMPORTANT]
