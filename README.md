@@ -364,6 +364,8 @@ if __name__ == "__main__":
 
 WeightsLab is **secure by default**: `weightslab ui launch` generates TLS certificates and a gRPC auth token (in `~/.weightslab-certs/`) the first time you run it, then launches the stack with TLS encryption and gRPC authentication enabled. Subsequent launches reuse the existing certificates.
 
+`WEIGHTSLAB_CERTS_DIR` is the **single source of truth**. HTTPS and gRPC auth are turned on/off purely by the presence of the cert files in that directory — never by separate env variables. If the files exist, the stack runs encrypted; if they don't, it runs over plain HTTP (any stale `GRPC_TLS_*` / `ENVOY_*_TLS` / `VITE_*` values are ignored). Point `WEIGHTSLAB_CERTS_DIR` at a different folder to switch cert sets, or use `--no-certs` to force plain HTTP.
+
 ### One Command (Recommended)
 ```bash
 weightslab ui launch
