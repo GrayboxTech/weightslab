@@ -51,12 +51,16 @@ class CertAuthManager:
         self.token_file = self.certs_dir / '.grpc_auth_token'
 
     def has_valid_certs(self) -> bool:
-        """Check if certificates exist and are valid."""
+        """Check if the full certificate set exists (all 3 files)."""
         return (
             self.cert_file.exists() and
             self.key_file.exists() and
             self.ca_file.exists()
         )
+
+    def has_any_credentials(self) -> bool:
+        """Return True if a complete cert set exists (token alone does not count)."""
+        return self.has_valid_certs()
 
     def generate_certs(self, force: bool = False) -> Tuple[bool, str]:
         """
@@ -259,4 +263,6 @@ class CertAuthManager:
     def from_env_or_default(enable_auth: bool = True) -> 'CertAuthManager':
         """Create manager using environment variables or defaults."""
         certs_dir = os.environ.get('WEIGHTSLAB_CERTS_DIR')
+        if certs_dir is not None:
+            certs_dir = certs_dir.strip().strip("'\"")
         return CertAuthManager(certs_dir=certs_dir, enable_auth=enable_auth)

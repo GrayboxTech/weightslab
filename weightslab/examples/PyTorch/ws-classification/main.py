@@ -1,8 +1,16 @@
 import itertools
 import os
+import ssl
 import time
 import logging
 import tempfile
+
+# Windows SSL fix: some Windows cert stores contain malformed ASN1 certs that
+# crash ssl.create_default_context(). Fall back to unverified only when broken.
+try:
+    ssl.create_default_context()
+except ssl.SSLError:
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 import yaml
 import tqdm

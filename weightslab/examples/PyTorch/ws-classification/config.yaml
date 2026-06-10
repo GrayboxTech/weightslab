@@ -28,13 +28,13 @@ data:
   train_loader:
     shuffle: true
     batch_size: 16
-    max_samples: 250
+    # max_samples: 250
   val_loader:
     shuffle: false
     batch_size: 16
-    max_samples: 100
+    # max_samples: 100
   test_loader:
     shuffle: false
     batch_size: 16
     drop_last: false
-    max_samples: 200
+    # max_samples: 200

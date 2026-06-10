@@ -266,7 +266,6 @@ def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None
 
         # Build environment variable assignments for bash command
         env_assignments = ' '.join([f"{k}='{v}'" for k, v in env_vars.items()]) if env_vars else ""
-        cwd_path = str(Path.home())
 
         if env_assignments:
             # Pass env vars directly in bash command using -c flag
@@ -275,12 +274,10 @@ def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None
             bash_script_cmd = f"{env_assignments} '{script_path}'"
             if args:
                 bash_script_cmd += " " + " ".join(f"'{arg}'" for arg in args)
-            else:
-                bash_script_cmd += " " + cwd_path
             bash_cmd = ['bash', '-c', bash_script_cmd]
         else:
             logger.info('Not using env assignments')
-            bash_cmd = ['bash', '-x', str(script_path), cwd_path]
+            bash_cmd = ['bash', '-x', str(script_path)]
             if args:
                 bash_cmd.extend(args)
 
@@ -349,10 +346,10 @@ def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) ->
     from cert-file presence in ``WEIGHTSLAB_CERTS_DIR`` (the single source of
     truth). Returns True if certs are present afterwards, False otherwise.
     """
-    if manager.has_valid_certs() and not force_certs:
-        logger.info(f"✓ Using existing certificates in {manager.certs_dir}")
+    if manager.has_any_credentials() and not force_certs:
+        logger.info(f"✓ Using existing credentials in {manager.certs_dir}")
         manager.get_or_create_auth_token()
-        return True
+        return manager.has_valid_certs()
 
     logger.info(
         "Regenerating certificates (--force-certs)..."
@@ -449,9 +446,18 @@ def ui_launch(args):
         # Ensure the certs dir exists (empty is fine) so the compose bind-mount
         # has a real, deterministic source. Envoy/nginx run plaintext and ignore
         # whatever is (or isn't) inside it.
-        manager.certs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            manager.certs_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            os.makedirs(str(manager.certs_dir), exist_ok=True)
+            logger.warning('Fail to create empty weightslab-certs directory!')
     else:
         _ensure_certificates(manager, force_certs=force_certs)
+
+    # Set the correct certs path in the process env NOW so that _compose_cmd
+    # passes it to docker compose — this overrides any stale/malformed value
+    # in a leftover .env file and prevents the "too many colons" bind-mount error.
+    os.environ["WEIGHTSLAB_CERTS_DIR"] = _to_docker_host_path(manager.certs_dir)
 
     # Remove stale weightslab/weights_studio Docker resources that could prevent
     # a clean launch. Scoped strictly to our own resources (see helper docstring).
@@ -592,9 +598,11 @@ def example_start(args):
     logger.info("Starting the WeightsLab classification (cls) example...")
     logger.info(f"   {main_py}")
     logger.info("In another terminal, launch the UI with: weightslab ui launch")
-    logger.info("Then open https://localhost:5173 — stop the example with Ctrl+C.")
+    logger.info(f"Then open http://localhost:5173 — stop the example with Ctrl+C.")
     try:
-        result = subprocess.run([sys.executable, str(main_py)], cwd=str(example_dir))
+        env = os.environ.copy()
+        env['WEIGHTSLAB_SUPPRESS_BANNER'] = '1'
+        result = subprocess.run([sys.executable, str(main_py)], cwd=str(example_dir), env=env)
     except KeyboardInterrupt:
         logger.info("Example stopped.")
         return

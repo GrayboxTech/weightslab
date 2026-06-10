@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Auto-detect TLS and tokens, then build production image
 
 # Print all environment variables to diagnose issues
@@ -222,7 +222,7 @@ IMAGE_NAME="graybx/weightslab"
 #     echo "Image '$IMAGE_NAME' not found - will build"
 #     SKIP_BUILD=false
 # fi
-SKIP_BUILD = false
+SKIP_BUILD=false
 
 # Build and deploy
 if [ "$DEV" = "true" ]; then

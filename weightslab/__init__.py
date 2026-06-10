@@ -25,48 +25,34 @@ from .components.global_monitoring import guard_training_context, guard_testing_
 # Change the name of the current (main) thread
 threading.current_thread().name = "WL-MainThread"
 
-# Track if initialization has already happened
+# Auto-initialize logging on import. Python's module cache (sys.modules) guarantees
+# this block runs exactly once per process. Subprocesses get a fresh interpreter
+# and initialize independently — no env var needed to coordinate across processes.
+log_level = os.getenv('WEIGHTSLAB_LOG_LEVEL', 'INFO')
+log_to_file = os.getenv('WEIGHTSLAB_LOG_TO_FILE', 'true').lower() == 'true'
 
-# Auto-initialize logging if not already configured
-if os.environ.get('WEIGHTSLAB_initialized', 'false').lower() == 'false':
-	# Check for environment variable to control log level
-	log_level = os.getenv(
-		'WEIGHTSLAB_LOG_LEVEL',
-		'INFO'
-	)
-	log_to_file = os.getenv(
-		'WEIGHTSLAB_LOG_TO_FILE',
-		'true'
-	).lower() == 'true'
+setup_logging(log_level, log_to_file=log_to_file)
 
-	# Initialize logging (ensure console + file handlers are configured).
-	# setup_logging resets handlers, so it's safe to call here and guarantees
-	# both a console StreamHandler and a FileHandler (when requested).
-	setup_logging(log_level, log_to_file=log_to_file)
-
-	# Setup and use logger
-	logger = logging.getLogger(__name__)
-	logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
+logger = logging.getLogger(__name__)
+logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
+if os.getenv('WEIGHTSLAB_SUPPRESS_BANNER', '0') != '1':
 	logger.info(_BANNER)
 
-	# Apply secure environment if certs exist (check-only, no generation at import time)
-	grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
-	if grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
-		try:
-			from weightslab.security import CertAuthManager
+grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
+if grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
+	try:
+		from weightslab.security import CertAuthManager
 
-			enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
-			manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
+		enable_auth = os.environ.get('WL_ENABLE_GRPC_AUTH_TOKEN', 'true').lower() == 'true'
+		manager = CertAuthManager.from_env_or_default(enable_auth=enable_auth)
 
-			success, msg = manager.check_and_apply()
-			if success:
-				logger.debug(f"Secure environment applied: {msg}")
-			else:
-				logger.debug(f"Running in unsecured mode — no certs found. To set up: weightslab ui se")
-		except Exception as e:
-			logger.debug(f"Secure environment check skipped: {e}")
-
-	os.environ['WEIGHTSLAB_initialized'] = 'true'  # Ensure WL init once
+		success, msg = manager.check_and_apply()
+		if success:
+			logger.debug(f"Secure environment applied: {msg}")
+		else:
+			logger.debug(f"Running in unsecured mode — no certs found. To set up: weightslab ui se")
+	except Exception as e:
+		logger.debug(f"Secure environment check skipped: {e}")
 
 # Get Package Metadata
 try:
