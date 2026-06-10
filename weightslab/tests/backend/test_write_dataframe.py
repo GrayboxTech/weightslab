@@ -119,8 +119,9 @@ class TestWriteDataframeCsvStructure:
         _call(tmp_csv, mgr, format="csv")
         with open(tmp_csv) as fh:
             reader = csv.DictReader(fh)
-        assert "sample_id" in reader.fieldnames
-        assert "annotation_id" in reader.fieldnames
+            fieldnames = reader.fieldnames
+        assert "sample_id" in fieldnames
+        assert "annotation_id" in fieldnames
 
     def test_csv_all_rows_present(self, mgr, tmp_csv):
         _call(tmp_csv, mgr, format="csv")
