@@ -82,6 +82,10 @@ Deploy our interface with Docker:
 weightslab ui launch
 ```
 
+`weightslab ui launch` is the one-command path: it **generates TLS certificates + a gRPC auth token if you don't have them yet**, removes any stale weightslab/weights_studio Docker resources that could break the launch, then starts the UI stack. To run unsecured (HTTP, no auth), use `weightslab ui launch --no-certs`.
+
+Run `weightslab`, `weightslab help`, or `weightslab -h` at any time to see the banner and the full command reference.
+
 > [!IMPORTANT]
 > For a detailed installation guide and more advanced features, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
@@ -176,7 +180,7 @@ def main():
 
     # Training loop
     print("🏃 Starting training...")
-    print("💡 Launch the UI with: weightslab ui docker launch")
+    print("💡 Launch the UI with: weightslab ui launch")
     print("🌐 Open browser to: https://localhost:5173")
     n_epochs = parameters.get('n_epochs')
     pbar = tqdm.tqdm(range(n_epochs), desc='Training..') if parameters.get('tqdm_display', False) else range(n_epochs)
@@ -341,7 +345,7 @@ if __name__ == "__main__":
 
 8. **Launch the UI** in another terminal:
    ```bash
-   weightslab ui docker launch
+   weightslab ui launch
    ```
 
 9. **Open your browser** to `https://localhost:5173` to track experiment evoluation and results!
@@ -358,98 +362,106 @@ if __name__ == "__main__":
 
 ## Security
 
-By default, WeightsLab runs in **unsecured mode** (NO TLS, HTTP, no gRPC authentification). To enable TLS encryption and gRPC authentication:
+WeightsLab is **secure by default**: `weightslab ui launch` generates TLS certificates and a gRPC auth token (in `~/.weightslab-certs/`) the first time you run it, then launches the stack with TLS encryption and gRPC authentication enabled. Subsequent launches reuse the existing certificates.
 
-### Quick Setup + Launch
-Setup secure environment AND launch Docker in one command:
+### One Command (Recommended)
 ```bash
-weightslab ui docker se
-export WEIGHTSLAB_CERTS_DIR='~/.weightslab-certs/'  # Windows commands is
+weightslab ui launch
 ```
 
 This will:
-1. Generate TLS certificates and gRPC auth token in `~/.weightslab-certs/`
-2. Launch the Docker stack with security enabled
-3. If setup fails, Docker still launches (unsecured fallback)
+1. Generate TLS certificates and a gRPC auth token in `~/.weightslab-certs/` **if they don't already exist** (otherwise reuse them)
+2. Remove any stale weightslab/weights_studio Docker resources (old containers, network, anonymous volumes, the cached frontend image, and a leftover generated `.env`) that could prevent a clean launch
+3. Launch the Docker stack with security enabled
 
-### Separate Steps (If Needed)
-Setup secure environment only:
+If certificate generation fails (e.g. `openssl` is unavailable), the launch continues in unsecured mode.
+
+### Launch Flags
+
+**For `weightslab ui launch`:**
+
+| Flag | Effect |
+|---|---|
+| `--no-certs` | Run unsecured (HTTP, no gRPC auth); do **not** generate or use certificates |
+| `--force-certs` | Regenerate certificates before launching, even if they already exist |
+| `--no-auth` | Use TLS without a gRPC auth token |
+| `--no-clean` | Skip the stale Docker resource cleanup step |
+| `--dev` | Use the dev compose overlay |
+
+**Examples:**
+```bash
+weightslab ui launch                 # secure by default (certs auto-created if missing)
+weightslab ui launch --no-certs      # explicitly run unsecured (HTTP)
+weightslab ui launch --force-certs   # regenerate certs, then launch
+weightslab ui launch --no-clean      # skip stale-resource cleanup (faster relaunch)
+```
+
+### Setup Certificates Separately
+Generate certificates and the gRPC auth token without launching (e.g. so the backend can run secured before the UI is up):
 ```bash
 weightslab se
 
-# Ubuntu command
-echo 'export WEIGHTSLAB_CERTS_DIR="~/.weightslab-certs/"' >> ~/.bashrc
+# Persist the certs directory across shells (optional — the default
+# ~/.weightslab-certs is auto-detected, so this is only needed for a custom path):
+# Ubuntu
+echo 'export WEIGHTSLAB_CERTS_DIR="$HOME/.weightslab-certs"' >> ~/.bashrc
 source ~/.bashrc
-
-# Windows command
-# setx WEIGHTSLAB_CERTS_DIR '~/.weightslab-certs/' /M
+# Windows
+# setx WEIGHTSLAB_CERTS_DIR "%USERPROFILE%\.weightslab-certs"
 ```
 
-Then launch Docker later:
+Then launch later (reuses the certs):
 ```bash
-weightslab ui docker launch
+weightslab ui launch
 ```
 
-### Custom Certificates Directory
-Store certificates in a custom location using the `WEIGHTSLAB_CERTS_DIR` environment variable:
-```bash
-# Generate the certs
-weightslab se "/path/to/my/certs"
-
-# Export path to env.
-# Ubuntu command
-echo 'export WEIGHTSLAB_CERTS_DIR=/path/to/my/certs' >> ~/.bashrc
-source ~/.bashrc
-
-# Windows command
-# setx WEIGHTSLAB_CERTS_DIR /path/to/my/certs /M
-
-# Start UI
-weightslab ui docker launch
-```
-
-### Options for Secure Environment Setup
-
-**For `weightslab se` or `weightslab ui docker se`:**
+**For `weightslab se`:**
 
 | Flag | Effect |
 |---|---|
 | `--force-certs` | Regenerate certificates even if they already exist |
 | `--no-auth` | Skip gRPC auth token generation (TLS only) |
 
-**Examples:**
+### Custom Certificates Directory
+Store certificates in a custom location:
 ```bash
-weightslab se --force-certs              # Regenerate certs only
-weightslab se --no-auth                  # TLS only, no gRPC token
-weightslab ui docker se                  # Setup + launch in one
-weightslab ui docker se --force-certs    # Setup (regenerate) + launch
+weightslab se "/path/to/my/certs"
+
+# Point WeightsLab at it
+# Ubuntu
+echo 'export WEIGHTSLAB_CERTS_DIR=/path/to/my/certs' >> ~/.bashrc
+source ~/.bashrc
+# Windows
+# setx WEIGHTSLAB_CERTS_DIR C:\path\to\my\certs
+
+weightslab ui launch
 ```
 
 ### What Gets Created?
-After running `weightslab se` or `weightslab ui docker se`, your `~/.weightslab-certs/` directory contains:
+After running `weightslab se` (or the first `weightslab ui launch`), your `~/.weightslab-certs/` directory contains:
 - `backend-server.crt` — Backend TLS certificate
 - `backend-server.key` — Backend TLS private key
 - `ca.crt` — CA certificate
 - `.grpc_auth_token` — gRPC authentication token (if not using `--no-auth`)
 
 ### Running Without Security
-To explicitly run in unsecured mode, delete the certificates directory:
+Either launch with `--no-certs`, or delete the certificates directory:
 ```bash
-rm -r ~/.weightslab-certs
-weightslab ui docker launch  # Falls back to unsecured HTTP
+weightslab ui launch --no-certs   # one-off unsecured launch
+# or
+rm -r ~/.weightslab-certs && weightslab ui launch --no-certs
 ```
 
 ### Testing the Setup
 **Secured environment:**
 ```bash
-weightslab se                      # Setup certs and token
-weightslab ui docker launch        # Launch Docker
+weightslab ui launch               # Auto-creates certs (if missing) and launches secured
 python main.py                     # Backend finds certs, runs secured
 ```
 
 **Unsecured environment:**
 ```bash
-weightslab ui docker launch        # Launch Docker (no certs)
+weightslab ui launch --no-certs    # Launch Docker without certs (HTTP)
 python main.py                     # Backend runs unsecured
 ```
 

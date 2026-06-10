@@ -16,6 +16,60 @@ from weightslab.security import CertAuthManager
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# Docker resources owned by the bundled stack. Cleanup is scoped strictly to
+# these names — we never run a global `docker system prune`.
+_FRONTEND_IMAGE = "graybx/weightslab"
+_STACK_CONTAINERS = ("weights_studio_envoy", "weights_studio_frontend")
+
+
+def _banner() -> str:
+    """Return the WeightsLab ASCII banner, or a plain title if art is unavailable."""
+    try:
+        from weightslab.art import _BANNER
+        return _BANNER
+    except Exception:
+        return "WeightsLab"
+
+
+_DESCRIPTION = (
+    _banner()
+    + "\nWeightsLab — Inspect, Edit, and Evolve Neural Networks\n"
+    + "Manage the Weights Studio UI, its Docker stack, and the secure "
+    + "(TLS + gRPC auth) environment."
+)
+
+_EPILOG = """\
+commands:
+  se [DIR]                 Set up the secure environment: generate TLS
+                           certificates + a gRPC auth token and export the
+                           matching environment variables.
+                             --force-certs   regenerate even if certs exist
+                             --no-auth       TLS only, skip the gRPC token
+
+  ui launch                Generate certificates if missing, purge stale
+                           weightslab/weights_studio Docker resources, then
+                           build & start the UI stack.
+                             --no-certs      run unsecured (HTTP, no auth)
+                             --no-auth       TLS without a gRPC auth token
+                             --force-certs   regenerate certs before launch
+                             --no-clean      skip the stale-resource cleanup
+                             --dev           use the dev compose overlay
+  ui stop                  Stop the UI containers (images are kept).
+  ui drop                  Stop and remove containers, networks, and images.
+
+  ui docker se             Set up the secure env AND launch in one step.
+  ui docker launch         Launch using existing certs (no generation).
+  ui docker stop           Stop the Docker containers.
+  ui docker info           Show the current certs / Docker configuration.
+
+examples:
+  weightslab se                       # one-time secure setup
+  weightslab ui launch                # certs-if-missing + clean + launch
+  weightslab ui launch --no-certs     # unsecured launch (HTTP)
+  weightslab ui launch --force-certs  # regenerate certs, then launch
+  weightslab ui stop                  # stop the UI
+"""
+
 
 def _get_compose_file():
     """Return the path to the bundled docker-compose.yml."""
@@ -256,12 +310,124 @@ def _generate_certs_with_fallback(force_certs: bool = False) -> int:
         return 1
 
 
+def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) -> bool:
+    """Generate certs + auth token if missing (or forced) and export env vars.
+
+    Returns True when a secure environment is active, False if generation failed
+    and the caller should fall back to unsecured mode.
+    """
+    if manager.has_valid_certs() and not force_certs:
+        logger.info(f"✓ Using existing certificates in {manager.certs_dir}")
+    else:
+        logger.info(
+            "Regenerating certificates (--force-certs)..."
+            if force_certs
+            else "No certificates found — generating them now..."
+        )
+        exit_code = _generate_certs_with_fallback(force_certs=force_certs)
+        if exit_code != 0:
+            logger.warning(
+                "Certificate generation failed — continuing in unsecured mode"
+            )
+            return False
+
+    manager.certs_dir.mkdir(parents=True, exist_ok=True)
+    manager.get_or_create_auth_token()
+    env_vars = manager.setup_tls_environment()
+    env_vars.update(manager.setup_auth_environment())
+    for key, value in env_vars.items():
+        os.environ[key] = value
+    logger.info(f"✓ Secure environment ready ({manager.certs_dir})")
+    return True
+
+
+def _remove_docker_image(image: str) -> None:
+    """Remove a Docker image (all tags) if present; no-op when absent."""
+    result = subprocess.run(
+        ["docker", "images", "-q", image],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    image_ids = sorted(set(result.stdout.split()))
+    if not image_ids:
+        return
+    logger.info(f"Removing cached image '{image}' ({len(image_ids)} ref(s))...")
+    subprocess.run(
+        ["docker", "rmi", "-f", *image_ids],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _clean_stale_docker_resources() -> None:
+    """Remove leftover weightslab / weights_studio Docker state before a launch.
+
+    Stale containers, the compose network, anonymous volumes, a cached frontend
+    image, and a leftover generated ``.env`` can each silently break a fresh
+    launch (an old image served instead of a rebuild, or an empty cert mount
+    that crashes Envoy). This is scoped STRICTLY to weightslab/weights_studio
+    resources — it never runs a global ``docker system prune``.
+    """
+    logger.info("Cleaning stale Docker resources (weightslab/weights_studio only)...")
+    compose_file = _get_compose_file()
+    envoy_config = _get_envoy_config()
+
+    # 1. Tear down any existing stack: containers + default network + anon volumes.
+    try:
+        _compose_cmd(compose_file, envoy_config, ["down", "--remove-orphans", "--volumes"])
+    except subprocess.CalledProcessError as exc:
+        logger.debug(f"'compose down' returned non-zero (nothing to remove?): {exc}")
+
+    # 2. Force-remove leftover named containers started outside this compose project.
+    for container in _STACK_CONTAINERS:
+        subprocess.run(
+            ["docker", "rm", "-f", container],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    # 3. Drop the cached frontend image so a fresh one is built/pulled.
+    _remove_docker_image(_FRONTEND_IMAGE)
+
+    # 4. Remove the generated .env so stale values don't leak into compose.
+    env_file = Path(compose_file).parent / ".env"
+    if env_file.exists():
+        try:
+            env_file.unlink()
+            logger.info(f"Removed stale env file: {env_file}")
+        except OSError as exc:
+            logger.debug(f"Could not remove {env_file}: {exc}")
+
+
 def ui_launch(args):
-    """Pull images and start UI containers."""
+    """Generate certs if missing, purge stale Docker state, then build & start the UI.
+
+    Flags (all optional, read defensively so legacy callers still work):
+      --no-certs     skip certificate generation/usage (HTTP, no gRPC auth)
+      --no-auth      TLS without a gRPC auth token
+      --force-certs  regenerate certificates even if they already exist
+      --no-clean     skip the stale Docker resource cleanup step
+      --dev          use the dev compose overlay
+    """
     _check_docker()
 
+    no_certs = getattr(args, "no_certs", False)
+    no_auth = getattr(args, "no_auth", False)
+    force_certs = getattr(args, "force_certs", False)
+    no_clean = getattr(args, "no_clean", False)
+
+    manager = CertAuthManager.from_env_or_default(enable_auth=not no_auth)
+
+    if no_certs:
+        logger.info("⚠ --no-certs: launching in unsecured mode (HTTP, no gRPC auth)")
+    else:
+        _ensure_certificates(manager, force_certs=force_certs)
+
+    # Remove stale weightslab/weights_studio Docker resources that could prevent
+    # a clean launch. Scoped strictly to our own resources (see helper docstring).
+    if no_clean:
+        logger.info("Skipping stale Docker resource cleanup (--no-clean)")
+    else:
+        _clean_stale_docker_resources()
+
     # Run bootstrap script to setup environment
-    manager = CertAuthManager.from_env_or_default(enable_auth=True)
     bootstrap_script = str(_get_bootstrap_script())
     if Path(bootstrap_script).exists():
         logger.info("Running bootstrap script...")
@@ -284,15 +450,22 @@ def ui_launch(args):
         # platform. The bash script writes this into .env for the compose mount.
         certs_dir_host = _to_docker_host_path(manager.certs_dir)
 
+        # When --no-certs is set, tell the bootstrap to force unsecured (HTTP)
+        # mode so it does not pick up any pre-existing certs on disk.
         bootstrap_env_vars = {
-            'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
-            'WEIGHTSLAB_CERTS_DIR_HOST': certs_dir_host,
+            'WEIGHTSLAB_CERTS_DIR': '' if no_certs else certs_dir_str,
+            'WEIGHTSLAB_CERTS_DIR_HOST': '' if no_certs else certs_dir_host,
             'WEIGHTSLAB_ROOT': weightslab_root
         }
+        script_args = []
+        if no_certs:
+            script_args.append('--unsecure')
+        if getattr(args, "dev", False):
+            script_args.append('--dev')
         logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
         logger.info(f"WEIGHTSLAB_CERTS_DIR_HOST={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR_HOST']}")
         logger.info(f"WEIGHTSLAB_ROOT={bootstrap_env_vars['WEIGHTSLAB_ROOT']}")
-        exit_code = _run_shell_script(bootstrap_script, [], bootstrap_env_vars)
+        exit_code = _run_shell_script(bootstrap_script, script_args, bootstrap_env_vars)
         if exit_code != 0:
             logger.warning(f"Bootstrap script exited with code {exit_code}, continuing anyway...")
     else:
@@ -301,7 +474,10 @@ def ui_launch(args):
     # docker compose gives an exported env var precedence over .env. Force the
     # host-native certs path here so our compose call below bind-mounts the real
     # folder (a stray /mnt/c value would mount an empty dir and crash Envoy).
-    os.environ["WEIGHTSLAB_CERTS_DIR"] = _to_docker_host_path(manager.certs_dir)
+    if no_certs:
+        os.environ.pop("WEIGHTSLAB_CERTS_DIR", None)
+    else:
+        os.environ["WEIGHTSLAB_CERTS_DIR"] = _to_docker_host_path(manager.certs_dir)
 
     _compose_cmd(
         _get_compose_file(),
@@ -309,19 +485,24 @@ def ui_launch(args):
         ["up", "-d", "--pull", "always"],
     )
     port = os.environ.get("VITE_PORT", "5173")
-    logger.info(f"Weights Studio UI is running at: https://localhost:{port}")
+    protocol = "http" if no_certs else "https"
+    logger.info(f"Weights Studio UI is running at: {protocol}://localhost:{port}")
 
 
 def ui_secure_environment(args):
     """Generate TLS certificates and gRPC auth token (one-time setup)."""
     logger.info("Setting up secure environment...")
 
-    exit_code = _generate_certs_with_fallback(force_certs=args.force_certs)
+    force_certs = getattr(args, "force_certs", False)
+    no_auth = getattr(args, "no_auth", False)
+    certs_dir = getattr(args, "certs_dir", None)
+
+    exit_code = _generate_certs_with_fallback(force_certs=force_certs)
     if exit_code != 0:
         logger.error("Certificate generation failed")
         sys.exit(1)
 
-    manager = CertAuthManager(certs_dir=args.certs_dir, enable_auth=not args.no_auth)
+    manager = CertAuthManager(certs_dir=certs_dir, enable_auth=not no_auth)
 
     # Ensure certs directory exists
     manager.certs_dir.mkdir(parents=True, exist_ok=True)
@@ -339,6 +520,12 @@ def ui_secure_environment(args):
     logger.info("✓ Certificates generated successfully")
     logger.info("✓ gRPC auth token created")
     logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
+    logger.info("")
+    logger.info("These variables are exported for this process only. To persist")
+    logger.info("them across shells, set WEIGHTSLAB_CERTS_DIR yourself, e.g.:")
+    logger.info(f"   (bash)    echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc")
+    logger.info(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
+    logger.info("Then launch the UI with: weightslab ui launch")
 
 
 def ui_docker_secure_environment(args):
@@ -503,10 +690,13 @@ def docker_info(args):
         logger.info(f"{key}={value}")
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argument parser (banner + detailed command reference)."""
     parser = argparse.ArgumentParser(
         prog="weightslab",
-        description="WeightsLab Docker Management",
+        description=_DESCRIPTION,
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -521,10 +711,16 @@ def main():
     ui_parser = sub.add_parser("ui", help="Manage Weights Studio UI and Docker")
     ui_sub = ui_parser.add_subparsers(dest="action")
 
-    # Legacy UI-only commands
-    ui_sub.add_parser("launch", help="Pull images and start the UI (legacy)")
-    ui_sub.add_parser("stop", help="Stop the UI containers (legacy)")
-    ui_sub.add_parser("drop", help="Stop containers and remove images (legacy)")
+    # Primary launch: generate certs if missing, clean stale Docker state, launch
+    launch_ui_parser = ui_sub.add_parser(
+        "launch", help="Generate certs if missing, clean stale Docker state, then launch the UI")
+    launch_ui_parser.add_argument('--no-certs', action='store_true', help='Run unsecured (HTTP, no gRPC auth); do not generate or use certs')
+    launch_ui_parser.add_argument('--no-auth', action='store_true', help='Use TLS without a gRPC auth token')
+    launch_ui_parser.add_argument('--force-certs', action='store_true', help='Regenerate certificates before launching')
+    launch_ui_parser.add_argument('--no-clean', action='store_true', help='Skip the stale Docker resource cleanup step')
+    launch_ui_parser.add_argument('--dev', action='store_true', help='Use the dev compose overlay')
+    ui_sub.add_parser("stop", help="Stop the UI containers")
+    ui_sub.add_parser("drop", help="Stop containers and remove images")
 
     # Docker commands under UI
     docker_parser = ui_sub.add_parser("docker", help="Manage Docker with UI")
@@ -551,6 +747,11 @@ def main():
 
     sub.add_parser("help", help="Show this help message")
 
+    return parser, ui_parser, docker_parser
+
+
+def main():
+    parser, ui_parser, docker_parser = _build_parser()
     args = parser.parse_args()
 
     ui_actions = {
