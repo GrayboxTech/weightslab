@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import sys
 import socket
-import time
 import logging
 from pathlib import Path
 
@@ -69,38 +68,25 @@ _DESCRIPTION = (
 
 _EPILOG = """\
 commands:
-  se [DIR]                 Set up the secure environment: generate TLS
-                           certificates + a gRPC auth token and export the
-                           matching environment variables.
+  se                       Set up the secure environment: generate TLS
+                           certificates + a gRPC auth token in
+                           ~/.weightslab-certs and export WEIGHTSLAB_CERTS_DIR.
                              --force-certs   regenerate even if certs exist
-                             --no-auth       TLS only, skip the gRPC token
 
   ui launch                Generate certificates if missing, purge stale
                            weightslab/weights_studio Docker resources, then
                            build & start the UI stack.
                              --no-certs      run unsecured (HTTP, no auth)
-                             --no-auth       TLS without a gRPC auth token
-                             --force-certs   regenerate certs before launch
-                             --no-clean      skip the stale-resource cleanup
-                             --dev           use the dev compose overlay
-  ui stop                  Stop the UI containers (images are kept).
-  ui drop                  Stop and remove containers, networks, and images.
 
-  ui docker se             Set up the secure env AND launch in one step.
-  ui docker launch         Launch using existing certs (no generation).
-  ui docker stop           Stop the Docker containers.
-  ui docker info           Show the current certs / Docker configuration.
-
-  example start            Run the bundled classification (cls) example
+  start example            Run the bundled classification (cls) example
                            (foreground; stop with Ctrl+C).
 
 examples:
   weightslab se                       # one-time secure setup
+  weightslab se --force-certs         # regenerate the certs
   weightslab ui launch                # certs-if-missing + clean + launch
   weightslab ui launch --no-certs     # unsecured launch (HTTP)
-  weightslab ui launch --force-certs  # regenerate certs, then launch
-  weightslab example start            # run the classification demo
-  weightslab ui stop                  # stop the UI
+  weightslab start example            # run the classification demo
 """
 
 
@@ -585,168 +571,6 @@ def ui_secure_environment(args):
     logger.info("Then launch the UI with: weightslab ui launch")
 
 
-def ui_docker_secure_environment(args):
-    """Setup secure environment AND launch Docker (both in one command)."""
-    logger.info("Setting up secure environment...")
-
-    no_auth = getattr(args, "no_auth", False)
-    force_certs = getattr(args, "force_certs", False)
-    manager = CertAuthManager.from_env_or_default(enable_auth=not no_auth)
-
-    exit_code = _generate_certs_with_fallback(force_certs=force_certs, certs_dir=manager.certs_dir)
-    if exit_code == 0:
-        # Ensure certs directory exists and the token is present.
-        manager.certs_dir.mkdir(parents=True, exist_ok=True)
-        manager.get_or_create_auth_token()
-
-        # Export ONLY the single source of truth; TLS/auth are derived from the
-        # files by ui_launch_secure / the deploy pipeline.
-        os.environ["WEIGHTSLAB_CERTS_DIR"] = str(manager.certs_dir)
-
-        logger.info("✓ Certificates and auth token generated successfully")
-        logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
-    else:
-        logger.warning("Certificate generation failed")
-        logger.warning("Launching Docker in unsecured mode...")
-
-    # Launch Docker regardless of secure setup success (non-blocking fallback)
-    logger.info("\nLaunching Docker stack...")
-    ui_launch_secure(args)
-
-
-def ui_launch_secure(args):
-    """Launch with secured TLS and gRPC auth (if certs exist)."""
-    logger.info("Launching Weights Studio...")
-
-    # Force unsecured mode if --unsecure flag is set
-    if hasattr(args, 'unsecure') and args.unsecure:
-        logger.info("⚠ Forcing unsecured mode (HTTP, no auth)")
-        ui_launch(args)
-        return
-
-    # Check for existing certificates (no generation)
-    manager = CertAuthManager.from_env_or_default(enable_auth=not args.no_auth)
-    success, msg = manager.check_and_apply()
-
-    if not success:
-        logger.warning(f"Secure certs not found — falling back to unsecured mode")
-        logger.warning("To set up security, run: weightslab se")
-        ui_launch(args)
-        return
-
-    logger.info("✓ Secure environment configured")
-
-    # Prepare bootstrap script arguments
-    script_args = []
-    if args.no_auth:
-        script_args.append('-no_auth_token')
-    if args.dev:
-        script_args.append('-dev')
-
-    # Run bootstrap script
-    bootstrap_script = str(_get_bootstrap_script())
-    if not Path(bootstrap_script).exists():
-        logger.error(f"Bootstrap script not found: {bootstrap_script}")
-        sys.exit(1)
-
-    logger.info("Running bootstrap script...")
-    logger.info(f"Bootstrap script path: {bootstrap_script}")
-    logger.info(f"Bootstrap script args: {script_args}")
-    # Convert Windows path to Unix-style for bash
-    certs_dir_str = str(manager.certs_dir)
-    if _is_windows() and '\\' in certs_dir_str:
-        certs_dir_str = _convert_to_git_bash_path(certs_dir_str)
-        logger.info(f"Converted path to Unix-style: {certs_dir_str}")
-
-    # Calculate WEIGHTSLAB_ROOT (parent of weightslab package)
-    weightslab_root = str(Path(__file__).parent.parent)
-    if _is_windows() and '\\' in weightslab_root:
-        weightslab_root = _convert_to_git_bash_path(weightslab_root)
-
-    # Docker Desktop (Windows) bind mounts need a host-native path
-    # (e.g. C:/Users/...), NOT the /mnt/c Unix path used for the bash script's
-    # own file checks. as_posix() yields C:/... on Windows and a normal
-    # /abs/path on Linux/macOS — correct for docker compose on every platform.
-    # The bash script writes this into .env for the compose mount.
-    certs_dir_host = _to_docker_host_path(manager.certs_dir)
-
-    bootstrap_env_vars = {
-        'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
-        'WEIGHTSLAB_CERTS_DIR_HOST': certs_dir_host,
-        'WEIGHTSLAB_ROOT': weightslab_root
-    }
-    logger.info(f"WEIGHTSLAB_CERTS_DIR={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR']}")
-    logger.info(f"WEIGHTSLAB_CERTS_DIR_HOST={bootstrap_env_vars['WEIGHTSLAB_CERTS_DIR_HOST']}")
-    logger.info(f"WEIGHTSLAB_ROOT={bootstrap_env_vars['WEIGHTSLAB_ROOT']}")
-    exit_code = _run_shell_script(bootstrap_script, script_args, bootstrap_env_vars)
-    if exit_code != 0:
-        logger.error(f"Bootstrap script failed with exit code {exit_code}")
-        sys.exit(exit_code)
-
-    logger.info("✓ Docker stack launched successfully")
-
-    # Test communication if requested
-    if args.test:
-        time.sleep(2)
-        logger.info("Testing backend-UI communication...")
-        if _test_backend_connection():
-            logger.info("✓ Backend server is reachable")
-        else:
-            logger.warning(
-                "Backend server not reachable at localhost:50051. "
-                "Ensure backend is running."
-            )
-
-
-def ui_stop(args):
-    """Stop UI containers (keeps images)."""
-    _check_docker()
-    _compose_cmd(
-        _get_compose_file(),
-        _get_envoy_config(),
-        ["stop"],
-    )
-    logger.info("Weights Studio UI stopped.")
-
-
-def ui_drop(args):
-    """Stop and remove containers, networks, and images."""
-    _check_docker()
-    _compose_cmd(
-        _get_compose_file(),
-        _get_envoy_config(),
-        ["down", "--rmi", "all"],
-    )
-    logger.info("Weights Studio UI containers and images removed.")
-
-
-def docker_launch_secure(args):
-    """Launch Docker with PowerShell bootstrap (Windows only)."""
-    ui_launch_secure(args)
-
-
-def docker_stop(args):
-    """Stop Docker containers."""
-    ui_stop(args)
-
-
-def docker_info(args):
-    """Show Docker configuration."""
-    manager = CertAuthManager.from_env_or_default()
-
-    logger.info("=== Weights Studio Docker Configuration ===")
-    logger.info(f"Certificates directory: {manager.certs_dir}")
-    logger.info(f"Certificates exist: {manager.has_valid_certs()}")
-    logger.info(f"Auth enabled: {manager.enable_auth}")
-
-    logger.info("\n=== Environment Variables ===")
-    tls_env = manager.setup_tls_environment()
-    auth_env = manager.setup_auth_environment()
-
-    for key, value in {**tls_env, **auth_env}.items():
-        logger.info(f"{key}={value}")
-
-
 def _get_example_dir(name: str = "ws-classification") -> Path:
     """Path to a bundled PyTorch example directory."""
     return Path(__file__).parent / 'examples' / 'PyTorch' / name
@@ -779,7 +603,14 @@ def example_start(args):
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the top-level argument parser (banner + detailed command reference)."""
+    """Build the top-level argument parser (banner + detailed command reference).
+
+    The CLI is intentionally minimal — exactly these commands:
+        weightslab --help | -h | help
+        weightslab se [--force-certs]
+        weightslab ui launch [--no-certs]
+        weightslab start example
+    """
     parser = argparse.ArgumentParser(
         prog="weightslab",
         description=_DESCRIPTION,
@@ -788,98 +619,45 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    # Top-level secure environment command (shortcut)
-    se_parser = sub.add_parser("se", aliases=["secured_environment"],
-                               help="Setup secure environment (TLS certs and gRPC auth token)")
-    se_parser.add_argument('certs_dir', nargs='?', default=None, help='Directory to store certificates (default: ~/.weightslab-certs)')
-    se_parser.add_argument('--no-auth', action='store_true', help='Skip gRPC auth token generation')
-    se_parser.add_argument('--force-certs', action='store_true', help='Regenerate certs even if they exist')
+    # weightslab se [--force-certs]
+    se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
+    se_parser.add_argument('--force-certs', action='store_true', help='Regenerate certificates even if they already exist')
 
-    # UI commands
-    ui_parser = sub.add_parser("ui", help="Manage Weights Studio UI and Docker")
+    # weightslab ui launch [--no-certs]
+    ui_parser = sub.add_parser("ui", help="Manage the Weights Studio UI")
     ui_sub = ui_parser.add_subparsers(dest="action")
-
-    # Primary launch: generate certs if missing, clean stale Docker state, launch
     launch_ui_parser = ui_sub.add_parser(
         "launch", help="Generate certs if missing, clean stale Docker state, then launch the UI")
     launch_ui_parser.add_argument('--no-certs', action='store_true', help='Run unsecured (HTTP, no gRPC auth); do not generate or use certs')
-    launch_ui_parser.add_argument('--no-auth', action='store_true', help='Use TLS without a gRPC auth token')
-    launch_ui_parser.add_argument('--force-certs', action='store_true', help='Regenerate certificates before launching')
-    launch_ui_parser.add_argument('--no-clean', action='store_true', help='Skip the stale Docker resource cleanup step')
-    launch_ui_parser.add_argument('--dev', action='store_true', help='Use the dev compose overlay')
-    ui_sub.add_parser("stop", help="Stop the UI containers")
-    ui_sub.add_parser("drop", help="Stop containers and remove images")
 
-    # Docker commands under UI
-    docker_parser = ui_sub.add_parser("docker", help="Manage Docker with UI")
-    docker_sub = docker_parser.add_subparsers(dest="docker_action")
-
-    # Docker secure environment + launch
-    docker_se_parser = docker_sub.add_parser("se", aliases=["secured_environment"],
-                                             help="Setup secure env + launch Docker (one command)")
-    docker_se_parser.add_argument('--no-auth', action='store_true', help='Skip gRPC auth token generation')
-    docker_se_parser.add_argument('--force-certs', action='store_true', help='Regenerate certs even if they exist')
-    docker_se_parser.add_argument('--dev', action='store_true', help='Use dev configuration')
-    docker_se_parser.add_argument('--test', action='store_true', help='Test backend connection')
-
-    # Docker launch only
-    launch_parser = docker_sub.add_parser("launch", help="Launch Docker (use existing certs or unsecured)")
-    launch_parser.add_argument('--dev', action='store_true', help='Use dev configuration')
-    launch_parser.add_argument('--no-auth', action='store_true', help='Disable auth token')
-    launch_parser.add_argument('--unsecure', action='store_true', help='Force HTTP mode without certs/auth')
-    launch_parser.add_argument('--test', action='store_true', help='Test backend connection')
-
-    # Docker info
-    docker_sub.add_parser("stop", help="Stop Docker containers")
-    docker_sub.add_parser("info", help="Show configuration")
-
-    # Example commands
-    example_parser = sub.add_parser("example", help="Run a bundled WeightsLab example")
-    example_sub = example_parser.add_subparsers(dest="example_action")
-    example_sub.add_parser("start", help="Start the bundled classification (cls) example")
+    # weightslab start example
+    start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
+    start_sub = start_parser.add_subparsers(dest="start_target")
+    start_sub.add_parser("example", help="Start the bundled classification (cls) example")
 
     sub.add_parser("help", help="Show this help message")
 
-    return parser, ui_parser, docker_parser, example_parser
+    return parser, ui_parser, start_parser
 
 
 def main():
-    parser, ui_parser, docker_parser, example_parser = _build_parser()
+    parser, ui_parser, start_parser = _build_parser()
     args = parser.parse_args()
-
-    ui_actions = {
-        "launch": ui_launch,
-        "stop": ui_stop,
-        "drop": ui_drop,
-    }
-
-    docker_actions = {
-        "launch": docker_launch_secure,
-        "stop": docker_stop,
-        "info": docker_info,
-        "se": ui_docker_secure_environment,
-        "secured_environment": ui_docker_secure_environment,
-    }
 
     if args.command == "help" or args.command is None:
         parser.print_help()
-    elif args.command in ("se", "secured_environment"):
+    elif args.command == "se":
         ui_secure_environment(args)
     elif args.command == "ui":
-        if args.action == "docker":
-            if hasattr(args, 'docker_action') and args.docker_action in docker_actions:
-                docker_actions[args.docker_action](args)
-            else:
-                docker_parser.print_help()
-        elif args.action in ui_actions:
-            ui_actions[args.action](args)
+        if getattr(args, "action", None) == "launch":
+            ui_launch(args)
         else:
             ui_parser.print_help()
-    elif args.command == "example":
-        if getattr(args, "example_action", None) == "start":
+    elif args.command == "start":
+        if getattr(args, "start_target", None) == "example":
             example_start(args)
         else:
-            example_parser.print_help()
+            start_parser.print_help()
     else:
         parser.print_help()
 

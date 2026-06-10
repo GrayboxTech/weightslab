@@ -21,15 +21,8 @@ from weightslab.ui_docker_bridge import (
     _STACK_CONTAINERS,
     example_start,
     main,
-    ui_drop,
     ui_launch,
-    ui_stop,
     ui_secure_environment,
-    ui_docker_secure_environment,
-    ui_launch_secure,
-    docker_launch_secure,
-    docker_info,
-    docker_stop,
 )
 
 
@@ -153,25 +146,6 @@ class TestUiLaunch(unittest.TestCase):
         self.assertTrue(any("http://localhost:5173" in msg for msg in log_context.output))
         self.assertFalse(any("https://localhost:5173" in msg for msg in log_context.output))
 
-    @patch("weightslab.ui_docker_bridge.CertAuthManager")
-    @patch("weightslab.ui_docker_bridge._get_bootstrap_script", return_value="/does/not/exist.sh")
-    @patch("weightslab.ui_docker_bridge._run_shell_script", return_value=0)
-    @patch("weightslab.ui_docker_bridge._ensure_certificates", return_value=True)
-    @patch("weightslab.ui_docker_bridge._clean_stale_docker_resources")
-    @patch("weightslab.ui_docker_bridge._compose_cmd")
-    @patch("weightslab.ui_docker_bridge._check_docker")
-    @patch("weightslab.ui_docker_bridge._get_envoy_config", return_value="/fake/envoy.yaml")
-    @patch("weightslab.ui_docker_bridge._get_compose_file", return_value="/fake/docker-compose.yml")
-    def test_launch_no_clean_skips_cleanup(
-        self, _gc, _ge, _mock_check, _mock_compose, mock_clean, _mock_ensure,
-        _mock_shell, _gb, mock_mgr,
-    ):
-        mock_mgr.from_env_or_default.return_value = MagicMock(certs_dir="/fake/certs")
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            ui_launch(argparse.Namespace(no_clean=True))
-        mock_clean.assert_not_called()
-        self.assertTrue(any("Skipping stale Docker resource cleanup" in msg for msg in log_context.output))
-
 
 class TestEnsureCertificates(unittest.TestCase):
     """_ensure_certificates only generates files; it never exports TLS/auth env."""
@@ -266,61 +240,16 @@ class TestCleanStaleDockerResources(unittest.TestCase):
         mock_rmimg.assert_called_once_with(_FRONTEND_IMAGE)
 
 
-class TestUiStop(unittest.TestCase):
-    @patch("weightslab.ui_docker_bridge._compose_cmd")
-    @patch("weightslab.ui_docker_bridge._check_docker")
-    @patch("weightslab.ui_docker_bridge._get_envoy_config", return_value="/fake/envoy.yaml")
-    @patch("weightslab.ui_docker_bridge._get_compose_file", return_value="/fake/docker-compose.yml")
-    def test_stop_prints_message(self, _gc, _ge, _mock_check, mock_compose):
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            ui_stop(argparse.Namespace())
-        mock_compose.assert_called_once_with(
-            "/fake/docker-compose.yml",
-            "/fake/envoy.yaml",
-            ["stop"],
-        )
-        self.assertTrue(any("Weights Studio UI stopped" in msg for msg in log_context.output))
-
-
-class TestUiDrop(unittest.TestCase):
-    @patch("weightslab.ui_docker_bridge._compose_cmd")
-    @patch("weightslab.ui_docker_bridge._check_docker")
-    @patch("weightslab.ui_docker_bridge._get_envoy_config", return_value="/fake/envoy.yaml")
-    @patch("weightslab.ui_docker_bridge._get_compose_file", return_value="/fake/docker-compose.yml")
-    def test_drop_prints_message(self, _gc, _ge, _mock_check, mock_compose):
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            ui_drop(argparse.Namespace())
-        mock_compose.assert_called_once_with(
-            "/fake/docker-compose.yml",
-            "/fake/envoy.yaml",
-            ["down", "--rmi", "all"],
-        )
-        self.assertTrue(any("containers and images removed" in msg for msg in log_context.output))
-
-
 class TestUiSecureEnvironment(unittest.TestCase):
     @patch("weightslab.ui_docker_bridge.CertAuthManager")
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
     def test_ui_secure_environment_success(self, mock_gen_certs, mock_cert_manager):
-        """Test successful secure environment setup."""
-        from unittest.mock import MagicMock
-
-        mock_manager_instance = MagicMock()
-        # Make certs_dir a proper MagicMock that acts like a Path
-        mock_certs_dir = MagicMock()
-        mock_certs_dir.mkdir = MagicMock()
-        mock_manager_instance.certs_dir = mock_certs_dir
-
+        """`weightslab se`: generate certs + token, export WEIGHTSLAB_CERTS_DIR."""
+        mock_manager_instance = MagicMock()       # certs_dir is a MagicMock (supports .mkdir)
         mock_manager_instance.get_or_create_auth_token.return_value = "fake_token"
-        mock_manager_instance.setup_tls_environment.return_value = {"TLS_KEY": "/fake/key"}
-        mock_manager_instance.setup_auth_environment.return_value = {"AUTH_TOKEN": "token123"}
         mock_cert_manager.return_value = mock_manager_instance
 
-        args = argparse.Namespace(
-            certs_dir="/fake/certs",
-            no_auth=False,
-            force_certs=False,
-        )
+        args = argparse.Namespace(force_certs=False)
 
         with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
             ui_secure_environment(args)
@@ -333,248 +262,51 @@ class TestUiSecureEnvironment(unittest.TestCase):
         # se exports WEIGHTSLAB_CERTS_DIR for the process.
         self.assertTrue(any("WEIGHTSLAB_CERTS_DIR exported" in msg for msg in log_context.output))
 
+    @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
+    def test_ui_secure_environment_force_certs(self, mock_gen_certs):
+        """`weightslab se --force-certs` forwards force_certs to generation."""
+        args = argparse.Namespace(force_certs=True)
+        with patch.dict(os.environ, {}, clear=False):
+            ui_secure_environment(args)
+        self.assertTrue(mock_gen_certs.call_args.kwargs["force_certs"])
+
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=1)
     def test_ui_secure_environment_cert_failure(self, mock_gen_certs):
-        """Test secure environment setup failure."""
-        args = argparse.Namespace(
-            certs_dir="/fake/certs",
-            no_auth=False,
-            force_certs=False,
-        )
-
+        """Certificate generation failure exits non-zero."""
+        args = argparse.Namespace(force_certs=False)
         with self.assertRaises(SystemExit) as ctx:
             ui_secure_environment(args)
         self.assertEqual(ctx.exception.code, 1)
 
 
-class TestUiDockerSecureEnvironment(unittest.TestCase):
-    @patch("weightslab.ui_docker_bridge.ui_launch_secure")
-    @patch("weightslab.ui_docker_bridge.CertAuthManager")
-    @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
-    def test_docker_secure_environment_success(self, mock_gen_certs, mock_cert_manager, mock_launch):
-        """Test Docker secure environment setup with successful certs."""
-        mock_manager_instance = MagicMock()
-        # certs_dir should be a Path-like object with mkdir method
-        mock_certs_dir = MagicMock()
-        mock_certs_dir.mkdir = MagicMock()
-        mock_manager_instance.certs_dir = mock_certs_dir
-        mock_manager_instance.setup_tls_environment.return_value = {"TLS_KEY": "/fake/key"}
-        mock_manager_instance.setup_auth_environment.return_value = {"AUTH_TOKEN": "token123"}
-        mock_cert_manager.from_env_or_default.return_value = mock_manager_instance
-
-        args = argparse.Namespace(
-            no_auth=False,
-            force_certs=False,
-            dev=False,
-            test=False,
-        )
-
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            ui_docker_secure_environment(args)
-
-        self.assertTrue(any("Certificates and auth token generated" in msg for msg in log_context.output))
-        mock_launch.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.ui_launch_secure")
-    @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=1)
-    def test_docker_secure_environment_cert_failure_fallback(self, mock_gen_certs, mock_launch):
-        """Test Docker secure environment falls back to unsecured launch on cert failure."""
-        args = argparse.Namespace(
-            no_auth=False,
-            force_certs=False,
-            dev=False,
-            test=False,
-        )
-
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            ui_docker_secure_environment(args)
-
-        self.assertTrue(any("Certificate generation failed" in msg for msg in log_context.output))
-        self.assertTrue(any("unsecured mode" in msg for msg in log_context.output))
-        mock_launch.assert_called_once()
-
-
-class TestUiLaunchSecure(unittest.TestCase):
-    @patch("weightslab.ui_docker_bridge._run_shell_script", return_value=0)
-    @patch("weightslab.ui_docker_bridge.Path")
-    @patch("weightslab.ui_docker_bridge._get_bootstrap_script")
-    @patch("weightslab.ui_docker_bridge.CertAuthManager")
-    @patch("weightslab.ui_docker_bridge.ui_launch")
-    def test_launch_secure_with_valid_certs(self, mock_ui_launch, mock_cert_manager,
-                                             mock_bootstrap_script, mock_path, mock_run_shell):
-        """Test launching with secure certs on Windows."""
-        mock_manager_instance = MagicMock()
-        mock_manager_instance.check_and_apply.return_value = (True, "Secure env ready")
-        mock_cert_manager.from_env_or_default.return_value = mock_manager_instance
-        mock_bootstrap_script.return_value = "/fake/bootstrap.ps1"
-
-        # Mock Path.exists() to return True for the bootstrap script
-        mock_path_instance = MagicMock()
-        mock_path_instance.exists.return_value = True
-        mock_path.return_value = mock_path_instance
-
-        args = argparse.Namespace(
-            no_auth=False,
-            dev=False,
-            test=False,
-            unsecure=False,
-        )
-
-        with patch("weightslab.ui_docker_bridge._is_windows", return_value=True):
-            with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-                ui_launch_secure(args)
-
-        self.assertTrue(any("✓ Secure environment configured" in msg for msg in log_context.output))
-
-    @patch("weightslab.ui_docker_bridge.ui_launch")
-    @patch("weightslab.ui_docker_bridge.CertAuthManager")
-    def test_launch_secure_with_unsecure_flag(self, mock_cert_manager, mock_ui_launch):
-        """Test launching with --unsecure flag bypasses cert check."""
-        args = argparse.Namespace(
-            unsecure=True,
-            no_auth=False,
-            dev=False,
-            test=False,
-        )
-
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            ui_launch_secure(args)
-
-        self.assertTrue(any("Forcing unsecured mode" in msg for msg in log_context.output))
-        mock_ui_launch.assert_called_once_with(args)
-
-    @patch("weightslab.ui_docker_bridge.ui_launch")
-    @patch("weightslab.ui_docker_bridge.CertAuthManager")
-    def test_launch_secure_without_certs_fallback(self, mock_cert_manager, mock_ui_launch):
-        """Test launching without certs falls back to unsecured mode."""
-        mock_manager_instance = MagicMock()
-        mock_manager_instance.check_and_apply.return_value = (False, "Certs not found")
-        mock_cert_manager.from_env_or_default.return_value = mock_manager_instance
-
-        args = argparse.Namespace(
-            unsecure=False,
-            no_auth=False,
-            dev=False,
-            test=False,
-        )
-
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            ui_launch_secure(args)
-
-        self.assertTrue(any("Secure certs not found" in msg for msg in log_context.output))
-        self.assertTrue(any("falling back to unsecured mode" in msg for msg in log_context.output))
-        mock_ui_launch.assert_called_once_with(args)
-
-
-class TestDockerLaunchSecure(unittest.TestCase):
-    @patch("weightslab.ui_docker_bridge.ui_launch_secure")
-    def test_docker_launch_secure(self, mock_launch_secure):
-        """Test docker_launch_secure delegates to ui_launch_secure."""
-        args = argparse.Namespace(
-            dev=False,
-            no_auth=False,
-            test=False,
-        )
-        docker_launch_secure(args)
-        mock_launch_secure.assert_called_once_with(args)
-
-
-class TestDockerStop(unittest.TestCase):
-    @patch("weightslab.ui_docker_bridge.ui_stop")
-    def test_docker_stop(self, mock_ui_stop):
-        """Test docker_stop delegates to ui_stop."""
-        args = argparse.Namespace()
-        docker_stop(args)
-        mock_ui_stop.assert_called_once_with(args)
-
-
-class TestDockerInfo(unittest.TestCase):
-    @patch("weightslab.ui_docker_bridge.CertAuthManager")
-    def test_docker_info(self, mock_cert_manager):
-        """Test docker_info displays configuration."""
-        mock_manager_instance = MagicMock()
-        mock_manager_instance.certs_dir = "/fake/certs"
-        mock_manager_instance.has_valid_certs.return_value = True
-        mock_manager_instance.enable_auth = True
-        mock_manager_instance.setup_tls_environment.return_value = {"TLS_KEY": "/fake/key"}
-        mock_manager_instance.setup_auth_environment.return_value = {"AUTH_TOKEN": "token123"}
-        mock_cert_manager.from_env_or_default.return_value = mock_manager_instance
-
-        args = argparse.Namespace()
-
-        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
-            docker_info(args)
-
-        self.assertTrue(any("Weights Studio Docker Configuration" in msg for msg in log_context.output))
-        self.assertTrue(any("/fake/certs" in msg for msg in log_context.output))
-
-
-
-
 class TestMainCLI(unittest.TestCase):
+    """The CLI exposes exactly: se, ui launch, start example, help."""
+
+    @patch("weightslab.ui_docker_bridge.ui_secure_environment")
+    def test_main_dispatches_se(self, mock_se):
+        with patch("sys.argv", ["weightslab", "se"]):
+            main()
+        mock_se.assert_called_once()
+
     @patch("weightslab.ui_docker_bridge.ui_launch")
     def test_main_dispatches_ui_launch(self, mock_launch):
         with patch("sys.argv", ["weightslab", "ui", "launch"]):
             main()
         mock_launch.assert_called_once()
 
-    @patch("weightslab.ui_docker_bridge.ui_stop")
-    def test_main_dispatches_ui_stop(self, mock_stop):
-        with patch("sys.argv", ["weightslab", "ui", "stop"]):
-            main()
-        mock_stop.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.ui_drop")
-    def test_main_dispatches_ui_drop(self, mock_drop):
-        with patch("sys.argv", ["weightslab", "ui", "drop"]):
-            main()
-        mock_drop.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.ui_secure_environment")
-    def test_main_dispatches_secure_environment(self, mock_se):
-        """Test 'se' command (secured environment)."""
-        with patch("sys.argv", ["weightslab", "se"]):
-            main()
-        mock_se.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.ui_docker_secure_environment")
-    def test_main_dispatches_docker_secure_environment(self, mock_docker_se):
-        """Test 'ui docker se' command."""
-        with patch("sys.argv", ["weightslab", "ui", "docker", "se"]):
-            main()
-        mock_docker_se.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.docker_launch_secure")
-    def test_main_dispatches_docker_launch(self, mock_launch):
-        """Test 'ui docker launch' command."""
-        with patch("sys.argv", ["weightslab", "ui", "docker", "launch"]):
-            main()
-        mock_launch.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.docker_stop")
-    def test_main_dispatches_docker_stop(self, mock_stop):
-        """Test 'ui docker stop' command."""
-        with patch("sys.argv", ["weightslab", "ui", "docker", "stop"]):
-            main()
-        mock_stop.assert_called_once()
-
-    @patch("weightslab.ui_docker_bridge.docker_info")
-    def test_main_dispatches_docker_info(self, mock_info):
-        """Test 'ui docker info' command."""
-        with patch("sys.argv", ["weightslab", "ui", "docker", "info"]):
-            main()
-        mock_info.assert_called_once()
-
     @patch("weightslab.ui_docker_bridge.example_start")
-    def test_main_dispatches_example_start(self, mock_example):
-        """Test 'example start' command."""
-        with patch("sys.argv", ["weightslab", "example", "start"]):
+    def test_main_dispatches_start_example(self, mock_example):
+        with patch("sys.argv", ["weightslab", "start", "example"]):
             main()
         mock_example.assert_called_once()
 
-    def test_main_example_without_action_does_not_crash(self):
-        with patch("sys.argv", ["weightslab", "example"]):
-            main()  # should print example help, not raise
+    def test_main_ui_without_action_does_not_crash(self):
+        with patch("sys.argv", ["weightslab", "ui"]):
+            main()  # should print ui help, not raise
+
+    def test_main_start_without_target_does_not_crash(self):
+        with patch("sys.argv", ["weightslab", "start"]):
+            main()  # should print start help, not raise
 
     def test_main_help_does_not_crash(self):
         with patch("sys.argv", ["weightslab", "help"]):
@@ -584,159 +316,99 @@ class TestMainCLI(unittest.TestCase):
         with patch("sys.argv", ["weightslab"]):
             main()  # should not raise
 
+    def test_removed_commands_are_rejected(self):
+        """Commands that were removed must no longer be accepted by the parser."""
+        for argv in (
+            ["weightslab", "ui", "stop"],
+            ["weightslab", "ui", "drop"],
+            ["weightslab", "ui", "docker", "launch"],
+            ["weightslab", "ui", "docker", "se"],
+            ["weightslab", "example", "start"],   # old order, now invalid
+        ):
+            with patch("sys.argv", argv):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertNotEqual(ctx.exception.code, 0, argv)
+
 
 class TestUserOnboardingFlow(unittest.TestCase):
-    """Integration-like tests for the user onboarding flow."""
+    """Integration-like test of the full onboarding flow, fully hermetic."""
 
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
     @patch("weightslab.ui_docker_bridge._compose_cmd")
     @patch("weightslab.ui_docker_bridge._check_docker")
     @patch("weightslab.ui_docker_bridge._run_shell_script", return_value=0)
+    @patch("weightslab.ui_docker_bridge._clean_stale_docker_resources")
+    @patch("weightslab.ui_docker_bridge._ensure_certificates", return_value=True)
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
     @patch("weightslab.ui_docker_bridge.CertAuthManager")
-    def test_complete_onboarding_workflow(self, mock_cert_manager, mock_gen_certs,
-                                          mock_run_shell, mock_check, mock_compose):
-        """A complete onboarding flow: setup -> launch -> check -> stop, hermetic.
+    def test_complete_onboarding_workflow(
+        self, mock_cert_manager, mock_gen, mock_ensure, mock_clean,
+        mock_shell, mock_check, mock_compose, mock_subproc,
+    ):
+        """se -> ui launch -> start example, with no real Docker/daemon/subprocess."""
+        mgr = MagicMock()
+        mock_cert_manager.return_value = mgr
+        mock_cert_manager.from_env_or_default.return_value = mgr
+        mock_subproc.return_value = MagicMock(returncode=0)
 
-        Low-level Docker (`_compose_cmd`, `_check_docker`) and the bootstrap
-        (`_run_shell_script`) are mocked so nothing touches a real daemon.
-        """
-        mock_manager_instance = MagicMock()  # certs_dir is a MagicMock (supports .mkdir)
-        mock_manager_instance.check_and_apply.return_value = (True, "Secure env ready")
-        mock_cert_manager.return_value = mock_manager_instance
-        mock_cert_manager.from_env_or_default.return_value = mock_manager_instance
-
-        args_se = argparse.Namespace(certs_dir=None, no_auth=False, force_certs=False)
-        args_launch = argparse.Namespace(
-            no_auth=False, force_certs=False, dev=False, test=False, unsecure=False)
-        args_info = argparse.Namespace()
-        args_stop = argparse.Namespace()
-
-        # Isolate os.environ — `se` exports WEIGHTSLAB_CERTS_DIR for the process.
         with patch.dict(os.environ, {}, clear=False):
             try:
-                ui_secure_environment(args_se)
-                docker_launch_secure(args_launch)
-                docker_info(args_info)
-                docker_stop(args_stop)
+                ui_secure_environment(argparse.Namespace(force_certs=False))
+                ui_launch(argparse.Namespace())
+                example_start(argparse.Namespace())
             except Exception as e:
                 self.fail(f"Onboarding workflow failed: {e}")
 
-    @patch("sys.argv", ["weightslab", "se"])
+    @patch("sys.argv", ["weightslab", "se", "--force-certs"])
     @patch("weightslab.ui_docker_bridge.ui_secure_environment")
-    def test_cli_secure_environment_command(self, mock_se):
-        """Test CLI command: weightslab se"""
+    def test_cli_se_force_certs(self, mock_se):
         main()
         mock_se.assert_called_once()
-
-    @patch("sys.argv", ["weightslab", "ui", "docker", "launch", "--test"])
-    @patch("weightslab.ui_docker_bridge.docker_launch_secure")
-    def test_cli_docker_launch_with_test(self, mock_launch):
-        """Test CLI command: weightslab ui docker launch --test"""
-        main()
-        mock_launch.assert_called_once()
-        # Verify --test flag was passed
-        call_args = mock_launch.call_args[0][0]
-        self.assertTrue(call_args.test)
-
-    @patch("sys.argv", ["weightslab", "ui", "docker", "info"])
-    @patch("weightslab.ui_docker_bridge.docker_info")
-    def test_cli_docker_info_command(self, mock_info):
-        """Test CLI command: weightslab ui docker info"""
-        main()
-        mock_info.assert_called_once()
-
-    @patch("sys.argv", ["weightslab", "ui", "docker", "launch", "--unsecure"])
-    @patch("weightslab.ui_docker_bridge.docker_launch_secure")
-    def test_cli_docker_launch_unsecure(self, mock_launch):
-        """Test CLI command: weightslab ui docker launch --unsecure"""
-        main()
-        mock_launch.assert_called_once()
-        call_args = mock_launch.call_args[0][0]
-        self.assertTrue(call_args.unsecure)
-
-    @patch("sys.argv", ["weightslab", "ui", "docker", "se", "--force-certs"])
-    @patch("weightslab.ui_docker_bridge.ui_docker_secure_environment")
-    def test_cli_docker_secure_environment_with_force_certs(self, mock_docker_se):
-        """Test CLI command: weightslab ui docker se --force-certs"""
-        main()
-        mock_docker_se.assert_called_once()
-        call_args = mock_docker_se.call_args[0][0]
-        self.assertTrue(call_args.force_certs)
+        self.assertTrue(mock_se.call_args.args[0].force_certs)
 
 
 class TestBackendConnectionDetection(unittest.TestCase):
-    """Test backend connection detection functionality."""
+    """Test backend connection detection utility."""
 
     @patch("socket.socket")
     def test_backend_connection_success(self, mock_socket_class):
-        """Test successful backend connection detection."""
         from weightslab.ui_docker_bridge import _test_backend_connection
-
         mock_socket = MagicMock()
         mock_socket.connect_ex.return_value = 0
         mock_socket_class.return_value = mock_socket
-
-        result = _test_backend_connection()
-        self.assertTrue(result)
+        self.assertTrue(_test_backend_connection())
 
     @patch("socket.socket")
     def test_backend_connection_failure(self, mock_socket_class):
-        """Test failed backend connection detection."""
         from weightslab.ui_docker_bridge import _test_backend_connection
-
         mock_socket = MagicMock()
-        mock_socket.connect_ex.return_value = 1  # Connection refused
+        mock_socket.connect_ex.return_value = 1
         mock_socket_class.return_value = mock_socket
-
-        result = _test_backend_connection()
-        self.assertFalse(result)
+        self.assertFalse(_test_backend_connection())
 
     @patch("socket.socket")
     def test_backend_connection_timeout(self, mock_socket_class):
-        """Test backend connection timeout handling."""
         from weightslab.ui_docker_bridge import _test_backend_connection
-
         mock_socket = MagicMock()
         mock_socket.connect_ex.side_effect = Exception("Connection timeout")
         mock_socket_class.return_value = mock_socket
-
-        result = _test_backend_connection()
-        self.assertFalse(result)
-
-    @patch("socket.socket")
-    def test_backend_connection_with_custom_host_port(self, mock_socket_class):
-        """Test backend connection with custom host and port."""
-        from weightslab.ui_docker_bridge import _test_backend_connection
-
-        mock_socket = MagicMock()
-        mock_socket.connect_ex.return_value = 0
-        mock_socket_class.return_value = mock_socket
-
-        result = _test_backend_connection(host='192.168.1.1', port=8080, timeout=10.0)
-        self.assertTrue(result)
-        mock_socket.connect_ex.assert_called_once_with(('192.168.1.1', 8080))
-        mock_socket.settimeout.assert_called_once_with(10.0)
+        self.assertFalse(_test_backend_connection())
 
 
 class TestPathConversion(unittest.TestCase):
     """Test Windows path to Git Bash conversion."""
 
     def test_windows_path_conversion(self):
-        """Test converting Windows path to Git Bash format."""
         from weightslab.ui_docker_bridge import _convert_to_git_bash_path
-
-        # Test Windows path
         win_path = r"C:\Users\testuser\.weightslab-certs"
         bash_path = _convert_to_git_bash_path(win_path)
         self.assertEqual(bash_path, "/mnt/c/Users/testuser/.weightslab-certs")
 
     def test_unix_path_passthrough(self):
-        """Test Unix paths pass through unchanged."""
         from weightslab.ui_docker_bridge import _convert_to_git_bash_path
-
         unix_path = "/home/testuser/.weightslab-certs"
-        bash_path = _convert_to_git_bash_path(unix_path)
-        self.assertEqual(bash_path, "/home/testuser/.weightslab-certs")
+        self.assertEqual(_convert_to_git_bash_path(unix_path), unix_path)
 
 
 class TestSingleSourceOfTruth(unittest.TestCase):
@@ -753,7 +425,6 @@ class TestSingleSourceOfTruth(unittest.TestCase):
     def test_generate_certs_forwards_certs_dir(self, mock_shell):
         rc = _generate_certs_with_fallback(force_certs=False, certs_dir="/custom/certs")
         self.assertEqual(rc, 0)
-        # The certs dir is forwarded to the generation script as WEIGHTSLAB_CERTS_DIR.
         env_vars = mock_shell.call_args.args[2]
         self.assertIsInstance(env_vars, dict)
         self.assertIn("WEIGHTSLAB_CERTS_DIR", env_vars)
@@ -761,7 +432,6 @@ class TestSingleSourceOfTruth(unittest.TestCase):
 
     @patch("weightslab.ui_docker_bridge._run_shell_script", return_value=0)
     def test_generate_certs_without_dir_passes_no_env(self, mock_shell):
-        # No certs_dir -> scripts fall back to their ~/.weightslab-certs default.
         _generate_certs_with_fallback(force_certs=False)
         self.assertIsNone(mock_shell.call_args.args[2])
 
@@ -807,7 +477,7 @@ class TestSingleSourceOfTruth(unittest.TestCase):
 
 
 class TestExampleStart(unittest.TestCase):
-    """`weightslab example start` runs the bundled classification example."""
+    """`weightslab start example` runs the bundled classification example."""
 
     @patch("weightslab.ui_docker_bridge.subprocess.run")
     def test_example_start_runs_classification(self, mock_run):
@@ -842,7 +512,7 @@ class TestExampleStart(unittest.TestCase):
 
 
 class TestBannerAndHelp(unittest.TestCase):
-    """`weightslab`, `weightslab help`, `-h`, `--help` should show banner + commands."""
+    """`weightslab`, `weightslab help`, `-h`, `--help` show banner + the command set."""
 
     @staticmethod
     def _capture_main(argv):
@@ -858,8 +528,9 @@ class TestBannerAndHelp(unittest.TestCase):
     def test_dash_h_shows_banner_and_command_reference(self):
         out = self._capture_main(["weightslab", "-h"])
         self.assertIn("WeightsLab", out)          # tagline from description
-        self.assertIn("ui launch", out)           # command reference
-        self.assertIn("--no-certs", out)          # documented flag
+        self.assertIn("ui launch", out)
+        self.assertIn("--no-certs", out)
+        self.assertIn("start example", out)
 
     def test_long_help_flag_shows_command_reference(self):
         out = self._capture_main(["weightslab", "--help"])
@@ -868,16 +539,22 @@ class TestBannerAndHelp(unittest.TestCase):
 
     def test_help_subcommand_shows_command_reference(self):
         out = self._capture_main(["weightslab", "help"])
+        self.assertIn("se", out)
         self.assertIn("ui launch", out)
-        self.assertIn("se [DIR]", out)
+        self.assertIn("start example", out)
 
     def test_no_args_shows_command_reference(self):
         out = self._capture_main(["weightslab"])
         self.assertIn("ui launch", out)
 
+    def test_help_does_not_mention_removed_commands(self):
+        out = self._capture_main(["weightslab", "help"])
+        for removed in ("ui stop", "ui drop", "ui docker", "--no-auth", "--no-clean"):
+            self.assertNotIn(removed, out, f"help should not mention removed '{removed}'")
+
 
 class TestLaunchCliFlags(unittest.TestCase):
-    """The `ui launch` subcommand parses the new flags onto the args namespace."""
+    """`ui launch` accepts only --no-certs."""
 
     @patch("weightslab.ui_docker_bridge.ui_launch")
     def test_launch_no_certs_flag_parsed(self, mock_launch):
@@ -887,22 +564,17 @@ class TestLaunchCliFlags(unittest.TestCase):
         self.assertTrue(mock_launch.call_args.args[0].no_certs)
 
     @patch("weightslab.ui_docker_bridge.ui_launch")
-    def test_launch_force_certs_and_no_clean_flags_parsed(self, mock_launch):
-        with patch("sys.argv", ["weightslab", "ui", "launch", "--force-certs", "--no-clean"]):
-            main()
-        mock_launch.assert_called_once()
-        ns = mock_launch.call_args.args[0]
-        self.assertTrue(ns.force_certs)
-        self.assertTrue(ns.no_clean)
-
-    @patch("weightslab.ui_docker_bridge.ui_launch")
-    def test_launch_defaults_are_false(self, mock_launch):
+    def test_launch_default_no_certs_false(self, mock_launch):
         with patch("sys.argv", ["weightslab", "ui", "launch"]):
             main()
-        ns = mock_launch.call_args.args[0]
-        self.assertFalse(ns.no_certs)
-        self.assertFalse(ns.no_clean)
-        self.assertFalse(ns.force_certs)
+        self.assertFalse(mock_launch.call_args.args[0].no_certs)
+
+    def test_launch_removed_flags_are_rejected(self):
+        for flag in ("--no-auth", "--force-certs", "--no-clean", "--dev"):
+            with patch("sys.argv", ["weightslab", "ui", "launch", flag]):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertNotEqual(ctx.exception.code, 0, flag)
 
 
 if __name__ == "__main__":
