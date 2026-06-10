@@ -133,13 +133,17 @@ jobs:
       - name: Install project dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
+          # Install the test extra so pytest, graphviz, torchmetrics,
+          # pytorch-lightning and tensorboard are available (several test modules
+          # import pytest / use pytest fixtures and cannot run under bare unittest).
+          python -m pip install '.[utest]' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install pytest-timeout
 
       - name: Run unit tests - General
         run: |
           export WEIGHTSLAB_LOG_LEVEL="DEBUG"
-          python -m pip install pytorch_lightning
-          python -m unittest discover -s ./weightslab/tests -p "test_*.py" -t . -v
+          # A per-test timeout guards against any regression that hangs a test.
+          python -m pytest ./weightslab/tests -v --timeout=300
 
       # TODO (GP): WL CI do not find WS CI for now; token or visibility problem ??
       # - name: Trigger WeightsStudio CI

@@ -231,7 +231,7 @@ class TestDataLoaderInterface(unittest.TestCase):
 
         calls = {"get_deny_listed_uids": 0}
 
-        def _fake_get_deny_listed_uids():
+        def _fake_get_deny_listed_uids(origin=None):
             calls["get_deny_listed_uids"] += 1
             return set()
 

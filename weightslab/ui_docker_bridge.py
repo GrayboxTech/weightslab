@@ -185,8 +185,11 @@ def _run_powershell_script(script_path: str, args: list = None, env_vars: dict =
 
 def _convert_to_git_bash_path(win_path: str) -> str:
     """Convert Windows path to Git Bash compatible format."""
-    p = Path(win_path).as_posix()
-    # Convert C:/Users/... to /c/Users/... for Git Bash
+    # Normalize backslashes to forward slashes explicitly: Path(...).as_posix()
+    # does NOT convert '\' on POSIX hosts (e.g. Linux CI runners), so a Windows
+    # input path would keep its separators there.
+    p = str(win_path).replace("\\", "/")
+    # Convert C:/Users/... to /mnt/c/Users/... for Git Bash
     if len(p) > 1 and p[1] == ':':
         drive = p[0].lower()
         rest = p[2:]
