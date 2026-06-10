@@ -132,16 +132,20 @@ class TestUiLaunch(unittest.TestCase):
         mock_shell, mock_mgr,
     ):
         # Uses the real (existing) bootstrap path so the --unsecure arg path runs.
-        mock_mgr.from_env_or_default.return_value = MagicMock(certs_dir="/fake/certs")
+        # certs_dir is a MagicMock so the --no-certs mkdir (for a valid mount) works.
+        mock_mgr.from_env_or_default.return_value = MagicMock()
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("VITE_PORT", None)
             with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
                 ui_launch(argparse.Namespace(no_certs=True))
         mock_ensure.assert_not_called()
-        # bootstrap invoked with --unsecure
+        # bootstrap invoked with --unsecure, and a NON-empty certs dir for the mount
         self.assertIsNotNone(mock_shell.call_args)
         script_args = mock_shell.call_args.args[1]
+        bootstrap_env = mock_shell.call_args.args[2]
         self.assertIn("--unsecure", script_args)
+        self.assertTrue(bootstrap_env["WEIGHTSLAB_CERTS_DIR"],
+                        "certs dir must be non-empty so the bind-mount has a real source")
         self.assertTrue(any("http://localhost:5173" in msg for msg in log_context.output))
         self.assertFalse(any("https://localhost:5173" in msg for msg in log_context.output))
 

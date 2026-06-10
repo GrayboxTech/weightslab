@@ -31,8 +31,10 @@ done
 # Check if WEIGHTSLAB_CERTS_DIR was explicitly set to empty string (before applying defaults)
 # This is how the E2E tests disable certs: WEIGHTSLAB_CERTS_DIR=""
 if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "--unsecured flag provided: disabling certs and auth"
-    WEIGHTSLAB_CERTS_DIR=""
+    # Force HTTP / no auth, but KEEP WEIGHTSLAB_CERTS_DIR: the compose bind-mount
+    # needs a real (possibly empty) source directory. TLS/auth are forced off in
+    # the derivation block below regardless of any files in it.
+    echo "--unsecured flag provided: forcing HTTP / no auth (certs dir kept for bind-mount only)"
 elif [ "${WEIGHTSLAB_CERTS_DIR+x}" ] && [ -z "$WEIGHTSLAB_CERTS_DIR" ]; then
     echo "WEIGHTSLAB_CERTS_DIR explicitly set to empty - forcing UNSECURE mode"
     FORCE_UNSECURE=1
@@ -235,7 +237,7 @@ else
     if [ "$SKIP_BUILD" = "false" ]; then
         echo "Building production image (single image, configuration at runtime)..."
         # Build with defaults - configuration happens at runtime via .env
-        docker compose -f $DOCKER_DIR/docker-compose.yml build
+        docker compose -f $DOCKER_DIR/docker-compose.yml build --no-cache
 
         BUILD_STATUS=$?
         if [ $BUILD_STATUS -ne 0 ]; then

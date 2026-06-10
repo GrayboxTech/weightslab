@@ -456,6 +456,10 @@ def ui_launch(args):
 
     if no_certs:
         logger.info("⚠ --no-certs: launching in unsecured mode (HTTP, no gRPC auth)")
+        # Ensure the certs dir exists (empty is fine) so the compose bind-mount
+        # has a real, deterministic source. Envoy/nginx run plaintext and ignore
+        # whatever is (or isn't) inside it.
+        manager.certs_dir.mkdir(parents=True, exist_ok=True)
     else:
         _ensure_certificates(manager, force_certs=force_certs)
 
@@ -495,11 +499,13 @@ def ui_launch(args):
         # platform. The bash script writes this into .env for the compose mount.
         certs_dir_host = _to_docker_host_path(manager.certs_dir)
 
-        # When --no-certs is set, tell the bootstrap to force unsecured (HTTP)
-        # mode so it does not pick up any pre-existing certs on disk.
+        # Always pass the real certs dir so the compose bind-mount has a valid
+        # source. With --no-certs we add --unsecure, which forces Envoy/nginx to
+        # plaintext (mounted files, if any, are ignored) without leaving the mount
+        # source empty.
         bootstrap_env_vars = {
-            'WEIGHTSLAB_CERTS_DIR': '' if no_certs else certs_dir_str,
-            'WEIGHTSLAB_CERTS_DIR_HOST': '' if no_certs else certs_dir_host,
+            'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
+            'WEIGHTSLAB_CERTS_DIR_HOST': certs_dir_host,
             'WEIGHTSLAB_ROOT': weightslab_root
         }
         script_args = []
@@ -517,12 +523,10 @@ def ui_launch(args):
         logger.warning(f"Bootstrap script not found: {bootstrap_script}")
 
     # docker compose gives an exported env var precedence over .env. Force the
-    # host-native certs path here so our compose call below bind-mounts the real
-    # folder (a stray /mnt/c value would mount an empty dir and crash Envoy).
-    if no_certs:
-        os.environ.pop("WEIGHTSLAB_CERTS_DIR", None)
-    else:
-        os.environ["WEIGHTSLAB_CERTS_DIR"] = _to_docker_host_path(manager.certs_dir)
+    # host-native certs path here (on every path, including --no-certs) so our
+    # compose call below bind-mounts a real folder — a stray /mnt/c or empty
+    # value would mount an empty/invalid dir and can crash Envoy.
+    os.environ["WEIGHTSLAB_CERTS_DIR"] = _to_docker_host_path(manager.certs_dir)
 
     _compose_cmd(
         _get_compose_file(),
