@@ -123,13 +123,33 @@ without modifying the model.
 Use Weightslab Studio (UI)
 -----------------------
 
-For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the Weights Studio web app via Docker Compose. This will start both the UI and Envoy proxy, which routes data to your training script's gRPC server.:
-Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
-If you keep agent settings outside the repository, set ``AGENT_CONFIG_PATH`` so the backend can resolve ``agent_config.yaml`` from that directory.
+For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the
+Weights Studio web app with the bundled CLI. ``weightslab ui launch`` is the one-command
+path: it **generates TLS certificates and a gRPC auth token if they don't already exist**,
+removes any stale weightslab/weights_studio Docker resources that could break the launch
+(old containers, network, anonymous volumes, the cached frontend image, and a leftover
+generated ``.env``), then starts both the UI and the Envoy proxy, which routes data to your
+training script's gRPC server.
 
 .. code-block:: bash
 
-   docker compose -f docker/docker-compose.yml up -d
+   weightslab ui launch              # secure by default (certs auto-created if missing)
+   weightslab ui launch --no-certs   # run unsecured (HTTP, no gRPC auth)
+
+Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
+command reference (``se``, ``ui launch``, ``ui stop``, ``ui drop``, ``ui docker ...``).
+
+If you keep agent settings outside the repository, set ``AGENT_CONFIG_PATH`` so the backend
+can resolve ``agent_config.yaml`` from that directory. Environment variables used in the
+production compose file can be set in a ``.env`` file in the repository root, or exported
+before launching.
+
+To stop the UI later:
+
+.. code-block:: bash
+
+   weightslab ui stop   # stop containers (keep images)
+   weightslab ui drop   # stop and remove containers + images
 
 
 Recommended next reading

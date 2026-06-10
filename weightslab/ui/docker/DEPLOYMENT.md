@@ -30,7 +30,7 @@ The container will:
 
 ```bash
 # Generate certificates and auth token (one-time setup)
-weightslab ui se
+weightslab se
 
 # Copy environment with auth enabled
 cp .env.example .env
@@ -55,7 +55,7 @@ The container will:
 
 ```bash
 # Generate certificates without auth
-weightslab ui se --no-auth
+weightslab se --no-auth
 
 # Copy environment with HTTPS, no auth
 cp .env.example .env
@@ -115,7 +115,7 @@ weightslab/ui/envoy/certs/
 Generate with:
 
 ```bash
-weightslab ui se [--force-certs] [--no-auth]
+weightslab se [--force-certs] [--no-auth]
 ```
 
 ## Environment Variables
@@ -209,7 +209,7 @@ curl https://localhost:5173/health
 
 ```bash
 # Production with full security
-weightslab ui se --force-certs  # Generate fresh certs
+weightslab se --force-certs  # Generate fresh certs
 
 # Set environment
 cat > .env << 'EOF'
