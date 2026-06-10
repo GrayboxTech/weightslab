@@ -43,6 +43,7 @@ dependencies = [
   "torch==2.9; python_version >= '3.13'",
   "torchvision>=0.16,<0.24; python_version < '3.13'",
   "torchvision>=0.24,<1; python_version >= '3.13'",
+  "torchmetrics>=1.9",
 
   # Serving / schema
   "grpcio>=1.80,<2",
