@@ -975,7 +975,28 @@ class DataManipulationAgent:
 
         except Exception as e:
             _LOGGER.warning(f"[{name}] Failed: {e}")
+            # Remember the failure so query() can surface a specific message
+            # (e.g. an auth/401 means the user isn't connected, not a planning bug).
+            self._last_query_error = e
             return None
+
+    @staticmethod
+    def _is_auth_error(error) -> bool:
+        """True when a provider error is an authentication/connection failure (401)."""
+        if error is None:
+            return False
+        status = getattr(error, "status_code", None) or getattr(error, "code", None)
+        if status == 401:
+            return True
+        text = str(error).lower()
+        return (
+            "401" in text
+            or "unauthorized" in text
+            or "user not found" in text
+            or "invalid api key" in text
+            or "no auth credentials" in text
+            or "authentication" in text
+        )
 
     def _try_query_provider(self, provider: str, instruction: str, system_prompt: str) -> Optional[List[dict]]:
             # 1. Dynamically find the chain (chain_openrouter, chain_ollama)
@@ -990,6 +1011,9 @@ class DataManipulationAgent:
     def query(self, instruction: str, abort_event: Optional[threading.Event] = None, status_callback: Optional[Callable[[str], None]] = None) -> List[dict]:
         _LOGGER.info(f"[Agent] Query started: '{instruction}'")
         if abort_event and abort_event.is_set(): return []
+
+        # Reset per-query error tracking so a stale failure doesn't leak forward.
+        self._last_query_error = None
 
         self._setup_schema()
 
@@ -1035,7 +1059,14 @@ class DataManipulationAgent:
 
         # If we get here, all providers failed
         error_msg = "Internal Agent Error: Failed to generate a plan."
-        if not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY"):
+        if self._is_auth_error(self._last_query_error):
+            # The provider rejected our credentials — the agent isn't connected.
+            error_msg = (
+                "Agent not connected: the LLM provider rejected the request "
+                "(401 Unauthorized). Check your API key and re-initialize the "
+                "agent with /init."
+            )
+        elif not self.is_ollama_available() and not os.environ.get("OPENROUTER_API_KEY"):
             error_msg = "No LLM providers configured. Please check your API keys or local Ollama setup. Initialize the agent with /init."
 
         return [{"function": "out_of_scope", "params": {"reason": error_msg}}]

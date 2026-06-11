@@ -993,7 +993,7 @@ class LedgeredDataFrameManager:
             # Merge nested dicts: update existing sample_id records, add new ones
             for sample_id, record in records_to_add.items():
                 self._buffer.setdefault(sample_id, {}).update(record)
-            logger.info(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
+            logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
             should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
 
         # Trigger flush outside lock

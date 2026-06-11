@@ -2626,9 +2626,14 @@ class DataService:
             )
 
         requested_cols = list(getattr(request, 'stats_to_retrieve', []) or [])
+        # NOTE: ORIGIN is intentionally NOT excluded. The histogram (and any caller
+        # that needs per-sample split coloring) requests 'origin' explicitly and
+        # relies on this fast vectorized path to return it — without this, the client
+        # had to fall back to the full per-sample path (image traversal + thread pool),
+        # which took ~30s for large datasets. sample_id is already sent as the record
+        # id, and task_type carries no per-sample signal, so both stay excluded.
         excluded_cols = {
             SampleStatsEx.SAMPLE_ID.value,
-            SampleStatsEx.ORIGIN.value,
             # SampleStatsEx.TARGET.value,
             # SampleStatsEx.PREDICTION.value,
             SampleStatsEx.TASK_TYPE.value,
@@ -3033,7 +3038,14 @@ class DataService:
         """
         tag_updates = {}
         uses_multiindex = self._all_datasets_df is not None and isinstance(self._all_datasets_df.index, pd.MultiIndex)
-        new_tag_name = f'{SampleStatsEx.TAG.value}:{new_tag_name.strip()}'
+        # No tag name -> no per-sample update. Whole-column deletes (EDIT_REMOVE with
+        # float_value == -1) carry the column in stat_name and an empty string_value;
+        # without this guard we'd build a bogus "tag:" column (prefix + empty name) and
+        # upsert it right before dropping the real column, leaving an empty "tag:" stub.
+        stripped_tag_name = (new_tag_name or "").strip()
+        if not stripped_tag_name:
+            return tag_updates
+        new_tag_name = f'{SampleStatsEx.TAG.value}:{stripped_tag_name}'
 
         # Get current tags from the in-memory dataframe or df_manager
         existing_tag_value = True  # Default to True for new tags
