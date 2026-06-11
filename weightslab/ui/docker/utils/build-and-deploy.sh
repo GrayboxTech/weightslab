@@ -224,6 +224,15 @@ IMAGE_NAME="graybx/weightslab"
 # fi
 SKIP_BUILD=false
 
+# When invoked from the Python launcher on a host where docker runs outside this
+# shell (e.g. Windows: docker lives on the host, not in WSL), the launcher does
+# `docker compose pull/up` itself. In that case this script only needs to write
+# the .env above — skip all docker operations here to avoid noisy failures.
+if [ -n "$WEIGHTSLAB_SKIP_DOCKER_OPS" ] && [ "$WEIGHTSLAB_SKIP_DOCKER_OPS" != "0" ]; then
+    echo "Skipping docker build/deploy in shell (handled by the launcher)."
+    exit 0
+fi
+
 # Build and deploy
 if [ "$DEV" = "true" ]; then
     echo "Skipped dev build (image already exists)"

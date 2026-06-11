@@ -150,9 +150,12 @@ class TestUiLaunch(unittest.TestCase):
 class TestEnsureCertificates(unittest.TestCase):
     """_ensure_certificates only generates files; it never exports TLS/auth env."""
 
+    @patch("weightslab.ui_docker_bridge._install_ca_trust")
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback")
-    def test_uses_existing_certs_without_generating(self, mock_gen):
+    def test_uses_existing_certs_without_generating(self, mock_gen, _mock_trust):
         manager = MagicMock()
+        # Gate is has_any_credentials(); existing creds short-circuit generation.
+        manager.has_any_credentials.return_value = True
         manager.has_valid_certs.return_value = True
         result = _ensure_certificates(manager, force_certs=False)
         self.assertTrue(result)
@@ -161,26 +164,32 @@ class TestEnsureCertificates(unittest.TestCase):
         # Derived TLS env must NOT be set here — the deploy pipeline derives it.
         manager.setup_tls_environment.assert_not_called()
 
+    @patch("weightslab.ui_docker_bridge._install_ca_trust")
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
-    def test_generates_when_missing_and_forwards_certs_dir(self, mock_gen):
+    def test_generates_when_missing_and_forwards_certs_dir(self, mock_gen, _mock_trust):
         manager = MagicMock()
-        # Missing at the gate, present after generation.
-        manager.has_valid_certs.side_effect = [False, True]
+        # No credentials at the gate -> generate; certs valid afterwards.
+        manager.has_any_credentials.return_value = False
+        manager.has_valid_certs.return_value = True
         result = _ensure_certificates(manager, force_certs=False)
         self.assertTrue(result)
         mock_gen.assert_called_once_with(force_certs=False, certs_dir=manager.certs_dir)
         manager.setup_tls_environment.assert_not_called()
 
+    @patch("weightslab.ui_docker_bridge._install_ca_trust")
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=0)
-    def test_force_regenerates_even_when_present(self, mock_gen):
+    def test_force_regenerates_even_when_present(self, mock_gen, _mock_trust):
         manager = MagicMock()
+        manager.has_any_credentials.return_value = True
         manager.has_valid_certs.return_value = True
         _ensure_certificates(manager, force_certs=True)
         mock_gen.assert_called_once_with(force_certs=True, certs_dir=manager.certs_dir)
 
+    @patch("weightslab.ui_docker_bridge._install_ca_trust")
     @patch("weightslab.ui_docker_bridge._generate_certs_with_fallback", return_value=1)
-    def test_returns_false_on_generation_failure(self, mock_gen):
+    def test_returns_false_on_generation_failure(self, mock_gen, _mock_trust):
         manager = MagicMock()
+        manager.has_any_credentials.return_value = False
         manager.has_valid_certs.return_value = False
         result = _ensure_certificates(manager, force_certs=False)
         self.assertFalse(result)

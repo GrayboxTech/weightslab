@@ -15,6 +15,10 @@ from weightslab.security import CertAuthManager
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# Capture whether WEIGHTSLAB_CERTS_DIR was already in the shell env when this
+# process started (set by the user) vs. injected later by our own code.
+_CERTS_DIR_IN_ORIGINAL_ENV: bool = "WEIGHTSLAB_CERTS_DIR" in os.environ
+
 # Docker resources owned by the bundled stack. Cleanup is scoped strictly to
 # these names — we never run a global `docker system prune`.
 _FRONTEND_IMAGE = "graybx/weightslab"
@@ -41,6 +45,41 @@ _DERIVED_DEPLOY_ENV_VARS = (
     "GRPC_AUTH_TOKEN",
     "VITE_GRPC_AUTH_TOKEN",
 )
+
+
+def _persist_certs_dir(certs_dir_str: str) -> None:
+    """Persist WEIGHTSLAB_CERTS_DIR so future terminals and the training backend find it.
+
+    Windows  — runs `setx` (permanent user env) and prints the PS one-liner for
+               the current session.
+    Linux/macOS — appends an export line to ~/.bashrc (idempotent) and prints the
+               source command for the current session.
+    """
+    export_line = f'export WEIGHTSLAB_CERTS_DIR="{certs_dir_str}"'
+    if _is_windows():
+        result = subprocess.run(
+            ["setx", "WEIGHTSLAB_CERTS_DIR", certs_dir_str],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if result.returncode == 0:
+            logger.info("✓ WEIGHTSLAB_CERTS_DIR saved permanently via setx (new terminals will have it)")
+        else:
+            logger.warning(f"setx failed — set it manually: setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
+        logger.info(f"  Current terminal (PowerShell): $env:WEIGHTSLAB_CERTS_DIR = \"{certs_dir_str}\"")
+    else:
+        bashrc = Path.home() / ".bashrc"
+        try:
+            existing = bashrc.read_text(encoding="utf-8") if bashrc.exists() else ""
+            if export_line not in existing:
+                with open(bashrc, "a", encoding="utf-8") as f:
+                    f.write(f"\n# Added by weightslab\n{export_line}\n")
+                logger.info(f"✓ WEIGHTSLAB_CERTS_DIR appended to {bashrc} (new terminals will have it)")
+            else:
+                logger.info(f"✓ WEIGHTSLAB_CERTS_DIR already in {bashrc}")
+        except OSError as e:
+            logger.warning(f"Could not write to {bashrc}: {e}")
+            logger.info(f"  Add manually: {export_line}")
+        logger.info(f"  Current terminal: source ~/.bashrc  (or open a new terminal)")
 
 
 def _strip_derived_deploy_env() -> None:
@@ -150,6 +189,20 @@ def _compose_cmd(compose_file, envoy_config, action):
     """Build and run a docker compose command."""
     env = os.environ.copy()
     env["WS_ENVOY_CONFIG"] = str(envoy_config)
+
+    # If WEIGHTSLAB_CERTS_DIR isn't set, fall back to the default certs dir when
+    # it actually holds a full cert set + gRPC token. This gives docker compose a
+    # valid host-native bind-mount source (so Envoy gets its certs) even when the
+    # user never exported the var — and covers compose calls that run before
+    # ui_launch sets it (e.g. the stale-resource cleanup `compose down`).
+    if not env.get("WEIGHTSLAB_CERTS_DIR"):
+        default_mgr = CertAuthManager()
+        if default_mgr.has_valid_certs() and default_mgr.token_file.exists():
+            host_path = _to_docker_host_path(default_mgr.certs_dir)
+            env["WEIGHTSLAB_CERTS_DIR"] = host_path
+            logger.info(
+                f"WEIGHTSLAB_CERTS_DIR not set — using default certs dir for docker: {host_path}"
+            )
 
     cmd = ["docker", "compose", "-f", str(compose_file)] + action
     result = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -299,12 +352,21 @@ def _generate_certs_with_fallback(force_certs: bool = False, certs_dir=None) -> 
 
     ``certs_dir`` is forwarded to the generation scripts as ``WEIGHTSLAB_CERTS_DIR``
     so certs land in the single source-of-truth directory (the scripts default to
-    ``~/.weightslab-certs`` when it is not provided). The host-native path
-    (``C:/...`` on Windows) is understood by both Git Bash and PowerShell.
+    ``~/.weightslab-certs`` when it is not provided). The shell script receives a
+    POSIX absolute path (``/mnt/c/...`` on Windows/WSL); PowerShell receives the
+    host-native path (``C:/...``).
     """
     env_vars = None
     if certs_dir is not None:
-        env_vars = {'WEIGHTSLAB_CERTS_DIR': _to_docker_host_path(certs_dir)}
+        # Shell scripts (bash/WSL) need a POSIX-style absolute path.
+        # _to_docker_host_path gives C:/... which WSL bash treats as a relative
+        # path, creating the certs dir under cwd instead of ~/.weightslab-certs.
+        # Use the /mnt/c/... form so the path is absolute inside WSL.
+        if _is_windows():
+            bash_certs_dir = _convert_to_git_bash_path(str(certs_dir))
+        else:
+            bash_certs_dir = str(certs_dir)
+        env_vars = {'WEIGHTSLAB_CERTS_DIR': bash_certs_dir}
 
     cert_script = str(_get_cert_script())
     if not Path(cert_script).exists():
@@ -339,6 +401,93 @@ def _generate_certs_with_fallback(force_certs: bool = False, certs_dir=None) -> 
         return 1
 
 
+_DEV_CA_SUBJECT = "weightslab-dev-ca"
+
+
+def _install_ca_trust(ca_file: Path) -> None:
+    """Install the dev CA into the OS trust store so browsers trust the HTTPS UI.
+
+    Idempotent and safe to call on every launch. Platform behavior:
+      * Windows — adds to the CurrentUser\\Root store via the .NET X509Store API
+        (silent, no prompt).
+      * macOS   — adds to the login keychain (may show a one-time auth prompt).
+      * Linux   — installs into the system trust store via sudo (one-time prompt)
+        and, best-effort, the user's NSS DB so Chrome/Firefox trust it too.
+
+    A failure here is non-fatal: TLS still works, the browser just shows a
+    self-signed warning until the CA is trusted manually.
+    """
+    if not ca_file.exists():
+        logger.warning(f"CA file not found, skipping trust install: {ca_file}")
+        return
+
+    if _is_windows():
+        ps = (
+            "$ErrorActionPreference='Stop';"
+            f"$caPath='{ca_file}';"
+            "$certObj=New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($caPath);"
+            "$store=New-Object System.Security.Cryptography.X509Certificates.X509Store('Root','CurrentUser');"
+            "$store.Open('ReadWrite');"
+            "try{"
+            # Already trusted (same thumbprint)? Nothing to do — avoids a fragile Remove.
+            "$match=$store.Certificates|Where-Object{$_.Thumbprint -eq $certObj.Thumbprint};"
+            "if(-not $match){"
+            # Drop stale same-subject CAs from a previous rotation (best-effort).
+            f"$stale=$store.Certificates|Where-Object{{$_.Subject -eq 'CN={_DEV_CA_SUBJECT}'}};"
+            "foreach($c in $stale){try{$store.Remove($c)}catch{}};"
+            "$store.Add($certObj);"
+            "}"
+            "}finally{$store.Close()}"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if result.returncode == 0:
+            logger.info("✓ Dev CA trusted in Windows CurrentUser\\Root store (restart browser to apply)")
+        else:
+            logger.warning(f"Could not auto-trust dev CA: {result.stderr.strip()}")
+        return
+
+    if sys.platform == "darwin":
+        check = subprocess.run(
+            ["security", "find-certificate", "-c", _DEV_CA_SUBJECT],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if check.returncode == 0:
+            logger.info("✓ Dev CA already trusted (macOS keychain)")
+            return
+        logger.info("Installing dev CA into macOS login keychain (may prompt)...")
+        subprocess.run(
+            ["security", "add-trusted-cert", "-r", "trustRoot",
+             "-k", os.path.expanduser("~/Library/Keychains/login.keychain-db"), str(ca_file)],
+        )
+        return
+
+    # Linux: system trust store (curl/openssl) + best-effort NSS (browsers).
+    system_ca = Path("/usr/local/share/ca-certificates/weightslab-dev-ca.crt")
+    try:
+        already = system_ca.exists() and system_ca.read_bytes() == ca_file.read_bytes()
+    except OSError:
+        already = False
+    if not already:
+        logger.info("Installing dev CA into the Linux system trust store (may prompt for sudo)...")
+        subprocess.run(["sudo", "cp", str(ca_file), str(system_ca)])
+        subprocess.run(["sudo", "update-ca-certificates"])
+    else:
+        logger.info("✓ Dev CA already in Linux system trust store")
+
+    # Browsers use their own NSS DB; add it there too if certutil is available.
+    if shutil.which("certutil"):
+        nssdb = Path.home() / ".pki" / "nssdb"
+        nssdb.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["certutil", "-A", "-n", _DEV_CA_SUBJECT, "-t", "C,,",
+             "-i", str(ca_file), "-d", f"sql:{nssdb}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
 def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) -> bool:
     """Generate certs + auth token in ``manager.certs_dir`` if missing (or forced).
 
@@ -349,6 +498,9 @@ def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) ->
     if manager.has_any_credentials() and not force_certs:
         logger.info(f"✓ Using existing credentials in {manager.certs_dir}")
         manager.get_or_create_auth_token()
+        # Ensure the CA is trusted even when reusing certs from a prior run that
+        # was generated via bash (which does not install OS trust).
+        _install_ca_trust(manager.ca_file)
         return manager.has_valid_certs()
 
     logger.info(
@@ -363,6 +515,7 @@ def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) ->
         return False
 
     manager.get_or_create_auth_token()
+    _install_ca_trust(manager.ca_file)
     logger.info(f"✓ Certificates ready in {manager.certs_dir}")
     return manager.has_valid_certs()
 
@@ -438,13 +591,28 @@ def ui_launch(args):
     no_auth = getattr(args, "no_auth", False)
     force_certs = getattr(args, "force_certs", False)
     no_clean = getattr(args, "no_clean", False)
+    certs_dir_arg = getattr(args, "certs_dir", None)
 
-    manager = CertAuthManager.from_env_or_default(enable_auth=not no_auth)
+    # A custom certs dir (positional arg) takes precedence over the env var /
+    # default. Otherwise fall back to $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs.
+    if certs_dir_arg:
+        # Resolve to an absolute path so Windows Python, WSL bash and docker all
+        # agree on the location (a relative path resolves differently per shell).
+        certs_dir_arg = str(Path(certs_dir_arg).resolve())
+        manager = CertAuthManager(certs_dir=certs_dir_arg, enable_auth=not no_auth)
+        logger.info(f"Using custom certs directory: {manager.certs_dir}")
+    else:
+        manager = CertAuthManager.from_env_or_default(enable_auth=not no_auth)
 
     if no_certs:
         logger.info("⚠ --no-certs: launching in unsecured mode (HTTP, no gRPC auth)")
-        # Ensure the certs dir exists (empty is fine) so the compose bind-mount
-        # has a real, deterministic source. Envoy/nginx run plaintext and ignore
+        # Remove any existing certs/token so the training backend (which derives
+        # TLS purely from cert-file presence in WEIGHTSLAB_CERTS_DIR) also runs
+        # unsecured — otherwise `weightslab start example` would still find them
+        # and mismatch the UI by enabling TLS.
+        manager.clear_credentials()
+        # Keep the certs dir itself (empty is fine) so the compose bind-mount has
+        # a real, deterministic source. Envoy/nginx run plaintext and ignore
         # whatever is (or isn't) inside it.
         try:
             manager.certs_dir.mkdir(parents=True, exist_ok=True)
@@ -504,6 +672,12 @@ def ui_launch(args):
             'WEIGHTSLAB_CERTS_DIR_HOST': certs_dir_host,
             'WEIGHTSLAB_ROOT': weightslab_root
         }
+        # On Windows the bootstrap runs in WSL/Git-Bash where `docker` usually
+        # isn't on PATH; the compose up below (run from Windows Python) handles
+        # the deploy. Tell the script to only write .env and skip docker ops so
+        # it doesn't emit a spurious "build failed" error.
+        if _is_windows():
+            bootstrap_env_vars['WEIGHTSLAB_SKIP_DOCKER_OPS'] = '1'
         script_args = []
         if no_certs:
             script_args.append('--unsecure')
@@ -535,6 +709,12 @@ def ui_launch(args):
     secured = (not no_certs) and manager.has_valid_certs()
     protocol = "https" if secured else "http"
     logger.info(f"Weights Studio UI is running at: {protocol}://localhost:{port}")
+    if secured:
+        certs_dir_str = str(manager.certs_dir)
+        # Persist when a custom dir was given (it won't match the default, so the
+        # backend must be told where to look) or when the var isn't already set.
+        if certs_dir_arg or not _CERTS_DIR_IN_ORIGINAL_ENV:
+            _persist_certs_dir(certs_dir_str)
 
 
 def ui_secure_environment(args):
@@ -550,6 +730,9 @@ def ui_secure_environment(args):
     force_certs = getattr(args, "force_certs", False)
     no_auth = getattr(args, "no_auth", False)
     certs_dir = getattr(args, "certs_dir", None)
+    if certs_dir:
+        # Absolute path so Windows Python, WSL bash and docker agree on location.
+        certs_dir = str(Path(certs_dir).resolve())
 
     # Resolve the target directory first (no filesystem work in __init__), so we
     # can point the generation scripts at it via WEIGHTSLAB_CERTS_DIR.
@@ -599,6 +782,15 @@ def example_start(args):
     logger.info(f"   {main_py}")
     logger.info("In another terminal, launch the UI with: weightslab ui launch")
     logger.info(f"Then open http://localhost:5173 — stop the example with Ctrl+C.")
+    if not _CERTS_DIR_IN_ORIGINAL_ENV:
+        manager = CertAuthManager.from_env_or_default()
+        if manager.has_valid_certs():
+            logger.warning(
+                "WEIGHTSLAB_CERTS_DIR is not set in your shell environment. "
+                "TLS will work this session (certs found at default location) "
+                "but may not persist across terminals."
+            )
+            _persist_certs_dir(str(manager.certs_dir))
     try:
         env = os.environ.copy()
         env['WEIGHTSLAB_SUPPRESS_BANNER'] = '1'
@@ -627,16 +819,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    # weightslab se [--force-certs]
+    # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
     se_parser.add_argument('--force-certs', action='store_true', help='Regenerate certificates even if they already exist')
+    se_parser.add_argument('certs_dir', nargs='?', default=None,
+                           help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 
-    # weightslab ui launch [--no-certs]
+    # weightslab ui launch [--no-certs] [certs_dir]
     ui_parser = sub.add_parser("ui", help="Manage the Weights Studio UI")
     ui_sub = ui_parser.add_subparsers(dest="action")
     launch_ui_parser = ui_sub.add_parser(
         "launch", help="Generate certs if missing, clean stale Docker state, then launch the UI")
     launch_ui_parser.add_argument('--no-certs', action='store_true', help='Run unsecured (HTTP, no gRPC auth); do not generate or use certs')
+    launch_ui_parser.add_argument('certs_dir', nargs='?', default=None,
+                                  help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 
     # weightslab start example
     start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
