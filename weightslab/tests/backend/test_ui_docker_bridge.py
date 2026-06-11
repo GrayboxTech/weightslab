@@ -14,6 +14,7 @@ from weightslab.ui_docker_bridge import (
     _ensure_certificates,
     _generate_certs_with_fallback,
     _get_example_dir,
+    _install_example_requirements,
     _remove_docker_image,
     _strip_derived_deploy_env,
     _DERIVED_DEPLOY_ENV_VARS,
@@ -518,6 +519,48 @@ class TestExampleStart(unittest.TestCase):
     def test_example_dir_points_at_bundled_example(self):
         # The bundled classification example must actually ship with the package.
         self.assertTrue((_get_example_dir("ws-classification") / "main.py").exists())
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_example_start_seg_runs_segmentation(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        with self.assertLogs("weightslab.ui_docker_bridge", level="INFO") as log_context:
+            example_start(argparse.Namespace(example_kind="seg"))
+        main_py = mock_run.call_args.args[0][1].replace("\\", "/")
+        self.assertTrue(main_py.endswith("examples/PyTorch/ws-segmentation/main.py"), main_py)
+        self.assertTrue(any("segmentation (seg) example" in m for m in log_context.output))
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_example_start_defaults_to_cls_when_flag_absent(self, mock_run):
+        # A Namespace without example_kind (e.g. older call sites) still defaults to cls.
+        mock_run.return_value = MagicMock(returncode=0)
+        example_start(argparse.Namespace())
+        main_py = mock_run.call_args.args[0][1].replace("\\", "/")
+        self.assertTrue(main_py.endswith("examples/PyTorch/ws-classification/main.py"), main_py)
+
+
+class TestInstallExampleRequirements(unittest.TestCase):
+    """Requirements install is non-interactive and only runs when a file is present."""
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_installs_requirements_non_interactively_when_present(self, mock_run):
+        import tempfile
+        mock_run.return_value = MagicMock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            req = Path(tmp) / "requirements.txt"
+            req.write_text("numpy\n")
+            _install_example_requirements(Path(tmp))
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[:5], [sys.executable, "-m", "pip", "install", "-r"])
+        self.assertIn("--no-input", cmd)  # never prompts
+        self.assertTrue(mock_run.call_args.kwargs.get("check"))
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_skips_when_no_requirements_file(self, mock_run):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            _install_example_requirements(Path(tmp))
+        mock_run.assert_not_called()
 
 
 class TestBannerAndHelp(unittest.TestCase):

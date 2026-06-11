@@ -252,7 +252,7 @@ if __name__ == "__main__":
     verbose = parameters.get('verbose', True)
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
-    eval_every = parameters.get("eval_full_to_train_steps_ratio", 50)
+    eval_full_to_train_steps_ratio = parameters.get("eval_full_to_train_steps_ratio", 50)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
     training_steps_to_do = parameters.get("training_steps_to_do", 1000)
 
@@ -364,7 +364,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("🚀 STARTING TRAINING")
-    print(f"🔄 Evaluation every {eval_every} steps")
+    print(f"🔄 Evaluation every {eval_full_to_train_steps_ratio} steps")
     print(f"� Dataset splits: train={len(_train_dataset)}, test={len(_test_dataset)}")
     print(f"💾 Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
@@ -393,7 +393,7 @@ if __name__ == "__main__":
         train_loss = train(train_loader, model, optimizer, train_criterion, device)
 
         # Periodic test evaluation
-        if age > 0 and age % eval_every == 0:
+        if age > 0 and age % eval_full_to_train_steps_ratio == 0:
             # Test (no nested progress bar)
             test_loss, test_metric = test(
                 test_loader,

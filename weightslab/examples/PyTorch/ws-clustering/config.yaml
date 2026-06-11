@@ -6,7 +6,7 @@ experiment_name: face_triplet_training
 device: auto             # "auto" → cuda if available, else cpu
 
 # Training schedule
-eval_every:     50       # evaluation frequency (steps); set to -1 to disable
+eval_full_to_train_steps_ratio: 50  # evaluation frequency (steps); set to -1 to disable
 experiment_dump_to_train_steps_ratio:      10       # print running loss every N steps
 is_training:    true    # start training immediately or not
 

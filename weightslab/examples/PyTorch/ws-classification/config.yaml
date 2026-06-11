@@ -1,6 +1,6 @@
 # Global configuration
+experiment_name: mnist_classification
 device: auto
-experiment_name: cls_MNIST_usecase
 training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
 # root_log_dir: ...  # Path to save current experiment checkpoints and data
 
@@ -25,6 +25,7 @@ serving_grpc: true
 serving_cli: false
 
 # DataLoader parameters
+# data_root: .\data  # Auto downloaded from mnist server
 data:
   train_loader:
     shuffle: true

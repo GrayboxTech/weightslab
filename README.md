@@ -54,49 +54,104 @@ The granular statistics and interactive paradigm enable powerful workflows:
   * Iterative pruning or growing of the architectures (INCOMING feature)
 
 
-## Find our demos:
-The password is **graybx**. More demo to come in the future!
+## Quick Start
 
-  <a href="https://preview.graybx.com/">
-    <p style="text-indent:20px;">DEMOS</p>
-  </a>
+### Requirements
+
+- **Docker Desktop v4.77 or newer** — required to deploy the Weights Studio UI (`weightslab ui launch`).
+- **Python >=3.10, <3.15** — to install and run the `weightslab` framework.
+> [!OPTIONAL]
+> We are fully compatible with Conda.
 
 
-## Getting Started
 ### Installation
 
-Define a Python environment (Python >=3.10, <3.15)
+> [!OPTIONAL]
+> Seting a clean environment:
+> Define a Python environment:
 ```bash
 python -m venv weightslab_venv
 ./weightslab_venv/Scripts/activate
 ```
-Or install directly on your machine.
+> Or install directly on your machine.
 
 Install our framework:
 ```bash
 pip install weightslab
 ```
 
-Deploy our interface with Docker:
+Deploy our interface:
 ```bash
 weightslab ui launch
 ```
 
 `weightslab ui launch` is the one-command path: it **generates TLS certificates + a gRPC auth token if you don't have them yet**, removes any stale weightslab/weights_studio Docker resources that could break the launch, then starts the UI stack. To run unsecured (HTTP, no auth), use `weightslab ui launch --no-certs`.
-
-Want to see it working end to end without writing any code? Start the bundled classification demo (it trains and serves until you stop it with `Ctrl+C`):
+<!--
+Want to see it working end to end without writing any code? Start a bundled demo (it installs the example's requirements first — no prompts — then trains and serves until you stop it with `Ctrl+C`). It defaults to classification; pick another with a flag:
 ```bash
-weightslab example start
-```
-Then run `weightslab ui launch` in another terminal and open `https://localhost:5173`.
+weightslab start example          # classification (default)
+weightslab start example --cls    # classification
+weightslab start example --seg    # segmentation
+weightslab start example --det    # detection
+weightslab start example --clus   # clustering
+weightslab start example --gen    # generation
+``` -->
+<!-- Then run `weightslab ui launch` in another terminal and open `https://localhost:5173`. -->
 
-Run `weightslab`, `weightslab help`, or `weightslab -h` at any time to see the banner and the full command reference.
+<!-- Run `weightslab`, `weightslab help`, or `weightslab -h` at any time to see the banner and the full command reference. -->
 
 > [!IMPORTANT]
 > For a detailed installation guide and more advanced features, please see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 
 ## Quick Training Example
+
+### Step-by-Step Integration
+
+1. **Add the import** at the top of your script:
+   ```python
+   import weightslab as wl  # ← Include our SDK into your experiment
+   ```
+
+2. **Wrap your parameters** with WeightsLab tracking:
+   ```python
+   model = wl.watch_or_edit(parameters, ...)  # ← Now WeightsLab monitors your parameters and allow you to update them from your UI
+   ```
+
+3. **Wrap your model** with WeightsLab tracking:
+   ```python
+   model = wl.watch_or_edit(SimpleModel(...), ...)  # ← Now WeightsLab monitors your model state
+   ```
+
+4. **Wrap your optimizer** with WeightsLab tracking:
+   ```python
+   optimizer = wl.watch_or_edit(optim.Adam(...), ...)  # ← Tracks optimizer state and update optimizer learning rate from your UI
+   ```
+
+5. **Wrap your signal** with WeightsLab tracking:
+   ```python
+    criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), ...)  # ← Tracks this signal and others (metrics, ..etc) from your UI
+   ```
+
+6. **Wrap your dataset** with WeightsLab tracking:
+   ```python
+    train_loader = wl.watch_or_edit(dataset, ...)  # ← Tracks this dataset and others (validation, test) from your UI
+   ```
+
+7. **Run your training script** as usual:
+   ```bash
+   python train.py
+   ```
+
+8. **Launch the UI** in another terminal:
+   ```bash
+   weightslab ui launch
+   ```
+
+9. **Open your browser** to `https://localhost:5173` to track experiment evoluation and results!
+
+
+### Details
 
 <details>
 <summary><b>Here's a complete example showing how to integrate WeightsLab into a basic PyTorch training script:</b></summary>
@@ -312,217 +367,34 @@ if __name__ == "__main__":
 </details>
 
 
-### Step-by-Step Integration
-
-1. **Add the import** at the top of your script:
-   ```python
-   import weightslab as wl  # ← Include our SDK into your experiment
-   ```
-
-2. **Wrap your parameters** with WeightsLab tracking:
-   ```python
-   model = wl.watch_or_edit(parameters, ...)  # ← Now WeightsLab monitors your parameters and allow you to update them from your UI
-   ```
-
-3. **Wrap your model** with WeightsLab tracking:
-   ```python
-   model = wl.watch_or_edit(SimpleModel(...), ...)  # ← Now WeightsLab monitors your model state
-   ```
-
-4. **Wrap your optimizer** with WeightsLab tracking:
-   ```python
-   optimizer = wl.watch_or_edit(optim.Adam(...), ...)  # ← Tracks optimizer state and update optimizer learning rate from your UI
-   ```
-
-5. **Wrap your signal** with WeightsLab tracking:
-   ```python
-    criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), ...)  # ← Tracks this signal and others (metrics, ..etc) from your UI
-   ```
-
-6. **Wrap your dataset** with WeightsLab tracking:
-   ```python
-    train_loader = wl.watch_or_edit(dataset, ...)  # ← Tracks this dataset and others (validation, test) from your UI
-   ```
-
-7. **Run your training script** as usual:
-   ```bash
-   python train.py
-   ```
-
-8. **Launch the UI** in another terminal:
-   ```bash
-   weightslab ui launch
-   ```
-
-9. **Open your browser** to `https://localhost:5173` to track experiment evoluation and results!
-
 
 ### What WeightsLab Does Automatically
 
-- 🔐 **Creates TLS certificates** in `~/.weightslab-certs/`
-- 🎫 **Generates secure auth tokens** for gRPC communication
-- 📊 **Tracks model parameters** and optimizer state in real-time
+<!-- - 📊 **Tracks model parameters** and optimizer state in real-time -->
+<!-- - 🔄 **Enables model editing (incoming feature)** and hyperparameter tuning through the UI -->
+- 📊 **Experiment tracking for reproducibility**
 - 📈 **Provides live metrics** and visualization in the web UI
-- 🔄 **Enables model editing (incoming feature)** and hyperparameter tuning through the UI
+- 🔄 **Enables data supervision during training** and experiment hyperparameter tuning through the UI
 
 
-## Security
+## Examples
 
-WeightsLab is **secure by default**: `weightslab ui launch` generates TLS certificates and a gRPC auth token (in `~/.weightslab-certs/`) the first time you run it, then launches the stack with TLS encryption and gRPC authentication enabled. Subsequent launches reuse the existing certificates.
-
-`WEIGHTSLAB_CERTS_DIR` is the **single source of truth**. HTTPS and gRPC auth are turned on/off purely by the presence of the cert files in that directory — never by separate env variables. If the files exist, the stack runs encrypted; if they don't, it runs over plain HTTP (any stale `GRPC_TLS_*` / `ENVOY_*_TLS` / `VITE_*` values are ignored). Point `WEIGHTSLAB_CERTS_DIR` at a different folder to switch cert sets, or use `--no-certs` to force plain HTTP.
-
-### One Command (Recommended)
+### Local examples
+After starting the UI, launch a local experiment with the command:
 ```bash
-weightslab ui launch
+weightslab start example          # classification (default)
+# weightslab start example --cls    # classification
+# weightslab start example --seg    # segmentation
+# weightslab start example --det    # detection
+# weightslab start example --clus   # clustering
+# weightslab start example --gen    # generation
 ```
 
-This will:
-1. Generate TLS certificates and a gRPC auth token in `~/.weightslab-certs/` **if they don't already exist** (otherwise reuse them)
-2. Remove any stale weightslab/weights_studio Docker resources (old containers, network, anonymous volumes, the cached frontend image, and a leftover generated `.env`) that could prevent a clean launch
-3. Launch the Docker stack with security enabled
-
-If certificate generation fails (e.g. `openssl` is unavailable), the launch continues in unsecured mode.
-
-### Launch Flags
-
-**For `weightslab ui launch`:**
-
-| Flag | Effect |
-|---|---|
-| `--no-certs` | Run unsecured (HTTP, no gRPC auth); do **not** generate or use certificates |
-| `--force-certs` | Regenerate certificates before launching, even if they already exist |
-| `--no-auth` | Use TLS without a gRPC auth token |
-| `--no-clean` | Skip the stale Docker resource cleanup step |
-| `--dev` | Use the dev compose overlay |
-
-**Examples:**
-```bash
-weightslab ui launch                 # secure by default (certs auto-created if missing)
-weightslab ui launch --no-certs      # explicitly run unsecured (HTTP)
-weightslab ui launch --force-certs   # regenerate certs, then launch
-weightslab ui launch --no-clean      # skip stale-resource cleanup (faster relaunch)
-```
-
-### Setup Certificates Separately
-Generate certificates and the gRPC auth token without launching (e.g. so the backend can run secured before the UI is up):
-```bash
-weightslab se
-
-# Persist the certs directory across shells (optional — the default
-# ~/.weightslab-certs is auto-detected, so this is only needed for a custom path):
-# Ubuntu
-echo 'export WEIGHTSLAB_CERTS_DIR="$HOME/.weightslab-certs"' >> ~/.bashrc
-source ~/.bashrc
-# Windows
-# setx WEIGHTSLAB_CERTS_DIR "%USERPROFILE%\.weightslab-certs"
-```
-
-Then launch later (reuses the certs):
-```bash
-weightslab ui launch
-```
-
-**For `weightslab se`:**
-
-| Flag | Effect |
-|---|---|
-| `--force-certs` | Regenerate certificates even if they already exist |
-| `--no-auth` | Skip gRPC auth token generation (TLS only) |
-
-### Custom Certificates Directory
-Store certificates in a custom location:
-```bash
-weightslab se "/path/to/my/certs"
-
-# Point WeightsLab at it
-# Ubuntu
-echo 'export WEIGHTSLAB_CERTS_DIR=/path/to/my/certs' >> ~/.bashrc
-source ~/.bashrc
-# Windows
-# setx WEIGHTSLAB_CERTS_DIR C:\path\to\my\certs
-
-weightslab ui launch
-```
-
-### What Gets Created?
-After running `weightslab se` (or the first `weightslab ui launch`), your `~/.weightslab-certs/` directory contains:
-- `backend-server.crt` — Backend TLS certificate
-- `backend-server.key` — Backend TLS private key
-- `ca.crt` — CA certificate
-- `.grpc_auth_token` — gRPC authentication token (if not using `--no-auth`)
-
-### Running Without Security
-Either launch with `--no-certs`, or delete the certificates directory:
-```bash
-weightslab ui launch --no-certs   # one-off unsecured launch
-# or
-rm -r ~/.weightslab-certs && weightslab ui launch --no-certs
-```
-
-### Testing the Setup
-**Secured environment:**
-```bash
-weightslab ui launch               # Auto-creates certs (if missing) and launches secured
-python main.py                     # Backend finds certs, runs secured
-```
-
-**Unsecured environment:**
-```bash
-weightslab ui launch --no-certs    # Launch Docker without certs (HTTP)
-python main.py                     # Backend runs unsecured
-```
-
-
-## Cookbook
-
-Check out our materials, which include examples ranging from toys to more complex models and experiments.
-
-Quickstart examples:
-- [WeightsLab - Classification toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-classification)
-- [WeightsLab - Segmentation toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-segmentation)
-- [WeightsLab - Detection toy (PyTorch)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch/ws-detection)
-- [WeightsLab - Classification toy (PyTorch Lightning)](https://github.com/GrayboxTech/weightslab/tree/main/weightslab/examples/PyTorch_Lightning/ws-classification)
-
-
-## Configuration
-
-WeightsLab and Weightslab UI are configured through environment variables.
-A fully commented .env template is included at the repository root — copy it and adjust for your setup:
-
-```bash
-cp .env .env.local   # or edit .env directly
-```
-
-| Category | Key variables |
-|---|---|
-| **Logging** | `WEIGHTSLAB_LOG_LEVEL`, `WEIGHTSLAB_LOG_TO_FILE`, `WEIGHTSLAB_ROOT_LOG_DIR` |
-| **gRPC server** | `GRPC_BACKEND_HOST`, `GRPC_BACKEND_PORT`, `GRPC_MAX_MESSAGE_BYTES`, `GRPC_TLS_ENABLED`, `GRPC_TLS_CERT_DIR`, `GRPC_TLS_CERT_FILE`, `GRPC_TLS_KEY_FILE`, `GRPC_TLS_CA_FILE`, `GRPC_TLS_REQUIRE_CLIENT_AUTH`, `GRPC_AUTH_TOKEN`, `GRPC_AUTH_TOKENS` |
-| **Watchdog** | `GRPC_WATCHDOG_STUCK_SECONDS`, `GRPC_WATCHDOG_INTERVAL_SECONDS`, `GRPC_WATCHDOG_RESTART_THRESHOLD`, `GRPC_WATCHDOG_EXIT_ON_STUCK` |
-| **Data / cache** | `WL_MAX_PREVIEW_CACHE_SIZE`, `WL_PREVIEW_CACHE_WARMUP_WAIT_MS`, `WL_DEFAULT_THUMBNAIL_SIZE`, `WL_INSTANCE_AGGREGATION`, `WEIGHTSLAB_SAVE_PREDICTIONS_IN_H5` |
-| **AI keys** | `OPENROUTER_API_KEY` |
-| **Agent config** | `AGENT_CONFIG_PATH` |
-| **Weightslab UI** | `VITE_SERVER_HOST`, `VITE_SERVER_PORT`, `VITE_HISTOGRAM_MAX_BINS`, `ENVOY_HOST`, `ENVOY_PORT` |
-
-`AGENT_CONFIG_PATH` lets you point the data agent to a custom directory that contains `agent_config.yaml`.
-If set, WeightsLab looks for `<AGENT_CONFIG_PATH>/agent_config.yaml` before fallback locations.
-
-WeightsLab also reads TLS settings from registered runtime config (hyperparameters),
-using config-first precedence over environment variables.
-
-If TLS is enabled (`grpc_tls_enabled` in config or `GRPC_TLS_ENABLED` in env),
-certificate path resolution is:
-1. config file paths (`grpc_tls_cert_file`, `grpc_tls_key_file`, `grpc_tls_ca_file`)
-2. env file paths (`GRPC_TLS_CERT_FILE`, `GRPC_TLS_KEY_FILE`, `GRPC_TLS_CA_FILE`)
-3. config directory (`grpc_tls_cert_dir`)
-4. env directory (`GRPC_TLS_CERT_DIR`)
-5. default `~/certs` (`backend-server.crt`, `backend-server.key`, `ca.crt`)
-
-TLS flags also follow config-first precedence:
-`grpc_tls_enabled` then `GRPC_TLS_ENABLED`, and
-`grpc_tls_require_client_auth` then `GRPC_TLS_REQUIRE_CLIENT_AUTH`.
-
-> Full documentation with all variables and their descriptions: [docs/configuration.rst](docs/configuration.rst)
+###  Cloud examples
+Find our demos online. The password is **graybx**.
+<a href="https://preview.graybx.com/">
+  <p style="text-indent:20px;">DEMOS</p>
+</a>
 
 
 ## AI Agent
@@ -537,8 +409,9 @@ Use OpenRouter when you want larger hosted models and model selection directly f
 
 
 ### Cloud OpenRouter
-#### SDK Configuration
 You can either preconfigure OpenRouter in `agent_config.yaml` / `.env`, or initialize it interactively from Weightslab UI.
+
+#### SDK Configuration
 
 Example static configuration:
 
@@ -568,16 +441,6 @@ OpenRouter models can be initialized and set directly from the UI:
 
 The default OpenRouter model, as recommended by Graybx, is `meta-llama/llama-3.3-70b-instruct`.
 
-### Agent Commands in Weightslab UI
-
-The agent input supports these commands:
-
-- `/init` initializes the cloud provider flow for OpenRouter
-- `/model` opens the model chooser and switches the active OpenRouter model
-- `/reset` clears the current runtime agent connection and status
-
-The agent history also records setup and model-change events as log-style entries, separate from normal agent responses.
-
 ### Typical Usage Flow
 
 1. Start your WeightsLab backend (e.g., "main.py").
@@ -591,11 +454,7 @@ The agent history also records setup and model-change events as log-style entrie
 
 ## Documentation (API + SDK)
 
-* <div>
-  <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
-    <p>Documentation</p>
-  </a>
-</div>
+Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html)
 
 
 ## Community

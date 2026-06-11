@@ -117,15 +117,24 @@ commands:
                            build & start the UI stack.
                              --no-certs      run unsecured (HTTP, no auth)
 
-  start example            Run the bundled classification (cls) example
-                           (foreground; stop with Ctrl+C).
+  start example            Run a bundled PyTorch example (foreground; stop with
+                           Ctrl+C). Installs the example's requirements first,
+                           without prompting. Defaults to classification:
+                             --cls    classification example (default)
+                             --seg    segmentation example
+                             --det    detection example
+                             --clus   clustering example
+                             --gen    generation example
 
 examples:
   weightslab se                       # one-time secure setup
   weightslab se --force-certs         # regenerate the certs
   weightslab ui launch                # certs-if-missing + clean + launch
   weightslab ui launch --no-certs     # unsecured launch (HTTP)
-  weightslab start example            # run the classification demo
+  weightslab start example            # run the classification demo (default)
+  weightslab start example --seg      # run the segmentation demo
+  weightslab start example --det      # run the detection demo
+  weightslab start example --clus     # run the clustering demo
 """
 
 
@@ -760,25 +769,71 @@ def ui_secure_environment(args):
     logger.info("Then launch the UI with: weightslab ui launch")
 
 
+# Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> ws-classification).
+# Each value is (directory name under examples/PyTorch, human-readable label).
+_EXAMPLES = {
+    "cls": ("ws-classification", "classification"),
+    "seg": ("ws-segmentation", "segmentation"),
+    "det": ("ws-detection", "detection"),
+    "clus": ("ws-clustering", "clustering"),
+    "gen": ("ws-generation", "generation"),
+}
+_DEFAULT_EXAMPLE = "cls"
+
+
 def _get_example_dir(name: str = "ws-classification") -> Path:
     """Path to a bundled PyTorch example directory."""
     return Path(__file__).parent / 'examples' / 'PyTorch' / name
 
 
-def example_start(args):
-    """`weightslab example start`: run the bundled classification (cls) example.
+def _install_example_requirements(example_dir: Path) -> None:
+    """Install an example's requirements non-interactively, if a file is present.
 
-    Runs the example's main.py with the current Python interpreter, from its own
-    directory so it resolves its sibling config.yaml. Runs in the foreground
-    (the script serves until you stop it with Ctrl+C).
+    Looks for requirements.txt (then requirements.in) in the example directory and
+    runs `pip install -r` with the current interpreter and `--no-input` so it never
+    prompts. Non-fatal: a failure is logged and the example is still attempted, so a
+    transient install hiccup doesn't block a run where deps are already satisfied.
     """
-    example_dir = _get_example_dir("ws-classification")
+    for fname in ("requirements.txt", "requirements.in"):
+        req = example_dir / fname
+        if not req.exists():
+            continue
+        logger.info(f"Installing example requirements (non-interactive): {req}")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", str(req),
+                 "--no-input", "--disable-pip-version-check"],
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            logger.warning(
+                f"Failed to install requirements ({req}): {exc}. "
+                "Continuing — the example may still run if deps are already installed."
+            )
+        return  # only the first matching requirements file is used
+
+
+def example_start(args):
+    """`weightslab start example [--cls|--seg|--clus|--gen]`: run a bundled example.
+
+    Defaults to the classification (cls) example. First installs the example's
+    requirements (if a requirements file is present) without prompting, then runs
+    its main.py with the current Python interpreter from its own directory so it
+    resolves its sibling config.yaml. Runs in the foreground (serves until Ctrl+C).
+    """
+    kind = getattr(args, "example_kind", None) or _DEFAULT_EXAMPLE
+    dir_name, label = _EXAMPLES.get(kind, _EXAMPLES[_DEFAULT_EXAMPLE])
+
+    example_dir = _get_example_dir(dir_name)
     main_py = example_dir / "main.py"
     if not main_py.exists():
-        logger.error(f"Classification example not found: {main_py}")
+        logger.error(f"{label.capitalize()} example not found: {main_py}")
         sys.exit(1)
 
-    logger.info("Starting the WeightsLab classification (cls) example...")
+    # Install the example's own requirements first, without any interaction.
+    _install_example_requirements(example_dir)
+
+    logger.info(f"Starting the WeightsLab {label} ({kind}) example...")
     logger.info(f"   {main_py}")
     logger.info("In another terminal, launch the UI with: weightslab ui launch")
     logger.info(f"Then open http://localhost:5173 — stop the example with Ctrl+C.")
@@ -802,6 +857,22 @@ def example_start(args):
         sys.exit(result.returncode)
 
 
+def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
+    """Attach the mutually-exclusive example-kind flags (default: classification)."""
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--cls", action="store_const", dest="example_kind", const="cls",
+                       help="Run the classification example (default)")
+    group.add_argument("--seg", action="store_const", dest="example_kind", const="seg",
+                       help="Run the segmentation example")
+    group.add_argument("--det", action="store_const", dest="example_kind", const="det",
+                       help="Run the detection example")
+    group.add_argument("--clus", action="store_const", dest="example_kind", const="clus",
+                       help="Run the clustering example")
+    group.add_argument("--gen", action="store_const", dest="example_kind", const="gen",
+                       help="Run the generation example")
+    p.set_defaults(example_kind=_DEFAULT_EXAMPLE)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser (banner + detailed command reference).
 
@@ -809,7 +880,7 @@ def _build_parser() -> argparse.ArgumentParser:
         weightslab --help | -h | help
         weightslab se [--force-certs]
         weightslab ui launch [--no-certs]
-        weightslab start example
+        weightslab start example [--cls|--seg|--det|--clus|--gen]
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -817,7 +888,9 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command")
+    # metavar lists only the documented commands; the `example` alias is accepted
+    # but intentionally omitted here (and help=SUPPRESS'd below) so it stays hidden.
+    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -834,10 +907,22 @@ def _build_parser() -> argparse.ArgumentParser:
     launch_ui_parser.add_argument('certs_dir', nargs='?', default=None,
                                   help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 
-    # weightslab start example
+    # weightslab start example [--cls|--seg|--clus|--gen]
     start_parser = sub.add_parser("start", help="Start a bundled WeightsLab resource")
     start_sub = start_parser.add_subparsers(dest="start_target")
-    start_sub.add_parser("example", help="Start the bundled classification (cls) example")
+    example_parser = start_sub.add_parser(
+        "example", help="Start a bundled PyTorch example (default: classification)")
+    _add_example_kind_flags(example_parser)
+
+    # Tolerate the swapped order: `weightslab example start [flags]` (and bare
+    # `weightslab example`) behave exactly like `weightslab start example`. Hidden
+    # from --help on purpose (argparse.SUPPRESS) — it's a forgiving fallback, not a
+    # documented command.
+    example_alias = sub.add_parser("example", help=argparse.SUPPRESS)
+    example_alias_sub = example_alias.add_subparsers(dest="example_action")
+    example_alias_start = example_alias_sub.add_parser(
+        "start", help="Start a bundled PyTorch example (default: classification)")
+    _add_example_kind_flags(example_alias_start)
 
     sub.add_parser("help", help="Show this help message")
 
@@ -862,6 +947,10 @@ def main():
             example_start(args)
         else:
             start_parser.print_help()
+    elif args.command == "example":
+        # Alias for `start example` — tolerate the swapped subcommand order
+        # (`weightslab example start [flags]`) and the bare `weightslab example`.
+        example_start(args)
     else:
         parser.print_help()
 
