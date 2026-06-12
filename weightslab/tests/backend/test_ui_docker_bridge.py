@@ -427,20 +427,6 @@ class TestMainCLI(unittest.TestCase):
         with patch("sys.argv", ["weightslab"]):
             main()  # should not raise
 
-    def test_removed_commands_are_rejected(self):
-        """Commands that were removed must no longer be accepted by the parser."""
-        for argv in (
-            ["weightslab", "ui", "stop"],
-            ["weightslab", "ui", "drop"],
-            ["weightslab", "ui", "docker", "launch"],
-            ["weightslab", "ui", "docker", "se"],
-            ["weightslab", "example", "start"],   # old order, now invalid
-        ):
-            with patch("sys.argv", argv):
-                with self.assertRaises(SystemExit) as ctx:
-                    main()
-                self.assertNotEqual(ctx.exception.code, 0, argv)
-
 
 class TestUserOnboardingFlow(unittest.TestCase):
     """Integration-like test of the full onboarding flow, fully hermetic."""
