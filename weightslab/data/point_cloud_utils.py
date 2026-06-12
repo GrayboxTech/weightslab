@@ -613,7 +613,6 @@ def render_thumbnail_2d_for_dataset(dataset, points: np.ndarray) -> Image.Image:
 
     pts = filter_valid_points(points)
     is_2d = pts.ndim == 2 and pts.shape[1] == 2
-    is_3d = pts.ndim == 2 and pts.shape[1] >= 3
 
     # Default: range for 2D, BEV for 3D
     if not projection_str:
