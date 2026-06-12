@@ -612,6 +612,22 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
     if hasattr(wrapped, '__getitem__'):
         np_img, is_volumetric, original_shape = _get_image_array_and_metadata(wrapped, index, rank=rank)
 
+        # Point-cloud samples (LiDAR etc.) cannot be PIL-encoded; render a
+        # server-side 2D thumbnail (BEV, range image, or custom projection).
+        # Guarded by both the task type and a shape heuristic so regular image
+        # datasets are never affected.
+        from weightslab.data.point_cloud_utils import (
+            is_point_cloud_task, looks_like_point_cloud, render_thumbnail_2d_for_dataset,
+        )
+        _raw_task = getattr(wrapped, "task_type", getattr(dataset, "task_type", None))
+        _pc_task = is_point_cloud_task(_raw_task)
+        _task_unknown = not str(_raw_task or "").strip()
+        if looks_like_point_cloud(np_img) and (
+                _pc_task or (_task_unknown and np_img.shape[0] >= 256)):
+            thumb_pil = render_thumbnail_2d_for_dataset(dataset, np_img)
+            thumb_arr = np.asarray(thumb_pil)
+            return thumb_arr, False, tuple(thumb_arr.shape), thumb_pil
+
         # Extract middle slice for thumbnail
         if is_volumetric:
             middle_slice = _extract_slice_from_4d(np_img, slice_idx=None)
@@ -639,6 +655,24 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
         return np_img, is_volumetric, original_shape, middle_pil
 
     return None, False, None, None
+
+
+def load_raw_point_cloud(dataset, index, rank: int = 0):
+    """Load the raw point-cloud array [M, 2..4] for one sample (no BEV render).
+
+    Same plucking rules as ``load_raw_image_array`` but returns the raw points
+    so the GetPointCloud RPC can stream them to the interactive 3D viewer.
+    Returns None when the sample does not look like a point cloud.
+    """
+    from weightslab.data.point_cloud_utils import looks_like_point_cloud
+
+    wrapped = getattr(dataset, "wrapped_dataset", dataset)
+    if not hasattr(wrapped, '__getitem__'):
+        return None
+    arr, _, _ = _get_image_array_and_metadata(wrapped, index, rank=rank)
+    if arr is None or not looks_like_point_cloud(np.asarray(arr)):
+        return None
+    return np.asarray(arr, dtype=np.float32)
 
 
 def load_uid(dataset, sample_id):

@@ -17,6 +17,9 @@ service ExperimentService {
   // Data Service (for weights_studio UI)
   rpc ApplyDataQuery (DataQueryRequest) returns (DataQueryResponse);
   rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
+  // Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
+  // in binary chunks for the interactive 3D viewer.
+  rpc GetPointCloud (PointCloudRequest) returns (stream PointCloudChunk);
   rpc EditDataSample (DataEditsRequest) returns (DataEditsResponse);
   rpc GetDataSplits (Empty) returns (DataSplitsResponse);
   rpc CheckAgentHealth (Empty) returns (AgentHealthResponse);
@@ -377,6 +380,30 @@ message DataSamplesResponse {
   bool success = 1;
   string message = 2;
   repeated DataRecord data_records = 3;
+}
+
+// --- Point cloud transfer (task_type "detection_pointcloud") ---
+message PointCloudRequest {
+  string sample_id = 1;
+  string origin = 2;       // loader name (e.g. "train_loader")
+  int32 max_points = 3;    // 0 = use the server default cap
+}
+
+message PointCloudChunk {
+  bool success = 1;
+  string message = 2;
+  // Set on the first chunk only:
+  int32 num_points = 3;          // total points after downsampling
+  int32 num_features = 4;        // column count (>= 2)
+  repeated float pc_range = 5;   // x_min, y_min, z_min, x_max, y_max, z_max
+  // Every chunk:
+  bytes data = 6;                // little-endian float32, row-major slice of [num_points, num_features]
+  int32 chunk_index = 7;
+  int32 total_chunks = 8;
+  // Per-column channel names (first chunk only), e.g.
+  // ["x","y","z","intensity"] or ["x","y","z","nx","ny","nz","r","g","b"].
+  // Drives the viewer's available colour / shading modes.
+  repeated string feature_names = 9;
 }
 
 enum SampleEditType {
