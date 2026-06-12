@@ -12,9 +12,11 @@ from weightslab.ui_docker_bridge import (
     _clean_stale_docker_resources,
     _compose_cmd,
     _ensure_certificates,
+    _ensure_scripts_executable,
     _generate_certs_with_fallback,
     _get_example_dir,
     _install_example_requirements,
+    _make_executable,
     _remove_docker_image,
     _strip_derived_deploy_env,
     _DERIVED_DEPLOY_ENV_VARS,
@@ -52,8 +54,9 @@ class TestCheckDocker(unittest.TestCase):
 
 
 class TestComposeCmd(unittest.TestCase):
+    @patch("weightslab.ui_docker_bridge._compose_base_cmd", return_value=["docker", "compose"])
     @patch("weightslab.ui_docker_bridge.subprocess.run")
-    def test_runs_docker_compose_with_env(self, mock_run):
+    def test_runs_docker_compose_with_env(self, mock_run, _mock_base):
         mock_run.return_value = MagicMock(stdout="", returncode=0)
         _compose_cmd("/path/to/compose.yml", "/path/to/envoy.yaml", ["up", "-d"])
         mock_run.assert_called_once()
@@ -65,6 +68,104 @@ class TestComposeCmd(unittest.TestCase):
         self.assertEqual(kwargs["env"]["WS_ENVOY_CONFIG"], "/path/to/envoy.yaml")
         self.assertTrue(kwargs["stdout"])
         self.assertTrue(kwargs["text"])
+
+    @patch("weightslab.ui_docker_bridge._compose_base_cmd", return_value=["docker-compose"])
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_v1_translates_up_pull_into_pull_then_up(self, mock_run, _mock_base):
+        """Compose v1 has no `up --pull`; it must `pull` first, then `up` without the flag."""
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
+        _compose_cmd("/c.yml", "/e.yaml", ["up", "-d", "--pull", "always"])
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        # A separate `docker-compose -f /c.yml pull` ran first.
+        self.assertIn(["docker-compose", "-f", "/c.yml", "pull"], cmds)
+        # The final `up` carries no --pull flag (v1 would reject it).
+        up_cmd = cmds[-1]
+        self.assertEqual(up_cmd, ["docker-compose", "-f", "/c.yml", "up", "-d"])
+        self.assertNotIn("--pull", up_cmd)
+
+    @patch("weightslab.ui_docker_bridge._compose_base_cmd", return_value=None)
+    def test_exits_when_no_compose_cli(self, _mock_base):
+        with self.assertRaises(SystemExit) as ctx:
+            _compose_cmd("/c.yml", "/e.yaml", ["up", "-d"])
+        self.assertEqual(ctx.exception.code, 1)
+
+
+class TestComposeDetection(unittest.TestCase):
+    """Prefer Compose v2 (`docker compose`), fall back to v1 (`docker-compose`)."""
+
+    @staticmethod
+    def _fake_run(ok_keys):
+        """Return a subprocess.run stub: rc 0 when ' '.join(cmd[:2]) is in ok_keys."""
+        def run(cmd, *a, **k):
+            return MagicMock(returncode=0 if " ".join(cmd[:2]) in ok_keys else 1)
+        return run
+
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_prefers_v2(self, mock_run):
+        from weightslab.ui_docker_bridge import _detect_compose_cmd
+        mock_run.side_effect = self._fake_run({"docker compose"})
+        self.assertEqual(_detect_compose_cmd(), ["docker", "compose"])
+
+    @patch("weightslab.ui_docker_bridge.shutil.which", return_value="/usr/bin/docker-compose")
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_falls_back_to_v1_when_v2_absent(self, mock_run, _which):
+        from weightslab.ui_docker_bridge import _detect_compose_cmd
+        # v2 probe fails (rc 1); v1 probe (`docker-compose version`) succeeds.
+        mock_run.side_effect = self._fake_run({"docker-compose version"})
+        self.assertEqual(_detect_compose_cmd(), ["docker-compose"])
+
+    @patch("weightslab.ui_docker_bridge.shutil.which", return_value=None)
+    @patch("weightslab.ui_docker_bridge.subprocess.run")
+    def test_returns_none_when_neither_available(self, mock_run, _which):
+        from weightslab.ui_docker_bridge import _detect_compose_cmd
+        mock_run.side_effect = self._fake_run(set())
+        self.assertIsNone(_detect_compose_cmd())
+
+
+class TestScriptsExecutable(unittest.TestCase):
+    """Bundled .sh scripts are made executable so users skip the manual `chmod +x`."""
+
+    @unittest.skipIf(sys.platform == "win32", "execute bit is POSIX-only")
+    def test_make_executable_adds_exec_bits(self):
+        import stat as _stat
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".sh", delete=False) as f:
+            path = f.name
+        try:
+            os.chmod(path, 0o644)
+            _make_executable(path)
+            mode = os.stat(path).st_mode
+            self.assertTrue(mode & _stat.S_IXUSR)
+            self.assertTrue(mode & _stat.S_IXGRP)
+            self.assertTrue(mode & _stat.S_IXOTH)
+        finally:
+            os.unlink(path)
+
+    def test_make_executable_is_noop_on_windows(self):
+        with patch("weightslab.ui_docker_bridge._is_windows", return_value=True):
+            with patch("weightslab.ui_docker_bridge.os.chmod") as mock_chmod:
+                _make_executable("/whatever/path.sh")
+                mock_chmod.assert_not_called()
+
+    def test_make_executable_swallows_oserror(self):
+        # A non-chmod-able path (e.g. root-owned system install) must not raise.
+        with patch("weightslab.ui_docker_bridge.os.stat", side_effect=OSError("denied")):
+            _make_executable("/root/owned.sh")  # should not raise
+
+    @unittest.skipIf(sys.platform == "win32", "execute bit is POSIX-only")
+    def test_ensure_scripts_executable_marks_bundled_scripts(self):
+        import stat as _stat
+        from weightslab.ui_docker_bridge import _get_bootstrap_script
+        _ensure_scripts_executable()
+        bootstrap = _get_bootstrap_script()
+        self.assertTrue(bootstrap.exists(), bootstrap)
+        self.assertTrue(os.stat(bootstrap).st_mode & _stat.S_IXUSR)
+
+    def test_ensure_scripts_executable_noop_on_windows(self):
+        with patch("weightslab.ui_docker_bridge._is_windows", return_value=True):
+            with patch("weightslab.ui_docker_bridge._make_executable") as mock_mk:
+                _ensure_scripts_executable()
+                mock_mk.assert_not_called()
 
 
 class TestUiLaunch(unittest.TestCase):

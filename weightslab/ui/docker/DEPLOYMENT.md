@@ -2,6 +2,16 @@
 
 This Docker setup automatically adapts to the availability of TLS certificates and gRPC auth tokens. All scenarios use a **single port (5173)** that works with HTTP or HTTPS depending on certificate availability.
 
+## Requirements
+
+- **Docker Engine** with the daemon running.
+- **Docker Compose v2** (the `docker compose` CLI plugin) — *recommended*, or the
+  legacy **v1** standalone binary (`docker-compose`, **≥ 1.27**). `weightslab ui launch`
+  auto-detects whichever is installed.
+
+> **Note:** The manual `docker compose ...` commands in this guide assume Compose v2.
+> If you are on v1, substitute the hyphenated form, e.g. `docker-compose -f docker-compose.yml up -d`.
+
 ## Quick Start
 
 ### Scenario 1: HTTP Only (No Certs, No Auth) - Development/Testing

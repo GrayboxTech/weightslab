@@ -59,9 +59,13 @@ The granular statistics and interactive paradigm enable powerful workflows:
 ### Requirements
 
 - **Docker Desktop v4.77 or newer** — required to deploy the Weights Studio UI (`weightslab ui launch`).
+- **Docker Compose v2** (the `docker compose` CLI plugin, bundled with Docker Desktop) — *recommended*. The legacy v1 standalone binary (`docker-compose`, **≥ 1.27**) also works: `weightslab ui launch` auto-detects whichever is installed and uses it. Compose v1 below 1.27 is **not** supported.
 - **Python >=3.10, <3.15** — to install and run the `weightslab` framework.
 > [!OPTIONAL]
 > We are fully compatible with Conda.
+
+> [!TIP]
+> Check your Compose version with `docker compose version` (v2) or `docker-compose --version` (v1). If `docker compose version` prints a version string, you have v2.
 
 
 ### Installation

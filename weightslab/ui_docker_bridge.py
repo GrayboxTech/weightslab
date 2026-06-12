@@ -4,6 +4,7 @@ import argparse
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import socket
@@ -23,6 +24,11 @@ _CERTS_DIR_IN_ORIGINAL_ENV: bool = "WEIGHTSLAB_CERTS_DIR" in os.environ
 # these names — we never run a global `docker system prune`.
 _FRONTEND_IMAGE = "graybx/weightslab"
 _STACK_CONTAINERS = ("weights_studio_envoy", "weights_studio_frontend")
+
+# Cached Docker Compose base command. Resolved once per process to either the
+# v2 plugin (``["docker", "compose"]``) or the legacy v1 standalone binary
+# (``["docker-compose"]``) — see _detect_compose_cmd(). None until first probe.
+_COMPOSE_BASE_CMD = None
 
 # TLS/auth env vars that are *derived* from cert-file presence in
 # WEIGHTSLAB_CERTS_DIR. WEIGHTSLAB_CERTS_DIR is the single source of truth; these
@@ -170,6 +176,94 @@ def _is_windows() -> bool:
     return sys.platform == 'win32'
 
 
+def _make_executable(path) -> None:
+    """Add the execute bit to a file so it can be run directly (POSIX only).
+
+    pip installs the bundled ``.sh`` scripts as package data *without* the execute
+    bit, and they are committed/shipped non-executable. ``_run_shell_script`` runs
+    them as a command (``bash -c "VAR=... '/path/script.sh'"``), which requires
+    the execute bit — otherwise bash fails with "Permission denied" until the user
+    ``chmod +x`` by hand. This grants u+x,g+x,o+x (e.g. 0644 -> 0755) and is a
+    best-effort no-op on Windows, where the POSIX execute bit is not used.
+    """
+    if _is_windows():
+        return
+    try:
+        mode = os.stat(path).st_mode
+        os.chmod(path, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as exc:
+        # Non-fatal: e.g. a root-owned system install the user can't chmod. They
+        # would not have been able to chmod it manually either; surface as debug.
+        logger.debug(f"Could not set execute bit on {path}: {exc}")
+
+
+def _ensure_scripts_executable() -> None:
+    """Make every bundled shell script executable (POSIX only).
+
+    Covers build-and-deploy.sh, generate-certs-auth-token.sh and the other ``.sh``
+    files under ``weightslab/ui`` so a freshly pip-installed package can run them
+    without the user having to ``chmod +x`` first. No-op on Windows.
+    """
+    if _is_windows():
+        return
+    ui_dir = Path(__file__).parent / 'ui'
+    try:
+        scripts = list(ui_dir.rglob('*.sh'))
+    except OSError as exc:
+        logger.debug(f"Could not enumerate bundled scripts under {ui_dir}: {exc}")
+        return
+    for script in scripts:
+        _make_executable(script)
+
+
+def _detect_compose_cmd():
+    """Return the base command for Docker Compose, preferring v2 over v1.
+
+    Docker Compose ships in two forms:
+      * v2 — the ``docker compose`` CLI plugin (bundled with Docker Desktop and
+        the recommended install). Invoked as two words: ``docker compose``.
+      * v1 — the legacy standalone ``docker-compose`` binary (one word, hyphen).
+
+    We probe v2 first (``docker compose version``) then fall back to v1
+    (``docker-compose version``) so ``weightslab ui launch`` works with either.
+    Returns ``["docker", "compose"]``, ``["docker-compose"]``, or None if neither
+    is available.
+    """
+    # v2: the `docker compose` plugin.
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            return ["docker", "compose"]
+    except FileNotFoundError:
+        # docker itself is missing; _check_docker() surfaces the user-facing error.
+        pass
+
+    # v1: the legacy standalone `docker-compose` binary.
+    if shutil.which("docker-compose") is not None:
+        try:
+            result = subprocess.run(
+                ["docker-compose", "version"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if result.returncode == 0:
+                return ["docker-compose"]
+        except FileNotFoundError:
+            pass
+
+    return None
+
+
+def _compose_base_cmd():
+    """Cached Docker Compose base command (v2 ``docker compose``, else v1 ``docker-compose``)."""
+    global _COMPOSE_BASE_CMD
+    if _COMPOSE_BASE_CMD is None:
+        _COMPOSE_BASE_CMD = _detect_compose_cmd()
+    return _COMPOSE_BASE_CMD
+
+
 def _check_docker():
     """Verify that docker is installed and the daemon is running."""
     if shutil.which("docker") is None:
@@ -213,7 +307,33 @@ def _compose_cmd(compose_file, envoy_config, action):
                 f"WEIGHTSLAB_CERTS_DIR not set — using default certs dir for docker: {host_path}"
             )
 
-    cmd = ["docker", "compose", "-f", str(compose_file)] + action
+    base = _compose_base_cmd()
+    if base is None:
+        logger.error(
+            "Docker Compose is required but was not found.\n"
+            "Install Compose v2 (recommended) — the `docker compose` CLI plugin, "
+            "bundled with Docker Desktop: https://docs.docker.com/compose/install/\n"
+            "The legacy v1 `docker-compose` binary also works if it is on your PATH."
+        )
+        sys.exit(1)
+
+    action = list(action)
+    # Compose v1 (`docker-compose`) has no `up --pull <policy>` flag (it is
+    # v2-only). Emulate it: `pull` first (best-effort — some services only build
+    # locally), then `up` without the flag. v2 supports it inline, so leave it.
+    if base == ["docker-compose"] and action and action[0] == "up" and "--pull" in action:
+        i = action.index("--pull")
+        del action[i:i + 2]  # drop '--pull' and its policy value (e.g. 'always')
+        logger.info("Docker Compose v1 detected — pulling images before 'up'...")
+        pull_result = subprocess.run(
+            base + ["-f", str(compose_file), "pull"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        if pull_result.stdout:
+            for line in pull_result.stdout.splitlines():
+                logger.info(line)
+
+    cmd = base + ["-f", str(compose_file)] + action
     result = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     if result.stdout:
@@ -310,6 +430,11 @@ def _run_shell_script(script_path: str, args: list = None, env_vars: dict = None
         if fixed_bytes != script_bytes:
             with open(script_path, 'wb') as f:
                 f.write(fixed_bytes)
+
+        # We invoke the script as a command below (bash -c "VAR=... 'script'"),
+        # which needs the execute bit. pip installs it without one, so add it here
+        # (no-op on Windows). Uses the on-disk path before any Git Bash conversion.
+        _make_executable(script_path)
 
         env = os.environ.copy()
         if env_vars:
@@ -595,6 +720,9 @@ def ui_launch(args):
       --dev          use the dev compose overlay
     """
     _check_docker()
+    # pip installs the bundled .sh scripts without the execute bit; make them
+    # runnable so the user never has to `chmod +x` before `weightslab ui launch`.
+    _ensure_scripts_executable()
 
     no_certs = getattr(args, "no_certs", False)
     no_auth = getattr(args, "no_auth", False)
@@ -735,6 +863,9 @@ def ui_secure_environment(args):
     backend and the deploy pipeline, so this command does not set any other env.
     """
     logger.info("Setting up secure environment...")
+    # Bundled .sh scripts ship without the execute bit (pip strips it); make them
+    # runnable so the cert-generation script below doesn't fail on "Permission denied".
+    _ensure_scripts_executable()
 
     force_certs = getattr(args, "force_certs", False)
     no_auth = getattr(args, "no_auth", False)

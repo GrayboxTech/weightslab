@@ -9,6 +9,9 @@ Prerequisites
 
 - Python 3.10+ installed.
 - A virtual environment tool (``venv`` or Conda).
+- Docker, plus **Docker Compose v2** (the ``docker compose`` plugin, recommended)
+  or the legacy v1 ``docker-compose`` binary (``>= 1.27``) — required to launch
+  the Weights Studio UI. ``weightslab ui launch`` auto-detects whichever you have.
 - Your training project available locally.
 
 Install WeightsLab

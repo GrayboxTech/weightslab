@@ -233,20 +233,36 @@ if [ -n "$WEIGHTSLAB_SKIP_DOCKER_OPS" ] && [ "$WEIGHTSLAB_SKIP_DOCKER_OPS" != "0
     exit 0
 fi
 
+# Detect the Docker Compose CLI: prefer v2 (the `docker compose` plugin), fall
+# back to the legacy v1 standalone binary (`docker-compose`). This lets the
+# deploy work whether the user has Compose v2 or v1 installed.
+if docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker-compose"
+else
+    echo "Error: Docker Compose not found." >&2
+    echo "       Install Compose v2 (the 'docker compose' plugin, recommended) or" >&2
+    echo "       the legacy v1 'docker-compose' binary." >&2
+    echo "       See: https://docs.docker.com/compose/install/" >&2
+    exit 1
+fi
+echo "Using Docker Compose command: $DOCKER_COMPOSE"
+
 # Build and deploy
 if [ "$DEV" = "true" ]; then
     echo "Skipped dev build (image already exists)"
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
-    docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml down
-    docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml up -d --force-recreate
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml down
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml up -d --force-recreate
 
     echo "Deployment to development complete!"
 else
     if [ "$SKIP_BUILD" = "false" ]; then
         echo "Building production image (single image, configuration at runtime)..."
         # Build with defaults - configuration happens at runtime via .env
-        docker compose -f $DOCKER_DIR/docker-compose.yml build --no-cache
+        $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml build --no-cache
 
         BUILD_STATUS=$?
         if [ $BUILD_STATUS -ne 0 ]; then
@@ -262,20 +278,20 @@ else
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
     echo "Stopping existing containers..."
-    docker compose -f $DOCKER_DIR/docker-compose.yml down
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml down
 
     echo "Starting containers..."
-    docker compose -f $DOCKER_DIR/docker-compose.yml up -d --force-recreate
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml up -d --force-recreate
 
     UP_STATUS=$?
     if [ $UP_STATUS -ne 0 ]; then
         echo "Container startup failed with status $UP_STATUS"
         echo "Checking container logs..."
-        docker compose -f $DOCKER_DIR/docker-compose.yml logs --tail=50 || true
+        $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml logs --tail=50 || true
         exit $UP_STATUS
     fi
 
     echo "Deployment to production complete!"
     echo "Running containers:"
-    docker compose -f $DOCKER_DIR/docker-compose.yml ps || true
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml ps || true
 fi
