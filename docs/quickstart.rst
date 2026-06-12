@@ -145,20 +145,30 @@ Use Weightslab Studio (UI)
 -----------------------
 
 For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the
-Weights Studio web app with the bundled CLI. ``weightslab ui launch`` is the one-command
-path: it **generates TLS certificates and a gRPC auth token if they don't already exist**,
-removes any stale weightslab/weights_studio Docker resources that could break the launch
-(old containers, network, anonymous volumes, the cached frontend image, and a leftover
-generated ``.env``), then starts both the UI and the Envoy proxy, which routes data to your
-training script's gRPC server.
+Weights Studio web app with the bundled CLI. ``weightslab ui launch`` removes any stale
+weightslab/weights_studio Docker resources that could break the launch (old containers,
+network, anonymous volumes, the cached frontend image, and a leftover generated ``.env``),
+then starts both the UI and the Envoy proxy, which routes data to your training script's
+gRPC server.
+
+**By default the UI runs unsecured (HTTP, no gRPC auth) — no certificates are generated.**
+Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth token:
 
 .. code-block:: bash
 
-   weightslab ui launch              # secure by default (certs auto-created if missing)
-   weightslab ui launch --no-certs   # run unsecured (HTTP, no gRPC auth)
+   weightslab ui launch              # unsecured HTTP (default; no certs generated)
+   weightslab ui launch --certs      # secured HTTPS + gRPC auth (generates certs if missing)
+
+.. important::
+
+   When using certs, set ``WEIGHTSLAB_CERTS_DIR`` so the training backend and any new
+   terminal use the **same** certificates — it is the single source of truth for TLS/auth.
+   Both ``weightslab se`` and ``weightslab ui launch --certs`` print the exact
+   ``export`` / ``setx`` command for your shell. You can also pre-generate certs with
+   ``weightslab se``.
 
 Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
-command reference (``se``, ``ui launch``, ``ui stop``, ``ui drop``, ``ui docker ...``).
+command reference (``se``, ``ui launch``, ``start example ...``).
 
 If you keep agent settings outside the repository, set ``AGENT_CONFIG_PATH`` so the backend
 can resolve ``agent_config.yaml`` from that directory. Environment variables used in the

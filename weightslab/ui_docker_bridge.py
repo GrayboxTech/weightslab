@@ -857,17 +857,19 @@ def ui_launch(args):
     logger.info(f"Weights Studio UI is running at: {protocol}://localhost:{port}")
     if secured:
         certs_dir_str = str(manager.certs_dir)
-        # The backend and any new shell must point at the same certs dir, or
-        # they'll mismatch the UI's TLS/auth. Warn the user to export it.
-        logger.warning(
-            "TLS is ON. Set WEIGHTSLAB_CERTS_DIR so the training backend and new "
-            "terminals use the same certificates:")
-        logger.warning(f"   (bash)    export WEIGHTSLAB_CERTS_DIR=\"{certs_dir_str}\"")
-        logger.warning(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
+        # Persist first (it logs its own lines), so the export/setx reminder
+        # below stays the FINAL output and can't be missed.
         # Persist when a custom dir was given (it won't match the default, so the
         # backend must be told where to look) or when the var isn't already set.
         if certs_dir_arg or not _CERTS_DIR_IN_ORIGINAL_ENV:
             _persist_certs_dir(certs_dir_str)
+        # The backend and any new shell must point at the same certs dir, or
+        # they'll mismatch the UI's TLS/auth. Keep this the last thing printed.
+        logger.warning("")
+        logger.warning("⚠ ACTION REQUIRED — TLS is ON. Set WEIGHTSLAB_CERTS_DIR so the "
+                       "training backend and new terminals use the same certificates:")
+        logger.warning(f"   (bash)    export WEIGHTSLAB_CERTS_DIR=\"{certs_dir_str}\"")
+        logger.warning(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
     else:
         logger.info("UI is running UNSECURED (HTTP, no gRPC auth). "
                     "Re-run with `weightslab ui launch --certs` for TLS.")
@@ -912,12 +914,13 @@ def ui_secure_environment(args):
     logger.info("✓ gRPC auth token created")
     logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
     logger.info(f"✓ WEIGHTSLAB_CERTS_DIR exported for this process: {manager.certs_dir}")
-    logger.info("")
-    logger.warning("Set WEIGHTSLAB_CERTS_DIR globally so new shells and the training "
-                   "backend find these certs (it is the single source of truth):")
+    logger.info("Then launch the secured UI with: weightslab ui launch --certs")
+    # Keep this the FINAL output so the user can't miss the action they must take.
+    logger.warning("")
+    logger.warning("⚠ ACTION REQUIRED — set WEIGHTSLAB_CERTS_DIR globally so new shells "
+                   "and the training backend find these certs (single source of truth):")
     logger.warning(f"   (bash)    echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc && source ~/.bashrc")
     logger.warning(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
-    logger.info("Then launch the secured UI with: weightslab ui launch --certs")
 
 
 # Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> ws-classification).
