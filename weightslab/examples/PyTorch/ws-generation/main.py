@@ -395,7 +395,7 @@ if __name__ == "__main__":
     parameters.setdefault("device", "auto")
     # Read training_steps instead of training_steps_to_do to align with config.yaml
     training_steps = parameters.get("training_steps", 1000)
-    eval_every = parameters.get("eval_every", 200)
+    eval_full_to_train_steps_ratio = parameters.get("eval_full_to_train_steps_ratio", 200)
     parameters.setdefault("image_size", 256)
     parameters.setdefault("batch_size", 4)
     parameters.setdefault("lr", 1e-4)
@@ -501,7 +501,7 @@ if __name__ == "__main__":
         loss, acc = loss_info
         pbar.set_postfix({"Loss": f"{loss:.4f}", "Acc": f"{acc:.4f}"})
 
-        if age % eval_every == 0 and age > 0:
+        if age % eval_full_to_train_steps_ratio == 0 and age > 0:
             logger.info(f"Evaluating at step {age}...")
             test_loss, test_acc = evaluate_all(
                 test_loader, model,

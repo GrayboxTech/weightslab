@@ -727,6 +727,11 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             if hasattr(obj, '__name__'):
                 obj.__name__ = obj_name
 
+    # Register logger in backend for model training
+    if ledgers.get_logger() == None:
+        LoggerQueue()
+        logger.info('LoggerQueue for experiment history has been initialized and registered.')
+
     # Model
     if 'model' in flag.lower() or (hasattr(obj, '__name__') and 'model' in obj.__name__.lower()):
         # Ensure ledger has a placeholder (Proxy) for this name so callers
@@ -742,9 +747,6 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
 
         # Now construct the wrapper and let it register into the ledger.
         wrapper = ModelInterface(obj, **kwargs)  if forced_model_wrapping or _model == None else _model
-
-        # Register logger in backend for model training
-        LoggerQueue()
 
         # No rebind here since the model wrapper is designed to be a drop-in replacement for the original model
 
@@ -1750,6 +1752,7 @@ def save_instance_signals(
     batch_ids: th.Tensor | np.ndarray | list,
     batch_idx: th.Tensor | np.ndarray | list,
     step: int | None = None,
+    origin: str | None = None,
     targets: th.Tensor | np.ndarray | dict = None,
     log: bool = False,
 ):
@@ -1857,11 +1860,8 @@ def save_instance_signals(
     if len(batch_idx_np) == 0:
         return
 
-    # Build per-instance sample_ids and annotation_ids from the flat batch_idx map.
-    # batch_idx[i] is the image position (in batch_ids) that instance i belongs to.
-    # Annotation ids are 1-based: instance_id 0 is reserved for the per-sample row,
-    # so the k-th instance of a sample is stored at annotation_id k (1, 2, ...).
     # Build per-instance (sample_id, annotation_id) lists from the flat batch_idx map.
+    # batch_idx[i] is the image position (in batch_ids) that instance i belongs to.
     # Both lists have length num_instances_total and are ALIGNED with the flat
     # signal/target order. enqueue_instance_batch zips sample_ids with annotation_ids
     # and requires len(sample_ids) == len(annotation_ids); passing the raw batch_ids
@@ -1870,8 +1870,33 @@ def save_instance_signals(
     #
     # annotation_id is 1-based per sample (instance_id 0 is reserved for the sample
     # row): the k-th instance of a given image becomes annotation_id k (1, 2, ...).
-    instance_sample_ids: list[str] = batch_ids
-    instance_annotation_ids: list[int] = batch_idx
+    # Out-of-range batch_idx entries are kept as placeholders (annotation_id 0, which
+    # enqueue_instance_batch skips) so the flat signal index stays aligned.
+    def _coerce_sid(x):
+        # Normalize a sample id (tensor/np scalar/float) to a clean string,
+        # e.g. tensor(1) -> "1", 1.0 -> "1", "0" -> "0".
+        if hasattr(x, "item"):
+            try:
+                x = x.item()
+            except Exception:
+                pass
+        if isinstance(x, float) and x.is_integer():
+            x = int(x)
+        return str(x)
+
+    num_images = len(batch_ids)
+    instance_sample_ids: list = []
+    instance_annotation_ids: list[int] = []
+    _per_sample_count: dict = {}
+    for img_pos in batch_idx_np.tolist():
+        if 0 <= img_pos < num_images:
+            sid = _coerce_sid(batch_ids[img_pos])
+            _per_sample_count[sid] = _per_sample_count.get(sid, 0) + 1
+            instance_sample_ids.append(sid)
+            instance_annotation_ids.append(_per_sample_count[sid])
+        else:
+            instance_sample_ids.append(None)
+            instance_annotation_ids.append(0)
 
     if not instance_sample_ids:
         return
@@ -2347,6 +2372,44 @@ def eval_fn(func):
     global _REGISTERED_EVAL_FN
     _REGISTERED_EVAL_FN = func
     return func
+
+
+def pointcloud_thumbnail(func):
+    """Register a custom 2D thumbnail renderer for point-cloud samples.
+
+    For ``task_type = "detection_pointcloud"`` the studio previews each sample
+    as a server-rendered 2D image (default: BEV; ``range`` for a LiDAR
+    scan-style spherical projection). This decorator overrides that with your
+    own function, e.g. a range/spherical projection:
+
+        @wl.pointcloud_thumbnail
+        def to_range_image(points):           # points: [M, 2..F] float
+            return my_range_projection(points)  # -> (H, W, 3) uint8 or PIL.Image
+
+    (Note: ``@wl.3d_pc_thumb`` isn't valid Python — identifiers can't start
+    with a digit — so the verb is spelled out.) A ``render_thumbnail_2d``
+    method on the dataset takes precedence over this global registration.
+    See also [[detection-3d-pipeline]].
+    """
+    from weightslab.data.point_cloud_utils import register_thumbnail_fn
+    return register_thumbnail_fn(func)
+
+
+def pointcloud_boxes(func):
+    """Register a custom box projector for point-cloud thumbnails/overlays.
+
+    Maps metric boxes ([N, 7..9] 3D or [N, 4..6] 2D rows) to normalized
+    ``[x1, y1, x2, y2, cls, conf]`` boxes in the thumbnail image frame, so the
+    overlay lines up with a custom ``@wl.pointcloud_thumbnail`` projection:
+
+        @wl.pointcloud_boxes
+        def boxes_to_range(boxes):
+            return my_boxes_in_range_frame(boxes)  # -> [N, 6] normalized
+
+    A ``project_boxes_2d`` method on the dataset takes precedence.
+    """
+    from weightslab.data.point_cloud_utils import register_boxes_fn
+    return register_boxes_fn(func)
 
 
 def trigger_pending_evaluation_async() -> bool:

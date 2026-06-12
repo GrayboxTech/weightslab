@@ -13,7 +13,6 @@ import weightslab as wl
 from torch import optim
 
 
-from weightslab.backend.logger import LoggerQueue
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context,
@@ -186,14 +185,11 @@ if __name__ == "__main__":
 
     log_dir = parameters["root_log_dir"]
     max_steps = parameters["training_steps_to_do"]
-    eval_every = parameters["eval_full_to_train_steps_ratio"]
+    eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
 
-    # --- 4) Register logger + hyperparameters ---
-    logger = LoggerQueue()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
-
+    # --- 4) Register hyperparameters ---
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -336,7 +332,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 STARTING BDD100k SEGMENTATION TRAINING")
     print(f"📈 Total steps: {max_steps}")
-    print(f"🔄 Evaluation every {eval_every} steps")
+    print(f"🔄 Evaluation every {eval_full_to_train_steps_ratio} steps")
     print(f"💾 Logs will be saved to: {log_dir}")
     print(f"📂 Data root: {data_root}")
     print("=" * 60 + "\n")
@@ -356,7 +352,7 @@ if __name__ == "__main__":
         train_loss = train(train_loader, model, optimizer, train_sig, device)
 
         # Test
-        if age == 0 or age % eval_every == 0:
+        if age == 0 or age % eval_full_to_train_steps_ratio == 0:
             test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
             test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(test_loader_it, model, test_sig, device, test_loader_len)

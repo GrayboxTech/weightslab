@@ -5,6 +5,7 @@ import logging
 import threading
 import hashlib
 import shutil
+import warnings
 import pandas as pd
 import numpy as np
 
@@ -15,6 +16,17 @@ from weightslab.data.sample_stats import SampleStats
 
 
 logger = logging.getLogger(__name__)  # Initialize logger
+
+# WL signal columns use dotted names (e.g. "signals.defaults.brightness"), which
+# PyTables flags with NaturalNameWarning because they aren't valid Python
+# identifiers for attribute-style access. We only ever read columns by key /
+# getattr, never via natural naming, so the warning is pure noise here — silence
+# this one category (best-effort: PyTables may be absent if HDF persistence is off).
+try:
+    from tables import NaturalNameWarning
+    warnings.filterwarnings("ignore", category=NaturalNameWarning)
+except Exception:
+    pass
 
 
 class _InterProcessFileLock:

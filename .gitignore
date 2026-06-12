@@ -48,6 +48,7 @@ _version.py
 *.log
 *.csv
 *.sqlite
+*.txt
 *.db
 *.ipynb_checkpoints
 *.code-workspace
@@ -71,3 +72,5 @@ weightslab/ui/certs/*.srl
 # Ignore documentation build artifacts
 _build
 generated
+
+CLAUDE.md

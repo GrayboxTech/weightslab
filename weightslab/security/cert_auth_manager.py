@@ -1,12 +1,31 @@
 """Manage secure certificates and gRPC auth tokens for weightslab."""
 
 import os
+import re
 import logging
 import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_native_path(path: str) -> str:
+    """Normalize a WSL/Git-Bash style path to a native path on Windows.
+
+    On Windows, a value like ``/mnt/c/Users/...`` or ``/c/Users/...`` (from a
+    shell that set WEIGHTSLAB_CERTS_DIR) would otherwise be taken literally by
+    pathlib and resolve to ``C:\\mnt\\c\\Users\\...`` — splitting certs and the
+    auth token across two directories. Convert those forms back to ``C:\\...``.
+    No-op on Linux/macOS and for already-native paths.
+    """
+    if os.name != 'nt':
+        return path
+    p = str(path).replace('\\', '/')
+    m = re.match(r'^/mnt/([a-zA-Z])/(.*)$', p) or re.match(r'^/([a-zA-Z])/(.*)$', p)
+    if m:
+        return f"{m.group(1).upper()}:/{m.group(2)}"
+    return path
 
 
 def _get_user_profile() -> str:
@@ -43,7 +62,9 @@ class CertAuthManager:
         if certs_dir is None:
             self.certs_dir = Path(_get_user_profile()) / '.weightslab-certs'
         else:
-            self.certs_dir = Path(certs_dir)
+            # Normalize WSL/Git-Bash paths (/mnt/c/..., /c/...) to native form on
+            # Windows so certs and the auth token never split across directories.
+            self.certs_dir = Path(_normalize_native_path(str(certs_dir)))
 
         self.cert_file = self.certs_dir / 'backend-server.crt'
         self.key_file = self.certs_dir / 'backend-server.key'
@@ -51,12 +72,42 @@ class CertAuthManager:
         self.token_file = self.certs_dir / '.grpc_auth_token'
 
     def has_valid_certs(self) -> bool:
-        """Check if certificates exist and are valid."""
+        """Check if the full certificate set exists (all 3 files)."""
         return (
             self.cert_file.exists() and
             self.key_file.exists() and
             self.ca_file.exists()
         )
+
+    def has_any_credentials(self) -> bool:
+        """Return True if a complete cert set exists (token alone does not count)."""
+        return self.has_valid_certs()
+
+    def clear_credentials(self) -> int:
+        """Remove all generated certs, keys and the auth token from the certs dir.
+
+        Used for unsecured launches so the training backend (which derives TLS
+        from cert-file presence) does not pick up stale certs. Returns the number
+        of files removed. The directory itself is kept (empty) for bind mounts.
+        """
+        names = [
+            'backend-server.crt', 'backend-server.key',
+            'envoy-server.crt', 'envoy-server.key',
+            'envoy-client.crt', 'envoy-client.key',
+            'ca.crt', 'ca.srl', '.grpc_auth_token',
+        ]
+        removed = 0
+        for name in names:
+            f = self.certs_dir / name
+            try:
+                if f.exists():
+                    f.unlink()
+                    removed += 1
+            except OSError as e:
+                logger.warning(f"Could not remove {f}: {e}")
+        if removed:
+            logger.info(f"Removed {removed} credential file(s) from {self.certs_dir}")
+        return removed
 
     def generate_certs(self, force: bool = False) -> Tuple[bool, str]:
         """
@@ -114,13 +165,10 @@ class CertAuthManager:
         if not self.enable_auth:
             return ""
 
-        # Check if token is already set in environment (from bootstrap script)
-        env_token = os.environ.get('GRPC_AUTH_TOKEN', '').strip()
-        if env_token:
-            logger.debug("Using GRPC_AUTH_TOKEN from environment")
-            return env_token
-
-        # Check if token exists in file
+        # The token file in this certs_dir is the single source of truth — check
+        # it FIRST. (Do not short-circuit on os.environ['GRPC_AUTH_TOKEN']: it may
+        # hold a different dir's token applied at import, which would prevent a
+        # token from ever being written into a custom certs_dir.)
         if self.token_file.exists():
             try:
                 with open(self.token_file, 'r') as f:
@@ -131,8 +179,10 @@ class CertAuthManager:
             except Exception as e:
                 logger.warning(f"Could not read existing token: {e}")
 
-        # Generate new token
-        token = _generate_hex_token()
+        # No token file in this dir yet. Reuse an env-provided token if present
+        # (so a value already exported stays consistent) — otherwise mint one —
+        # and materialize it as a file so the dir is self-contained.
+        token = os.environ.get('GRPC_AUTH_TOKEN', '').strip() or _generate_hex_token()
 
         # Save token
         try:
@@ -144,7 +194,7 @@ class CertAuthManager:
                 os.chmod(self.token_file, 0o600)
             except Exception:
                 pass  # Windows doesn't support chmod
-            logger.info(f"Generated new gRPC auth token")
+            logger.info(f"Wrote gRPC auth token to {self.token_file}")
         except Exception as e:
             logger.error(f"Could not save token: {e}")
 
@@ -259,4 +309,6 @@ class CertAuthManager:
     def from_env_or_default(enable_auth: bool = True) -> 'CertAuthManager':
         """Create manager using environment variables or defaults."""
         certs_dir = os.environ.get('WEIGHTSLAB_CERTS_DIR')
+        if certs_dir is not None:
+            certs_dir = certs_dir.strip().strip("'\"")
         return CertAuthManager(certs_dir=certs_dir, enable_auth=enable_auth)

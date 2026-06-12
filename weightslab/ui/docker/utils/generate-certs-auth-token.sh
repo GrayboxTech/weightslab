@@ -2,6 +2,12 @@
 
 set -e
 
+# Git Bash / MSYS rewrites arguments that look like POSIX paths into Windows
+# paths. That corrupts the openssl "-subj /CN=..." values, but the "-out /tmp/.."
+# paths DO need conversion — so exclude only the subject strings. Harmless no-op
+# on Linux/macOS.
+export MSYS2_ARG_CONV_EXCL="/CN=;/C=;/O=;/OU="
+
 SKIP_TRUST=false
 FORCE_CREATE_CERTS=false
 
@@ -29,7 +35,10 @@ fi
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-USER_CERT_DIR="$HOME/.weightslab-certs"
+# Single source of truth: WEIGHTSLAB_CERTS_DIR decides where certs live.
+# Default to ~/.weightslab-certs when not provided.
+USER_CERT_DIR="${WEIGHTSLAB_CERTS_DIR:-$HOME/.weightslab-certs}"
+echo "Using certs directory: $USER_CERT_DIR"
 
 mkdir -p "$USER_CERT_DIR"
 

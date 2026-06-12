@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Auto-detect TLS and tokens, then build production image
 
 # Print all environment variables to diagnose issues
@@ -31,8 +31,10 @@ done
 # Check if WEIGHTSLAB_CERTS_DIR was explicitly set to empty string (before applying defaults)
 # This is how the E2E tests disable certs: WEIGHTSLAB_CERTS_DIR=""
 if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "--unsecured flag provided: disabling certs and auth"
-    WEIGHTSLAB_CERTS_DIR=""
+    # Force HTTP / no auth, but KEEP WEIGHTSLAB_CERTS_DIR: the compose bind-mount
+    # needs a real (possibly empty) source directory. TLS/auth are forced off in
+    # the derivation block below regardless of any files in it.
+    echo "--unsecured flag provided: forcing HTTP / no auth (certs dir kept for bind-mount only)"
 elif [ "${WEIGHTSLAB_CERTS_DIR+x}" ] && [ -z "$WEIGHTSLAB_CERTS_DIR" ]; then
     echo "WEIGHTSLAB_CERTS_DIR explicitly set to empty - forcing UNSECURE mode"
     FORCE_UNSECURE=1
@@ -73,68 +75,62 @@ else
     echo "WEIGHTSLAB_CERTS_DIR is empty, skipping cert check"
 fi
 
-# Respect environment variables if explicitly set (for E2E tests)
-VITE_DEV_SERVER_HTTPS="${VITE_DEV_SERVER_HTTPS:-unset}"
-VITE_SERVER_PROTOCOL="${VITE_SERVER_PROTOCOL:-unset}"
-ENVOY_UPSTREAM_TLS="${ENVOY_UPSTREAM_TLS:-unset}"
-ENVOY_DOWNSTREAM_TLS="${ENVOY_DOWNSTREAM_TLS:-unset}"
-
-# Detect TLS (unless overridden by environment)
-if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "UNSECURE mode: HTTP (no TLS)"
+# ---------------------------------------------------------------------------
+# Single source of truth: TLS + gRPC auth are derived SOLELY from the presence
+# of cert files in WEIGHTSLAB_CERTS_DIR. Any inherited VITE_*/ENVOY_* values are
+# intentionally ignored and recomputed here, so a stale or pre-set env var can
+# never force HTTPS without certs (which would crash Envoy on an empty mount) or
+# vice versa. `--unsecure` (or an empty WEIGHTSLAB_CERTS_DIR) forces everything
+# off.
+# ---------------------------------------------------------------------------
+if [ "$FORCE_UNSECURE" = "1" ] || [ -z "$WEIGHTSLAB_CERTS_DIR" ]; then
+    echo "Unsecured mode: HTTP, no auth (no certs directory)"
     VITE_DEV_SERVER_HTTPS=0
     VITE_SERVER_PROTOCOL=http
     ENVOY_UPSTREAM_TLS=off
     ENVOY_DOWNSTREAM_TLS=off
-elif [ "$VITE_SERVER_PROTOCOL" != "unset" ]; then
-    # Environment variables are already set, use them
-    echo "Using environment-provided protocol settings"
-    [ "$VITE_DEV_SERVER_HTTPS" = "unset" ] && VITE_DEV_SERVER_HTTPS=0
-    [ "$ENVOY_UPSTREAM_TLS" = "unset" ] && ENVOY_UPSTREAM_TLS=off
-    [ "$ENVOY_DOWNSTREAM_TLS" = "unset" ] && ENVOY_DOWNSTREAM_TLS=off
-elif [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.crt" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.key" ]; then
-    echo "TLS certificates found - building with HTTPS support"
-    VITE_DEV_SERVER_HTTPS=1
-    VITE_SERVER_PROTOCOL=https
-    ENVOY_UPSTREAM_TLS=on
-    ENVOY_DOWNSTREAM_TLS=on
+    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
+    VITE_GRPC_AUTH_TOKEN=""
 else
-    echo "TLS certificates not found - building for HTTP mode"
-    VITE_DEV_SERVER_HTTPS=0
-    VITE_SERVER_PROTOCOL=http
-    ENVOY_UPSTREAM_TLS=off
-    ENVOY_DOWNSTREAM_TLS=off
+    # Downstream HTTPS (browser <-> Envoy): needs the Envoy server cert + key.
+    if [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.crt" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-server.key" ]; then
+        echo "Envoy server cert found in $WEIGHTSLAB_CERTS_DIR - enabling HTTPS"
+        VITE_DEV_SERVER_HTTPS=1
+        VITE_SERVER_PROTOCOL=https
+        ENVOY_DOWNSTREAM_TLS=on
+    else
+        echo "No Envoy server cert in $WEIGHTSLAB_CERTS_DIR - HTTP (no downstream TLS)"
+        VITE_DEV_SERVER_HTTPS=0
+        VITE_SERVER_PROTOCOL=http
+        ENVOY_DOWNSTREAM_TLS=off
+    fi
+
+    # Upstream mTLS (Envoy <-> backend gRPC): needs the Envoy client cert + CA.
+    if [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-client.crt" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/envoy-client.key" ] && [ -f "$WEIGHTSLAB_CERTS_DIR/ca.crt" ]; then
+        echo "Envoy client cert + CA found - enabling upstream TLS"
+        ENVOY_UPSTREAM_TLS=on
+    else
+        echo "No Envoy client cert/CA - upstream plaintext"
+        ENVOY_UPSTREAM_TLS=off
+    fi
+
+    # gRPC auth token.
+    if [ -f "$TOKEN_FILE" ]; then
+        echo "gRPC token found - enabling auth"
+        VITE_WL_ENABLE_GRPC_AUTH_TOKEN=1
+        VITE_GRPC_AUTH_TOKEN=$(cat "$TOKEN_FILE")
+    else
+        echo "gRPC token not found - auth disabled"
+        VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
+        VITE_GRPC_AUTH_TOKEN=""
+    fi
 fi
 
-# Export all environment variables for docker compose
+# Export all derived variables for docker compose
 export VITE_DEV_SERVER_HTTPS
 export VITE_SERVER_PROTOCOL
 export ENVOY_UPSTREAM_TLS
 export ENVOY_DOWNSTREAM_TLS
-
-# Detect gRPC token
-VITE_WL_ENABLE_GRPC_AUTH_TOKEN="${VITE_WL_ENABLE_GRPC_AUTH_TOKEN:-unset}"
-VITE_GRPC_AUTH_TOKEN="${VITE_GRPC_AUTH_TOKEN:-}"
-
-if [ "$FORCE_UNSECURE" = "1" ]; then
-    echo "UNSECURE mode: auth disabled"
-    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
-    VITE_GRPC_AUTH_TOKEN=""
-elif [ "$VITE_WL_ENABLE_GRPC_AUTH_TOKEN" != "unset" ]; then
-    # Environment variable is already set, use it
-    echo "Using environment-provided auth settings"
-    true
-elif [ -f "$TOKEN_FILE" ]; then
-    echo "gRPC token found - enabling auth"
-    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=1
-    VITE_GRPC_AUTH_TOKEN=$(cat "$TOKEN_FILE")
-else
-    echo "gRPC token not found - auth disabled"
-    VITE_WL_ENABLE_GRPC_AUTH_TOKEN=0
-    VITE_GRPC_AUTH_TOKEN=""
-fi
-
-# Export auth variables for docker compose
 export VITE_WL_ENABLE_GRPC_AUTH_TOKEN
 export VITE_GRPC_AUTH_TOKEN
 
@@ -226,22 +222,47 @@ IMAGE_NAME="graybx/weightslab"
 #     echo "Image '$IMAGE_NAME' not found - will build"
 #     SKIP_BUILD=false
 # fi
-SKIP_BUILD = false
+SKIP_BUILD=false
+
+# When invoked from the Python launcher on a host where docker runs outside this
+# shell (e.g. Windows: docker lives on the host, not in WSL), the launcher does
+# `docker compose pull/up` itself. In that case this script only needs to write
+# the .env above — skip all docker operations here to avoid noisy failures.
+if [ -n "$WEIGHTSLAB_SKIP_DOCKER_OPS" ] && [ "$WEIGHTSLAB_SKIP_DOCKER_OPS" != "0" ]; then
+    echo "Skipping docker build/deploy in shell (handled by the launcher)."
+    exit 0
+fi
+
+# Detect the Docker Compose CLI: prefer v2 (the `docker compose` plugin), fall
+# back to the legacy v1 standalone binary (`docker-compose`). This lets the
+# deploy work whether the user has Compose v2 or v1 installed.
+if docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker-compose"
+else
+    echo "Error: Docker Compose not found." >&2
+    echo "       Install Compose v2 (the 'docker compose' plugin, recommended) or" >&2
+    echo "       the legacy v1 'docker-compose' binary." >&2
+    echo "       See: https://docs.docker.com/compose/install/" >&2
+    exit 1
+fi
+echo "Using Docker Compose command: $DOCKER_COMPOSE"
 
 # Build and deploy
 if [ "$DEV" = "true" ]; then
     echo "Skipped dev build (image already exists)"
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
-    docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml down
-    docker compose -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml up -d --force-recreate
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml down
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml -f $DOCKER_DIR/docker-compose.dev.yml up -d --force-recreate
 
     echo "Deployment to development complete!"
 else
     if [ "$SKIP_BUILD" = "false" ]; then
         echo "Building production image (single image, configuration at runtime)..."
         # Build with defaults - configuration happens at runtime via .env
-        docker compose -f $DOCKER_DIR/docker-compose.yml build
+        $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml build --no-cache
 
         BUILD_STATUS=$?
         if [ $BUILD_STATUS -ne 0 ]; then
@@ -257,20 +278,20 @@ else
     # Deploy (docker compose automatically reads .env)
     echo "Deploying containers..."
     echo "Stopping existing containers..."
-    docker compose -f $DOCKER_DIR/docker-compose.yml down
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml down
 
     echo "Starting containers..."
-    docker compose -f $DOCKER_DIR/docker-compose.yml up -d --force-recreate
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml up -d --force-recreate
 
     UP_STATUS=$?
     if [ $UP_STATUS -ne 0 ]; then
         echo "Container startup failed with status $UP_STATUS"
         echo "Checking container logs..."
-        docker compose -f $DOCKER_DIR/docker-compose.yml logs --tail=50 || true
+        $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml logs --tail=50 || true
         exit $UP_STATUS
     fi
 
     echo "Deployment to production complete!"
     echo "Running containers:"
-    docker compose -f $DOCKER_DIR/docker-compose.yml ps || true
+    $DOCKER_COMPOSE -f $DOCKER_DIR/docker-compose.yml ps || true
 fi

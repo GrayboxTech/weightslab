@@ -101,19 +101,19 @@ def train(
     model: FaceEmbeddingModel,
     train_loader: torch.utils.data.DataLoader,
     test_loader: torch.utils.data.DataLoader,
-    eval_every: int = 50,
+    eval_full_to_train_steps_ratio: int = 50,
     log_every: int = 10,
     loss_name: str = "triplet",
 ) -> Dict[str, Any]:
     """Open-ended training loop.
 
     Runs indefinitely until interrupted (Ctrl+C). Periodic test evaluation is
-    performed every eval_every steps when test_loader is provided.
+    performed every eval_full_to_train_steps_ratio steps when test_loader is provided.
     """
     print("\n" + "=" * 60)
     print("Face Recognition Training  (open-ended while loop)")
     print(f"  Loss       : {loss_name}")
-    print(f"  Eval every : {eval_every} steps")
+    print(f"  Eval every : {eval_full_to_train_steps_ratio} steps")
     print("  Max steps  : infinite (stop with Ctrl+C)")
     print("=" * 60)
 
@@ -161,7 +161,7 @@ def train(
 
                 should_eval = (
                     test_loader is not None
-                    and (step % eval_every == 0)
+                    and (step % eval_full_to_train_steps_ratio == 0)
                 )
 
             if should_eval:
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     # Defaults
     parameters.setdefault("experiment_name", "face_triplet_training")
     parameters.setdefault("device", "auto")
-    parameters.setdefault("eval_every", 50)
+    parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     parameters.setdefault("log_every", 10)
 
     # ---- Device ----
@@ -220,7 +220,7 @@ if __name__ == "__main__":
         print(f"No root_log_dir specified - using temp dir: {parameters['root_log_dir']}")
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
 
-    eval_every = int(parameters.get("eval_every", 50))
+    eval_full_to_train_steps_ratio = int(parameters.get("eval_full_to_train_steps_ratio", 50))
     log_every = int(parameters.get("log_every", 10))
     enable_h5 = parameters.get("enable_h5_persistence", True)
 
@@ -315,7 +315,7 @@ if __name__ == "__main__":
     print("STARTING FACE RECOGNITION TRAINING")
     print(f"  Experiment   : {parameters['experiment_name']}")
     print(f"  Device       : {device}")
-    print(f"  Steps        : infinite  |  eval_every={eval_every}")
+    print(f"  Steps        : infinite  |  eval_full_to_train_steps_ratio={eval_full_to_train_steps_ratio}")
     print(f"  Loss         : {model_cfg.get('loss', 'triplet')}")
     print(f"  Logs         : {parameters['root_log_dir']}")
     print("=" * 60)
@@ -324,7 +324,7 @@ if __name__ == "__main__":
         model=model,
         train_loader=train_loader,
         test_loader=test_loader,
-        eval_every=eval_every,
+        eval_full_to_train_steps_ratio=eval_full_to_train_steps_ratio,
         log_every=log_every,
         loss_name=model_cfg.get("loss", "triplet"),
     )

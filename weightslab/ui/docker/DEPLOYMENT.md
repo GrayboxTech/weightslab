@@ -2,6 +2,16 @@
 
 This Docker setup automatically adapts to the availability of TLS certificates and gRPC auth tokens. All scenarios use a **single port (5173)** that works with HTTP or HTTPS depending on certificate availability.
 
+## Requirements
+
+- **Docker Engine** with the daemon running.
+- **Docker Compose v2** (the `docker compose` CLI plugin) — *recommended*, or the
+  legacy **v1** standalone binary (`docker-compose`, **≥ 1.27**). `weightslab ui launch`
+  auto-detects whichever is installed.
+
+> **Note:** The manual `docker compose ...` commands in this guide assume Compose v2.
+> If you are on v1, substitute the hyphenated form, e.g. `docker-compose -f docker-compose.yml up -d`.
+
 ## Quick Start
 
 ### Scenario 1: HTTP Only (No Certs, No Auth) - Development/Testing
@@ -30,7 +40,7 @@ The container will:
 
 ```bash
 # Generate certificates and auth token (one-time setup)
-weightslab ui se
+weightslab se
 
 # Copy environment with auth enabled
 cp .env.example .env
@@ -55,7 +65,7 @@ The container will:
 
 ```bash
 # Generate certificates without auth
-weightslab ui se --no-auth
+weightslab se --no-auth
 
 # Copy environment with HTTPS, no auth
 cp .env.example .env
@@ -115,7 +125,7 @@ weightslab/ui/envoy/certs/
 Generate with:
 
 ```bash
-weightslab ui se [--force-certs] [--no-auth]
+weightslab se [--force-certs] [--no-auth]
 ```
 
 ## Environment Variables
@@ -209,7 +219,7 @@ curl https://localhost:5173/health
 
 ```bash
 # Production with full security
-weightslab ui se --force-certs  # Generate fresh certs
+weightslab se --force-certs  # Generate fresh certs
 
 # Set environment
 cat > .env << 'EOF'

@@ -1,7 +1,5 @@
 experiment_name: vad_unet
-# root_log_dir:
-# Absolute path to your VAD data root (can also be set at runtime via the WL UI)
-# data_root:
+# root_log_dir:  # Empty to write in tmp directory, or specify a path to store logs and checkpoints
 
 # ── Model ────────────────────────────────────────────────────────────────────
 base_channels: 8          # channel multiplier for UNetMulti
@@ -11,7 +9,8 @@ image_size: 256           # both H and W are resized to this
 lr: 0.0001
 batch_size: 16
 training_steps: 200000
-eval_every: 200           # evaluate test set every N training steps
+eval_full_to_train_steps_ratio: 200           # evaluate test set every N training steps
+experiment_dump_to_train_steps_ratio: 5
 
 # ── Loss weights ─────────────────────────────────────────────────────────────
 recon_weight: 2.0         # MSE reconstruction vs. BCE classification trade-off
@@ -23,6 +22,7 @@ serving_cli: false
 enable_h5_persistence: true
 
 # ── Per-loader data config ────────────────────────────────────────────────────
+# data_root:  # Absolute path to your VAD data root (can also be set at runtime via the WL UI)
 data:
   train_loader:
     batch_size: 16

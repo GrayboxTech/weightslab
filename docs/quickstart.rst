@@ -9,6 +9,9 @@ Prerequisites
 
 - Python 3.10+ installed.
 - A virtual environment tool (``venv`` or Conda).
+- Docker, plus **Docker Compose v2** (the ``docker compose`` plugin, recommended)
+  or the legacy v1 ``docker-compose`` binary (``>= 1.27``) — required to launch
+  the Weights Studio UI. ``weightslab ui launch`` auto-detects whichever you have.
 - Your training project available locally.
 
 Install WeightsLab
@@ -28,6 +31,24 @@ Create and activate a virtual environment, then install WeightsLab in editable m
    # source .venv/bin/activate
 
    python -m pip install weightslab
+
+
+Try the bundled example
+------------------------
+
+To see WeightsLab working end to end without writing any code, start the bundled
+classification (cls) example. It trains a small model and serves it until you
+stop it with ``Ctrl+C``:
+
+.. code-block:: bash
+
+   weightslab example start
+
+Then, in another terminal, launch the UI and open https://localhost:5173:
+
+.. code-block:: bash
+
+   weightslab ui launch
 
 
 Optional: build docs locally
@@ -123,13 +144,43 @@ without modifying the model.
 Use Weightslab Studio (UI)
 -----------------------
 
-For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the Weights Studio web app via Docker Compose. This will start both the UI and Envoy proxy, which routes data to your training script's gRPC server.:
-Environment variables used in the production compose file can be set in a .env file in the repository root, or passed directly in the command line.
-If you keep agent settings outside the repository, set ``AGENT_CONFIG_PATH`` so the backend can resolve ``agent_config.yaml`` from that directory.
+For a full visual workflow (agent, samples, tags, discard/restore, plots), deploy the
+Weights Studio web app with the bundled CLI. ``weightslab ui launch`` removes any stale
+weightslab/weights_studio Docker resources that could break the launch (old containers,
+network, anonymous volumes, the cached frontend image, and a leftover generated ``.env``),
+then starts both the UI and the Envoy proxy, which routes data to your training script's
+gRPC server.
+
+**By default the UI runs unsecured (HTTP, no gRPC auth) — no certificates are generated.**
+Pass ``--certs`` to generate (if missing) and use TLS certificates + a gRPC auth token:
 
 .. code-block:: bash
 
-   docker compose -f docker/docker-compose.yml up -d
+   weightslab ui launch              # unsecured HTTP (default; no certs generated)
+   weightslab ui launch --certs      # secured HTTPS + gRPC auth (generates certs if missing)
+
+.. important::
+
+   When using certs, set ``WEIGHTSLAB_CERTS_DIR`` so the training backend and any new
+   terminal use the **same** certificates — it is the single source of truth for TLS/auth.
+   Both ``weightslab se`` and ``weightslab ui launch --certs`` print the exact
+   ``export`` / ``setx`` command for your shell. You can also pre-generate certs with
+   ``weightslab se``.
+
+Run ``weightslab``, ``weightslab help``, or ``weightslab -h`` to see the banner and the full
+command reference (``se``, ``ui launch``, ``start example ...``).
+
+If you keep agent settings outside the repository, set ``AGENT_CONFIG_PATH`` so the backend
+can resolve ``agent_config.yaml`` from that directory. Environment variables used in the
+production compose file can be set in a ``.env`` file in the repository root, or exported
+before launching.
+
+To stop the UI later:
+
+.. code-block:: bash
+
+   weightslab ui stop   # stop containers (keep images)
+   weightslab ui drop   # stop and remove containers + images
 
 
 Recommended next reading

@@ -1,0 +1,46 @@
+# Global configuration
+device: auto
+experiment_name: lidar2d_detection_usecase
+training_steps_to_do: null  # null = infinite training until manually stopped
+
+checkpoint_manager:
+  load_config: false
+
+compute_natural_sort: true
+
+eval_full_to_train_steps_ratio: 20
+experiment_dump_to_train_steps_ratio: 20
+tqdm_display: true
+is_training: false
+
+serving_grpc: true
+serving_cli: true
+
+ledger_enable_h5_persistence: true
+ledger_enable_flushing_threads: true
+ledger_flush_max_rows: 100
+ledger_flush_interval: 60.0
+
+# Model / task (2D point-cloud detection)
+num_classes: 2                       # Vehicle, Pedestrian
+point_cloud_range: [0.0, -20.0, 0.0, 40.0, 20.0, 1.0]  # x/y plane crop (z flat)
+voxel_size: 0.5                      # cell size in meters -> 80x80 grid
+grid_size: 32                        # detection head grid
+conf_thresh: 0.3
+max_points: 4000
+
+optimizer:
+  lr: 0.001
+
+# Data (synthetic 2D laser-scan scenes; zero download)
+data:
+  num_synthetic: 400
+  thumbnail_projection: bev          # bev (top-down) | range | custom
+  train_loader:
+    batch_size: 8
+    shuffle: true
+    max_samples: null
+  test_loader:
+    batch_size: 8
+    shuffle: false
+    max_samples: null
