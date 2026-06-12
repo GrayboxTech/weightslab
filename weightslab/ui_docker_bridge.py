@@ -648,7 +648,7 @@ def _ensure_certificates(manager: CertAuthManager, force_certs: bool = False) ->
         if force_certs
         else "No certificates found — generating them now..."
     )
-    manager.certs_dir.mkdir(parents=True, exist_ok=True)
+    Path(manager.certs_dir).mkdir(parents=True, exist_ok=True)
     exit_code = _generate_certs_with_fallback(force_certs=force_certs, certs_dir=manager.certs_dir)
     if exit_code != 0:
         logger.warning("Certificate generation failed — continuing in unsecured mode")
@@ -760,7 +760,7 @@ def ui_launch(args):
         logger.info("Launching WITHOUT cert generation (default; HTTP). "
                     "Pass --certs for secured HTTPS + gRPC auth.")
         try:
-            manager.certs_dir.mkdir(parents=True, exist_ok=True)
+            Path(manager.certs_dir).mkdir(parents=True, exist_ok=True)
         except OSError:
             os.makedirs(str(manager.certs_dir), exist_ok=True)
             logger.warning('Fail to create weightslab-certs directory!')
@@ -904,7 +904,7 @@ def ui_secure_environment(args):
         logger.error("Certificate generation failed")
         sys.exit(1)
 
-    manager.certs_dir.mkdir(parents=True, exist_ok=True)
+    Path(manager.certs_dir).mkdir(parents=True, exist_ok=True)
     manager.get_or_create_auth_token()
 
     # Export ONLY the single source of truth for this process.
