@@ -3,7 +3,6 @@ import numpy as np
 import torch as th
 import logging
 
-from typing import Any
 from PIL import Image
 
 

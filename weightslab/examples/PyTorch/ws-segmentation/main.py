@@ -13,7 +13,6 @@ import weightslab as wl
 from torch import optim
 
 
-from weightslab.backend.logger import LoggerQueue
 from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context,
