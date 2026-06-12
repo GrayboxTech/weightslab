@@ -184,7 +184,7 @@ class TestUiLaunch(unittest.TestCase):
         self, _gc, _ge, mock_check, mock_compose, mock_clean, mock_ensure,
         _mock_shell, _gb, mock_mgr,
     ):
-        mgr = MagicMock(certs_dir="/fake/certs")
+        mgr = MagicMock()
         mgr.has_valid_certs.return_value = False   # no certs on disk -> unsecured
         mock_mgr.from_env_or_default.return_value = mgr
         with patch.dict(os.environ, {}, clear=False):
@@ -541,7 +541,7 @@ class TestSingleSourceOfTruth(unittest.TestCase):
     def test_ui_launch_strips_derived_env(
         self, _gc, _ge, _mock_check, _mock_compose, _mock_clean, _mock_ensure, _gb, mock_mgr,
     ):
-        mock_mgr.from_env_or_default.return_value = MagicMock(certs_dir="/fake/certs")
+        mock_mgr.from_env_or_default.return_value = MagicMock()
         # Simulate a stale derived env var leaking in (e.g. from import-time check).
         with patch.dict(os.environ, {"ENVOY_DOWNSTREAM_TLS": "on", "VITE_SERVER_PROTOCOL": "https"}, clear=False):
             ui_launch(argparse.Namespace())
@@ -560,7 +560,7 @@ class TestSingleSourceOfTruth(unittest.TestCase):
         self, _gc, _ge, _mock_check, _mock_compose, _mock_clean, _mock_ensure, _gb, mock_mgr,
     ):
         # Certs absent on disk -> URL must be http (default unsecured launch).
-        mgr = MagicMock(certs_dir="/fake/certs")
+        mgr = MagicMock()
         mgr.has_valid_certs.return_value = False
         mock_mgr.from_env_or_default.return_value = mgr
         with patch.dict(os.environ, {}, clear=False):

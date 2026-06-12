@@ -760,10 +760,13 @@ def ui_launch(args):
         logger.info("Launching WITHOUT cert generation (default; HTTP). "
                     "Pass --certs for secured HTTPS + gRPC auth.")
         try:
-            Path(manager.certs_dir).mkdir(parents=True, exist_ok=True)
-        except OSError:
-            os.makedirs(str(manager.certs_dir), exist_ok=True)
-            logger.warning('Fail to create weightslab-certs directory!')
+            manager.certs_dir.mkdir(parents=True, exist_ok=True)
+        except (OSError, AttributeError):
+            # AttributeError: certs_dir is a plain str (e.g. in unit tests).
+            try:
+                os.makedirs(str(manager.certs_dir), exist_ok=True)
+            except OSError:
+                logger.warning('Fail to create weightslab-certs directory!')
 
     # Single source of truth: TLS is on iff cert files exist in the dir.
     secured = manager.has_valid_certs()
@@ -904,7 +907,7 @@ def ui_secure_environment(args):
         logger.error("Certificate generation failed")
         sys.exit(1)
 
-    Path(manager.certs_dir).mkdir(parents=True, exist_ok=True)
+    manager.certs_dir.mkdir(parents=True, exist_ok=True)
     manager.get_or_create_auth_token()
 
     # Export ONLY the single source of truth for this process.
