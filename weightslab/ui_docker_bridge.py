@@ -115,32 +115,38 @@ _EPILOG = """\
 commands:
   se                       Set up the secure environment: generate TLS
                            certificates + a gRPC auth token in
-                           ~/.weightslab-certs and export WEIGHTSLAB_CERTS_DIR.
+                           ~/.weightslab-certs. Then set WEIGHTSLAB_CERTS_DIR
+                           (the single source of truth) so the backend + new
+                           shells find them.
                              --force-certs   regenerate even if certs exist
 
-  ui launch                Generate certificates if missing, purge stale
-                           weightslab/weights_studio Docker resources, then
-                           build & start the UI stack.
-                             --no-certs      run unsecured (HTTP, no auth)
+  ui launch                Purge stale weightslab/weights_studio Docker
+                           resources, then build & start the UI stack.
+                           UNSECURED (HTTP) by default — no certs generated.
+                             --certs         generate (if missing) + use TLS
+                                             certs + gRPC auth (HTTPS)
 
   start example            Run a bundled PyTorch example (foreground; stop with
                            Ctrl+C). Installs the example's requirements first,
                            without prompting. Defaults to classification:
-                             --cls    classification example (default)
-                             --seg    segmentation example
-                             --det    detection example
-                             --clus   clustering example
-                             --gen    generation example
+                             --cls     classification example (default)
+                             --seg     segmentation example
+                             --det     detection example
+                             --clus    clustering example
+                             --gen     generation example
+                             --3d_det  3D LiDAR point-cloud detection example
+                             --2d_det  2D LiDAR point-cloud detection example
 
 examples:
-  weightslab se                       # one-time secure setup
+  weightslab se                       # one-time secure setup (then export WEIGHTSLAB_CERTS_DIR)
   weightslab se --force-certs         # regenerate the certs
-  weightslab ui launch                # certs-if-missing + clean + launch
-  weightslab ui launch --no-certs     # unsecured launch (HTTP)
+  weightslab ui launch                # clean + launch (unsecured HTTP, default)
+  weightslab ui launch --certs        # secured launch (HTTPS + gRPC auth)
   weightslab start example            # run the classification demo (default)
   weightslab start example --seg      # run the segmentation demo
   weightslab start example --det      # run the detection demo
-  weightslab start example --clus     # run the clustering demo
+  weightslab start example --3d_det   # run the 3D LiDAR detection demo
+  weightslab start example --2d_det   # run the 2D LiDAR detection demo
 """
 
 
@@ -710,12 +716,16 @@ def _clean_stale_docker_resources() -> None:
 
 
 def ui_launch(args):
-    """Generate certs if missing, purge stale Docker state, then build & start the UI.
+    """Purge stale Docker state, then build & start the UI.
+
+    By default the UI launches UNSECURED (HTTP, no gRPC auth) — no certificates
+    are generated. Pass ``--certs`` to generate (if missing) and use TLS certs +
+    a gRPC auth token. Existing certs in WEIGHTSLAB_CERTS_DIR are always honored
+    (file presence is the single source of truth) and are never deleted here.
 
     Flags (all optional, read defensively so legacy callers still work):
-      --no-certs     skip certificate generation/usage (HTTP, no gRPC auth)
-      --no-auth      TLS without a gRPC auth token
-      --force-certs  regenerate certificates even if they already exist
+      --certs        generate (if missing) and use TLS certs + gRPC auth (HTTPS)
+      --force-certs  with --certs, regenerate certificates even if they exist
       --no-clean     skip the stale Docker resource cleanup step
       --dev          use the dev compose overlay
     """
@@ -724,7 +734,7 @@ def ui_launch(args):
     # runnable so the user never has to `chmod +x` before `weightslab ui launch`.
     _ensure_scripts_executable()
 
-    no_certs = getattr(args, "no_certs", False)
+    use_certs = getattr(args, "certs", False)
     no_auth = getattr(args, "no_auth", False)
     force_certs = getattr(args, "force_certs", False)
     no_clean = getattr(args, "no_clean", False)
@@ -741,23 +751,22 @@ def ui_launch(args):
     else:
         manager = CertAuthManager.from_env_or_default(enable_auth=not no_auth)
 
-    if no_certs:
-        logger.info("⚠ --no-certs: launching in unsecured mode (HTTP, no gRPC auth)")
-        # Remove any existing certs/token so the training backend (which derives
-        # TLS purely from cert-file presence in WEIGHTSLAB_CERTS_DIR) also runs
-        # unsecured — otherwise `weightslab start example` would still find them
-        # and mismatch the UI by enabling TLS.
-        manager.clear_credentials()
-        # Keep the certs dir itself (empty is fine) so the compose bind-mount has
-        # a real, deterministic source. Envoy/nginx run plaintext and ignore
-        # whatever is (or isn't) inside it.
+    if use_certs:
+        _ensure_certificates(manager, force_certs=force_certs)
+    else:
+        # Default: do NOT generate certs. Existing certs in WEIGHTSLAB_CERTS_DIR
+        # are still honored (file-presence is the single source of truth); this
+        # never deletes anything. Ensure the dir exists for the compose bind-mount.
+        logger.info("Launching WITHOUT cert generation (default; HTTP). "
+                    "Pass --certs for secured HTTPS + gRPC auth.")
         try:
             manager.certs_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             os.makedirs(str(manager.certs_dir), exist_ok=True)
-            logger.warning('Fail to create empty weightslab-certs directory!')
-    else:
-        _ensure_certificates(manager, force_certs=force_certs)
+            logger.warning('Fail to create weightslab-certs directory!')
+
+    # Single source of truth: TLS is on iff cert files exist in the dir.
+    secured = manager.has_valid_certs()
 
     # Set the correct certs path in the process env NOW so that _compose_cmd
     # passes it to docker compose — this overrides any stale/malformed value
@@ -801,9 +810,9 @@ def ui_launch(args):
         certs_dir_host = _to_docker_host_path(manager.certs_dir)
 
         # Always pass the real certs dir so the compose bind-mount has a valid
-        # source. With --no-certs we add --unsecure, which forces Envoy/nginx to
-        # plaintext (mounted files, if any, are ignored) without leaving the mount
-        # source empty.
+        # source. When there are no certs we add --unsecure, which forces
+        # Envoy/nginx to plaintext (mounted files, if any, are ignored) without
+        # leaving the mount source empty.
         bootstrap_env_vars = {
             'WEIGHTSLAB_CERTS_DIR': certs_dir_str,
             'WEIGHTSLAB_CERTS_DIR_HOST': certs_dir_host,
@@ -816,7 +825,7 @@ def ui_launch(args):
         if _is_windows():
             bootstrap_env_vars['WEIGHTSLAB_SKIP_DOCKER_OPS'] = '1'
         script_args = []
-        if no_certs:
+        if not secured:
             script_args.append('--unsecure')
         if getattr(args, "dev", False):
             script_args.append('--dev')
@@ -830,7 +839,7 @@ def ui_launch(args):
         logger.warning(f"Bootstrap script not found: {bootstrap_script}")
 
     # docker compose gives an exported env var precedence over .env. Force the
-    # host-native certs path here (on every path, including --no-certs) so our
+    # host-native certs path here (on every path, secured or not) so our
     # compose call below bind-mounts a real folder — a stray /mnt/c or empty
     # value would mount an empty/invalid dir and can crash Envoy.
     os.environ["WEIGHTSLAB_CERTS_DIR"] = _to_docker_host_path(manager.certs_dir)
@@ -843,15 +852,27 @@ def ui_launch(args):
     port = os.environ.get("VITE_PORT", "5173")
     # HTTPS iff cert files actually exist in WEIGHTSLAB_CERTS_DIR — the same
     # file-presence rule the deploy pipeline applies.
-    secured = (not no_certs) and manager.has_valid_certs()
+    secured = manager.has_valid_certs()
     protocol = "https" if secured else "http"
     logger.info(f"Weights Studio UI is running at: {protocol}://localhost:{port}")
     if secured:
         certs_dir_str = str(manager.certs_dir)
+        # Persist first (it logs its own lines), so the export/setx reminder
+        # below stays the FINAL output and can't be missed.
         # Persist when a custom dir was given (it won't match the default, so the
         # backend must be told where to look) or when the var isn't already set.
         if certs_dir_arg or not _CERTS_DIR_IN_ORIGINAL_ENV:
             _persist_certs_dir(certs_dir_str)
+        # The backend and any new shell must point at the same certs dir, or
+        # they'll mismatch the UI's TLS/auth. Keep this the last thing printed.
+        logger.warning("")
+        logger.warning("⚠ ACTION REQUIRED — TLS is ON. Set WEIGHTSLAB_CERTS_DIR so the "
+                       "training backend and new terminals use the same certificates:")
+        logger.warning(f"   (bash)    export WEIGHTSLAB_CERTS_DIR=\"{certs_dir_str}\"")
+        logger.warning(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{certs_dir_str}\"")
+    else:
+        logger.info("UI is running UNSECURED (HTTP, no gRPC auth). "
+                    "Re-run with `weightslab ui launch --certs` for TLS.")
 
 
 def ui_secure_environment(args):
@@ -893,28 +914,33 @@ def ui_secure_environment(args):
     logger.info("✓ gRPC auth token created")
     logger.info(f"✓ Certs and token stored in: {manager.certs_dir}")
     logger.info(f"✓ WEIGHTSLAB_CERTS_DIR exported for this process: {manager.certs_dir}")
-    logger.info("")
-    logger.info("Export it globally so new shells and the training backend find it:")
-    logger.info(f"   (bash)    echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc && source ~/.bashrc")
-    logger.info(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
-    logger.info("Then launch the UI with: weightslab ui launch")
+    logger.info("Then launch the secured UI with: weightslab ui launch --certs")
+    # Keep this the FINAL output so the user can't miss the action they must take.
+    logger.warning("")
+    logger.warning("⚠ ACTION REQUIRED — set WEIGHTSLAB_CERTS_DIR globally so new shells "
+                   "and the training backend find these certs (single source of truth):")
+    logger.warning(f"   (bash)    echo 'export WEIGHTSLAB_CERTS_DIR=\"{manager.certs_dir}\"' >> ~/.bashrc && source ~/.bashrc")
+    logger.warning(f"   (Windows) setx WEIGHTSLAB_CERTS_DIR \"{manager.certs_dir}\"")
 
 
 # Bundled PyTorch examples, keyed by the CLI flag (e.g. --cls -> ws-classification).
 # Each value is (directory name under examples/PyTorch, human-readable label).
+# kind -> (dir_name, label, category) where category is the examples/ subfolder.
 _EXAMPLES = {
-    "cls": ("ws-classification", "classification"),
-    "seg": ("ws-segmentation", "segmentation"),
-    "det": ("ws-detection", "detection"),
-    "clus": ("ws-clustering", "clustering"),
-    "gen": ("ws-generation", "generation"),
+    "cls": ("ws-classification", "classification", "PyTorch"),
+    "seg": ("ws-segmentation", "segmentation", "PyTorch"),
+    "det": ("ws-detection", "detection", "PyTorch"),
+    "clus": ("ws-clustering", "clustering", "PyTorch"),
+    "gen": ("ws-generation", "generation", "PyTorch"),
+    "3d_det": ("ws-3d-lidar-detection", "3D LiDAR detection", "Usecases"),
+    "2d_det": ("ws-2d-lidar-detection", "2D LiDAR detection", "Usecases"),
 }
 _DEFAULT_EXAMPLE = "cls"
 
 
-def _get_example_dir(name: str = "ws-classification") -> Path:
-    """Path to a bundled PyTorch example directory."""
-    return Path(__file__).parent / 'examples' / 'PyTorch' / name
+def _get_example_dir(name: str = "ws-classification", category: str = "PyTorch") -> Path:
+    """Path to a bundled example directory (under examples/<category>/<name>)."""
+    return Path(__file__).parent / 'examples' / category / name
 
 
 def _install_example_requirements(example_dir: Path) -> None:
@@ -953,9 +979,9 @@ def example_start(args):
     resolves its sibling config.yaml. Runs in the foreground (serves until Ctrl+C).
     """
     kind = getattr(args, "example_kind", None) or _DEFAULT_EXAMPLE
-    dir_name, label = _EXAMPLES.get(kind, _EXAMPLES[_DEFAULT_EXAMPLE])
+    dir_name, label, category = _EXAMPLES.get(kind, _EXAMPLES[_DEFAULT_EXAMPLE])
 
-    example_dir = _get_example_dir(dir_name)
+    example_dir = _get_example_dir(dir_name, category)
     main_py = example_dir / "main.py"
     if not main_py.exists():
         logger.error(f"{label.capitalize()} example not found: {main_py}")
@@ -1001,6 +1027,10 @@ def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
                        help="Run the clustering example")
     group.add_argument("--gen", action="store_const", dest="example_kind", const="gen",
                        help="Run the generation example")
+    group.add_argument("--3d_det", action="store_const", dest="example_kind", const="3d_det",
+                       help="Run the 3D LiDAR point-cloud detection example")
+    group.add_argument("--2d_det", action="store_const", dest="example_kind", const="2d_det",
+                       help="Run the 2D LiDAR point-cloud detection example")
     p.set_defaults(example_kind=_DEFAULT_EXAMPLE)
 
 
@@ -1010,8 +1040,8 @@ def _build_parser() -> argparse.ArgumentParser:
     The CLI is intentionally minimal — exactly these commands:
         weightslab --help | -h | help
         weightslab se [--force-certs]
-        weightslab ui launch [--no-certs]
-        weightslab start example [--cls|--seg|--det|--clus|--gen]
+        weightslab ui launch [--certs]
+        weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -1029,12 +1059,12 @@ def _build_parser() -> argparse.ArgumentParser:
     se_parser.add_argument('certs_dir', nargs='?', default=None,
                            help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 
-    # weightslab ui launch [--no-certs] [certs_dir]
+    # weightslab ui launch [--certs] [certs_dir]
     ui_parser = sub.add_parser("ui", help="Manage the Weights Studio UI")
     ui_sub = ui_parser.add_subparsers(dest="action")
     launch_ui_parser = ui_sub.add_parser(
-        "launch", help="Generate certs if missing, clean stale Docker state, then launch the UI")
-    launch_ui_parser.add_argument('--no-certs', action='store_true', help='Run unsecured (HTTP, no gRPC auth); do not generate or use certs')
+        "launch", help="Clean stale Docker state, then launch the UI (unsecured by default; --certs for TLS)")
+    launch_ui_parser.add_argument('--certs', action='store_true', help='Generate (if missing) and use TLS certs + gRPC auth token (secured HTTPS). Default: unsecured HTTP.')
     launch_ui_parser.add_argument('certs_dir', nargs='?', default=None,
                                   help='Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)')
 

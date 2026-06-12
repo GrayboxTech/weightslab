@@ -54,10 +54,6 @@ class WLAwareTrainer(DetectionTrainer):
                 )
 
         def _on_train_start(trainer):
-            wl.watch_or_edit(
-                LoggerQueue(), flag="logger",
-                name=trainer.save_dir.name, log_dir=str(trainer.save_dir.parent),
-            )
             underlying = trainer.model
             trainer.optimizer = wl.watch_or_edit(trainer.optimizer, flag="optimizer")
             trainer.model = wl.watch_or_edit(

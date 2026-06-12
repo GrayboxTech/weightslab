@@ -33,6 +33,10 @@ from weightslab.components.global_monitoring import pause_controller
 from weightslab.trainer.services.agent.agent import DataManipulationAgent
 from weightslab.backend.ledgers import get_dataloaders, get_dataframe, list_signals, Proxy
 from weightslab.data.data_utils import load_label, load_raw_image, to_numpy_safe
+from weightslab.data.point_cloud_utils import (
+    POINT_CLOUD_DETECTION_TASK,
+    is_point_cloud_detection_task,
+)
 from weightslab.trainer.trainer_tools import execute_df_operation, generate_overview, encode_image_to_raw_bytes
 from weightslab.data.data_utils import load_raw_image_array
 
@@ -290,7 +294,6 @@ class DataService:
         self._is_filtered = False  # Track if the current view is filtered/modified by user
         # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
         # These should be triggered on-demand or run in background to avoid blocking training start.
-        self._deduce_and_set_aspect_ratios()
 
         if self._compute_natural_sort:
            self._compute_natural_sort_stats()
@@ -430,9 +433,31 @@ class DataService:
                         stats.append(create_data_stat('raw_data', 'bytes', shape=[th, tw, nc], thumbnail=thumb_bytes))
                         del pil_thumb, pil_save, pil_img
 
+                    # Resolve task type early: point-cloud detection labels are
+                    # box rows, not rasterizable masks.
+                    _early_task = row.get(SampleStatsEx.TASK_TYPE.value)
+                    _early_task = str(_early_task).strip().lower() if _early_task else ""
+                    if not _early_task or _early_task in ("none", "nan", "unknown"):
+                        _early_task = str(getattr(ds, "task_type", "") or "").strip().lower()
+                    _is_pc_detection = is_point_cloud_detection_task(_early_task)
+
                     # --- GT mask ---
                     label = load_label(dataset, sample_id)
-                    if label is not None:
+                    if label is not None and _is_pc_detection:
+                        # BEV-projected boxes as JSON (same payload as the full
+                        # record path) so grid thumbnails get box overlays.
+                        from weightslab.data.point_cloud_utils import serialize_pointcloud_box_payload
+                        label_arr = to_numpy_safe(label)
+                        if label_arr is not None and label_arr.size > 0:
+                            try:
+                                payload = serialize_pointcloud_box_payload(ds, label_arr)
+                                if payload:
+                                    stats.append(create_data_stat(
+                                        'target', 'string', shape=[1],
+                                        value_string=json.dumps(payload)))
+                            except Exception as exc:
+                                logger.debug("[PreviewCache] detection_pointcloud target skipped: %s", exc)
+                    elif label is not None:
                         label_arr = to_numpy_safe(label)
                         if label_arr is None:
                             try:
@@ -452,7 +477,19 @@ class DataService:
 
                     # --- Prediction mask ---
                     pred = row.get(SampleStatsEx.PREDICTION.value)
-                    if pred is not None:
+                    if pred is not None and _is_pc_detection:
+                        from weightslab.data.point_cloud_utils import serialize_pointcloud_box_payload
+                        pred_arr = to_numpy_safe(pred)
+                        if pred_arr is not None and pred_arr.size > 0 and pred_arr.ndim == 2:
+                            try:
+                                payload = serialize_pointcloud_box_payload(ds, pred_arr)
+                                if payload:
+                                    stats.append(create_data_stat(
+                                        'pred', 'string', shape=[1],
+                                        value_string=json.dumps(payload)))
+                            except Exception as exc:
+                                logger.debug("[PreviewCache] detection_pointcloud pred skipped: %s", exc)
+                    elif pred is not None:
                         pred_arr = to_numpy_safe(pred)
                         if pred_arr is None:
                             try:
@@ -472,6 +509,8 @@ class DataService:
                     # Detect task type
                     db_task = row.get(SampleStatsEx.TASK_TYPE.value)
                     task_type = str(db_task).strip().lower() if db_task and str(db_task).strip().lower() not in ("none", "nan", "unknown", "") else "unknown"
+                    if task_type == "unknown" and _early_task:
+                        task_type = _early_task
                     if task_type == "unknown" and label is not None:
                         l_arr = to_numpy_safe(label)
                         if l_arr is not None and l_arr.ndim >= 2 and l_arr.shape[-2] >= 16 and l_arr.shape[-1] >= 16:
@@ -522,6 +561,12 @@ class DataService:
         """
         rec = pb2.DataRecord(sample_id=preview_rec.sample_id)
         rec.data_stats.extend(preview_rec.data_stats)
+
+        # Point-cloud detection records carry box JSON, not rasterizable masks:
+        # refresh the GT/pred box payloads instead of RLE-encoding the rows.
+        _task = next((st.value_string for st in rec.data_stats if st.name == "task_type"), "")
+        if is_point_cloud_detection_task(_task):
+            return self._refresh_preview_boxes_3d_from_row(rec, row)
 
         # Infer preview dimensions from cached raw_data shape; fallback to 64x64.
         target_h, target_w = 64, 64
@@ -574,48 +619,36 @@ class DataService:
 
         return rec
 
-    def _deduce_and_set_aspect_ratios(self):
-        """Automatically deduce and set aspect_ratio for all registered datasets.
+    def _refresh_preview_boxes_3d_from_row(self, rec: "pb2.DataRecord", row: pd.Series) -> "pb2.DataRecord":
+        """Refresh GT/pred box JSON stats of a detection_pointcloud preview record."""
+        from weightslab.data.point_cloud_utils import serialize_pointcloud_box_payload
 
-        It loads the first raw image from each dataset to determine the
-        canonical aspect ratio, then monkey-patches the 'aspect_ratio'
-        attribute onto the dataset object if it's not already set.
-        """
-        try:
-            from weightslab.data.data_utils import load_raw_image
-            from weightslab.backend.ledgers import get_dataloaders
+        origin = next((st.value_string for st in rec.data_stats if st.name == "origin"), None)
+        dataset = self._get_dataset(origin) if origin else None
+        ds = getattr(dataset, "wrapped_dataset", dataset) if dataset is not None else None
 
-            loaders_dict = get_dataloaders()
-            for name, loader in loaders_dict.items():
-                if not loader or not hasattr(loader, "dataset"):
-                    continue
+        def _upsert_box_stat(stat_name: str, value_like) -> None:
+            if value_like is None or ds is None:
+                return
+            arr = to_numpy_safe(value_like)
+            if arr is None or getattr(arr, "ndim", 0) != 2 or arr.size == 0:
+                return
+            try:
+                payload = serialize_pointcloud_box_payload(ds, arr)
+            except Exception:
+                return
+            if not payload:
+                return
+            new_stat = create_data_stat(stat_name, 'string', shape=[1], value_string=json.dumps(payload))
+            for i, st in enumerate(rec.data_stats):
+                if st.name == stat_name:
+                    rec.data_stats[i].CopyFrom(new_stat)
+                    return
+            rec.data_stats.append(new_stat)
 
-                # Unwrap to find the base dataset
-                dataset = loader.dataset
-                ds = getattr(dataset, "wrapped_dataset", dataset)
-
-                # Skip if already set manually
-                if hasattr(ds, "aspect_ratio") and ds.aspect_ratio is not None:
-                    logger.debug(f"[DataService] Dataset '{name}' already has aspect_ratio={ds.aspect_ratio}")
-                    continue
-
-                # Load first image to deduce ratio
-                try:
-                    if len(dataset) > 0:
-                        pil_img = load_raw_image(dataset, 0)
-                        if pil_img:
-                            w, h = pil_img.size
-                            ratio = w / h if h > 0 else 1.0
-                            ds.aspect_ratio = ratio
-                            logger.info(f"[DataService] Deduced aspect_ratio={ratio:.2f} for dataset '{name}' from first sample.")
-                except Exception as e:
-                    logger.debug(f"[DataService] Failed to deduce aspect_ratio for dataset '{name}': {e}")
-
-        except ImportError:
-            pass
-
-        except Exception as e:
-            logger.warning(f"[DataService] Unexpected error during aspect ratio deduction: {e}")
+        _upsert_box_stat('target', row.get(SampleStatsEx.TARGET.value))
+        _upsert_box_stat('pred', row.get(SampleStatsEx.PREDICTION.value))
+        return rec
 
     def _get_loader_by_origin(self, origin: str):
         """Dynamically retrieve loader for a specific origin (on-demand).
@@ -1161,6 +1194,10 @@ class DataService:
                                     # Detection: shape like (N, 4), (N, 5), (N, 6)
                                     if ndim == 2 and shape[-1] in [4, 5, 6] and shape[-2] > 0:
                                         task_type = 'detection'
+                                    # 3D detection: (N, 7..9) metric box rows
+                                    # [cx, cy, cz, dx, dy, dz, yaw, cls?, conf?]
+                                    elif ndim == 2 and shape[-1] in [7, 8, 9] and shape[-2] > 0:
+                                        task_type = POINT_CLOUD_DETECTION_TASK
                                     # Segmentation: check spatial dims
                                     elif len(shape) >= 2 and shape[-2] >= 16 and shape[-1] >= 16:
                                         task_type = 'segmentation'
@@ -1243,8 +1280,37 @@ class DataService:
                 if label_raw is None and dataset is not None:
                     label_raw = load_label(dataset, sample_id)
 
+                # Handle 3D (point cloud) detection: metric boxes are sent both
+                # as raw 3D rows (for the interactive viewer) and projected to
+                # the BEV image frame (legacy 'bboxes' key, so the existing 2D
+                # detection renderer overlays them unchanged).
+                if is_point_cloud_detection_task(task_type):
+                    from weightslab.data.point_cloud_utils import serialize_pointcloud_box_payload
+                    bbox_data = {}
+                    label_arr = to_numpy_safe(label_raw)
+                    if label_arr is None:
+                        try:
+                            label_arr = np.asarray(label_raw, dtype=np.float32) if label_raw is not None else np.array([])
+                        except Exception:
+                            label_arr = np.array([])
+                    if label_arr is not None and label_arr.size > 0:
+                        try:
+                            bbox_data = serialize_pointcloud_box_payload(ds, label_arr)
+                        except Exception as exc:
+                            logger.debug("detection_pointcloud target serialization failed: %s", exc)
+                    t_label_convert = time.time() - t0_gt_conv
+
+                    data_stats.append(
+                        create_data_stat(
+                            name='target',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=json.dumps(bbox_data) if bbox_data else "",
+                            thumbnail=b""
+                        )
+                    )
                 # Handle detection task type with bounding boxes
-                if task_type == "detection":
+                elif task_type == "detection":
                     # Send raw bbox data as JSON
                     bbox_data = {}
                     if isinstance(label_raw, dict):
@@ -1330,7 +1396,10 @@ class DataService:
                 )
                 if num_classes is None and label_raw is not None:
                     # Fallback: infer from this label
-                    if label_arr.size > 0:
+                    if is_point_cloud_detection_task(task_type) and getattr(label_arr, "ndim", 0) == 2 and label_arr.shape[-1] >= 8:
+                        # Class ids live in column 7 of [cx,cy,cz,dx,dy,dz,yaw,cls,conf]
+                        num_classes = int(label_arr[:, 7].max()) + 1
+                    elif label_arr.size > 0:
                         max_id = int(label_arr.max())
                         num_classes = max(1, max_id) + 1
                     else:
@@ -1437,8 +1506,39 @@ class DataService:
             if task_type != "classification" and pred is not None:
                 t0_pmask = time.time()
 
+                # 3D (point cloud) detection predictions: same dual payload as
+                # the GT path (BEV-projected 'bboxes' + raw 'bboxes_3d').
+                if is_point_cloud_detection_task(task_type):
+                    from weightslab.data.point_cloud_utils import serialize_pointcloud_box_payload
+                    pred_bbox_data = {}
+                    pred_source = pred
+                    if isinstance(pred, dict):
+                        # Accept dict-shaped predictions ({'bboxes_3d': ...} or {'bboxes': ...})
+                        pred_source = pred.get('bboxes_3d', pred.get('bboxes', pred.get('boxes')))
+                    pred_arr = to_numpy_safe(pred_source)
+                    if pred_arr is None:
+                        try:
+                            pred_arr = np.asarray(pred_source, dtype=np.float32)
+                        except Exception:
+                            pred_arr = np.array([])
+                    if pred_arr is not None and pred_arr.size > 0 and pred_arr.ndim == 2:
+                        try:
+                            pred_bbox_data = serialize_pointcloud_box_payload(ds, pred_arr)
+                        except Exception as exc:
+                            logger.debug("detection_pointcloud pred serialization failed: %s", exc)
+                    t_mask_encode += time.time() - t0_pmask
+
+                    data_stats.append(
+                        create_data_stat(
+                            name='pred',
+                            stat_type='string',
+                            shape=[1],
+                            value_string=json.dumps(pred_bbox_data) if pred_bbox_data else "",
+                            thumbnail=b""
+                        )
+                    )
                 # Handle detection task type with bounding boxes
-                if task_type == "detection":
+                elif task_type == "detection":
                     # Send raw bbox data as JSON
                     pred_bbox_data = {}
                     if isinstance(pred, dict):
@@ -1583,12 +1683,7 @@ class DataService:
                     )
 
                     # Check for explicit aspect ratio on dataset (favors true ratio over squashed model input)
-                    aspect_ratio = getattr(ds, "aspect_ratio", None)
-                    if aspect_ratio is not None:
-                        # Normalize target dimensions to honor explicit ratio before scaling
-                        target_width = int(target_height * aspect_ratio)
-                    else:
-                        aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
+                    aspect_ratio = original_size[0] / original_size[1] if original_size[1] > 0 else 1.0
 
                     # Resize logic:
                     if request.resize_width < 0 and request.resize_height < 0:
@@ -3325,6 +3420,93 @@ class DataService:
                 success=False,
                 message=f"Failed to retrieve samples: {str(e)}",
                 data_records=[]
+            )
+
+    # Streamed chunk size for GetPointCloud (raw float32 bytes per message).
+    _POINT_CLOUD_CHUNK_BYTES = 1 << 20  # 1 MiB
+
+    def GetPointCloud(self, request, context):
+        """Stream one sample's raw point cloud as binary float32 chunks.
+
+        Used by the studio's interactive 3D viewer (task_type "detection_pointcloud").
+        The cloud is pad-filtered and optionally downsampled (request
+        ``max_points``, capped by env WL_MAX_POINT_CLOUD_POINTS, default 1.5M)
+        before serialization; the first chunk carries num_points/num_features
+        and the dataset's pc_range so the client can frame the camera.
+        """
+        from weightslab.data.data_utils import load_raw_point_cloud
+        from weightslab.data.point_cloud_utils import (
+            get_pc_range, get_point_feature_names, pack_point_cloud,
+        )
+
+        try:
+            sample_id = int(str(request.sample_id))
+            origins = [request.origin] if request.origin else []
+            if not origins:
+                # No origin provided: scan known loaders for the sample.
+                origins = list(get_dataloaders().keys())
+
+            dataset, ds_idx, member_rank = None, None, 0
+            for origin in origins:
+                candidate = self._get_dataset(origin)
+                if candidate is None:
+                    continue
+                try:
+                    if hasattr(candidate, "get_physical_location"):
+                        ds_idx, member_rank = candidate.get_physical_location(sample_id)
+                    else:
+                        ds_idx = candidate.get_index_from_sample_id(sample_id)
+                        member_rank = 0
+                    dataset = candidate
+                    break
+                except (KeyError, ValueError, AttributeError, IndexError):
+                    continue
+
+            if dataset is None or ds_idx is None:
+                yield pb2.PointCloudChunk(
+                    success=False,
+                    message=f"Sample {request.sample_id} not found (origin={request.origin or 'any'})",
+                )
+                return
+
+            points = load_raw_point_cloud(dataset, ds_idx, rank=member_rank)
+            if points is None:
+                yield pb2.PointCloudChunk(
+                    success=False,
+                    message=f"Sample {request.sample_id} is not a point cloud",
+                )
+                return
+
+            server_cap = int(os.environ.get("WL_MAX_POINT_CLOUD_POINTS", "1500000"))
+            max_points = int(request.max_points) if request.max_points > 0 else server_cap
+            max_points = min(max_points, server_cap) if server_cap > 0 else max_points
+
+            data, num_points, num_features = pack_point_cloud(
+                points, max_points=max_points, seed=sample_id)
+            ds = getattr(dataset, "wrapped_dataset", dataset)
+            pc_range = get_pc_range(ds, points) or ()
+            feature_names = get_point_feature_names(ds, num_features)
+
+            chunk_size = self._POINT_CLOUD_CHUNK_BYTES
+            total_chunks = max(1, (len(data) + chunk_size - 1) // chunk_size)
+            for i in range(total_chunks):
+                chunk = pb2.PointCloudChunk(
+                    success=True,
+                    data=data[i * chunk_size:(i + 1) * chunk_size],
+                    chunk_index=i,
+                    total_chunks=total_chunks,
+                )
+                if i == 0:
+                    chunk.num_points = num_points
+                    chunk.num_features = num_features
+                    chunk.pc_range.extend(float(v) for v in pc_range)
+                    chunk.feature_names.extend(feature_names)
+                yield chunk
+        except Exception as e:
+            logger.error("Error in GetPointCloud: %s", str(e), exc_info=True)
+            yield pb2.PointCloudChunk(
+                success=False,
+                message=f"Failed to retrieve point cloud: {str(e)}",
             )
 
     def _set_h5_persistence_enabled(self, enabled: bool) -> bool:

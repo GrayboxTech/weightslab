@@ -89,7 +89,15 @@ Deploy our interface:
 weightslab ui launch
 ```
 
-`weightslab ui launch` is the one-command path: it **generates TLS certificates + a gRPC auth token if you don't have them yet**, removes any stale weightslab/weights_studio Docker resources that could break the launch, then starts the UI stack. To run unsecured (HTTP, no auth), use `weightslab ui launch --no-certs`.
+`weightslab ui launch` removes any stale weightslab/weights_studio Docker resources that could break the launch, then starts the UI stack. **By default it runs unsecured (HTTP, no gRPC auth) — no certificates are generated.**
+
+To run secured (HTTPS + gRPC auth), pass `--certs`:
+```bash
+weightslab ui launch --certs   # generates TLS certs + a gRPC auth token if missing, then launches secured
+```
+
+> [!IMPORTANT]
+> When using certs, set `WEIGHTSLAB_CERTS_DIR` so the training backend and any new terminal use the **same** certificates (it is the single source of truth). `weightslab se` and `weightslab ui launch --certs` print the exact export/`setx` command for your shell. You can also generate certs up front with `weightslab se`.
 <!--
 Want to see it working end to end without writing any code? Start a bundled demo (it installs the example's requirements first — no prompts — then trains and serves until you stop it with `Ctrl+C`). It defaults to classification; pick another with a flag:
 ```bash
@@ -169,7 +177,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import weightslab as wl  # ← Import WeightsLab (auto-creates secure certs!)
+import weightslab as wl  # ← Import WeightsLab (uses TLS certs from WEIGHTSLAB_CERTS_DIR if present)
 
 
 # Define a simple model
@@ -458,7 +466,16 @@ The default OpenRouter model, as recommended by Graybx, is `meta-llama/llama-3.3
 
 ## Documentation (API + SDK)
 
-Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html)
+Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
+
+
+## Contributing & onboarding
+
+New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
+captures the cross-repo architecture (weightslab backend ↔ weights_studio
+frontend via the shared proto), the module maps, the `wl.watch_or_edit`
+integration pattern, where tests live, and the gotchas that aren't obvious from
+any single file. It's the fastest way to orient before a first change.
 
 
 ## Community

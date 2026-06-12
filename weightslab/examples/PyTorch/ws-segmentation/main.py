@@ -190,10 +190,7 @@ if __name__ == "__main__":
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
 
-    # --- 4) Register logger + hyperparameters ---
-    logger = LoggerQueue()
-    wl.watch_or_edit(logger, flag="logger", name=exp_name, log_dir=log_dir)
-
+    # --- 4) Register hyperparameters ---
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
