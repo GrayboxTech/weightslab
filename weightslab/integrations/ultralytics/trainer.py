@@ -28,7 +28,6 @@ from torch.nn import Identity
 from ultralytics.models.yolo.detect import DetectionTrainer
 
 import weightslab as wl
-from weightslab.backend.logger import LoggerQueue
 from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend import ledgers
 
