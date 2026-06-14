@@ -2702,7 +2702,17 @@ class DataService:
             stats_to_retrieve = list(getattr(request, 'stats_to_retrieve', []) or [])
             include_raw = bool(getattr(request, 'include_raw_data', False))
             include_transformed = bool(getattr(request, 'include_transformed_data', False))
-            return (not include_raw) and (not include_transformed) and bool(stats_to_retrieve)
+            if include_raw or include_transformed:
+                return False
+            if stats_to_retrieve:
+                return True
+            # An empty stats request with no image payload and no resize is a
+            # metadata/histogram sweep. Route it through the fast filtered path (which
+            # drops heavy blob columns like pred/target) instead of the slow per-sample
+            # path that serializes every column. See _build_metadata_only_response.
+            resize_w = int(getattr(request, 'resize_width', 0) or 0)
+            resize_h = int(getattr(request, 'resize_height', 0) or 0)
+            return resize_w <= 0 and resize_h <= 0
         except Exception:
             return False
 
@@ -2733,6 +2743,14 @@ class DataService:
             # SampleStatsEx.PREDICTION.value,
             SampleStatsEx.TASK_TYPE.value,
         }
+
+        # When no explicit columns are requested (histogram/metadata sweep), default to
+        # all columns EXCEPT heavy per-sample blob columns. For dense tasks (e.g. 3D
+        # detection) pred/target are large JSON arrays (~310 KB/record) that bloat the
+        # response to 100s of MB and silently break the histogram fetch.
+        if not requested_cols:
+            _HEAVY_BLOB_COLS = {"pred", "prediction", "prediction_raw", "target"}
+            requested_cols = [c for c in df_slice.columns if c not in _HEAVY_BLOB_COLS]
 
         metadata_cols = [
             col for col in requested_cols
