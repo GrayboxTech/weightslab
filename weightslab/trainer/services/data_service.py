@@ -1699,14 +1699,14 @@ class DataService:
                             target_width = w_limit
                             target_height = int(target_width / aspect_ratio)
                     elif request.resize_width == 0 and request.resize_height == 0:
-                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 720))  # Default full resolution image is 720p on the longest side, but can be overridden by env var
+                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180))  # Default full resolution image is 360p on the longest side, but can be overridden by env var
                         target_width = int(target_height * aspect_ratio)
 
                     if is_full_resolution:
                         max_modal_height = int(
                             os.environ.get(
                                 "WL_MODAL_MAX_RESOLUTION",
-                                os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 720),
+                                os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 360),
                             )
                         )
                         if max_modal_height > 0 and target_height > max_modal_height:
