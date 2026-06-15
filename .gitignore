@@ -10,6 +10,7 @@ __pycache__
 venv
 runs
 data
+MagicMock
 
 # Ignore hidden directories
 .history

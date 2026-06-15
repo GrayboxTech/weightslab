@@ -552,6 +552,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                 log=False,  # already logged sample-level above
             )
         except Exception as e:
+            traceback.print_exc() if os.environ.get('WEIGHTSLAB_LOG_LEVEL') == 'DEBUG' else None
             logger.debug(f"Per-instance signal save failed for {reg_name}: {e}")
     else:
         _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
