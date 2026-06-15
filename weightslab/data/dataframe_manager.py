@@ -1049,7 +1049,7 @@ class LedgeredDataFrameManager:
             if v is None:
                 return False
             try:
-                return not np.isnan(v)
+                return not np.isnan(v).any()
             except (TypeError, ValueError):
                 return True
 
@@ -2378,7 +2378,7 @@ class LedgeredDataFrameManager:
         logger.debug(f"[LedgeredDataFrameManager] Waiting for buffer to drain. Buffer size: {len(self._buffer)}.")
         while time.time() < deadline:
             with self._buffer_lock:
-                logger.debug(f"[LedgeredDataFrameManager] Acquiring buffer lock for flush_async check. Buffer size: {len(self._buffer)}.")
+                # logger.debug(f"[LedgeredDataFrameManager] Acquiring buffer lock for flush_async check. Buffer size: {len(self._buffer)}.")
                 if len(self._buffer) < self._flush_max_rows:
                     logger.debug(f"[LedgeredDataFrameManager] Buffer drained, proceeding. Buffer size: {len(self._buffer)}.")
                     return
