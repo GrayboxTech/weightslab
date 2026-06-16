@@ -382,10 +382,13 @@ if __name__ == "__main__":
     else:
         train_range = range(training_steps_to_do) if training_steps_to_do is not None else itertools.count()
 
-    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     train_loss = None
     test_loss, test_metric = None, None
+    test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
     for train_step in train_range:
         age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
 

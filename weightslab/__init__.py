@@ -14,7 +14,7 @@ import threading
 from .src import watch_or_edit, start_training, serve, keep_serving, save_signals, save_instance_signals, save_group_signals, tag_samples, register_categorical_tag, set_categorical_tag, discard_samples, get_samples_by_tag, get_discarded_samples, signal, eval_fn, compute_signals, SignalContext, clear_all, run_pending_evaluation, trigger_pending_evaluation_async, query_signal_history, query_sample_history, query_instance_history, write_history, write_dataframe, get_current_experiment_hash, pointcloud_thumbnail, pointcloud_boxes
 from .backend.ledgers import GLOBAL_LEDGER as ledger
 from .art import _BANNER
-from .utils.logs import setup_logging, set_log_directory
+from .utils.logs import setup_logging, set_log_directory, is_main_process
 from .utils.tools import seed_everything
 from .components.global_monitoring import guard_training_context, guard_testing_context
 
@@ -25,21 +25,27 @@ from .components.global_monitoring import guard_training_context, guard_testing_
 # Change the name of the current (main) thread
 threading.current_thread().name = "WL-MainThread"
 
-# Auto-initialize logging on import. Python's module cache (sys.modules) guarantees
-# this block runs exactly once per process. Subprocesses get a fresh interpreter
-# and initialize independently — no env var needed to coordinate across processes.
+# Auto-initialize logging on import. Python's module cache (sys.modules) makes
+# this block run once per process — but spawned/forked workers (e.g. PyTorch
+# DataLoader workers, which on Windows' 'spawn' start method re-import this
+# package) are separate processes and would each re-emit the banner and create
+# their own temp log file during training. The noisy parts below are therefore
+# gated to the main process; workers keep a quiet console-only logger.
 log_level = os.getenv('WEIGHTSLAB_LOG_LEVEL', 'INFO')
 log_to_file = os.getenv('WEIGHTSLAB_LOG_TO_FILE', 'true').lower() == 'true'
 
-setup_logging(log_level, log_to_file=log_to_file)
+_IS_MAIN_PROCESS = is_main_process()
+
+setup_logging(log_level, log_to_file=(log_to_file and _IS_MAIN_PROCESS))
 
 logger = logging.getLogger(__name__)
-logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
-if os.getenv('WEIGHTSLAB_SUPPRESS_BANNER', '0') != '1':
-	logger.info(_BANNER)
+if _IS_MAIN_PROCESS:
+    logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
+    if os.getenv('WEIGHTSLAB_SUPPRESS_BANNER', '0') != '1':
+        logger.info(_BANNER)
 
 grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
-if grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
+if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':
 	try:
 		from weightslab.security import CertAuthManager
 

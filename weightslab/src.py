@@ -552,6 +552,7 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                 log=False,  # already logged sample-level above
             )
         except Exception as e:
+            traceback.print_exc() if os.environ.get('WEIGHTSLAB_LOG_LEVEL') == 'DEBUG' else None
             logger.debug(f"Per-instance signal save failed for {reg_name}: {e}")
     else:
         _log_signal(scalar, batch_scalar, reg_name, step=step, **kwargs)
@@ -3003,6 +3004,9 @@ class _EvalManagedLoader:
         self._processed_batches = 0
         self._avg_batch_seconds = 0.0
         self._multiplier, self._min_seconds, self._absolute_timeout = _get_eval_timeout_config()
+
+        # UL deps
+        self.dataset = loader.dataset if hasattr(loader, 'dataset') else None
 
     def _check_cancel_or_timeout(self) -> None:
         if self._controller.is_cancel_requested():

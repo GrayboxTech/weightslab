@@ -484,6 +484,10 @@ if __name__ == "__main__":
     # 5. Training Loop
     logger.info(f"Starting Contrastive-VAD Training on {device}...")
 
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+
     pbar = tqdm(range(training_steps), desc="Training")
     for step in pbar:
         age = model.get_age() if hasattr(model, "get_age") else step

@@ -320,6 +320,10 @@ if __name__ == "__main__":
     print(f"  Logs         : {parameters['root_log_dir']}")
     print("=" * 60)
 
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+
     train(
         model=model,
         train_loader=train_loader,

@@ -443,6 +443,9 @@ class DataLoaderInterface:
         self.is_training = kwargs.pop("is_training", False)
         self._enable_h5_persistence = kwargs.pop("enable_h5_persistence", True)
         self.skip_previous_auto_load = kwargs.pop("skip_previous_auto_load", False)
+        # Captured so we can default it intelligently (see _should_persist_workers).
+        # Popped here so it never reaches DataLoader/wrapper twice via **kwargs.
+        self._user_persistent_workers = kwargs.pop("persistent_workers", None)
 
         # Init ledgered HP
         self.hp = get_hyperparams()
@@ -513,6 +516,7 @@ class DataLoaderInterface:
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 collate_fn=collate_fn,
+                persistent_workers=self._should_persist_workers(num_workers),
                 **filter_kwargs_for_callable(DataLoader, kwargs)
             )
             self._mutable_batch_sampler = batch_sampler
@@ -952,6 +956,29 @@ class DataLoaderInterface:
     #         self._skipped = []
     #         self._sample_offset = 0
 
+    def _should_persist_workers(self, num_workers: int) -> bool:
+        """Whether to keep DataLoader workers alive across iterator resets.
+
+        With num_workers > 0 and persistent_workers=False, every `_reset_iterator()`
+        (each epoch boundary, batch-size change, RNG restore) tears down and
+        re-spawns all worker processes. On Windows ('spawn') each respawn
+        re-imports torch + weightslab + the dataset module — hundreds of ms to
+        seconds per reset. Persisting workers makes the reset a cheap re-shuffle.
+
+        Safe because discards/eval filtering happen in the main-process sampler
+        (WeightsLabDataSampler, re-iterated every epoch) and the dataset's
+        idx->sample mapping is immutable. The one exception is tag-based
+        relabeling (use_tags=True): __getitem__ then reads live tags, which
+        today only reach workers via the per-epoch respawn — so keep respawning
+        in that case. An explicit persistent_workers= kwarg always wins.
+        """
+        if num_workers <= 0:
+            return False
+        if self._user_persistent_workers is not None:
+            return bool(self._user_persistent_workers)
+        use_tags_active = bool(getattr(self.tracked_dataset, "_use_tags", False))
+        return not use_tags_active
+
     def _reset_iterator(self) -> None:
         """Reset the internal iterator so `_next_batch()` starts from the beginning.
 
@@ -962,6 +989,14 @@ class DataLoaderInterface:
         import gc
         import time
 
+        # Workers are only torn down and re-spawned when they DON'T persist. When
+        # persistent_workers is on, iter(self.dataloader) reuses the live workers
+        # (a cheap re-shuffle), so the GC sweep and settle-delay below are pure
+        # overhead and are skipped.
+        num_workers = getattr(self.dataloader, 'num_workers', 0) or 0
+        persistent = bool(getattr(self.dataloader, 'persistent_workers', False))
+        respawning = num_workers > 0 and not persistent
+
         # Explicitly delete old iterator to allow worker processes to be cleaned up
         if hasattr(self, '_iterator') and self._iterator is not None:
             try:
@@ -970,12 +1005,13 @@ class DataLoaderInterface:
             except Exception as e:
                 logger.debug(f"Failed to delete old iterator: {e}")
 
-        # Force garbage collection to ensure worker processes are terminated
-        # This is especially important when num_workers > 0
-        try:
-            gc.collect()
-        except Exception:
-            pass
+        # Force garbage collection to ensure worker processes are terminated.
+        # Only needed when workers are actually being torn down (non-persistent).
+        if respawning:
+            try:
+                gc.collect()
+            except Exception:
+                pass
 
         # Reset sampler's offset for new epoch (important: prevents skipping samples on subsequent epochs)
         if hasattr(self, '_mutable_batch_sampler') and self._mutable_batch_sampler is not None:
@@ -985,9 +1021,10 @@ class DataLoaderInterface:
                 if old_offset > 0:
                     logger.debug(f"Reset sampler offset from {old_offset} to 0")
 
-        # Give worker processes time to fully terminate (especially important with num_workers > 0)
-        # Short delay to avoid race conditions when spawning new workers
-        if hasattr(self.dataloader, 'num_workers') and self.dataloader.num_workers > 0:
+        # Give worker processes time to fully terminate before spawning new ones.
+        # Only relevant when workers are actually respawning; persistent workers
+        # stay alive, so no settle-delay is needed.
+        if respawning:
             time.sleep(0.01)  # 10ms delay for worker cleanup
 
         # Create new iterator
@@ -1168,6 +1205,7 @@ class DataLoaderInterface:
                         num_workers=num_workers,
                         pin_memory=pin_memory,
                         collate_fn=collate_fn,
+                        persistent_workers=self._should_persist_workers(num_workers),
                         **kwargs,
                     )
                 else:
@@ -1180,6 +1218,7 @@ class DataLoaderInterface:
                         drop_last=drop_last,
                         pin_memory=pin_memory,
                         collate_fn=collate_fn,
+                        persistent_workers=self._should_persist_workers(num_workers),
                         **kwargs,
                     )
 

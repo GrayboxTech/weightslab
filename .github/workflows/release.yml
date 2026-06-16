@@ -114,16 +114,29 @@ jobs:
           path: dist/
           retention-days: 1
 
+  # ── Cross-version install test from TestPyPI (Dev Release) ───────────────
   test-install-from-pip-dev-release:
-    name: Test Install From TestPyPI (Dev Release)
+    name: Test Install From TestPyPI — Python ${{ matrix.python-version }} (Dev Release)
     needs: build-and-publish-dev-release
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.10'
+          - python-version: '3.11'
+          - python-version: '3.12'
+          - python-version: '3.13'
+          - python-version: '3.14'
+            allow-prereleases: true
+    continue-on-error: ${{ matrix.allow-prereleases == true }}
     permissions:
       contents: read
     steps:
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ matrix.allow-prereleases || false }}
 
       - name: Create isolated virtual environment
         run: python -m venv .venv-ci
@@ -159,14 +172,14 @@ jobs:
             --extra-index-url https://pypi.org/simple/ \
             --extra-index-url https://download.pytorch.org/whl/cpu \
             "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
-          echo "weightslab==${WL_VERSION} installed from TestPyPI"
+          echo "weightslab==${WL_VERSION} installed on Python ${{ matrix.python-version }}"
 
       - name: Verify package import
         run: |
           . .venv-ci/bin/activate
           python -c "
           import weightslab, importlib.metadata as m
-          print('weightslab import OK')
+          print('weightslab import OK on Python ${{ matrix.python-version }}')
           print('installed version:', m.version('weightslab'))
           "
 
@@ -290,7 +303,6 @@ jobs:
 
   build-and-publish-main:
     name: Build & Publish Main (PyPI)
-    # needs: [detect-target, ]
     needs: [detect-target]
     runs-on: ubuntu-latest
     if: ${{ needs.detect-target.outputs.is_main == 'true' }}
@@ -343,16 +355,21 @@ jobs:
           path: dist/
           retention-days: 1
 
+  # ── Cross-version install test from PyPI (Main Release) ──────────────────
   test-install-from-pip-main:
-    name: Test Install From PyPI (Main Release)
+    name: Test Install From PyPI — Python ${{ matrix.python-version }} (Main Release)
     needs: build-and-publish-main
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     permissions:
       contents: read
     steps:
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
 
       - name: Create isolated virtual environment
         run: python -m venv .venv-ci
@@ -387,14 +404,14 @@ jobs:
             --index-url https://pypi.org/simple/ \
             --extra-index-url https://download.pytorch.org/whl/cpu \
             "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
-          echo "weightslab==${WL_VERSION} installed from PyPI"
+          echo "weightslab==${WL_VERSION} installed on Python ${{ matrix.python-version }}"
 
       - name: Verify package import
         run: |
           . .venv-ci/bin/activate
           python -c "
           import weightslab, importlib.metadata as m
-          print('weightslab import OK')
+          print('weightslab import OK on Python ${{ matrix.python-version }}')
           print('installed version:', m.version('weightslab'))
           "
 

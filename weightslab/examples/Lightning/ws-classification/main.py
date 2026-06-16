@@ -381,6 +381,10 @@ def main():
     # PyTorch Lightning Trainer
     pl.seed_everything(parameters.get('seed', 42), workers=True)
 
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         accelerator=trainer_accelerator,

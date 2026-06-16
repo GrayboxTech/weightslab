@@ -214,11 +214,13 @@ class GuardContext:
         except Exception:
             pass
 
-    def __enter__(self):
+    def __enter__(self, f: bool = False):
         """
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
         self._maybe_pause_at_step()
+        if f:
+            pause_controller.resume(force=f)
         pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
 
@@ -266,11 +268,15 @@ class GuardContext:
                 self.model.set_tracking_mode(TrackingMode.EVAL)
                 self.model.eval()
 
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any, f: bool = False) -> bool:
         """
         Executed upon exiting the 'with' block (after user code runs).
         Reverts the model state.
         """
+
+        if f:
+            pause_controller.pause()
+
         # Revert the model state
         if self.model is not None and hasattr(self, '_prev_training_mode'):
             self.model.train(self._prev_training_mode)

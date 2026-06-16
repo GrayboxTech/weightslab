@@ -95,18 +95,21 @@ jobs:
             echo "$FILES" | xargs vulture --min-confidence 70 ./weightslab || true
           fi
 
+  # ── Fast install gate (always runs) ──────────────────────────────────────
+  # Single-version install on 3.11 — always runs so `test` has a gate to
+  # depend on regardless of branch.
   install:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
+    name: install (Python 3.11)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
 
       - name: Install project dependencies
         run: |
@@ -117,9 +120,49 @@ jobs:
         run: |
           python -c "import weightslab; print(f'weightslab imported successfully')"
 
+  # ── Full Python version matrix (PR and main only) ─────────────────────────
+  # Verifies that `pip install` + basic import work across all supported Python
+  # versions. Runs on every PR and every push to main; skipped on dev/other
+  # branch pushes to avoid unnecessary cost on work-in-progress commits.
+  install-matrix:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false          # keep running other versions if one fails
+      matrix:
+        include:
+          - python-version: '3.10'
+          - python-version: '3.11'
+          - python-version: '3.12'
+          - python-version: '3.13'
+          - python-version: '3.14'
+            allow-prereleases: true   # 3.14 is pre-release; visible failure but non-blocking
+    name: install (Python ${{ matrix.python-version }})
+    # 3.14 pre-release failures are informational — don't block the pipeline.
+    continue-on-error: ${{ matrix.allow-prereleases == true }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ matrix.allow-prereleases || false }}
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Verify installation
+        run: |
+          python -c "import weightslab; print(f'weightslab imported successfully on Python ${{ matrix.python-version }}')"
+
   test:
     if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
+    # Depends on the fast 3.11 gate only — the matrix runs independently in parallel.
     needs: install
     steps:
       - name: Checkout repository
@@ -165,7 +208,8 @@ jobs:
       #     echo "WeightsStudio workflow dispatch requested successfully."
 
   build-and-publish-dev:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+    # Only publish to TestPyPI when pushing to main (not on PRs or dev branch pushes).
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     name: Build & Publish Dev (TestPyPI)
     needs: test
     runs-on: ubuntu-latest
@@ -248,18 +292,34 @@ jobs:
           fi
           python -m twine upload --repository-url https://test.pypi.org/legacy/ --verbose dist/*
 
+  # ── Cross-version install test from TestPyPI ──────────────────────────────
+  # Installs the just-published dev package from TestPyPI on every supported
+  # Python version and verifies the import works end-to-end.
+  # Runs only on main branch pushes (same gate as the publish step above).
   test-install-from-pip-dev:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
-    name: Test Install From Pip Dev
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    name: Test Install From Pip Dev (Python ${{ matrix.python-version }})
     needs: build-and-publish-dev
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.10'
+          - python-version: '3.11'
+          - python-version: '3.12'
+          - python-version: '3.13'
+          - python-version: '3.14'
+            allow-prereleases: true
+    continue-on-error: ${{ matrix.allow-prereleases == true }}
     permissions:
       contents: read
     steps:
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ matrix.allow-prereleases || false }}
 
       - name: Create isolated virtual environment
         run: |
@@ -296,9 +356,13 @@ jobs:
           done
 
           python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "weightslab==${WL_VERSION}" --no-cache-dir --retries 10 --timeout 60
-          echo "weightslab==${WL_VERSION} installed from TestPyPI"
+          echo "weightslab==${WL_VERSION} installed from TestPyPI on Python ${{ matrix.python-version }}"
 
       - name: Verify package import
         run: |
           . .venv-ci/bin/activate
-          python -c "import weightslab; import importlib.metadata as m; print('weightslab import OK'); print('installed version:', m.version('weightslab'))"
+          python -c "
+          import weightslab, importlib.metadata as m
+          print('weightslab import OK on Python ${{ matrix.python-version }}')
+          print('installed version:', m.version('weightslab'))
+          "

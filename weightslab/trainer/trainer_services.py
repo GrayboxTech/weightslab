@@ -139,46 +139,55 @@ def _run_security_preflight(
     auth_tokens: set[str],
 ) -> None:
     """Validate security-critical configuration before spawning gRPC threads."""
-    logger.info(
-        "" + "\n" +
-        "\n# #######################################" + "\n" +
-        "# #######################################"
-    )
-    logger.info("[gRPC] Running security preflight checks...")
+    # Run the checks first, accumulating a human-readable summary so the final
+    # report can be emitted as a single contiguous block (no interleaved
+    # per-line timestamps), mirroring the agent's configuration banner.
+    lines: list[str] = []
+    warnings: list[str] = []
 
+    # --- TLS / mTLS ---
     if not grpc_tls_enabled:
-        # Log a strong warning if TLS is disabled, since this is a common misconfiguration with severe security implications.
-        logger.warning(
-            "[gRPC] GRPC_TLS_ENABLED=0. Traffic will be unencrypted. Use only for development."
+        # A common misconfiguration with severe security implications.
+        warnings.append(
+            "GRPC_TLS_ENABLED=0. Traffic will be unencrypted. Use only for development."
         )
+        lines.append("\tTLS: DISABLED (unencrypted traffic)")
     else:
         _validate_file_exists(grpc_tls_key_file, "gRPC TLS private key (GRPC_TLS_KEY_FILE)")
         _validate_file_exists(grpc_tls_cert_file, "gRPC TLS certificate (GRPC_TLS_CERT_FILE)")
         if grpc_tls_require_client_auth:
             _validate_file_exists(grpc_tls_ca_file, "gRPC TLS CA file (GRPC_TLS_CA_FILE)")
 
-        # Log TLS/mTLS configuration with sensitive values redacted.
-        logger.info(
-            "" + "\n" +
-            f"TLS preflight initiated." + "\n" +
-            f"[gRPC] TLS preflight OK with:" + "\n" +
-            f"\tmTLS={grpc_tls_require_client_auth}, " + "\n" +
-            f"\tcert={grpc_tls_cert_file}, " + "\n" +
-            f"\tkey={grpc_tls_key_file}, " + "\n" +
-            f"\tca={(grpc_tls_ca_file if grpc_tls_require_client_auth else '<unused>')}"
-        )
+        lines.append("\tTLS: OK with:")
+        lines.append(f"\t\tmTLS={grpc_tls_require_client_auth}, ")
+        lines.append(f"\t\tcert={grpc_tls_cert_file}, ")
+        lines.append(f"\t\tkey={grpc_tls_key_file}, ")
+        lines.append(f"\t\tca={(grpc_tls_ca_file if grpc_tls_require_client_auth else '<unused>')}")
 
+    # --- Auth tokens ---
     if auth_tokens:
-        logger.info(
-            f"[gRPC] Auth token preflight OK ({len(auth_tokens)} token(s) loaded):" + "\n" +
-            "\n".join(f"\t- {auth_token[:4]}***{auth_token[-4:]}" for auth_token in auth_tokens)
+        lines.append(f"\tAuth tokens: OK ({len(auth_tokens)} token(s) loaded):")
+        lines.extend(
+            f"\t\t- {auth_token[:4]}***{auth_token[-4:]}" for auth_token in auth_tokens
         )
     else:
-        logger.warning(
-            "[gRPC] No GRPC_AUTH_TOKEN/GRPC_AUTH_TOKENS configured. "
+        warnings.append(
+            "No GRPC_AUTH_TOKEN/GRPC_AUTH_TOKENS configured. "
             "Only transport-level trust (TLS/mTLS) will protect RPC access."
         )
-    logger.info("\n" + "# #######################################" + "\n" + "# #######################################" + "\n" + "")
+        lines.append("\tAuth tokens: NONE configured")
+
+    # Emit the whole report at once for transparency.
+    logger.info(
+        "" + "\n" +
+        "\n# #######################################" + "\n" +
+        "# #######################################" + "\n" +
+        "[gRPC] Security preflight checks:" + "\n" +
+        "\n".join(lines) +
+        ("" if not warnings else "\n" + "\n".join(f"\t! WARNING: {w}" for w in warnings)) + "\n" +
+        "# #######################################" + "\n" +
+        "# #######################################" + "\n" + ""
+    )
 
 def _iter_possible_tokens(invocation_metadata: Iterable[tuple[str, str]] | None):
     if not invocation_metadata:
