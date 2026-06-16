@@ -67,13 +67,31 @@ class WLAwareTrainer(DetectionTrainer):
 
             _register_channels()
 
+            # Decorated function for evaluation mode using trainer hook init.
             @wl.eval_fn
             def _validate(loader):
-                pause_controller.resume(force=True)
-                trainer.validator(model=(trainer.ema.ema if trainer.ema else trainer.model))
-                pause_controller.pause()
+                # Clean pause ctrl callbacks
+                raised_exc = None
+                try:
+                    on_val_batch_start_callbacks = trainer.validator.callbacks.pop('on_val_batch_start')  # Remove pause ctrl deps. We can use it as resume pause ctrl will trigger the training in //.
+                    on_val_batch_end_callbacks = trainer.validator.callbacks.pop('on_val_batch_end')  # Remove pause ctrl deps. We can use it as resume pause ctrl will trigger the training in //.
+                    val_loader = trainer.validator.dataloader
+                    trainer.validator.dataloader = loader
+                    trainer.validator(model=(trainer.ema.ema if trainer.ema else trainer.model))
+                except Exception as e:
+                    raised_exc = e
+                    pass
 
-            pause_controller.resume(force=True)
+                # Set Val loader
+                trainer.validator.dataloader = val_loader  # Reset val trainer
+
+                # Set val callbacks
+                trainer.validator.callbacks["on_val_batch_start"].extend(on_val_batch_start_callbacks)
+                trainer.validator.callbacks["on_val_batch_end"].extend(on_val_batch_end_callbacks)
+
+                # Finally raise exc.
+                if raised_exc is not None:
+                    raise raised_exc
 
         def _on_train_batch_start(trainer):
             wl.guard_training_context.__enter__()

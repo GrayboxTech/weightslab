@@ -3005,6 +3005,9 @@ class _EvalManagedLoader:
         self._avg_batch_seconds = 0.0
         self._multiplier, self._min_seconds, self._absolute_timeout = _get_eval_timeout_config()
 
+        # UL deps
+        self.dataset = loader.dataset if hasattr(loader, 'dataset') else None
+
     def _check_cancel_or_timeout(self) -> None:
         if self._controller.is_cancel_requested():
             raise _EvalCanceled(f"Evaluation on '{self._split_name}' canceled by user")

@@ -4,6 +4,7 @@ import tempfile
 import atexit
 import os
 import shutil
+import multiprocessing
 from datetime import datetime
 
 
@@ -19,6 +20,33 @@ _FILE_HANDLER = None
 
 def _env_flag(name: str, default: str = 'false') -> bool:
     return os.getenv(name, default).lower() in {'1', 'true', 'yes', 'on'}
+
+
+def is_main_process() -> bool:
+    """True only in the top-level process.
+
+    Returns False inside spawned/forked workers (PyTorch ``DataLoader`` workers,
+    ``multiprocessing`` children, DDP ranks). On Windows the default ``spawn``
+    start method re-imports this package in every worker, so without this guard
+    each worker re-runs the banner / creates its own temp log file during
+    training. Detection is reliable at import time: ``multiprocessing`` sets the
+    child's process *name* during the spawn "prepare" phase, before the main
+    module (and therefore this package) is re-imported — even though
+    ``parent_process()`` is not populated until slightly later in the child.
+    """
+    try:
+        proc = multiprocessing.current_process()
+        if proc is not None and getattr(proc, 'name', 'MainProcess') != 'MainProcess':
+            return False
+    except Exception:
+        pass
+    try:
+        # Populated in forked children and once a spawned child is bootstrapped.
+        if multiprocessing.parent_process() is not None:
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def _configure_dependency_log_levels() -> None:

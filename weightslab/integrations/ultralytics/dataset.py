@@ -27,9 +27,11 @@ def _to_six_col(xyxy: np.ndarray, cls: np.ndarray) -> np.ndarray:
     if n == 0:
         return np.zeros((0, 6), dtype=np.float32)
     cls_col = cls.reshape(-1, 1).astype(np.float32)
-    return np.concatenate(
-        [xyxy.astype(np.float32), cls_col, np.ones((n, 1), dtype=np.float32)],
-        axis=1,
+    return list(
+        np.concatenate(
+            [xyxy.astype(np.float32), cls_col, np.ones((n, 1), dtype=np.float32)],
+            axis=1,
+        )
     )
 
 
