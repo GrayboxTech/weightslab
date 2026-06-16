@@ -167,7 +167,10 @@ if __name__ == "__main__":
     print(f"💾 Logs: {log_dir}")
     print("=" * 60 + "\n")
 
-    wl.start_training(timeout=None)
+
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loss, test_metric = None, None

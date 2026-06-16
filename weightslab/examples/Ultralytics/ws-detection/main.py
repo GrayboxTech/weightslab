@@ -51,9 +51,14 @@ def main():
     serving_cli = cfg.get("serving_cli", False)
     project = cfg["root_log_dir"]
     name = cfg["experiment_name"]
+    signals_cfg = cfg.get('signals_cfg', {})
 
     wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg, poll_interval=1.0)
     wl.serve(serving_grpc=serving_grpc, serving_cli=serving_cli)
+
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     YOLO(model_name).train(
         trainer=WLAwareTrainer,
@@ -73,6 +78,8 @@ def main():
         degrees=0.0, translate=0.0, scale=0.0, shear=0.0, perspective=0.0,
         flipud=0.0, fliplr=0.0, erasing=0.0,
         auto_augment=None,
+        # Signals cfg
+        **signals_cfg
     )
 
     wl.keep_serving()  # Keep main thread alive to analyze training results directly
