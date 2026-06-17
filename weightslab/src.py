@@ -9,6 +9,7 @@ import sys
 import ctypes
 import time
 import types
+import queue
 import logging
 import inspect
 import functools
@@ -77,18 +78,64 @@ _EVAL_WORKER_LOCK = threading.Lock()
 _EVAL_WORKER_THREAD: Optional[threading.Thread] = None
 
 
+class SignalValue:
+    """Per-sample handle for the subscribed signal: its current value plus the
+    sample's trajectory (history over steps), read in-process from the logger.
+
+    Lets a @wl.signal subscriber classify the *shape* of a sample's curve
+    directly — ``classify(ctx.value.history)`` — with no dataframe round-trip and
+    no staleness: the upstream signal is logged before subscribers fire, so the
+    history already includes the current step.
+    """
+    def __init__(self, current, sample_id, signal_name, logger):
+        self._current = current
+        self._sample_id = sample_id
+        self._signal_name = signal_name
+        self._logger = logger
+
+    @property
+    def current(self):
+        return self._current
+
+    def __float__(self):
+        return float(self._current) if self._current is not None else float("nan")
+
+    @property
+    def history(self):
+        """This sample's trajectory of the subscribed signal: values in step order
+        (oldest -> newest, including the current step)."""
+        if self._logger is None or self._signal_name is None:
+            return [float(self._current)] if self._current is not None else []
+        try:
+            rows = self._logger.query_per_sample(
+                self._signal_name, sample_ids=[self._sample_id])
+        except Exception:
+            return [float(self._current)] if self._current is not None else []
+        rows = sorted(rows, key=lambda r: int(r[1]))
+        return [float(r[2]) for r in rows]
+
+
 class SignalContext:
     """
     Unified context object for WeightsLab signals.
     Carries all available metadata for a single sample during computation.
     """
-    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None, logger=None, origin=None):
+    def __init__(self, sample_id, dataframe, data=None, subscribed_value=None,
+                 logger=None, origin=None, subscribed_signal=None):
         self.sample_id = sample_id
         self.dataframe = dataframe
         self.data = data
         self.subscribed_value = subscribed_value
         self.logger = logger
         self.origin = origin
+        self.subscribed_signal = subscribed_signal
+
+    @property
+    def value(self):
+        """The subscribed signal as a handle carrying both the current value and
+        this sample's trajectory: ``ctx.value.history`` -> list of past values."""
+        return SignalValue(self.subscribed_value, self.sample_id,
+                           self.subscribed_signal, self.logger)
 
     @property
     def image(self) -> Optional[np.ndarray]:
@@ -161,6 +208,129 @@ class SignalContext:
     def is_dynamic(self) -> bool:
         """True if running during training (triggered by a metric)."""
         return self.subscribed_value is not None
+
+
+def _run_subscribers_for(reg_name, ids_np, val_vec, step, origin, kwargs):
+    """Run every @wl.signal subscribed to `reg_name` for the samples whose
+    subscribed value just updated. Builds the per-sample SignalContext (so the
+    subscriber can read ``ctx.value.history``) and logs the result. Called from
+    the framework signal executor thread (off the training hot path)."""
+    subscribers = [(n, f) for n, f in _REGISTERED_SIGNALS.items()
+                   if getattr(f, '_wl_signal_meta', {}).get('subscribe_to') == reg_name]
+    if not subscribers:
+        return
+    try:
+        df_proxy = get_dataframe()
+    except Exception:
+        df_proxy = None
+    for name, func in subscribers:
+        meta = getattr(func, '_wl_signal_meta', {})
+        if step % max(1, meta.get('compute_every_n_steps', 1)) != 0:
+            continue
+        try:
+            if meta.get('batched'):
+                bctx = SignalContext(
+                    sample_id=[int(u) for u in ids_np],
+                    subscribed_value=[float(v) for v in val_vec],
+                    logger=ledgers.get_logger(), dataframe=df_proxy,
+                    origin=origin, subscribed_signal=reg_name)
+                signal_value = list(func(bctx))
+            else:
+                signal_value = []
+                for i, uid in enumerate(ids_np):
+                    ctx = SignalContext(
+                        sample_id=int(uid), subscribed_value=float(val_vec[i]),
+                        logger=ledgers.get_logger(), dataframe=df_proxy,
+                        origin=origin, subscribed_signal=reg_name)
+                    try:
+                        signal_value.append(func(ctx))
+                    except TypeError:
+                        signal_value.append(func(sample_id=int(uid),
+                                                 value=float(val_vec[i]), dataframe=df_proxy))
+            if meta.get('log', True) and signal_value:
+                # Persist via the proven per-sample path: binds each value to its
+                # batch_id (writes df column + logger history), so the result is
+                # queryable per sample under `name`.
+                save_signals(signals={name: signal_value}, batch_ids=ids_np,
+                             step=step, log=True)
+        except Exception as e:
+            logger.debug(f"Dynamic signal {name} failed: {e}")
+
+
+class _SignalExecutor:
+    """Framework-owned worker thread that runs @wl.signal subscribers OFF the
+    training hot path. ``wrappered_fwd`` submits one event per subscribed-value
+    update; this thread drains them and runs the dependent signals. Exposes a
+    heartbeat (``health()``) so the gRPC watchdog can restart it if it stalls."""
+
+    def __init__(self, maxsize: int = 1024):
+        self._q: "queue.Queue" = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self._thread = None
+        self.submitted = self.processed = self.dropped = self.errors = 0
+        self.last_progress = time.time()
+        self.compute_ms = 0.0
+
+    def start(self) -> "_SignalExecutor":
+        if self._thread is not None and self._thread.is_alive():
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="WL-SignalExecutor", daemon=True)
+        self._thread.start()
+        return self
+
+    def submit(self, reg_name, ids_np, val_vec, step, origin, kwargs) -> None:
+        """Hot-path call: enqueue one subscribed-value-update event. O(1)."""
+        try:
+            self._q.put_nowait((reg_name, ids_np, val_vec, step, origin, kwargs))
+            self.submitted += 1
+        except queue.Full:
+            self.dropped += 1            # observability signal — drop, never block training
+
+    def health(self) -> dict:
+        return {"alive": bool(self._thread and self._thread.is_alive()),
+                "backlog": self._q.qsize(), "submitted": self.submitted,
+                "processed": self.processed, "dropped": self.dropped,
+                "errors": self.errors, "stuck_for_s": time.time() - self.last_progress,
+                "compute_ms": self.compute_ms}
+
+    def restart(self, drop_backlog: bool = True) -> None:
+        """Watchdog action when the worker is wedged: optionally drop the backlog
+        and (re)start the thread. Training is never affected."""
+        if drop_backlog:
+            try:
+                while True:
+                    self._q.get_nowait(); self._q.task_done()
+            except queue.Empty:
+                pass
+        self.last_progress = time.time()
+        self.start()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                reg_name, ids_np, val_vec, step, origin, kwargs = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                _t = time.perf_counter()
+                _run_subscribers_for(reg_name, ids_np, val_vec, step, origin, kwargs)
+                self.compute_ms = (time.perf_counter() - _t) * 1000
+                self.processed += 1
+                self.last_progress = time.time()
+            except Exception:
+                self.errors += 1
+            finally:
+                self._q.task_done()
+
+
+_SIGNAL_EXECUTOR = _SignalExecutor()
+
+
+def get_signal_executor() -> "_SignalExecutor":
+    """The framework signal executor (lazily started)."""
+    return _SIGNAL_EXECUTOR.start()
 
 
 # #####################################################################################################################
@@ -571,22 +741,19 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                 ids_np = np.asarray(batch_ids)
 
     if ids_np is not None:
-         # Identify Subscribers for this specific signal (reg_name)
-         subscribers = []
-         for name, func in _REGISTERED_SIGNALS.items():
-             meta = getattr(func, '_wl_signal_meta', {})
-             if meta.get('subscribe_to') == reg_name:
-                 subscribers.append((name, func))
+         # If anything subscribes to this signal, hand the UPDATE EVENT to the
+         # framework signal executor (off the training hot path). The executor
+         # builds each sample's SignalContext (so the subscriber can read
+         # ``ctx.value.history``), runs the dependents, and logs them. Execution
+         # is driven by this subscribed-value update — no polling, no cadence.
+         has_subscriber = any(
+             getattr(f, '_wl_signal_meta', {}).get('subscribe_to') == reg_name
+             for f in _REGISTERED_SIGNALS.values())
 
-         if subscribers:
-             # Resolve generic value vector
-             val_tensor = out
-             if hasattr(val_tensor, 'detach'):
-                  val_tensor = val_tensor.detach().cpu().numpy()
-             else:
-                  val_tensor = np.asarray(val_tensor)
-
-             # Need (B,) vector for per-sample signals
+         if has_subscriber:
+             # Resolve generic value vector (B,) for the updated samples.
+             val_tensor = (out.detach().cpu().numpy()
+                           if hasattr(out, 'detach') else np.asarray(out))
              val_vec = None
              if val_tensor.ndim > 1:
                   val_vec = val_tensor.mean(axis=tuple(range(1, val_tensor.ndim)))
@@ -594,64 +761,9 @@ def wrappered_fwd(original_forward, kwargs, reg_name, *a, **kw):
                   val_vec = val_tensor
 
              if val_vec is not None and len(val_vec) == len(ids_np):
-                 # Attempt to get current step for frequency control
-                 current_step = 0
-                 try:
-                     # Quick check for common model names
-                     m = None
-                     if 'experiment' in list_models(): m = _gm('experiment')
-                     elif 'main' in list_models(): m = _gm('main')
-
-                     if m is not None:
-                         val = getattr(m, 'current_step', None)
-                         if val is not None: current_step = int(val)
-                 except Exception:
-                     pass
-
-                 # Get Dataframe Proxy for injection
-                 try:
-                     df_proxy = get_dataframe()
-                 except:
-                     df_proxy = None
-
-                 # Iterate subscribers
-                 for name, func in subscribers:
-                     meta = getattr(func, '_wl_signal_meta', {})
-                     compute_every = meta.get('compute_every_n_steps', 1)
-
-                     # Frequency Check
-                     if current_step % compute_every != 0:
-                         continue
-
-                     try:
-                         batch_res = {}
-                         for i, uid in enumerate(ids_np):
-                             # Generic 'value' argument
-                             val = float(val_vec[i])
-
-                             # Unified Context Pattern
-                             ctx = SignalContext(
-                                 sample_id=int(uid),
-                                 subscribed_value=val,
-                                 logger=ledgers.get_logger(),
-                                 dataframe=df_proxy,
-                                 origin=kwargs.get('origin', 'train')
-                             )
-                             try:
-                                 res = func(ctx)  # Compute per sample result with unified context
-                             except TypeError:
-                                 # Fallback for legacy subscriber functions
-                                 res = func(sample_id=int(uid), value=val, dataframe=df_proxy)
-
-                             batch_res[uid] = res
-                         signal_value = list(batch_res.values())
-                         dynamic_updates[name] = signal_value
-                         if dynamic_updates and meta.get('log', True):
-                             logger.debug(f"Dynamic updates computed for signal '{reg_name}': {list(dynamic_updates.keys())}")
-                             _log_signal(sum(signal_value)/len(signal_value), signal_value, name, step=step, **kwargs)  # Log custom subscribed signals
-                     except Exception as e:
-                         logger.debug(f"Dynamic signal {name} failed: {e}")
-                         pass  # User function error, skip
+                 get_signal_executor().submit(
+                     reg_name, ids_np, val_vec, step,
+                     kwargs.get('origin', 'train'), kwargs)
 
     # Save statistics if requested and applicable.
     # Skip the per-sample save path when per_instance=True — instance values
@@ -1111,7 +1223,7 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
         logger.info("Shutting down WeightsLab services.")
 
 
-def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
+def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, batched: bool = False, **kwargs):
     """
     Decorator that registers a custom signal function.
 
@@ -1123,6 +1235,10 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         name: Public signal name. Defaults to decorated function name.
         subscribe_to: Optional signal/metric name this signal reacts to.
         compute_every_n_steps: Frequency for dynamic computation.
+        batched: If True the subscriber is called ONCE per step with vectors
+            (``ctx.sample_id`` and ``ctx.subscribed_value`` are lists), so it can
+            vectorize co-signal reads (one ``dataframe.get_values`` instead of a
+            ``get_value`` per sample). Must return one value per sample.
         **kwargs: Additional signal metadata stored in the ledger.
 
     Returns:
@@ -1145,6 +1261,7 @@ def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, 
         func._wl_signal_meta = kwargs
         func._wl_signal_meta['subscribe_to'] = subscribe_to
         func._wl_signal_meta['compute_every_n_steps'] = compute_every_n_steps
+        func._wl_signal_meta['batched'] = batched
         func._wl_signal_name = reg_name
 
         return func

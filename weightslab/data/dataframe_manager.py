@@ -1416,6 +1416,26 @@ class LedgeredDataFrameManager:
             return None
         return row[column]
 
+    def get_values(self, origin: str, sample_ids, column: str):
+        """Batched ``get_value``: one locked, vectorized read of ``column`` for
+        many sample_ids. Returns a list aligned with ``sample_ids`` (None where
+        missing). Avoids the per-sample ``get_row`` (which materializes a full row
+        per call) — the random single-cell lookup that dominated the per-step
+        subscriber cost. Used by ``@wl.signal(batched=True)`` functions.
+        """
+        with self._lock:
+            if self._df.empty or column not in self._df.columns:
+                return [None] * len(sample_ids)
+            col = self._df[column]
+            keys = ([(origin, s) for s in sample_ids]
+                    if isinstance(col.index, pd.MultiIndex) else list(sample_ids))
+            try:
+                # Vectorized: single reindex over all keys (NaN for missing).
+                return col.reindex(keys).tolist()
+            except Exception:
+                # Fallback (e.g. duplicate index): per-key lookup, still one lock.
+                return [col.get(k) for k in keys]
+
     def get_df_view(self, column: str = None, limit: int = -1, copy: bool = False, value: str = None) -> pd.DataFrame:
         with self._lock:
             if self._df.empty:

@@ -768,19 +768,24 @@ class DataService:
             blocking on IO. Falls back to last snapshot if retrieval fails.
             """
             try:
-                # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
-                df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
-                if df.empty:
-                    logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
-                    return df
+                _t = time.perf_counter()
+                _tk = []
+                if self._df_manager is None:
+                    return pd.DataFrame()
 
-                # The manager now expands samples into one row per (sample_id, annotation_id)
-                # instance. Collapse back to one row per sample for the sample-centric UI/agent
-                # view, nesting per-instance signals into a dict column.
+                # The manager expands samples into one row per (sample_id, annotation_id)
+                # instance. Collapse back to one row per sample for the sample-centric
+                # UI/agent view. NOTE: collapse() pulls the combined df internally, so we
+                # do NOT call get_combined_df() separately (that was a wasted full rebuild).
                 df = self._df_manager.get_collapse_annotations_to_samples_df()
+                _tk.append(("collapse(+combine)", (time.perf_counter()-_t)*1000, len(df))); _t = time.perf_counter()
+                if df.empty:
+                    logger.debug(f"[DataService] Pull returned empty dataframe")
+                    return df
 
                 # Ensure sample_id is a column if it was the index
                 df = safe_reset_index(df)
+                _tk.append(("reset_index", (time.perf_counter()-_t)*1000, len(df))); _t = time.perf_counter()
 
                 # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
                 # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
@@ -793,12 +798,16 @@ class DataService:
                     # Fallback to single index if origin is missing, though manager should provide it
                     df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=True)
 
+                _tk.append(("set_index", (time.perf_counter()-_t)*1000, len(df))); _t = time.perf_counter()
                 # DEDUPLICATE: Ensure index is unique before returning.
                 # If duplicates exist, reindex() will fail later.
                 if df.index.has_duplicates:
                     logger.debug(f"[DataService] Dropping {df.index.duplicated().sum()} duplicate index labels from data view.")
                     df = df[~df.index.duplicated(keep='last')]
+                _tk.append(("dedup", (time.perf_counter()-_t)*1000, len(df)))
 
+                logger.info("[PullTiming] rows=%d  " + "  ".join("%s=%.0fms" % (k, ms) for k, ms, _ in _tk),
+                            len(df))
                 return df
             except Exception as e:
                 logger.debug(f"[DataService] Error pulling data view: {e}")
@@ -2716,6 +2725,84 @@ class DataService:
         except Exception:
             return False
 
+    def _signal_histogram_response(self, df, column, max_bins=512):
+        """Server-side histogram binning. Bins `column` (row order) into <=max_bins
+        bins, each {min,max,avg,count} + per-(origin,discarded) sub-bar counts,
+        packed as DataRecords (one record per bin). ~512 tiny records vs N rows."""
+        t0 = time.time()
+        df = safe_reset_index(df)
+        n = len(df)
+        if n == 0 or column not in df.columns:
+            return pb2.DataSamplesResponse(
+                success=False, message=f"histogram: column '{column}' not in view",
+                data_records=[])
+        bars = max(1, min(n, int(max_bins)))
+        vals = pd.to_numeric(df[column], errors="coerce").to_numpy()
+        origin = (df["origin"].astype(str).to_numpy() if "origin" in df.columns
+                  else np.full(n, ""))
+        disc = (df["discarded"].astype(bool).to_numpy() if "discarded" in df.columns
+                else np.zeros(n, bool))
+        edges = (np.arange(bars + 1) * n) // bars
+        bin_of_row = np.searchsorted(edges, np.arange(n), side="right") - 1
+        fin = np.isfinite(vals)
+        gf = pd.DataFrame({"b": bin_of_row[fin], "v": vals[fin],
+                           "o": origin[fin], "d": disc[fin]})
+        stats = gf.groupby("b")["v"].agg(["min", "max", "mean", "count"])
+        sub_by_bin = {}
+        for (b, d, o), c in gf.groupby(["b", "d", "o"]).size().items():
+            sub_by_bin.setdefault(int(b), []).append((bool(d), str(o), int(c)))
+        have = stats.index.to_numpy()
+        mn, mx, av, cn = (stats["min"].to_numpy(), stats["max"].to_numpy(),
+                          stats["mean"].to_numpy(), stats["count"].to_numpy())
+        pos = {int(b): i for i, b in enumerate(have)}
+        _DS, _DR = pb2.DataStat, pb2.DataRecord
+        recs = []
+        for b in range(bars):
+            i = pos.get(b)
+            ds = []
+            if i is not None:
+                ds = [_DS(name="min", type="scalar", shape=[1], value=[float(mn[i])]),
+                      _DS(name="max", type="scalar", shape=[1], value=[float(mx[i])]),
+                      _DS(name="avg", type="scalar", shape=[1], value=[float(av[i])]),
+                      _DS(name="count", type="scalar", shape=[1], value=[float(cn[i])])]
+                for d, o, c in sub_by_bin.get(b, []):
+                    ds.append(_DS(name=f"sub:{1 if d else 0}:{o}", type="scalar",
+                                  shape=[1], value=[float(c)]))
+            recs.append(_DR(sample_id=str(b), data_stats=ds))
+        logger.info("[HistBin] column=%s rows=%d bins=%d in %.0fms",
+                    column, n, len(recs), (time.time() - t0) * 1000)
+        return pb2.DataSamplesResponse(
+            success=True, message=f"histogram {column}: {len(recs)} bins from {n} rows",
+            data_records=recs)
+
+    def _signal_history_response(self, signal_name, sample_ids):
+        """Per-sample signal history (the curve over training steps), read from the
+        in-memory logger. Returns one DataRecord per sample with two parallel
+        vector DataStats: 'steps' and 'values'."""
+        from weightslab.backend.ledgers import get_logger
+        lg = get_logger()
+        if lg is None:
+            return pb2.DataSamplesResponse(success=False, message="no logger", data_records=[])
+        try:
+            rows = lg.query_per_sample(signal_name, sample_ids=list(sample_ids))
+        except Exception as e:
+            return pb2.DataSamplesResponse(success=False, message=f"history error: {e}", data_records=[])
+        by_sid = {}
+        for tup in rows:
+            sid, step, val = str(tup[0]), int(tup[1]), float(tup[2])
+            by_sid.setdefault(sid, []).append((step, val))
+        recs = []
+        for sid in sample_ids:
+            series = sorted(by_sid.get(str(sid), []))
+            steps = [float(s) for s, _ in series]
+            vals = [v for _, v in series]
+            recs.append(pb2.DataRecord(sample_id=str(sid), data_stats=[
+                pb2.DataStat(name="steps", type="vector", shape=[len(steps)], value=steps),
+                pb2.DataStat(name="values", type="vector", shape=[len(vals)], value=vals)]))
+        logger.info("[HistCurve] signal=%s samples=%d", signal_name, len(recs))
+        return pb2.DataSamplesResponse(
+            success=True, message=f"history {signal_name}: {len(recs)} samples", data_records=recs)
+
     def _build_metadata_only_response(self, df_slice: pd.DataFrame, request):
         """Build DataSamplesResponse from dataframe columns only (no dataset/image traversal).
 
@@ -2963,6 +3050,21 @@ class DataService:
                     message="Internal dataframe is empty or not initialized.",
                     data_records=[]
                 )
+
+            # --- Server-side histogram binning (sentinel, no proto change) ---
+            # stats_to_retrieve = ["__histogram__", "<column>"], records_cnt = max_bins.
+            # Returns <=max_bins bins (min/max/avg/count + per-(origin,discarded)
+            # sub-bars) instead of every per-sample row.
+            _stats = list(request.stats_to_retrieve or [])
+            if _stats and _stats[0] == "__histogram__":
+                return self._signal_histogram_response(
+                    current_df, _stats[1] if len(_stats) > 1 else "",
+                    int(request.records_cnt) if request.records_cnt > 0 else 512)
+
+            # Per-sample history (loss curve over steps): stats=["__history__", signal, sid1, sid2, ...]
+            if _stats and _stats[0] == "__history__":
+                return self._signal_history_response(
+                    _stats[1] if len(_stats) > 1 else "", _stats[2:])
 
             # Slice the snapshot
             try:

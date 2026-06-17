@@ -30,6 +30,7 @@ from weightslab.components.global_monitoring import (
     guard_training_context,
     guard_testing_context
 )
+from signal_maintenance import SignalMaintenanceThread
 
 
 # Setup logging
@@ -125,10 +126,134 @@ class MNISTCustomDataset(Dataset):
 
 
 # -----------------------------------------------------------------------------
+# Per-sample metric modules
+# -----------------------------------------------------------------------------
+# Each is a tiny nn.Module whose forward(outputs, labels) returns one value per
+# sample ([B]). Wrapped with wl.watch_or_edit(flag="metric", per_sample=True),
+# WL auto-converts every call into a per-sample signal keyed by batch_ids — so
+# the train loop just *calls* them, no manual wl.save_signals(). Same pattern as
+# the 3D-detection example's PerSampleBevIoU.
+class _ProbMetric(nn.Module):
+    """Base: softmax once, then a per-sample reduction in forward()."""
+    @staticmethod
+    def _probs(outputs):
+        return torch.softmax(outputs.float(), dim=1)
+
+
+class Confidence(_ProbMetric):
+    def forward(self, outputs, labels):
+        return self._probs(outputs).max(dim=1).values
+
+
+class TrueClassProb(_ProbMetric):
+    def forward(self, outputs, labels):
+        p = self._probs(outputs)
+        return p.gather(1, labels.long().view(-1, 1)).squeeze(1)
+
+
+class PredMargin(_ProbMetric):
+    def forward(self, outputs, labels):
+        top2 = self._probs(outputs).topk(2, dim=1).values
+        return top2[:, 0] - top2[:, 1]
+
+
+class PredEntropy(_ProbMetric):
+    def forward(self, outputs, labels):
+        p = self._probs(outputs)
+        return -(p * (p + 1e-9).log()).sum(dim=1)
+
+
+class IsCorrect(_ProbMetric):
+    def forward(self, outputs, labels):
+        return (outputs.argmax(dim=1) == labels.view(-1)).float()
+
+
+class CorrectClassRank(_ProbMetric):
+    def forward(self, outputs, labels):
+        p = self._probs(outputs)
+        true_p = p.gather(1, labels.long().view(-1, 1))
+        return (p > true_p).sum(dim=1).float() + 1.0
+
+
+# name -> metric class; registered once in main and called every train step.
+STRESS_METRICS = {
+    "train/confidence": Confidence,
+    "train/true_class_prob": TrueClassProb,
+    "train/pred_margin": PredMargin,
+    "train/pred_entropy": PredEntropy,
+    "train/is_correct": IsCorrect,
+    "train/correct_class_rank": CorrectClassRank,
+}
+
+
+# --- Off-thread signal compute (the SignalMaintenanceThread prototype) ---------
+# Raw (UNwrapped) metric modules — compute only; no watch_or_edit, no inline save.
+_METRICS = {name: cls() for name, cls in STRESS_METRICS.items()}
+
+
+def compute_all_signals(t):
+    """Runs on the maintenance thread. t = {'preds_raw':…, 'labels':…} (detached).
+    Returns one value/sample for each of the 6 base metrics (need raw logits).
+    'decision_shape' is NO LONGER computed here — it is a framework-driven
+    @wl.signal over the loss trajectory (see below)."""
+    return {name: mod(t["preds_raw"], t["labels"]) for name, mod in _METRICS.items()}
+
+
+# -----------------------------------------------------------------------------
+# Categorical trajectory shape — a real @wl.signal, computed by the FRAMEWORK
+# executor whenever a sample's loss updates. It classifies the *shape* of the
+# per-sample loss curve handed to it via ctx.value.history.
+# -----------------------------------------------------------------------------
+SHAPE_LABELS = {0: "low", 1: "hilo", 2: "U", 3: "hi"}
+SHAPE_TAU = 2.0     # CE threshold between low(~1.46) and high(~2.46) clusters
+SHAPE_DELTA = 0.3   # min end-drop / mid-dip to count a transition
+
+
+def classify(history, tau=SHAPE_TAU, delta=SHAPE_DELTA):
+    """Reduce a per-sample loss trajectory to {0:low,1:hilo,2:U,3:hi}."""
+    n = len(history)
+    if n == 0:
+        return 0
+    k = max(1, n // 3)
+    early = sum(history[:k]) / k
+    late = sum(history[-k:]) / k
+    mid = sum(history[k:n - k]) / (n - 2 * k) if n - 2 * k >= 1 else sum(history) / n
+    overall = sum(history) / n
+    if early > tau and late <= tau and (early - late) >= delta:
+        return 1   # hilo: high -> low (being learned)
+    if early > tau and late > tau and mid <= tau and (min(early, late) - mid) >= delta:
+        return 2   # U: high -> low -> high (forgotten / unstable)
+    return 3 if overall > tau else 0   # hi (stubborn) / low (easy)
+
+
+# Overhead A/B/C knobs:
+#   WL_SHAPE=0        -> signal not registered at all (baseline)
+#   WL_SHAPE_HEAVY=N  -> N iterations of a pure-Python CPU burn per classify call
+#                        (simulates a heavy signal; holds the GIL, so it contends
+#                         with training even though it runs on the executor thread)
+SHAPE_HEAVY = int(os.environ.get("WL_SHAPE_HEAVY", "0"))
+
+
+def decision_shape(ctx):
+    # Fired by the framework executor on every loss update for this sample.
+    hist = ctx.value.history
+    if SHAPE_HEAVY:
+        s = 0.0
+        for _ in range(SHAPE_HEAVY):
+            s = (s + 1.234) ** 0.5      # pure-Python busy work (holds the GIL)
+    return classify(hist)
+
+
+if os.environ.get("WL_SHAPE", "1") == "1":
+    wl.signal(name="train/decision_shape", subscribe_to="train-loss-CE")(decision_shape)
+
+
+# -----------------------------------------------------------------------------
 # Train / Test functions
 # -----------------------------------------------------------------------------
-def train(loader, model, optimizer, criterion_mlt, device):
-    """Single training step using the tracked dataloader + watched loss."""
+def train(loader, model, optimizer, criterion_mlt, sig_worker, device):
+    """Single training step. ALL per-sample signal compute is off-loaded to the
+    maintenance thread via one cheap submit()."""
 
     with guard_training_context:
         (inputs, ids, labels) = next(loader)
@@ -138,21 +263,16 @@ def train(loader, model, optimizer, criterion_mlt, device):
         # Infer
         optimizer.zero_grad()
         preds_raw = model(inputs)
+        preds = preds_raw.argmax(dim=1, keepdim=True)
 
-        # Preds
-        if preds_raw.ndim == 1:
-            preds = (preds_raw > 0.0).long()
-        else:
-            preds = preds_raw.argmax(dim=1, keepdim=True)
-
-        # Loss is a watched object => pass metadata for logging/stats
+        # Watched loss (needed for backward + saves train-loss-CE).
         loss_batch_mlt = criterion_mlt(
-            preds_raw.float(),
-            labels.long(),
-            batch_ids=ids,
-            preds=preds
-        )
-        total_loss = loss_batch_mlt.mean()  # Final scalar loss
+            preds_raw.float(), labels.long(), batch_ids=ids, preds=preds)
+        total_loss = loss_batch_mlt.mean()
+
+        # Off-thread: detach + enqueue. The maintenance thread computes the 6
+        # metrics + the derived decision_shape and persists them. O(1) here.
+        sig_worker.submit(ids, preds_raw=preds_raw, labels=labels)
 
         # Model
         total_loss.backward()
@@ -356,6 +476,11 @@ if __name__ == "__main__":
         Accuracy(task="multiclass", num_classes=10).to(device),
         flag="metric", signal_name="metric-ACC", log=True)
 
+    # Dedicated maintenance thread owns ALL per-sample signal compute off the
+    # training hot path (6 metrics + derived decision_shape). The train loop only
+    # submits detached tensors; this thread computes + persists via save_signals.
+    sig_worker = SignalMaintenanceThread(compute_all_signals, origin="train").start()
+
     # Start WeightsLab services (gRPC only, no CLI)
     wl.serve(
         serving_grpc=parameters.get("serving_grpc", False),
@@ -390,7 +515,20 @@ if __name__ == "__main__":
         age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
 
         # Train one step
-        train_loss = train(train_loader, model, optimizer, train_criterion, device)
+        train_loss = train(train_loader, model, optimizer, train_criterion, sig_worker, device)
+        if train_step % 200 == 0:
+            avg = sig_worker.compute_ms_sum / max(sig_worker.processed, 1)
+            print(f"[sigworker] step~{sig_worker.processed} backlog={sig_worker.backlog} "
+                  f"compute_ms avg={avg:.2f} max={sig_worker.compute_ms_max:.2f} last={sig_worker.compute_ms_last:.2f}",
+                  flush=True)
+            try:
+                from weightslab.src import get_signal_executor
+                h = get_signal_executor().health()
+                print(f"[executor] backlog={h['backlog']} processed={h['processed']} "
+                      f"dropped={h['dropped']} errors={h['errors']} compute_ms={h['compute_ms']:.2f}",
+                      flush=True)
+            except Exception as _e:
+                print(f"[executor] health err: {_e}", flush=True)
 
         # Periodic test evaluation
         if age > 0 and age % eval_full_to_train_steps_ratio == 0:

@@ -238,6 +238,23 @@ if __name__ == "__main__":
     )
 
     def _build_datasets(src):
+        if src == "nuscenes":
+            # nuScenes via the devkit. Set in config.yaml:
+            #   data.source: nuscenes
+            #   data.nuscenes_dataroot: <path to nuscenes>   (default: <data_root>/nuscenes)
+            #   data.nuscenes_version: v1.0-mini | v1.0-trainval
+            #   point_cloud_range: [-50,-50,-5, 50,50,3]      (360-degree, symmetric)
+            from utils.nuscenes_data import NuScenesLidarDataset
+            ncommon = dict(
+                dataroot=data_cfg.get("nuscenes_dataroot", os.path.join(data_root, "nuscenes")),
+                version=data_cfg.get("nuscenes_version", "v1.0-mini"),
+                num_classes=num_classes, pc_range=pc_range,
+                max_points=int(parameters["max_points"]),
+                thumbnail_projection=data_cfg.get("thumbnail_projection", "bev"),
+            )
+            train = NuScenesLidarDataset(split="train", max_samples=train_cfg.get("max_samples", None), **ncommon)
+            val = NuScenesLidarDataset(split="val", max_samples=test_cfg.get("max_samples", None), **ncommon)
+            return train, val
         common = dict(
             root=data_root, source=src, num_classes=num_classes, pc_range=pc_range,
             max_points=int(parameters["max_points"]), num_synthetic=num_synthetic,

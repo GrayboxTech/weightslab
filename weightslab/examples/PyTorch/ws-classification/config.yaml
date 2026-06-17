@@ -1,18 +1,18 @@
 # Global configuration
-experiment_name: mnist_classification
+experiment_name: mnist_stress_70k
 device: auto
-training_steps_to_do: null  # Set to null for infinite training until manually stopped - behavior set by the user in main script
+training_steps_to_do: 375000  # STRESS: 100 epochs over 60k train @ batch_size 16 (60000/16 = 3750 steps/epoch)
 # root_log_dir: ...  # Path to save current experiment checkpoints and data
 
 # Initially compute natural sorting values, e.g., average intensity. More details in the README.md file.
 compute_natural_sort: false
 
 # Experiment parameters
-eval_full_to_train_steps_ratio: 100
-experiment_dump_to_train_steps_ratio: 25
+eval_full_to_train_steps_ratio: 10000000   # OVERHEAD TEST: eval off (would mask signal cost)
+experiment_dump_to_train_steps_ratio: 10000000  # OVERHEAD TEST: checkpoint off
 skip_checkpoint_load: false  # If true restart the experiment from last state
 tqdm_display: true  # Whether to use tqdm progress bars during training/evaluation
-is_training: false  # Start training immediately or not
+is_training: true  # auto-start the stress run (no UI Resume needed)
 
 # Configure global dataframe storage
 ledger_enable_flushing_threads: true
@@ -30,10 +30,11 @@ data:
   train_loader:
     shuffle: true
     batch_size: 16
+    max_samples: 5000   # OVERHEAD TEST: small subset, fast iteration (per-step signal cost is dataset-independent)
   val_loader:
     shuffle: false
     batch_size: 16
   test_loader:
     shuffle: false
-    batch_size: 16
+    batch_size: 128   # was 16 — bigger test batch -> ~8x fewer eval batches/save calls
     drop_last: false
