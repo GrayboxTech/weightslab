@@ -70,24 +70,26 @@ class WLAwareTrainer(DetectionTrainer):
             @wl.eval_fn
             def _validate(loader):
                 # Clean pause ctrl callbacks
+                import copy
                 raised_exc = None
+                val_loader = trainer.validator.dataloader
                 try:
-                    # Should be remove as guards is no blocker now
-                    on_val_batch_start_callbacks = trainer.validator.callbacks.pop('on_val_batch_start')  # Remove pause ctrl deps. We can use it as resume pause ctrl will trigger the training in //.
-                    on_val_batch_end_callbacks = trainer.validator.callbacks.pop('on_val_batch_end')  # Remove pause ctrl deps. We can use it as resume pause ctrl will trigger the training in //.
-                    val_loader = trainer.validator.dataloader
                     trainer.validator.dataloader = loader
-                    trainer.validator(model=(trainer.ema.ema if trainer.ema else trainer.model))
+                    # validator(model=...) takes UL's *standalone* path, which
+                    # wraps the model in AutoBackend and FUSES it in place
+                    # (conv+bn -> conv with bias, bn deleted). Fusing the live
+                    # EMA/model rewrites its state_dict keys, so the next
+                    # trainer.ema.update(model) raises KeyError 'model.*.conv.bias'.
+                    # Validate on a throwaway deep copy so the live EMA / training
+                    # model are never mutated. (`underlying` is the unwrapped model
+                    # captured above; avoids deep-copying the WL wrapper.)
+                    src = trainer.ema.ema if trainer.ema else underlying
+                    eval_model = copy.deepcopy(src).eval()
+                    trainer.validator(model=eval_model)
                 except Exception as e:
                     raised_exc = e
-                    pass
-
-                # Set Val loader
-                trainer.validator.dataloader = val_loader  # Reset val trainer
-
-                # Set val callbacks
-                trainer.validator.callbacks["on_val_batch_start"].extend(on_val_batch_start_callbacks)
-                trainer.validator.callbacks["on_val_batch_end"].extend(on_val_batch_end_callbacks)
+                finally:
+                    trainer.validator.dataloader = val_loader  # Reset val loader
 
                 # Finally raise exc.
                 if raised_exc is not None:
