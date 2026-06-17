@@ -1729,14 +1729,6 @@ def save_signals(
     preds_np     = expand_dim(preds_np)
     preds_raw_np = expand_dim(preds_raw_np)
 
-    # During evaluation mode we must not mutate dataframe state.
-    try:
-        from weightslab.components.evaluation_controller import eval_controller
-        if eval_controller.is_running():
-            return
-    except Exception:
-        pass
-
     # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(
         sample_ids=batch_ids_np,
@@ -2666,12 +2658,13 @@ def run_pending_evaluation(
     controlled_loader = _EvalManagedLoader(loader_if, split_name, total_batches, max_batches=max_steps)
     eval_error = None
 
-    # Set evaluation context (exempt from watchdog timeouts)
+    # Set evaluation context (exempt from watchdog timeouts) and guarding
     from weightslab.components.global_monitoring import set_in_evaluation, reset_in_evaluation
     eval_context_token = set_in_evaluation(True)
 
     try:
-        _eval_fn(controlled_loader)
+        with th.no_grad():
+            _eval_fn(controlled_loader)
     except _EvalCanceled as exc:
         logger_obj.warning("[wl.run_pending_evaluation] canceled: %s", exc)
         eval_controller.mark_canceled(str(exc))

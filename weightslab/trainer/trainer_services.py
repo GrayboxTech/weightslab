@@ -466,7 +466,7 @@ def grpc_serve(
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
     watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks
     watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
-    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "1")).strip().lower() in {"1", "true", "yes", "on"}  # Default state: disabled
     config = get_hyperparams()
     grpc_tls_enabled = _resolve_bool_setting(config, "grpc_tls_enabled", "GRPC_TLS_ENABLED", "0")
     grpc_tls_key_file = _resolve_grpc_tls_path(
