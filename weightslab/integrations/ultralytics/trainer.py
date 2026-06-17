@@ -28,7 +28,6 @@ from torch.nn import Identity
 from ultralytics.models.yolo.detect import DetectionTrainer
 
 import weightslab as wl
-from weightslab.components.global_monitoring import pause_controller
 from weightslab.backend import ledgers
 
 from .collate import wl_ul_dict_collate
@@ -73,6 +72,7 @@ class WLAwareTrainer(DetectionTrainer):
                 # Clean pause ctrl callbacks
                 raised_exc = None
                 try:
+                    # Should be remove as guards is no blocker now
                     on_val_batch_start_callbacks = trainer.validator.callbacks.pop('on_val_batch_start')  # Remove pause ctrl deps. We can use it as resume pause ctrl will trigger the training in //.
                     on_val_batch_end_callbacks = trainer.validator.callbacks.pop('on_val_batch_end')  # Remove pause ctrl deps. We can use it as resume pause ctrl will trigger the training in //.
                     val_loader = trainer.validator.dataloader
