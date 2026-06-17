@@ -833,8 +833,8 @@ class CheckpointManager:
         weights_model = None
 
         if 'model' in changed_components and model is not None and dump_model_architecture:
-            logger.info("Dumping model architecture...")
-            self.save_model_architecture(model)
+            # logger.info("Dumping model architecture...")
+            # self.save_model_architecture(model)
             should_save_weights = True
             weights_model = model
 
