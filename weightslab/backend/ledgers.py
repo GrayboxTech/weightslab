@@ -190,6 +190,23 @@ class Proxy:
             except TypeError:
                 return False
 
+        def __getitem__(self, key: Any) -> Any:
+            """Support subscript access: ``proxy[key]``.
+
+            Equivalent to ``.get(key)`` — reaches into the resolved value with
+            ``[]`` and wraps nested dicts in a fresh _ValueProxy so chaining
+            (e.g. ``proxy['dataset']['batch_size']``) keeps resolving live.
+            Missing keys raise ``KeyError``, matching standard subscript access.
+            """
+            key = self._unwrap(key)
+            v = self._resolve()
+            if v is None:
+                raise KeyError(key)
+            value = v[key]
+            if isinstance(value, dict):
+                return Proxy._ValueProxy(Proxy(v), key)
+            return value
+
         def __int__(self) -> int:
             return int(self._resolve())
 
