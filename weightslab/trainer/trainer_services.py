@@ -334,6 +334,10 @@ class ExperimentServiceServicer(pb2_grpc.ExperimentServiceServicer):
         logger.debug(f"\nExperimentServiceServicer.GetDataSamples({request})")
         return self._exp_service.data_service.GetDataSamples(request, context)
 
+    def GetHistogram(self, request, context):
+        logger.debug(f"\nExperimentServiceServicer.GetHistogram({request})")
+        return self._exp_service.data_service.GetHistogram(request, context)
+
     def GetPointCloud(self, request, context):
         logger.debug(f"\nExperimentServiceServicer.GetPointCloud({request})")
         # Server-streaming RPC: delegate the generator directly.

@@ -237,6 +237,10 @@ class DataService:
         self._update_lock = threading.Lock()
         self._update_done = threading.Event()
         self._update_done.set()   # "done" initially so the very first call proceeds
+        # Guard so a non-force (reader-triggered) view refresh runs in the BACKGROUND
+        # at most once at a time — readers never pay the rebuild cost (they read the
+        # current snapshot; the bg thread swaps in fresh data when ready).
+        self._refresh_in_flight = threading.Lock()
         self._df_manager = get_dataframe()
 
         # init references to the context components
@@ -2526,6 +2530,17 @@ class DataService:
     # ------------------------------------------------------------------
     # Main update method
     # ------------------------------------------------------------------
+    def _bg_view_refresh(self) -> None:
+        """Background view rebuild for reader-triggered (non-force) refreshes. Runs the
+        real rebuild+swap via force=True OFF the request path, then releases the guard so
+        a later stale read can trigger another. Never raises into a request."""
+        try:
+            self._slowUpdateInternals(force=True)
+        except Exception:
+            logger.exception("[ViewRefresh] background view refresh failed")
+        finally:
+            self._refresh_in_flight.release()
+
     def _slowUpdateInternals(self, force: bool = False, reset_view: bool = False) -> None:
         """Update the internal dataframe view with the latest data from the manager.
 
@@ -2555,7 +2570,24 @@ class DataService:
                 current_time - self._last_internals_update_time <= 10:
             return
 
-        # --- Try to become the single updater ---
+        # --- Non-force (reader-triggered) refresh: run it in the BACKGROUND ---
+        # The view is stale, but a reader (grid/histogram/periodic fetch) must NOT block
+        # on the multi-second collapse+combine rebuild. Kick a single background refresh
+        # (the WL-ViewRefresh thread calls force=True, which does the real rebuild+atomic
+        # swap below) and return immediately — the caller reads the current (last-completed)
+        # snapshot. If a refresh is already running, just return; the next fetch sees the swap.
+        if not force:
+            if self._refresh_in_flight.acquire(blocking=False):
+                try:
+                    threading.Thread(
+                        target=self._bg_view_refresh, name="WL-ViewRefresh", daemon=True
+                    ).start()
+                except Exception:
+                    self._refresh_in_flight.release()   # never leak the guard
+                    logger.exception("[ViewRefresh] failed to start background refresh")
+            return
+
+        # --- Try to become the single updater (force path: rebuild inline) ---
         t_wait_start = time.time()
         acquired = self._update_lock.acquire(blocking=False)
 
@@ -3262,11 +3294,17 @@ class DataService:
 
                 # Apply operations with lock
                 with self._watched_lock("_lock[ApplyDataQuery/ops]"):
-                    # If this is JUST a view-sort for a specific page, DO NOT force an internal refresh
-                    # as that wipes out the existing slice/sort state before we try to modify the next slice.
-                    is_only_view_sort = len(operations) == 1 and operations[0].get("function") == "df.sort_view_slice"
-                    if not is_only_view_sort:
-                        self._slowUpdateInternals(force=True)  # Refresh internals before applying Agent operations
+                    # Skip the forced full-view rebuild for SORT-ONLY operations. Sorting just
+                    # re-orders the existing snapshot, so a fresh collapse+combine (hundreds of
+                    # ms on large views, and — being lock-held — contends with the training
+                    # thread for multi-second stalls) is unnecessary. Filters/edits still refresh
+                    # so they operate on the latest data. The view is frozen on direct queries
+                    # anyway (_is_filtered=True), so it wasn't auto-refreshing mid-sort regardless.
+                    _SORT_FUNCS = {"df.sort_values", "df.sort_index", "df.sort_view_slice"}
+                    is_sort_only = bool(operations) and all(
+                        op.get("function") in _SORT_FUNCS for op in operations)
+                    if not is_sort_only:
+                        self._slowUpdateInternals(force=True)  # Refresh internals before applying non-sort operations
 
                     # Work on a copy to allow concurrent readers to see a consistent state
                     df = self._all_datasets_df  # Remove copy because memory waste and slowdown
@@ -3439,6 +3477,71 @@ class DataService:
                 message=f"Failed to retrieve samples: {str(e)}",
                 data_records=[]
             )
+
+    def GetHistogram(self, request, context):
+        """Server-side histogram binning of one column (typed RPC).
+
+        Bins the current all-data view by ROW ORDER into <= max_bins equal-
+        population bins; each bin carries {min,max,avg,count} over its finite
+        values plus a per-(origin,discarded) sub-bar breakdown. Returns typed
+        HistogramBin messages (no DataStat name-encoding). Empty bins are emitted
+        with count=0 and NaN stats so the client's positional bars stay aligned.
+        """
+        try:
+            column = request.column or ""
+            max_bins = int(request.max_bins) if request.max_bins > 0 else 512
+            df = getattr(self, "_all_datasets_df", None)
+            if df is None or df.empty:
+                return pb2.HistogramResponse(
+                    success=False, message="empty dataframe view", total_rows=0, bins=[])
+            df = safe_reset_index(df)
+            n = len(df)
+            if column not in df.columns:
+                return pb2.HistogramResponse(
+                    success=False, message=f"column '{column}' not in view",
+                    total_rows=n, bins=[])
+
+            bars = max(1, min(n, max_bins))
+            vals = pd.to_numeric(df[column], errors="coerce").to_numpy()
+            origin = (df["origin"].astype(str).to_numpy() if "origin" in df.columns
+                      else np.full(n, ""))
+            disc = (df["discarded"].astype(bool).to_numpy() if "discarded" in df.columns
+                    else np.zeros(n, bool))
+            edges = (np.arange(bars + 1) * n) // bars
+            bin_of_row = np.searchsorted(edges, np.arange(n), side="right") - 1
+            fin = np.isfinite(vals)
+            gf = pd.DataFrame({"b": bin_of_row[fin], "v": vals[fin],
+                               "o": origin[fin], "d": disc[fin]})
+            stats = gf.groupby("b")["v"].agg(["min", "max", "mean", "count"])
+            sub_by_bin = {}
+            for (b, d, o), c in gf.groupby(["b", "d", "o"]).size().items():
+                sub_by_bin.setdefault(int(b), []).append(
+                    pb2.HistogramSubBar(origin=str(o), discarded=bool(d), count=int(c)))
+            have = stats.index.to_numpy()
+            mn, mx, av, cn = (stats["min"].to_numpy(), stats["max"].to_numpy(),
+                              stats["mean"].to_numpy(), stats["count"].to_numpy())
+            pos = {int(b): i for i, b in enumerate(have)}
+            _nan = float("nan")
+            bins = []
+            for b in range(bars):
+                i = pos.get(b)
+                if i is None:
+                    bins.append(pb2.HistogramBin(
+                        min=_nan, max=_nan, avg=_nan, count=0, sub_bars=[]))
+                else:
+                    bins.append(pb2.HistogramBin(
+                        min=float(mn[i]), max=float(mx[i]), avg=float(av[i]),
+                        count=int(cn[i]), sub_bars=sub_by_bin.get(b, [])))
+            logger.info("[HistBin] column=%s rows=%d bins=%d", column, n, len(bins))
+            return pb2.HistogramResponse(
+                success=True,
+                message=f"histogram {column}: {len(bins)} bins from {n} rows",
+                total_rows=n, bins=bins)
+        except Exception as e:
+            logger.error("Error in GetHistogram: %s", str(e), exc_info=True)
+            return pb2.HistogramResponse(
+                success=False, message=f"histogram failed: {str(e)}",
+                total_rows=0, bins=[])
 
     # Streamed chunk size for GetPointCloud (raw float32 bytes per message).
     _POINT_CLOUD_CHUNK_BYTES = 1 << 20  # 1 MiB
