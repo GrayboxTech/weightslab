@@ -2,19 +2,52 @@ name: Code CI
 
 on:
   push:
-    branches: [ main, dev ]
+    # Fire on every branch so the `gate` job below can decide whether to run.
+    # GitHub cannot filter on commit message at the event level, so we trigger
+    # broadly and gate execution: main/dev always run, other branches run only
+    # when the head commit message contains "[force ci]".
+    branches: [ '**' ]
     tags: [ 'v*' ]
   pull_request:
     types: [ opened, reopened, ready_for_review ]
   workflow_dispatch:
 
 jobs:
-  # Required gate: a lint violation here FAILS the CI run. This job has no
-  # `needs` and nothing `needs` it, so it runs in parallel with install/test/
-  # build — its failure turns the run red but does NOT stop the other jobs from
-  # running (GitHub Actions does not cancel sibling jobs on failure).
+  # Single source of truth for "should the core CI jobs run?". Reproduces the
+  # previous trigger rules (PR / manual dispatch / main / dev run; tags skip)
+  # and adds a manual escape hatch for custom branches via "[force ci]".
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run_ci: ${{ steps.decide.outputs.run_ci }}
+    steps:
+      - name: Decide whether to run CI
+        id: decide
+        env:
+          # Evaluated by GitHub (not the shell) so the raw commit message is
+          # never interpolated into bash — avoids quoting/injection issues.
+          FORCE_CI: ${{ contains(github.event.head_commit.message, '[force ci]') }}
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            run_ci=true            # PRs and manual dispatch always run
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            run_ci=false           # tag pushes are handled by the release workflow
+          elif [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/dev" ]; then
+            run_ci=true            # default branches always run
+          elif [ "${FORCE_CI}" = "true" ]; then
+            run_ci=true            # custom branch opted in via [force ci]
+          else
+            run_ci=false           # custom branch without [force ci] → skip
+          fi
+          echo "run_ci=${run_ci}" >> "$GITHUB_OUTPUT"
+          echo "Decision: run_ci=${run_ci} (event=${{ github.event_name }}, ref=${{ github.ref }}, force_ci=${FORCE_CI})"
+  # Required gate: a lint violation here FAILS the CI run. Nothing `needs` this
+  # job, so it runs in parallel with install/test/build — its failure turns the
+  # run red but does NOT stop the other jobs from running (GitHub Actions does
+  # not cancel sibling jobs on failure).
   code-quality:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+    needs: gate
+    if: ${{ needs.gate.outputs.run_ci == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -99,7 +132,8 @@ jobs:
   # Single-version install on 3.11 — always runs so `test` has a gate to
   # depend on regardless of branch.
   install:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+    needs: gate
+    if: ${{ needs.gate.outputs.run_ci == 'true' }}
     runs-on: ubuntu-latest
     name: install (Python 3.11)
     steps:
@@ -160,10 +194,11 @@ jobs:
           python -c "import weightslab; print(f'weightslab imported successfully on Python ${{ matrix.python-version }}')"
 
   test:
-    if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ needs.gate.outputs.run_ci == 'true' }}
     runs-on: ubuntu-latest
-    # Depends on the fast 3.11 gate only — the matrix runs independently in parallel.
-    needs: install
+    # Depends on the fast 3.11 install gate; `gate` is also a direct need so this
+    # job can read run_ci (the matrix and main-only jobs run independently).
+    needs: [ gate, install ]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

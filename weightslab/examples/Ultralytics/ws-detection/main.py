@@ -39,6 +39,7 @@ def main():
     if not cfg.get("root_log_dir"):
         cfg["root_log_dir"] = tempfile.mkdtemp()
     os.makedirs(cfg["root_log_dir"], exist_ok=True)
+    wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg, poll_interval=1.0)
 
     # Read raw config values BEFORE wrapping so YOLO.train kwargs are plain
     # Python (avoids ProxyValue.__gt__ during max()/comparisons).
@@ -53,7 +54,6 @@ def main():
     name = cfg["experiment_name"]
     signals_cfg = cfg.get('signals_cfg', {})
 
-    wl.watch_or_edit(cfg, flag="hyperparameters", defaults=cfg, poll_interval=1.0)
     wl.serve(serving_grpc=serving_grpc, serving_cli=serving_cli)
 
     # ================

@@ -407,15 +407,15 @@ if __name__ == "__main__":
 
     parameters.setdefault("is_training", False)
 
+    # WeightsLab initialization
+    wl.watch_or_edit(parameters, flag="hyperparameters", defaults=parameters)
+
     if parameters["device"] == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(parameters["device"])
 
     os.makedirs(parameters["root_log_dir"], exist_ok=True)
-
-    # WeightsLab initialization
-    wl.watch_or_edit(parameters, flag="hyperparameters", defaults=parameters)
 
     # 1.5. Serving
     logger.info("Starting WeightsLab servers...")

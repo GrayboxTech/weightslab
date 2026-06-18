@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_NAME = "main"
 
 
+def _debug_logging_enabled() -> bool:
+    """True only when WEIGHTSLAB_LOG_LEVEL is 'debug' (case-insensitive).
+
+    Used to gate verbose diagnostics (traceback dumps) so they stay quiet in
+    normal runs and only surface when the user explicitly opts into debug.
+    """
+    return os.environ.get("WEIGHTSLAB_LOG_LEVEL", "").strip().lower() == "debug"
+
+
 def _rebuild_proxy(obj: Any) -> "Proxy":
     proxy = Proxy()
     proxy._obj = obj
@@ -37,6 +46,36 @@ def _rebuild_proxy(obj: Any) -> "Proxy":
 
 def _rebuild_value_proxy(parent: "Proxy", key: Any, default: Any = None) -> "Proxy._ValueProxy":
     return Proxy._ValueProxy(parent, key, default)
+
+
+# Sentinel: the resolved value should stay a live proxy (no plain-value coercion).
+_KEEP_AS_PROXY = object()
+
+
+def _is_torch_device(value: Any) -> bool:
+    """True if ``value`` is a ``torch.device``, matched by duck typing.
+
+    Checked via the type's module/name so this backend module never imports
+    torch (it must stay usable without a torch install).
+    """
+    t = type(value)
+    return t.__name__ == "device" and t.__module__ == "torch"
+
+
+def _plain_get_value(value: Any) -> Any:
+    """Plain value a ``get`` should hand back for types that must NOT be returned
+    as a live proxy, else the ``_KEEP_AS_PROXY`` sentinel.
+
+    - ``str``: immutable; as a live proxy it breaks os.PathLike consumers
+      (os.stat / os.path.isdir see ``__index__`` and treat it as a file descriptor).
+    - ``torch.device``: torch's C-level ``torch.device()`` / ``Tensor.to()`` reject
+      a proxy, so we return its string form (which torch accepts everywhere).
+    """
+    if isinstance(value, str):
+        return value
+    if _is_torch_device(value):
+        return str(value)
+    return _KEEP_AS_PROXY
 
 
 class Proxy:
@@ -115,7 +154,9 @@ class Proxy:
             """
             v = self._resolve()
             if not args and not kwargs:
-                return v
+                # Hand back the plain form for str / torch.device; raw value otherwise.
+                plain = _plain_get_value(v)
+                return v if plain is _KEEP_AS_PROXY else plain
             if hasattr(v, 'get'):
                 return v.get(*args, **kwargs)
             # Fallback for the proxy's own resolve-with-default logic
@@ -357,17 +398,50 @@ class Proxy:
                 return 0
             return len(v)
 
+        def __iter__(self):
+            """Iterate over the resolved value (e.g. a list/tuple hyperparameter).
+
+            Without this, ``for x in proxy`` / ``tuple(proxy)`` / unpacking raise
+            ``'_ValueProxy' object is not iterable`` even though the wrapped value
+            is iterable. A None target iterates as empty.
+            """
+            v = self._resolve()
+            if v is None:
+                return iter(())
+            return iter(v)
+
+        def __getitem__(self, item: Any) -> Any:
+            """Index, slice, or key into the resolved value.
+
+            Works for lists (``proxy[0]``, ``proxy[1:3]``), dicts (``proxy[key]``)
+            and strings. Nested mappings are re-wrapped in a live proxy to mirror
+            __getattr__, so chained subscripting keeps tracking edits.
+            """
+            v = self._resolve()
+            if v is None:
+                raise TypeError("ValueProxy target not set (resolved to None)")
+            value = v[item]
+            if isinstance(value, dict):
+                return Proxy._ValueProxy(Proxy(v), item)
+            return value
+
     def get(self, ref=None, default=None, proxy: bool = True) -> Any:
         """Get wrapped object or a key from the wrapped mapping.
 
         Args:
             ref: Mapping key when provided.
             default: Fallback value when key/target is missing.
-            proxy: When True and ref is provided, return a live key proxy.
+            proxy: When True and ref is provided, return a live key proxy —
+                except for ``str`` values, which are returned raw (see below).
         """
         if ref is not None:
             if proxy:
-                return Proxy._ValueProxy(self, ref, default)
+                vp = Proxy._ValueProxy(self, ref, default)
+                # str and torch.device are handed back as plain values (see
+                # _plain_get_value); other types (dict/list/int/float/...) stay
+                # live proxies so studio edits keep tracking.
+                plain = _plain_get_value(vp._resolve())
+                return vp if plain is _KEEP_AS_PROXY else plain
             return self._obj.get(ref, default)
         return self._obj if self._obj is not None else default
 
@@ -457,11 +531,14 @@ class Proxy:
                     self._it.is_a_loop = False  # Loop ends here
                     raise
                 except KeyError:
-                    traceback.print_exc()
-                    logger.error(
-                        "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." +
-                        "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
-                    )
+                    # Quiet by default; only surface this diagnostic when the user
+                    # opted into debug logging (WEIGHTSLAB_LOG_LEVEL=debug).
+                    if _debug_logging_enabled():
+                        traceback.print_exc()
+                        logger.error(
+                            "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." +
+                            "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
+                        )
                     raise StopIteration
         return _ProxyIterator(underlying_iter)
 
@@ -590,13 +667,15 @@ class Proxy:
             # Let StopIteration propagate naturally to signal end of iteration
             raise
         except Exception:
-            traceback.print_exc()
+            if _debug_logging_enabled():
+                traceback.print_exc()
             # clear cached iterator so future next(proxy) restarts
             try:
                 if '_iterator' in self.__dict__:
                     object.__delattr__(self, '_iterator')
             except Exception:
-                traceback.print_exc()
+                if _debug_logging_enabled():
+                    traceback.print_exc()
             raise StopIteration
 
     # Context manager support so `with proxy as x:` works when the proxy

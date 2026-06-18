@@ -6,11 +6,12 @@ level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 import gc
 import os
 import sys
-import ctypes
 import time
 import types
+import ctypes
 import logging
 import inspect
+import tempfile
 import functools
 import threading
 import traceback
@@ -931,7 +932,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             # If obj is a string, treat as a file path and start watcher
             try:
                 # Initialize CheckpointManager if we have a root dir (fallback to default root)
-                root_log_dir = obj.get('root_log_dir') or os.path.join('.', 'root_log_dir')
+                root_log_dir = obj.get('root_log_dir') or tempfile.mkdtemp()
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:

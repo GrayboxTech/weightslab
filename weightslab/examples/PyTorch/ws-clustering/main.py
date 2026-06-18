@@ -208,6 +208,14 @@ if __name__ == "__main__":
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     parameters.setdefault("log_every", 10)
 
+    # ---- Hyperparameter tracking ----
+    wl.watch_or_edit(
+        parameters,
+        flag="hyperparameters",
+        defaults=parameters,
+        poll_interval=1.0,
+    )
+
     # ---- Device ----
     if parameters.get("device", "auto") == "auto":
         parameters["device"] = "cuda" if torch.cuda.is_available() else "cpu"
@@ -223,14 +231,6 @@ if __name__ == "__main__":
     eval_full_to_train_steps_ratio = int(parameters.get("eval_full_to_train_steps_ratio", 50))
     log_every = int(parameters.get("log_every", 10))
     enable_h5 = parameters.get("enable_h5_persistence", True)
-
-    # ---- Hyperparameter tracking ----
-    wl.watch_or_edit(
-        parameters,
-        flag="hyperparameters",
-        defaults=parameters,
-        poll_interval=1.0,
-    )
 
     # ---- Datasets ----
     data_cfg = parameters.get("data", {})

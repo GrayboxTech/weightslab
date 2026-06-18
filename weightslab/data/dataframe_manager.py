@@ -4,6 +4,7 @@ import traceback
 import threading
 import logging
 import traceback
+import warnings
 import numpy as np
 import pandas as pd
 import torch
@@ -60,6 +61,16 @@ def _safe_update(target: pd.DataFrame, source: pd.DataFrame) -> None:
         mask = src.notna()
         if not mask.any():
             continue
+        # Widen the target to object before assigning object (arrays/masks) or
+        # bool values into a numeric (e.g. NaN -> float64) column. Otherwise
+        # pandas >= 2.1 emits an incompatible-dtype FutureWarning (a future hard
+        # error). Compatible numeric assignments keep their dtype (fast path).
+        try:
+            if src.dtype.kind in ("O", "b") and target[col].dtype != object \
+                    and target[col].dtype.kind != src.dtype.kind:
+                target[col] = target[col].astype(object)
+        except Exception:
+            pass
         try:
             target.loc[common_idx[mask.values], col] = src[common_idx].values
         except Exception:
@@ -765,7 +776,7 @@ class LedgeredDataFrameManager:
             arr = np.asanyarray(value)
         except Exception:
             return False
-        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in (4, 5, 6)
+        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in range(3, 9+1)
 
     @staticmethod
     def _is_empty(value: Any) -> bool:
@@ -1624,17 +1635,31 @@ class LedgeredDataFrameManager:
         if self._df.index.has_duplicates:
             self._df = self._df[~self._df.index.duplicated(keep='last')]
 
-        # Widen categorical target columns so a new value doesn't raise
-        # "Cannot setitem on a Categorical with a new category".
+        # Categorical target columns must be widened up front: assigning a value
+        # outside the category list raises an UNCATCHABLE AssertionError, so it
+        # cannot be handled by the try/except below.
         for col in df_updates.columns:
             if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
                 self._df[col] = self._df[col].astype(object)
 
         # Masked update: only overwrite where df_updates is non-NaN.
         mask = df_updates.notna()
-        self._df.loc[df_updates.index, df_updates.columns] = (
-            self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
-        )
+        combined = self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
+        try:
+            with warnings.catch_warnings():
+                # pandas >= 2.1 only *warns* when a partial assignment changes a
+                # column's dtype (object arrays/masks or bool into a numeric column),
+                # but will raise in a future version. Promote it so we widen the
+                # affected columns to object and retry. Compatible assignments take
+                # this fast path unchanged.
+                warnings.filterwarnings(
+                    "error", message=".*incompatible dtype.*", category=FutureWarning)
+                self._df.loc[df_updates.index, df_updates.columns] = combined
+        except Exception:
+            for col in df_updates.columns:
+                if col in self._df.columns and self._df[col].dtype != object:
+                    self._df[col] = self._df[col].astype(object)
+            self._df.loc[df_updates.index, df_updates.columns] = combined
         return df_updates.index
 
     def _merge_buffer_frames_into(self, df: pd.DataFrame, sample_df: pd.DataFrame, instance_df: pd.DataFrame) -> pd.DataFrame:
@@ -1748,7 +1773,8 @@ class LedgeredDataFrameManager:
             applied_index = written_s.append(written_i) if len(written_i) else written_s
             update_cols = sample_df.columns.union(instance_df.columns)
             # Keep newly-added signal columns float32 and empty object cells as None.
-            self._df = self._optimize_dataframe_memory(self._df)
+            _df = self._optimize_dataframe_memory(self._df)
+            self._df = _df
         finally:
             self._lock.release()
 

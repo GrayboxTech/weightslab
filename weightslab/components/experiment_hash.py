@@ -237,6 +237,8 @@ class ExperimentHashGenerator:
         config_cp.pop('is_training', None)
         config_cp.pop('pause_at_step', None)
         # config_cp.pop('auditor_mode', None)  # Audit should be another state
+        if 'auditor_mode' not in config_cp:
+            config_cp['auditor_mode'] = False
 
         try:
             # Sort keys for deterministic hashing
