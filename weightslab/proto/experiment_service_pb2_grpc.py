@@ -5,7 +5,7 @@ import warnings
 
 from weightslab.proto import experiment_service_pb2 as weightslab_dot_proto_dot_experiment__service__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class ExperimentServiceStub(object):
+class ExperimentServiceStub:
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -73,6 +73,11 @@ class ExperimentServiceStub(object):
                 '/ExperimentService/GetDataSamples',
                 request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.SerializeToString,
                 response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.FromString,
+                _registered_method=True)
+        self.GetHistogram = channel.unary_unary(
+                '/ExperimentService/GetHistogram',
+                request_serializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramRequest.SerializeToString,
+                response_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramResponse.FromString,
                 _registered_method=True)
         self.GetPointCloud = channel.unary_stream(
                 '/ExperimentService/GetPointCloud',
@@ -136,7 +141,7 @@ class ExperimentServiceStub(object):
                 _registered_method=True)
 
 
-class ExperimentServiceServicer(object):
+class ExperimentServiceServicer:
     """Missing associated documentation comment in .proto file."""
 
     def GetLatestLoggerData(self, request, context):
@@ -184,6 +189,13 @@ class ExperimentServiceServicer(object):
 
     def GetDataSamples(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetHistogram(self, request, context):
+        """Server-side histogram binning of one metadata/signal column.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -307,6 +319,11 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.FromString,
                     response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.SerializeToString,
             ),
+            'GetHistogram': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetHistogram,
+                    request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramRequest.FromString,
+                    response_serializer=weightslab_dot_proto_dot_experiment__service__pb2.HistogramResponse.SerializeToString,
+            ),
             'GetPointCloud': grpc.unary_stream_rpc_method_handler(
                     servicer.GetPointCloud,
                     request_deserializer=weightslab_dot_proto_dot_experiment__service__pb2.PointCloudRequest.FromString,
@@ -375,7 +392,7 @@ def add_ExperimentServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class ExperimentService(object):
+class ExperimentService:
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
@@ -584,6 +601,33 @@ class ExperimentService(object):
             '/ExperimentService/GetDataSamples',
             weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesRequest.SerializeToString,
             weightslab_dot_proto_dot_experiment__service__pb2.DataSamplesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetHistogram(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ExperimentService/GetHistogram',
+            weightslab_dot_proto_dot_experiment__service__pb2.HistogramRequest.SerializeToString,
+            weightslab_dot_proto_dot_experiment__service__pb2.HistogramResponse.FromString,
             options,
             channel_credentials,
             insecure,
