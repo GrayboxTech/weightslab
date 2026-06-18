@@ -386,6 +386,7 @@ if __name__ == "__main__":
 ## Examples
 
 ### Local examples
+
 After starting the UI, launch a local experiment with the command:
 ```bash
 weightslab start example            # classification (default)
@@ -396,11 +397,9 @@ weightslab start example            # classification (default)
 # weightslab start example --gen    # generation
 ```
 
+
 ###  Cloud examples
-Find our demos online. The password is **graybx**.
-<a href="https://preview.graybx.com/">
-  <p style="text-indent:20px;">DEMOS</p>
-</a>
+Find our [sandbox](https://preview.graybx.com) online. The password is **graybx**.
 
 
 ## Documentation (API + SDK)
