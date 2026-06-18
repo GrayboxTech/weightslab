@@ -236,6 +236,14 @@ if __name__ == "__main__":
     # Experiment name
     exp_name = parameters["experiment_name"]
 
+    # Hyperparameters (must use 'hyperparameters' flag for trainer services / UI)
+    wl.watch_or_edit(
+        parameters,
+        flag="hyperparameters",
+        defaults=parameters,
+        poll_interval=1.0,
+    )
+
     # Device selection
     if parameters.get("device", "auto") == "auto":
         parameters["device"] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -255,15 +263,6 @@ if __name__ == "__main__":
     eval_full_to_train_steps_ratio = parameters.get("eval_full_to_train_steps_ratio", 50)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
     training_steps_to_do = parameters.get("training_steps_to_do", 1000)
-
-    # Hyperparameters (must use 'hyperparameters' flag for trainer services / UI)
-    hp = ledgers.get_hyperparams()
-    wl.watch_or_edit(
-        parameters,
-        flag="hyperparameters",
-        defaults=parameters,
-        poll_interval=1.0,
-    )
 
     # Model
     _model = CNN().to(device)

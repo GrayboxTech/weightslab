@@ -164,7 +164,15 @@ if __name__ == "__main__":
     parameters.setdefault("image_size", 256)
     parameters.setdefault("compute_natural_sort", True)
 
+    # --- 4) Register hyperparameters ---
     exp_name = parameters["experiment_name"]
+    wl.watch_or_edit(
+        parameters,
+        flag="hyperparameters",
+        name=exp_name,
+        defaults=parameters,
+        poll_interval=1.0,
+    )
     num_classes = int(parameters["num_classes"])
     ignore_index = int(parameters["ignore_index"])
     image_size = int(parameters["image_size"])
@@ -188,15 +196,6 @@ if __name__ == "__main__":
     eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
-
-    # --- 4) Register hyperparameters ---
-    wl.watch_or_edit(
-        parameters,
-        flag="hyperparameters",
-        name=exp_name,
-        defaults=parameters,
-        poll_interval=1.0,
-    )
 
     # --- 5) Data (BDD100k reduced) ---
     default_data_root = os.path.abspath(
