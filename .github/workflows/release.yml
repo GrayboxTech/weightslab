@@ -47,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install . --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install .[utest] --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Run tests
         run: |
@@ -226,7 +226,7 @@ jobs:
 
           export PRS_JSON
           PRS_JSON=$(gh pr list --state merged --base "dev" --limit 100 \
-            --json number,title,mergedAt,url,author,body \
+            --json number,title,mergedAt,url,author,body,commits \
             2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
@@ -249,6 +249,29 @@ jobs:
               line += f"\n\n  > {desc}"
             return line
           filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
+          # "What's Changed precisely": list each merged PR's own developer commits,
+          # NOT the squashed/merge/chore commits that land on the release branch
+          # (those are redundant with the PR list above and not useful).
+          _seen_commits = set()
+          _commit_blocks = []
+          for pr in filtered:
+            _commit_lines = []
+            for c in (pr.get("commits") or []):
+              oid = (c.get("oid") or "")[:7]
+              head = (c.get("messageHeadline") or "").strip()
+              if not head or head.startswith("Merge "):
+                continue
+              key = (oid, head)
+              if key in _seen_commits:
+                continue
+              _seen_commits.add(key)
+              _commit_lines.append(f"  - `{oid}` {head}")
+            if _commit_lines:
+              _commit_blocks.append(
+                f"**[#{pr['number']}]({pr['url']}) {pr['title']}**\n" + "\n".join(_commit_lines)
+              )
+          # Fall back to the raw git log only when no PR commits are available.
+          commits_section = "\n\n".join(_commit_blocks) if _commit_blocks else commits
           if filtered:
             prs_lines = "\n".join(_pr_entry(pr) for pr in filtered)
             seen, clabels = set(), []
@@ -276,7 +299,7 @@ jobs:
             "Happy Training!\n\n"
             "---\n\n"
             "### What's Changed precisely:\n\n"
-            f"{commits}\n\n"
+            f"{commits_section}\n\n"
             "---\n\n"
             "### Thank you!\n\n"
             f"{contributors}\n"
@@ -458,7 +481,7 @@ jobs:
 
           export PRS_JSON
           PRS_JSON=$(gh pr list --state merged --base "main" --limit 100 \
-            --json number,title,mergedAt,url,author,body \
+            --json number,title,mergedAt,url,author,body,commits \
             2>/dev/null || echo "[]")
 
           python3 << 'PYEOF'
@@ -481,6 +504,29 @@ jobs:
               line += f"\n\n  > {desc}"
             return line
           filtered = [pr for pr in prs_data if pr.get("mergedAt", "") > prev_date]
+          # "What's Changed precisely": list each merged PR's own developer commits,
+          # NOT the squashed/merge/chore commits that land on the release branch
+          # (those are redundant with the PR list above and not useful).
+          _seen_commits = set()
+          _commit_blocks = []
+          for pr in filtered:
+            _commit_lines = []
+            for c in (pr.get("commits") or []):
+              oid = (c.get("oid") or "")[:7]
+              head = (c.get("messageHeadline") or "").strip()
+              if not head or head.startswith("Merge "):
+                continue
+              key = (oid, head)
+              if key in _seen_commits:
+                continue
+              _seen_commits.add(key)
+              _commit_lines.append(f"  - `{oid}` {head}")
+            if _commit_lines:
+              _commit_blocks.append(
+                f"**[#{pr['number']}]({pr['url']}) {pr['title']}**\n" + "\n".join(_commit_lines)
+              )
+          # Fall back to the raw git log only when no PR commits are available.
+          commits_section = "\n\n".join(_commit_blocks) if _commit_blocks else commits
           if filtered:
             prs_lines = "\n".join(_pr_entry(pr) for pr in filtered)
             seen, clabels = set(), []
@@ -508,7 +554,7 @@ jobs:
             "Happy Training!\n\n"
             "---\n\n"
             "### What's Changed precisely:\n\n"
-            f"{commits}\n\n"
+            f"{commits_section}\n\n"
             "---\n\n"
             "### Thank you!\n\n"
             f"{contributors}\n"
