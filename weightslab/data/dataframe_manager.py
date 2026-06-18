@@ -776,7 +776,7 @@ class LedgeredDataFrameManager:
             arr = np.asanyarray(value)
         except Exception:
             return False
-        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in (4, 5, 6)
+        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in range(3, 9+1)
 
     @staticmethod
     def _is_empty(value: Any) -> bool:
@@ -1773,7 +1773,8 @@ class LedgeredDataFrameManager:
             applied_index = written_s.append(written_i) if len(written_i) else written_s
             update_cols = sample_df.columns.union(instance_df.columns)
             # Keep newly-added signal columns float32 and empty object cells as None.
-            self._df = self._optimize_dataframe_memory(self._df)
+            _df = self._optimize_dataframe_memory(self._df)
+            self._df = _df
         finally:
             self._lock.release()
 
