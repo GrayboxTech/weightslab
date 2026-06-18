@@ -403,61 +403,6 @@ Find our demos online. The password is **graybx**.
 </a>
 
 
-## AI Agent
-
-WeightsLab can run its data agent in two modes:
-
-- Local provider with Ollama
-- Cloud provider with OpenRouter
-
-Use local Ollama when you want a fully local setup and do not need cloud-hosted models (see more details installation from the documentation).
-Use OpenRouter when you want larger hosted models and model selection directly from Weightslab UI.
-
-
-### Cloud OpenRouter
-You can either preconfigure OpenRouter in `agent_config.yaml` / `.env`, or initialize it interactively from Weightslab UI.
-
-#### SDK Configuration
-
-Example static configuration:
-
-```yaml
-agent:
-  provider: openrouter
-  openrouter_model: meta-llama/llama-3.3-70b-instruct
-  fallback_to_local: false
-  # openrouter_api_key: ${OPENROUTER_API_KEY}
-```
-
-Environment variable:
-
-```bash
-export OPENROUTER_API_KEY=your_key_here
-```
-
-#### Interactive setup from Weightslab UI
-
-OpenRouter models can be initialized and set directly from the UI:
-1. Click in the agent bar or double-click to expand the agent window.
-2. Type `/init`.
-3. Choose either:
-   - `A` Enter your OpenRouter API key manually
-   - `B` Use the OpenRouter OAuth flow
-4. Select a model from the fetched list, then confirm.
-
-The default OpenRouter model, as recommended by Graybx, is `meta-llama/llama-3.3-70b-instruct`.
-
-### Typical Usage Flow
-
-1. Start your WeightsLab backend (e.g., "main.py").
-2. Start Weightslab UI.
-3. If you use Ollama, query the agent directly.
-4. If you use OpenRouter and the agent is not configured yet, type `/init`.
-5. Ask natural-language data operations such as sorting, filtering, slicing, and inspection requests. You can also ask questions about the data.
-6. Use `/model` to try another cloud model without re-entering the key.
-7. Use `/reset` if you want to clear the current connection and start over.
-
-
 ## Documentation (API + SDK)
 
 Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
