@@ -20,11 +20,9 @@ import torch.optim as optim
 
 from torchvision import datasets, transforms
 from torchmetrics.classification import Accuracy
-from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 
 import weightslab as wl
-from weightslab.backend import ledgers
 from weightslab.baseline_models.pytorch.models import FashionCNN as CNN
 from weightslab.components.global_monitoring import (
     guard_training_context,
