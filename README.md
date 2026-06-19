@@ -241,7 +241,7 @@ if __name__ == "__main__":
 
 
 
-##  Cloud examples
+##  Cloud Examples
 Find our [sandbox](https://preview.graybx.com) online. The password is **graybx**.
 
 
@@ -250,7 +250,7 @@ Find our [sandbox](https://preview.graybx.com) online. The password is **graybx*
 Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
 
 
-## Contributing & onboarding
+## Contributing & Onboarding
 
 New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
 captures the cross-repo architecture (weightslab backend ↔ weights_studio
