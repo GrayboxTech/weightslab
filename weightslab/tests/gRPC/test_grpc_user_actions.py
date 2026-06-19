@@ -531,16 +531,22 @@ class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):
             {"tag:hard": [True, False]},
             index=[11, 12],
         )
-        # break-by-slices reads compact (sample_id, step, value, hash) tuples via
-        # query_per_sample (filtered by the tag-derived sample_ids), then aggregates
-        # the matching samples into a single MEAN curve per experiment_hash.
+        # break-by-slices aggregates the tag-derived sample_ids into a single MEAN
+        # curve per experiment_hash via aggregate_per_sample_by_step.
         _pts = [("11", 5, 0.2, "exp-1"), ("12", 5, 0.8, "exp-1")]
 
-        def _qps(graph_name, sample_ids=None, exp_hash=None):
+        def _agg(graph_name, sample_ids=None, exp_hash=None):
             wanted = {str(s) for s in sample_ids} if sample_ids is not None else None
-            return [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            rows = [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            by_hash: dict = {}
+            for sid, step, val, h in rows:
+                by_hash.setdefault(h, {}).setdefault(step, []).append(val)
+            return {
+                h: sorted((s, sum(v) / len(v)) for s, v in steps.items())
+                for h, steps in by_hash.items()
+            }
 
-        signal_logger.query_per_sample.side_effect = _qps
+        signal_logger.aggregate_per_sample_by_step.side_effect = _agg
         signal_logger.get_evaluation_marker_hashes.return_value = []
 
         servicer = ExperimentServiceServicer(exp_service=exp_service)

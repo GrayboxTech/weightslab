@@ -3123,7 +3123,7 @@ def query_sample_history(
     names = (
         [signal_name]
         if signal_name
-        else list(_lg._signal_history_per_sample.keys())
+        else _lg.list_sample_signal_names()
     )
     results = []
     for name in names:
@@ -3156,7 +3156,7 @@ def query_instance_history(
     names = (
         [signal_name]
         if signal_name
-        else list(_lg._signal_history_per_instance.keys())
+        else _lg.list_instance_signal_names()
     )
     results = []
     for name in names:
@@ -3352,7 +3352,7 @@ def write_history(
     instance_rows: list = []
 
     if write_global:
-        for gn, hashes in _lg._signal_history.items():
+        for gn, hashes in _lg.get_signal_history().items():
             if _gn_filter is not None and gn not in _gn_filter:
                 continue
             for h, steps in hashes.items():
@@ -3378,7 +3378,7 @@ def write_history(
         graphs_s = (
             list(_gn_filter)
             if _gn_filter is not None
-            else list(_lg._signal_history_per_sample.keys())
+            else _lg.list_sample_signal_names()
         )
         for gn in graphs_s:
             for sid, step, val, h in _lg.query_per_sample(
@@ -3400,7 +3400,7 @@ def write_history(
         graphs_i = (
             list(_gn_filter)
             if _gn_filter is not None
-            else list(_lg._signal_history_per_instance.keys())
+            else _lg.list_instance_signal_names()
         )
         # query_per_instance filters by a single (sample_id, annotation_id); iterate when multiple given
         _sid_iter = _sid_filter if _sid_filter is not None else [None]
