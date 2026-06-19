@@ -17,10 +17,9 @@ FROM python:3.11-slim
 # --- System deps -------------------------------------------------------------
 # - docker engine (dockerd + CLI + compose plugin + containerd): installed via
 #   the official convenience script. We need the *daemon* here (DinD).
-# - libgl1/libglib2.0-0: runtime libs for opencv-python (a weightslab dep).
 # - curl/ca-certificates/git: fetch the docker installer + optional dev install.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl sudo ca-certificates git libgl1 libglib2.0-0 \
+        curl sudo ca-certificates git \
     && curl -fsSL https://get.docker.com | sh \
     && rm -rf /var/lib/apt/lists/*
 

@@ -223,25 +223,6 @@ jobs:
           # A per-test timeout guards against any regression that hangs a test.
           python -m pytest ./weightslab/tests -v --timeout=300
 
-      # TODO (GP): WL CI do not find WS CI for now; token or visibility problem ??
-      # - name: Trigger WeightsStudio CI
-      #   env:
-      #     WS_TOKEN: ${{ secrets.WEIGHTS_STUDIO_API_TOKEN }}
-      #   run: |
-      #     if [ -z "${WS_TOKEN}" ]; then
-      #       echo "WEIGHTS_STUDIO_API_TOKEN not set; skipping WeightsStudio trigger."
-      #       exit 0
-      #     fi
-
-      #     # Trigger the ws-ci workflow in the weights_studio repository on main.
-      #     curl -fSs -X POST "https://api.github.com/repos/GrayboxTech/weights_studio/actions/workflows/ws-ci.yml/dispatches" \
-      #       -H "Authorization: Bearer ${WS_TOKEN}" \
-      #       -H "Accept: application/vnd.github+json" \
-      #       -H "Content-Type: application/json" \
-      #       -d '{"ref":"main"}'
-
-      #     echo "WeightsStudio workflow dispatch requested successfully."
-
   build-and-publish-dev:
     # Only publish to TestPyPI when pushing to main (not on PRs or dev branch pushes).
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
