@@ -74,15 +74,15 @@ For a detailed installation guide and advanced configuration, see the [Installat
 
 2. **Wrap your parameters, model, optimizer, signals, and dataset:**
 ```python
-   parameters     = wl.watch_or_edit(parameters,                              flag='hp',     ...) # ← WeightsLab monitors your parameters and lets you update them from the UI
-   model = wl.watch_or_edit(parameters,                                       flag='hp', ...) # ← WeightsLab monitors your model state
-   optimizer      = wl.watch_or_edit(optim.Adam(...),                         flag='opt',    ...) # ← Tracks optimizer state and lets you update the learning rate from the UI
+   parameters      = wl.watch_or_edit(parameters,                              flag='hp',     ...) # ← WeightsLab monitors your parameters and lets you update them from the UI
+   model           = wl.watch_or_edit(parameters,                                       flag='hp', ...) # ← WeightsLab monitors your model state
+   optimizer       = wl.watch_or_edit(optim.Adam(...),                         flag='opt',    ...) # ← Tracks optimizer state and lets you update the learning rate from the UI
    
    train_criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),  flag='signal', name="train_loss/sample", per_sample=True, log=True)   # ← Wrap and plot your signals on the UI
    test_criterion  = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"),  flag='signal', name="test_loss/sample",  per_sample=True, log=False)  # ← Per-sample only, plot disabled
    
-   train_loader = wl.watch_or_edit(train_dataset, flag='data', loader_name="train_loader", ...)  # ← Track your training dataset
-   val_loader   = wl.watch_or_edit(val_dataset,   flag='data', loader_name="val_loader",   ...)  # ← Track your validation dataset
+   train_loader    = wl.watch_or_edit(train_dataset, flag='data', loader_name="train_loader", ...)  # ← Track your training dataset
+   val_loader      = wl.watch_or_edit(val_dataset,   flag='data', loader_name="val_loader",   ...)  # ← Track your validation dataset
    
 ```
 
@@ -239,3 +239,27 @@ if __name__ == "__main__":
 </details>
 
 
+
+
+##  Cloud examples
+Find our [sandbox](https://preview.graybx.com) online. The password is **graybx**.
+
+
+## Documentation (API + SDK)
+
+Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
+
+
+## Contributing & onboarding
+
+New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
+captures the cross-repo architecture (weightslab backend ↔ weights_studio
+frontend via the shared proto), the module maps, the `wl.watch_or_edit`
+integration pattern, where tests live, and the gotchas that aren't obvious from
+any single file. It's the fastest way to orient before a first change.
+
+
+## Community
+
+Graybx is building a wonderful community of AI researchers and engineers.
+Are you interested in joining our project? Contact us at hello [at] graybx [dot] com
