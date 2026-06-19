@@ -17,6 +17,8 @@ service ExperimentService {
   // Data Service (for weights_studio UI)
   rpc ApplyDataQuery (DataQueryRequest) returns (DataQueryResponse);
   rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
+  // Server-side histogram binning of one metadata/signal column.
+  rpc GetHistogram (HistogramRequest) returns (HistogramResponse);
   // Metadata-only retrieval (dataframe columns). Returns every metadata column
   // name for the WHOLE dataset, the current grid slice's per-sample metadata, and
   // the open modal sample's metadata. Separated from GetDataSamples, which now
@@ -395,6 +397,35 @@ message DataSamplesResponse {
   repeated DataRecord data_records = 3;
 }
 
+// --- Server-side histogram binning ---
+// One stacked sub-segment of a bar: count of samples in this bin for a given
+// (origin, discarded) combination (used to colour train/eval/discarded splits).
+message HistogramSubBar {
+  string origin = 1;
+  bool discarded = 2;
+  int64 count = 3;
+}
+
+// One histogram bar: aggregate stats over the samples whose row index falls in
+// this bin's range, plus the per-(origin,discarded) breakdown.
+message HistogramBin {
+  double min = 1;
+  double max = 2;
+  double avg = 3;
+  int64 count = 4;
+  repeated HistogramSubBar sub_bars = 5;
+}
+
+message HistogramRequest {
+  string column = 1;     // dataframe/signal column to histogram
+  int32 max_bins = 2;    // 0 => server default (512)
+}
+
+message HistogramResponse {
+  bool success = 1;
+  string message = 2;
+  int64 total_rows = 3;  // rows in the view that were binned
+  repeated HistogramBin bins = 4;
 // --- Metadata retrieval (separated from GetDataSamples) ---
 message GetMetaDataRequest {
   int32 start_index = 1;        // grid slice start (current view order)

@@ -280,6 +280,7 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         # the first call proceeds (mirrors DataService.__init__).
         ds._update_done = threading.Event()
         ds._update_done.set()
+        ds._refresh_in_flight = threading.Lock()   # mirrors __init__: bg view-refresh guard
         ds._df_manager = df_manager
         ds._all_datasets_df = df.copy()
         ds._compute_natural_sort = False
