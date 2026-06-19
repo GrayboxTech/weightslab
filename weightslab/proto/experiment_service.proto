@@ -19,6 +19,11 @@ service ExperimentService {
   rpc GetDataSamples (DataSamplesRequest) returns (DataSamplesResponse);
   // Server-side histogram binning of one metadata/signal column.
   rpc GetHistogram (HistogramRequest) returns (HistogramResponse);
+  // Metadata-only retrieval (dataframe columns). Returns every metadata column
+  // name for the WHOLE dataset, the current grid slice's per-sample metadata, and
+  // the open modal sample's metadata. Separated from GetDataSamples, which now
+  // returns only image / label / prediction data.
+  rpc GetMetaData (GetMetaDataRequest) returns (GetMetaDataResponse);
   // Raw point cloud of one sample (task_type "detection_pointcloud"), server-streamed
   // in binary chunks for the interactive 3D viewer.
   rpc GetPointCloud (PointCloudRequest) returns (stream PointCloudChunk);
@@ -164,6 +169,13 @@ message PlotNoteOperation {
   string note = 4;
 }
 
+// Manual "save now" trigger: force a checkpoint of the current model weights
+// (and, when requested, the architecture) regardless of pending-change tracking.
+message SaveCheckpointOperation {
+  bool save_architecture = 1;  // force re-dump architecture even if a file already exists
+  bool save_optimizer = 2;     // also persist optimizer state
+}
+
 message TrainerCommand {
   bool get_hyper_parameters = 4;
   bool get_interactive_layers = 5;
@@ -176,6 +188,7 @@ message TrainerCommand {
   optional DenySamplesOperation remove_from_denylist_operation = 11;
   optional DenySamplesOperation remove_eval_from_denylist_operation = 12;
   optional PlotNoteOperation plot_note_operation = 13;
+  optional SaveCheckpointOperation save_checkpoint_operation = 14;
 }
 
 message HyperParameterDesc {
@@ -413,6 +426,19 @@ message HistogramResponse {
   string message = 2;
   int64 total_rows = 3;  // rows in the view that were binned
   repeated HistogramBin bins = 4;
+// --- Metadata retrieval (separated from GetDataSamples) ---
+message GetMetaDataRequest {
+  int32 start_index = 1;        // grid slice start (current view order)
+  int32 records_cnt = 2;        // grid slice size
+  string modal_sample_id = 3;   // optional: sample_id of the open modal ("" = none)
+}
+
+message GetMetaDataResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string all_metadata_names = 3;  // every metadata column for the WHOLE dataset
+  repeated DataRecord grid_records = 4;     // per-sample metadata for the requested slice
+  DataRecord modal_record = 5;              // metadata for the open modal sample (if found)
 }
 
 // --- Point cloud transfer (task_type "detection_pointcloud") ---

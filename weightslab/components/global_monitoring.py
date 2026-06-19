@@ -219,9 +219,10 @@ class GuardContext:
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
         self._maybe_pause_at_step()
-        if f:
-            pause_controller.resume(force=f)
-        pause_controller.wait_if_paused()
+        if not is_in_evaluation():
+            if f:
+                pause_controller.resume(force=f)
+            pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
 
         # Set the current context for this execution

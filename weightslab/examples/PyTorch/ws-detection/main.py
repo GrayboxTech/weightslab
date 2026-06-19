@@ -119,33 +119,7 @@ if __name__ == "__main__":
     parameters.setdefault("freeze_backbone", True)
     parameters.setdefault("compute_natural_sort", True)
 
-    exp_name = parameters["experiment_name"]
-    num_classes = int(parameters["num_classes"])
-    image_size = int(parameters["image_size"])
-    grid_size = int(parameters["grid_size"])
-    conf_thresh = float(parameters["conf_thresh"])
-
-    # --- 2) Device selection ---
-    if parameters.get("device", "auto") == "auto":
-        parameters["device"] = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-    device = parameters["device"]
-
-    # --- 3) Logging directory ---
-    if not parameters.get("root_log_dir"):
-        tmp_dir = tempfile.mkdtemp()
-        parameters["root_log_dir"] = tmp_dir
-        print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
-    os.makedirs(parameters["root_log_dir"], exist_ok=True)
-
-    log_dir = parameters["root_log_dir"]
-    max_steps = parameters["training_steps_to_do"]
-    eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
-    verbose = parameters.get("verbose", True)
-    tqdm_display = parameters.get("tqdm_display", True)
-
-    # --- 4) Register hyperparameters ---
+    # --- 2) Register hyperparameters ---
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -153,6 +127,32 @@ if __name__ == "__main__":
         defaults=parameters,
         poll_interval=1.0,
     )
+
+    exp_name = parameters["experiment_name"]
+    num_classes = int(parameters["num_classes"])
+    image_size = int(parameters["image_size"])
+    grid_size = int(parameters["grid_size"])
+    conf_thresh = float(parameters["conf_thresh"])
+
+    # --- 3) Device selection ---
+    if parameters.get("device", "auto") == "auto":
+        parameters["device"] = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+    device = parameters["device"]
+
+    # --- 4) Logging directory ---
+    if not parameters.get("root_log_dir"):
+        tmp_dir = tempfile.mkdtemp()
+        parameters["root_log_dir"] = tmp_dir
+        print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
+    os.makedirs(parameters["root_log_dir"], exist_ok=True)
+    log_dir = parameters["root_log_dir"]
+    max_steps = parameters["training_steps_to_do"]
+    eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
+    verbose = parameters.get("verbose", True)
+    tqdm_display = parameters.get("tqdm_display", True)
+
 
     # --- 5) Data (Penn-Fudan pedestrians, downloaded on first run) ---
     default_data_root = os.path.abspath(

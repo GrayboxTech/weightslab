@@ -102,8 +102,10 @@ __all__ = [
     "query_signal_history",
     "query_sample_history",
     "query_instance_history",
+
     "write_history",
     "write_dataframe",
+
     "pointcloud_thumbnail",
     "pointcloud_boxes",
 

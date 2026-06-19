@@ -6,11 +6,12 @@ level (for example, ``weightslab.watch_or_edit`` and ``weightslab.signal``).
 import gc
 import os
 import sys
-import ctypes
 import time
 import types
+import ctypes
 import logging
 import inspect
+import tempfile
 import functools
 import threading
 import traceback
@@ -931,7 +932,7 @@ def watch_or_edit(obj: Callable, obj_name: str = None, flag: str = None, **kwarg
             # If obj is a string, treat as a file path and start watcher
             try:
                 # Initialize CheckpointManager if we have a root dir (fallback to default root)
-                root_log_dir = obj.get('root_log_dir') or os.path.join('.', 'root_log_dir')
+                root_log_dir = obj.get('root_log_dir') or tempfile.mkdtemp()
                 try:
                     # Check if a checkpoint manager is already registered in ledger
                     try:
@@ -1728,14 +1729,6 @@ def save_signals(
     target_np    = expand_dim(target_np)
     preds_np     = expand_dim(preds_np)
     preds_raw_np = expand_dim(preds_raw_np)
-
-    # During evaluation mode we must not mutate dataframe state.
-    try:
-        from weightslab.components.evaluation_controller import eval_controller
-        if eval_controller.is_running():
-            return
-    except Exception:
-        pass
 
     # Enqueue to dataframe manager buffer for efficiency
     DATAFRAME_M.enqueue_batch(
@@ -2666,12 +2659,13 @@ def run_pending_evaluation(
     controlled_loader = _EvalManagedLoader(loader_if, split_name, total_batches, max_batches=max_steps)
     eval_error = None
 
-    # Set evaluation context (exempt from watchdog timeouts)
+    # Set evaluation context (exempt from watchdog timeouts) and guarding
     from weightslab.components.global_monitoring import set_in_evaluation, reset_in_evaluation
     eval_context_token = set_in_evaluation(True)
 
     try:
-        _eval_fn(controlled_loader)
+        with th.no_grad():
+            _eval_fn(controlled_loader)
     except _EvalCanceled as exc:
         logger_obj.warning("[wl.run_pending_evaluation] canceled: %s", exc)
         eval_controller.mark_canceled(str(exc))
@@ -3129,7 +3123,7 @@ def query_sample_history(
     names = (
         [signal_name]
         if signal_name
-        else list(_lg._signal_history_per_sample.keys())
+        else _lg.list_sample_signal_names()
     )
     results = []
     for name in names:
@@ -3162,7 +3156,7 @@ def query_instance_history(
     names = (
         [signal_name]
         if signal_name
-        else list(_lg._signal_history_per_instance.keys())
+        else _lg.list_instance_signal_names()
     )
     results = []
     for name in names:
@@ -3358,7 +3352,7 @@ def write_history(
     instance_rows: list = []
 
     if write_global:
-        for gn, hashes in _lg._signal_history.items():
+        for gn, hashes in _lg.get_signal_history().items():
             if _gn_filter is not None and gn not in _gn_filter:
                 continue
             for h, steps in hashes.items():
@@ -3384,7 +3378,7 @@ def write_history(
         graphs_s = (
             list(_gn_filter)
             if _gn_filter is not None
-            else list(_lg._signal_history_per_sample.keys())
+            else _lg.list_sample_signal_names()
         )
         for gn in graphs_s:
             for sid, step, val, h in _lg.query_per_sample(
@@ -3406,7 +3400,7 @@ def write_history(
         graphs_i = (
             list(_gn_filter)
             if _gn_filter is not None
-            else list(_lg._signal_history_per_instance.keys())
+            else _lg.list_instance_signal_names()
         )
         # query_per_instance filters by a single (sample_id, annotation_id); iterate when multiple given
         _sid_iter = _sid_filter if _sid_filter is not None else [None]
