@@ -30,14 +30,17 @@ pip install weightslab
 ```
 
 ```python
+# wrap the objects in your training script
+
 import weightslab as wl
-
-model     = wl.watch_or_edit(model,     flag='model')
-optimizer = wl.watch_or_edit(optimizer, flag='opt')
-criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), flag='signal', name="train_loss/sample", per_sample=True, log=True)
-loader    = wl.watch_or_edit(train_dataset, flag='data', loader_name="train_loader", is_training=True)
-
-# wrap your training script
+...
+model  = wl.watch_or_edit(model, flag='model')
+optim  = wl.watch_or_edit(optim, flag='opt')
+loss   = wl.watch_or_edit(loss, flag='signal', name="loss", per_sample=True, log=True)
+loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
+...
+wl.serve(serving_grpc=True, serving_cli=False)
+...
 ```
 
 ```bash
