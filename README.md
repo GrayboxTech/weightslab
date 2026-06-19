@@ -39,6 +39,8 @@ optim  = wl.watch_or_edit(optim, flag='opt')
 loss   = wl.watch_or_edit(loss, flag='signal', name="loss", per_sample=True, log=True)
 loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 ...
+wl.serve(serving_grpc=True, serving_cli=False)
+...
 ```
 
 ```bash
