@@ -1,6 +1,6 @@
 <div align="center">
   <img
-    src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/GitHub_banner_WL.png"
+    src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner.png"
     alt="Graybox Logo."
     height="250"
   />
