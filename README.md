@@ -238,7 +238,7 @@ if __name__ == "__main__":
 </details>
 
 <details>
-<summary><b>Docuemntation (API + SDK)</b></summary>
+<summary><b>Documentation (API + SDK)</b></summary>
 
 <br>
 
