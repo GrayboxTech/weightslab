@@ -547,3 +547,45 @@ These variables are injected into the browser bundle at build / dev time.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
+
+
+Bounding-box render limits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Detection samples can carry many bounding boxes per image (dense scenes,
+high-recall predictions). Drawing them all slows rendering and turns the
+overlay into noise, so the number of boxes drawn per image is capped. The cap
+is applied **separately** to ground-truth (GT) and predictions (PRED) — a value
+of ``10`` allows up to 10 GT boxes *and* 10 PRED boxes per image. Boxes beyond
+the cap are simply not drawn (predictions are typically score-ordered, so the
+most confident ones are kept).
+
+These are set on the Weights Studio frontend container (for example in
+``../weights_studio/docker/docker-compose.yml``) and injected into the page at
+startup by the nginx entrypoint — changing them needs no rebuild, just a
+container restart. For a local ``vite`` dev server, use the ``VITE_`` fallbacks
+shown below. Values are clamped to a hard ceiling of ``10000``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 12 58
+
+   * - Variable
+     - Default
+     - Description
+   * - ``BB_THUMB_RENDER``
+     - ``10``
+     - Maximum bounding boxes drawn per image in the grid **thumbnails**, per
+       overlay (up to N ground-truth and N predictions). Dev-server fallback:
+       ``VITE_BB_THUMB_RENDER``.
+   * - ``BB_MODAL_RENDER``
+     - ``100``
+     - Maximum bounding boxes drawn per image in the **modal** detail view, per
+       overlay (up to N ground-truth and N predictions). A ``?`` button in the
+       top-right of the modal image surfaces the active limit on hover.
+       Dev-server fallback: ``VITE_BB_MODAL_RENDER``.
+
+.. note::
+
+   These caps only affect *rendering* — no sample data is dropped. They apply to
+   detection bounding-box overlays; segmentation masks are unaffected.
