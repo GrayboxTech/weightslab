@@ -60,8 +60,7 @@ For a detailed installation guide and advanced configuration, see the [Installat
 
 <br>
 
-## Examples
-
+## Resrouces
 <details>
 <summary><b>Training script with Weightslab - Step-by-Step Integration</b></summary>
 
@@ -238,19 +237,21 @@ if __name__ == "__main__":
 
 </details>
 
+<details>
+<summary><b>Docuemntation (API + SDK)</b></summary>
 
-
-
-##  Cloud Examples
-Find our [sandbox](https://preview.graybx.com) online. The password is **graybx**.
-
-
-## Documentation (API + SDK)
+<br>
 
 Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
 
+</details>
 
-## Contributing & Onboarding
+</details>
+
+<details>
+<summary><b>Contributing & Onboarding</b></summary>
+
+<br>
 
 New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
 captures the cross-repo architecture (weightslab backend ↔ weights_studio
@@ -258,8 +259,14 @@ frontend via the shared proto), the module maps, the `wl.watch_or_edit`
 integration pattern, where tests live, and the gotchas that aren't obvious from
 any single file. It's the fastest way to orient before a first change.
 
+</details>
 
-## Community
+<details>
+<summary><b>Community</b></summary>
+
+<br>
 
 Graybx is building a wonderful community of AI researchers and engineers.
 Are you interested in joining our project? Contact us at hello [at] graybx [dot] com
+
+</details>
