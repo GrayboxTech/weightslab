@@ -1,9 +1,9 @@
 <div align="center">
   <a href="https://grayboxtech.github.io/weightslab/latest/index.html">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrayboxTech/weightslab/main/.github/images/weightslab-banner.png" />
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/GrayboxTech/weightslab/main/.github/images/weightslab-banner.png" />
-      <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/weightslab/main/.github/images/weightslab-banner.png" width="100%" />
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-dark.png" />
+      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-light.png" />
+      <img alt="WeightsLab Banner" src="https://raw.githubusercontent.com/GrayboxTech/.github/main/profile/weightslab-banner-light.png" width="100%" />
     </picture>
   </a>
 </div>
