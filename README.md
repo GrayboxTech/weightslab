@@ -30,14 +30,15 @@ pip install weightslab
 ```
 
 ```python
+# wrap the objects in your training script
+
 import weightslab as wl
 ...
-model  = wl.watch_or_edit(model,   flag='model')
-optim  = wl.watch_or_edit(optimizer, flag='opt')
-loss   = wl.watch_or_edit(nn.BCE(reduction="none"), name="loss", per_sample=True, log=True)
+model  = wl.watch_or_edit(model, flag='model')
+optim  = wl.watch_or_edit(optim, flag='opt')
+loss   = wl.watch_or_edit(loss, flag='signal', name="loss", per_sample=True, log=True)
 loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 ...
-# wrap your training script
 ```
 
 ```bash
