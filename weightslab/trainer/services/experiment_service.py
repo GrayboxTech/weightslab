@@ -596,6 +596,134 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         )
         return hyper_parameter_descs
 
+    def _handle_save_checkpoint(self, save_op, components, context):
+        """Pause training and force-dump the current model weights.
+
+        Implements the manual "Save weights" button. Training is paused *first*
+        (so the weights are captured at a consistent point, between training
+        steps) and only then are the latest weights written to a checkpoint —
+        optionally with the optimizer state and/or a fresh architecture dump,
+        per the ``SaveCheckpointOperation`` flags.
+
+        If no model is registered there is nothing to dump: we return a clear
+        failure *without* disrupting the run (training is left untouched).
+
+        Returns a ``pb2.CommandResponse``.
+        """
+        save_optimizer = bool(getattr(save_op, "save_optimizer", False))
+        save_architecture = bool(getattr(save_op, "save_architecture", False))
+        audit_details = {
+            "save_optimizer": save_optimizer,
+            "save_architecture": save_architecture,
+        }
+
+        # 1) Resolve the model first. Without a registered model there is nothing
+        #    to dump — fail early so we don't needlessly pause a running experiment.
+        model = components.get("model") if components else None
+        if model is None:
+            model = ledgers.get_model()
+        if model is None:
+            msg = (
+                "No model registered — nothing to dump. Register one with "
+                "watch_or_edit(model, flag='model')."
+            )
+            logger.warning("[SaveCheckpoint] %s", msg)
+            self._log_audit("checkpoint_save", "failed", audit_details, error=msg)
+            return pb2.CommandResponse(success=False, message=msg)
+
+        # 2) Resolve the checkpoint manager (component cache, then ledger fallback).
+        checkpoint_manager = components.get("checkpoint_manager") if components else None
+        if checkpoint_manager is None:
+            checkpoint_manager = ledgers.get_checkpoint_manager()
+        if checkpoint_manager is None:
+            msg = "Checkpoint manager not initialized"
+            logger.warning("[SaveCheckpoint] %s", msg)
+            self._log_audit("checkpoint_save", "failed", audit_details, error=msg)
+            return pb2.CommandResponse(success=False, message=msg)
+
+        # 3) Pause training before dumping. Acquire the global lock so any
+        #    in-flight training step has finished; clearing is_training keeps the
+        #    loop parked at its next pause point, so the subsequent save reads a
+        #    consistent model state.
+        if not try_acquire_rlock():
+            logger.error(
+                "[SaveCheckpoint] weightslab_rlock timed out after %.0fs",
+                _GRPC_LOCK_TIMEOUT_S,
+            )
+            if context is not None:
+                context.abort(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    f"Training lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s",
+                )
+            return pb2.CommandResponse(success=False, message="Lock timeout")
+        try:
+            trainer = components.get("trainer") if components else None
+            if trainer is not None:
+                logger.info("[SaveCheckpoint] Pausing training before weights dump...")
+                trainer.pause()
+            hp = components.get("hyperparams") if components else None
+            if hp is not None:
+                try:
+                    hp["is_training"] = False
+                except Exception:
+                    logger.debug("[SaveCheckpoint] Could not set is_training=False", exc_info=True)
+        finally:
+            weightslab_rlock.release()
+
+        # 4) Ensure an experiment hash exists so save_model_checkpoint has a
+        #    target directory (a brand-new experiment may not have one yet).
+        try:
+            if getattr(checkpoint_manager, "current_exp_hash", None) is None:
+                if hasattr(checkpoint_manager, "get_current_experiment_hash"):
+                    checkpoint_manager.get_current_experiment_hash()
+                if (
+                    getattr(checkpoint_manager, "current_exp_hash", None) is None
+                    and hasattr(checkpoint_manager, "update_experiment_hash")
+                ):
+                    checkpoint_manager.update_experiment_hash(first_time=True)
+        except Exception:
+            logger.debug("[SaveCheckpoint] Could not ensure experiment hash", exc_info=True)
+
+        # 5) Dump the weights (force_dump_pending flushes any pending changes).
+        try:
+            checkpoint_path = checkpoint_manager.save_model_checkpoint(
+                model=model,
+                save_optimizer=save_optimizer,
+                force_dump_pending=True,
+            )
+        except Exception as e:
+            msg = f"Failed to save model weights: {e}"
+            logger.error("[SaveCheckpoint] %s", msg)
+            self._log_audit("checkpoint_save", "failed", audit_details, error=str(e))
+            return pb2.CommandResponse(success=False, message=msg)
+
+        if checkpoint_path is None:
+            msg = "Failed to save model weights (no checkpoint produced)."
+            logger.warning("[SaveCheckpoint] %s", msg)
+            self._log_audit("checkpoint_save", "failed", audit_details, error=msg)
+            return pb2.CommandResponse(success=False, message=msg)
+
+        # 6) Optionally dump the architecture as well.
+        arch_saved = False
+        if save_architecture:
+            try:
+                arch_path = checkpoint_manager.save_model_architecture(model)
+                arch_saved = arch_path is not None
+            except Exception:
+                logger.warning("[SaveCheckpoint] Could not save model architecture", exc_info=True)
+
+        saved = ["weights"]
+        if save_optimizer:
+            saved.append("optimizer")
+        if arch_saved:
+            saved.append("architecture")
+        msg = f"Saved {', '.join(saved)} (training paused)."
+        logger.info("[SaveCheckpoint] %s -> %s", msg, checkpoint_path)
+        audit_details["path"] = str(checkpoint_path)
+        audit_details["architecture_saved"] = arch_saved
+        self._log_audit("checkpoint_save", "success", audit_details)
+        return pb2.CommandResponse(success=True, message=msg)
+
     # Training & hyperparameter commands
     # -------------------------------------------------------------------------
     def ExperimentCommand(self, request, context):
@@ -603,6 +731,11 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         components = self._ctx.components
 
         # Write requests
+        if request.HasField("save_checkpoint_operation"):
+            return self._handle_save_checkpoint(
+                request.save_checkpoint_operation, components, context
+            )
+
         if request.HasField("plot_note_operation"):
             note_op = request.plot_note_operation
             metric_name = str(note_op.metric_name or "")

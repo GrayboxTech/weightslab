@@ -148,6 +148,107 @@ class TestExperimentServiceUnit(unittest.TestCase):
         _, kwargs = checkpoint_manager.load_state.call_args
         self.assertEqual(kwargs.get("target_step"), 5)
 
+    def _make_save_service(self, components):
+        ctx = _DummyCtx(components=components)
+        with patch("weightslab.trainer.services.experiment_service.DataService"):
+            return ExperimentService(ctx)
+
+    def test_save_checkpoint_with_optimizer_and_architecture(self):
+        """Manual save with both optimizer + architecture: pauses, then dumps all three."""
+        trainer = MagicMock()
+        model = MagicMock()
+        checkpoint_manager = MagicMock()
+        checkpoint_manager.save_model_checkpoint.return_value = "/tmp/exp/weights_step_000010.pt"
+        checkpoint_manager.save_model_architecture.return_value = "/tmp/exp/arch.pkl"
+        hp = {"is_training": True}
+
+        service = self._make_save_service({
+            "trainer": trainer,
+            "model": model,
+            "checkpoint_manager": checkpoint_manager,
+            "hyperparams": hp,
+        })
+
+        request = pb2.TrainerCommand(
+            save_checkpoint_operation=pb2.SaveCheckpointOperation(
+                save_architecture=True, save_optimizer=True
+            )
+        )
+        response = service.ExperimentCommand(request, None)
+
+        self.assertTrue(response.success)
+        # Training is paused BEFORE the dump, and is_training is cleared.
+        trainer.pause.assert_called_once()
+        self.assertFalse(hp["is_training"])
+        # Weights dumped with optimizer; architecture dumped too.
+        checkpoint_manager.save_model_checkpoint.assert_called_once()
+        _, kwargs = checkpoint_manager.save_model_checkpoint.call_args
+        self.assertTrue(kwargs.get("save_optimizer"))
+        self.assertIs(kwargs.get("model"), model)
+        checkpoint_manager.save_model_architecture.assert_called_once_with(model)
+        self.assertIn("optimizer", response.message)
+        self.assertIn("architecture", response.message)
+
+    def test_save_checkpoint_weights_only(self):
+        """Manual save without optimizer/architecture: only weights are dumped."""
+        trainer = MagicMock()
+        model = MagicMock()
+        checkpoint_manager = MagicMock()
+        checkpoint_manager.save_model_checkpoint.return_value = "/tmp/exp/weights_step_000010.pt"
+        hp = {"is_training": True}
+
+        service = self._make_save_service({
+            "trainer": trainer,
+            "model": model,
+            "checkpoint_manager": checkpoint_manager,
+            "hyperparams": hp,
+        })
+
+        request = pb2.TrainerCommand(
+            save_checkpoint_operation=pb2.SaveCheckpointOperation(
+                save_architecture=False, save_optimizer=False
+            )
+        )
+        response = service.ExperimentCommand(request, None)
+
+        self.assertTrue(response.success)
+        trainer.pause.assert_called_once()
+        checkpoint_manager.save_model_checkpoint.assert_called_once()
+        _, kwargs = checkpoint_manager.save_model_checkpoint.call_args
+        self.assertFalse(kwargs.get("save_optimizer"))
+        # No architecture dump requested.
+        checkpoint_manager.save_model_architecture.assert_not_called()
+        self.assertNotIn("optimizer", response.message)
+        self.assertNotIn("architecture", response.message)
+
+    def test_save_checkpoint_no_model_registered(self):
+        """No registered model: fails clearly and does NOT pause or dump."""
+        trainer = MagicMock()
+        checkpoint_manager = MagicMock()
+
+        service = self._make_save_service({
+            "trainer": trainer,
+            "model": None,
+            "checkpoint_manager": checkpoint_manager,
+            "hyperparams": {},
+        })
+
+        request = pb2.TrainerCommand(
+            save_checkpoint_operation=pb2.SaveCheckpointOperation(
+                save_architecture=True, save_optimizer=True
+            )
+        )
+        # The ledger fallback must also report no model.
+        with patch("weightslab.trainer.services.experiment_service.ledgers.get_model", return_value=None):
+            response = service.ExperimentCommand(request, None)
+
+        self.assertFalse(response.success)
+        self.assertIn("No model registered", response.message)
+        # Nothing was dumped, and a running experiment is left untouched.
+        trainer.pause.assert_not_called()
+        checkpoint_manager.save_model_checkpoint.assert_not_called()
+        checkpoint_manager.save_model_architecture.assert_not_called()
+
 
 class TestModelServiceUnit(unittest.TestCase):
     def test_get_weights_success(self):

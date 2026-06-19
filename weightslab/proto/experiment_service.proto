@@ -160,6 +160,11 @@ message LoadCheckpointOperation {
   int32 checkpoint_id = 1;
 }
 
+message SaveCheckpointOperation {
+  bool save_architecture = 1;  // force re-dump the model architecture even if a file already exists
+  bool save_optimizer = 2;     // also persist optimizer state alongside the weights
+}
+
 message PlotNoteOperation {
   string metric_name = 1;
   string experiment_hash = 2;
