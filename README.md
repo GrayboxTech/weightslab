@@ -31,12 +31,12 @@ pip install weightslab
 
 ```python
 import weightslab as wl
-
-model     = wl.watch_or_edit(model,     flag='model')
-optimizer = wl.watch_or_edit(optimizer, flag='opt')
-criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), flag='signal', name="train_loss/sample", per_sample=True, log=True)
-loader    = wl.watch_or_edit(train_dataset, flag='data', loader_name="train_loader", is_training=True)
-
+...
+model  = wl.watch_or_edit(model,   flag='model')
+optim  = wl.watch_or_edit(optimizer, flag='opt')
+loss   = wl.watch_or_edit(nn.BCE(reduction="none"), name="loss", per_sample=True, log=True)
+loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
+...
 # wrap your training script
 ```
 
