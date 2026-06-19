@@ -466,15 +466,10 @@ class TestDataServiceHelpersUnit(unittest.TestCase):
                 "quality": [0.1, 0.9],
             }
         )
-        request = type(
-            "Req",
-            (),
-            {
-                "stats_to_retrieve": ["quality"],
-            },
-        )()
 
-        response = service._build_metadata_only_response(df_slice, request)
+        # _build_metadata_only_response now takes an explicit requested_cols list
+        # (it is the building block reused by the GetMetaData RPC).
+        response = service._build_metadata_only_response(df_slice, ["quality"])
 
         self.assertTrue(response.success)
         self.assertEqual(len(response.data_records), 2)

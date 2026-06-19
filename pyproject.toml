@@ -52,7 +52,8 @@ dependencies = [
 
   # Imaging
   "Pillow>=10,<12",
-  "opencv-python>=4.8,<5",
+
+  # Modeling
   "onnx>=1.15,<=1.20",
 
   # Utility used in examples and progress reporting

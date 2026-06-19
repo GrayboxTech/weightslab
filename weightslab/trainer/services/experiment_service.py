@@ -797,6 +797,105 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
                 ),
             )
 
+        if request.HasField("save_checkpoint_operation"):
+            op = request.save_checkpoint_operation
+
+            checkpoint_manager = components.get("checkpoint_manager") if isinstance(components, dict) else None
+            if checkpoint_manager is None:
+                try:
+                    checkpoint_manager = ledgers.get_checkpoint_manager()
+                except Exception:
+                    checkpoint_manager = None
+            if checkpoint_manager is None:
+                return pb2.CommandResponse(success=False, message="Checkpoint manager not initialized")
+
+            # Resolve the live model. The ledger may hand back a proxy, so unwrap it
+            # the same way checkpoint_manager._save_changes does before dumping.
+            model = components.get("model") if isinstance(components, dict) else None
+            if model is None:
+                try:
+                    model = ledgers.get_model()
+                except Exception:
+                    model = None
+            if model is not None and callable(getattr(model, "get", None)):
+                try:
+                    inner = model.get()
+                    if inner is not None:
+                        model = inner
+                except Exception:
+                    pass
+            if model is None:
+                return pb2.CommandResponse(success=False, message="No model available to checkpoint")
+
+            if getattr(checkpoint_manager, "current_exp_hash", None) is None:
+                return pb2.CommandResponse(
+                    success=False,
+                    message="No experiment hash set yet; run at least one training step before saving.",
+                )
+
+            # Snapshot model state under the training lock so we never persist a
+            # half-applied optimizer step (mirrors the load-checkpoint hygiene).
+            if not try_acquire_rlock():
+                logger.error(
+                    "[ExperimentCommand] save_checkpoint: weightslab_rlock timed out after %.0fs",
+                    _GRPC_LOCK_TIMEOUT_S,
+                )
+                return pb2.CommandResponse(
+                    success=False,
+                    message=f"Training busy: lock not acquired within {_GRPC_LOCK_TIMEOUT_S:.0f}s. Try again.",
+                )
+
+            ckpt_path = None
+            try:
+                # save_model_architecture is a no-op when the .pkl already exists,
+                # so delete it first when a forced architecture re-dump is requested.
+                if op.save_architecture:
+                    try:
+                        h = checkpoint_manager.current_exp_hash[8:-8]
+                        arch_file = checkpoint_manager.models_dir / h / f"{h}_architecture.pkl"
+                        if arch_file.exists():
+                            arch_file.unlink()
+                    except Exception as e:
+                        logger.warning(f"Could not remove existing architecture file for forced re-dump: {e}")
+                    checkpoint_manager.save_model_architecture(model)
+
+                ckpt_path = checkpoint_manager.save_model_checkpoint(
+                    model=model,
+                    save_optimizer=bool(op.save_optimizer),
+                    save_model_checkpoint=True,
+                    force_dump_pending=True,
+                )
+            except Exception as e:
+                logger.error(f"Error during manual checkpoint save: {e}")
+                self._log_audit(
+                    "checkpoint_save",
+                    "failed",
+                    {"save_architecture": bool(op.save_architecture), "save_optimizer": bool(op.save_optimizer)},
+                    error=str(e),
+                )
+                return pb2.CommandResponse(success=False, message=f"Failed to save checkpoint: {e}")
+            finally:
+                weightslab_rlock.release()
+
+            self._log_audit(
+                "checkpoint_save",
+                "success" if ckpt_path is not None else "failed",
+                {
+                    "experiment_hash": checkpoint_manager.current_exp_hash,
+                    "save_architecture": bool(op.save_architecture),
+                    "save_optimizer": bool(op.save_optimizer),
+                    "checkpoint_file": str(ckpt_path) if ckpt_path else None,
+                },
+            )
+            return pb2.CommandResponse(
+                success=ckpt_path is not None,
+                message=(
+                    f"Saved model weights{' and architecture' if op.save_architecture else ''} for {checkpoint_manager.current_exp_hash}"
+                    if ckpt_path is not None
+                    else "Checkpoint save produced no weights file (weight dumping may be disabled in config)."
+                ),
+            )
+
         if request.HasField("hyper_parameter_change"):
             hyper_parameters = request.hyper_parameter_change.hyper_parameters
 

@@ -8,7 +8,7 @@ import torch
 import unittest
 
 # On Windows, DataLoader workers use spawn: each worker re-imports the heavy
-# weightslab package (torch + cv2 + onnx + langchain + cert/banner setup), so a
+# weightslab package (torch + onnx + langchain + cert/banner setup), so a
 # multi-worker loader takes far longer than any sane test timeout. These tests
 # are meaningful on Linux/CI (cheap fork workers); skip the num_workers>0 cases
 # on Windows. Single-worker correctness still runs everywhere.
