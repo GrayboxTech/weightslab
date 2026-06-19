@@ -285,6 +285,9 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         ds._compute_natural_sort = False
         ds._is_filtered = False
         ds._last_internals_update_time = 0
+        # Thread pool used by GetDataSamples' per-sample path (GetMetaData uses the
+        # vectorized path and doesn't need it, but GetDataSamples does).
+        ds._data_executor = ThreadPoolExecutor(max_workers=2)
         ds._agent = MagicMock()
         ds._agent.is_ollama_available.return_value = True
         ds.audit_logger = MagicMock()
@@ -426,9 +429,9 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         kept = [idx[1] for idx in data_service._all_datasets_df.index.tolist()]
         self.assertEqual(sorted(kept), ["2", "3"])
 
-    def test_grpc_get_data_samples_returns_scalar_stats(self):
-        """GetDataSamples must stream per-sample records with requested scalar stats
-        (no raw images needed for this path)."""
+    def test_grpc_get_data_samples_excludes_metadata(self):
+        """GetDataSamples returns image / label / prediction data only — metadata
+        columns (e.g. 'loss') are now served exclusively by GetMetaData."""
         data_service, _ = self._make_real_data_service()
         servicer = self._make_servicer_with_real_data_service(data_service)
 
@@ -444,10 +447,42 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         self.assertEqual(len(response.data_records), 3)
         returned_ids = {r.sample_id for r in response.data_records}
         self.assertEqual(returned_ids, {"1", "2", "3"})
-        # The requested 'loss' stat is present on each record.
         for rec in response.data_records:
             names = {s.name for s in rec.data_stats}
+            # The 'loss' metadata stat must NOT leak through GetDataSamples anymore.
+            self.assertNotIn("loss", names)
+            # Rendering flags (origin/task_type/discarded) still travel with image data.
+            self.assertIn("origin", names)
+            self.assertIn("discarded", names)
+
+    def test_grpc_get_metadata_returns_names_records_and_modal(self):
+        """GetMetaData returns whole-dataset column names, per-sample grid metadata
+        for the slice, and the open modal sample's metadata."""
+        data_service, _ = self._make_real_data_service()
+        servicer = self._make_servicer_with_real_data_service(data_service)
+
+        request = pb2.GetMetaDataRequest(
+            start_index=0,
+            records_cnt=10,
+            modal_sample_id="2",
+        )
+        response = servicer.GetMetaData(request, _MockContext())
+
+        self.assertTrue(response.success)
+        # All metadata column names for the whole dataset include 'loss'.
+        self.assertIn("loss", list(response.all_metadata_names))
+        # Grid records cover the slice and carry the 'loss' metadata stat.
+        self.assertEqual(len(response.grid_records), 3)
+        returned_ids = {r.sample_id for r in response.grid_records}
+        self.assertEqual(returned_ids, {"1", "2", "3"})
+        for rec in response.grid_records:
+            names = {s.name for s in rec.data_stats}
             self.assertIn("loss", names)
+        # Modal record resolves the requested sample_id with its metadata.
+        self.assertTrue(response.HasField("modal_record"))
+        self.assertEqual(response.modal_record.sample_id, "2")
+        modal_names = {s.name for s in response.modal_record.data_stats}
+        self.assertIn("loss", modal_names)
 
 
 class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):

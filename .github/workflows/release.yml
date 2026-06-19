@@ -47,7 +47,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+
+# Install the test extra so pytest, graphviz, torchmetrics,
+          # pytorch-lightning and tensorboard are available (several test modules
+          # import pytest / use pytest fixtures and cannot run under bare unittest).
           python -m pip install .[utest] --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install pytest-timeout
 
       - name: Run tests
         run: |
@@ -326,7 +331,8 @@ jobs:
 
   build-and-publish-main:
     name: Build & Publish Main (PyPI)
-    needs: [detect-target]
+    needs: [detect-target,test]
+    # needs: [detect-target]
     runs-on: ubuntu-latest
     if: ${{ needs.detect-target.outputs.is_main == 'true' }}
     permissions:

@@ -177,6 +177,15 @@ if __name__ == "__main__":
     parameters.setdefault("compute_natural_sort", True)
 
     exp_name = parameters["experiment_name"]
+    # --- Register hyperparameters ---
+    wl.watch_or_edit(
+        parameters,
+        flag="hyperparameters",
+        name=exp_name,
+        defaults=parameters,
+        poll_interval=1.0,
+    )
+
     num_classes = int(parameters["num_classes"])
     pc_range = tuple(float(v) for v in parameters["point_cloud_range"])
     voxel_size = float(parameters["voxel_size"])
@@ -202,15 +211,6 @@ if __name__ == "__main__":
     eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
-
-    # --- 4) Register hyperparameters ---
-    wl.watch_or_edit(
-        parameters,
-        flag="hyperparameters",
-        name=exp_name,
-        defaults=parameters,
-        poll_interval=1.0,
-    )
 
     # --- 5) Data (KITTI if present under data_root, else synthetic scenes) ---
     default_data_root = os.path.abspath(

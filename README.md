@@ -61,23 +61,16 @@ The granular statistics and interactive paradigm enable powerful workflows:
 - **Docker Desktop v4.77 or newer** — required to deploy the Weights Studio UI (`weightslab ui launch`).
 - **Docker Compose v2** (the `docker compose` CLI plugin, bundled with Docker Desktop) — *recommended*. The legacy v1 standalone binary (`docker-compose`, **≥ 1.27**) also works: `weightslab ui launch` auto-detects whichever is installed and uses it. Compose v1 below 1.27 is **not** supported.
 - **Python >=3.10, <3.15** — to install and run the `weightslab` framework.
-> [!OPTIONAL]
-> We are fully compatible with Conda.
-
-> [!TIP]
-> Check your Compose version with `docker compose version` (v2) or `docker-compose --version` (v1). If `docker compose version` prints a version string, you have v2.
 
 
 ### Installation
-
-> [!OPTIONAL]
-> Seting a clean environment:
-> Define a Python environment:
-```bash
-python -m venv weightslab_venv
-./weightslab_venv/Scripts/activate
-```
-> Or install directly on your machine.
+Install directly on your machine.
+> [!TIP]
+> Setting a clean Python environment:
+> ```bash
+> python -m venv weightslab_venv
+> ./weightslab_venv/Scripts/activate
+> ```
 
 Install our framework:
 ```bash
@@ -89,17 +82,16 @@ Deploy our interface:
 weightslab ui launch
 ```
 
-`weightslab ui launch` removes any stale weightslab/weights_studio Docker resources that could break the launch, then starts the UI stack. **By default it runs unsecured (HTTP, no gRPC auth) — no certificates are generated.**
-
-To run secured (HTTPS + gRPC auth), pass `--certs`:
-```bash
-weightslab ui launch --certs   # generates TLS certs + a gRPC auth token if missing, then launches secured
-```
-
-> [!IMPORTANT]
+The command `weightslab ui launch` removes any stale weightslab/weights_studio Docker resources that could break the launch, then starts the UI stack. **By default, it runs unsecured (HTTP, no gRPC auth) — no certificates are generated. However, communication are not safe.**
+> [!TIP]
+> To run secured communication, pass the arguments `--certs`:
+> ```bash
+> weightslab ui launch --certs   # generates TLS certs + a gRPC auth token if missing, then launches secured
+> ```
 > When using certs, set `WEIGHTSLAB_CERTS_DIR` so the training backend and any new terminal use the **same** certificates (it is the single source of truth). `weightslab se` and `weightslab ui launch --certs` print the exact export/`setx` command for your shell. You can also generate certs up front with `weightslab se`.
+
 <!--
-Want to see it working end to end without writing any code? Start a bundled demo (it installs the example's requirements first — no prompts — then trains and serves until you stop it with `Ctrl+C`). It defaults to classification; pick another with a flag:
+Want to see it working end-to-end without writing any code? Start a bundled demo (it installs the example's requirements first — no prompts — then trains and serves until you stop it with `Ctrl+C`). It defaults to classification; pick another with a flag:
 ```bash
 weightslab start example          # classification (default)
 weightslab start example --cls    # classification
@@ -127,27 +119,29 @@ weightslab start example --gen    # generation
 
 2. **Wrap your parameters** with WeightsLab tracking:
    ```python
-   model = wl.watch_or_edit(parameters, ...)  # ← Now WeightsLab monitors your parameters and allow you to update them from your UI
+   model = wl.watch_or_edit(parameters, flag='hp', ...)  # ← Now WeightsLab monitors your parameters and allow you to update them from your UI
    ```
 
 3. **Wrap your model** with WeightsLab tracking:
    ```python
-   model = wl.watch_or_edit(SimpleModel(...), ...)  # ← Now WeightsLab monitors your model state
+   model = wl.watch_or_edit(SimpleModel(...), flag='model', ...)  # ← Now WeightsLab monitors your model state
    ```
 
 4. **Wrap your optimizer** with WeightsLab tracking:
    ```python
-   optimizer = wl.watch_or_edit(optim.Adam(...), ...)  # ← Tracks optimizer state and update optimizer learning rate from your UI
+   optimizer = wl.watch_or_edit(optim.Adam(...), flag='opt', ...)  # ← Tracks optimizer state and update optimizer learning rate from your UI
    ```
 
 5. **Wrap your signal** with WeightsLab tracking:
    ```python
-    criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), ...)  # ← Tracks this signal and others (metrics, ..etc) from your UI
+    train_criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), flag='signal', name="train_loss/sample", per_sample=True, log=True)  # ← Tracks this signal and others (metrics, ..etc) from your UI
+    test_criterion = wl.watch_or_edit(nn.CrossEntropyLoss(reduction="none"), flag='signal', name="test_loss/sample", per_sample=True, log=False)  # ← Tracks this signal and others (metrics, ..etc) from your UI - Plot is disabled, only per sample signal
    ```
 
 6. **Wrap your dataset** with WeightsLab tracking:
    ```python
-    train_loader = wl.watch_or_edit(dataset, ...)  # ← Tracks this dataset and others (validation, test) from your UI
+    train_loader = wl.watch_or_edit(train_dataset, flag='data', loader_name="train_loader", ...)  # ← Tracks this dataset and others (validation, test) from your UI
+    val_loader = wl.watch_or_edit(val_dataset, flag='data', loader_name="val_loader", ...)  # ← Tracks this dataset and others (validation, test) from your UI
    ```
 
 7. **Run your training script** as usual:
@@ -392,9 +386,10 @@ if __name__ == "__main__":
 ## Examples
 
 ### Local examples
+
 After starting the UI, launch a local experiment with the command:
 ```bash
-weightslab start example          # classification (default)
+weightslab start example            # classification (default)
 # weightslab start example --cls    # classification
 # weightslab start example --seg    # segmentation
 # weightslab start example --det    # detection
@@ -402,66 +397,9 @@ weightslab start example          # classification (default)
 # weightslab start example --gen    # generation
 ```
 
+
 ###  Cloud examples
-Find our demos online. The password is **graybx**.
-<a href="https://preview.graybx.com/">
-  <p style="text-indent:20px;">DEMOS</p>
-</a>
-
-
-## AI Agent
-
-WeightsLab can run its data agent in two modes:
-
-- Local provider with Ollama
-- Cloud provider with OpenRouter
-
-Use local Ollama when you want a fully local setup and do not need cloud-hosted models (see more details installation from the documentation).
-Use OpenRouter when you want larger hosted models and model selection directly from Weightslab UI.
-
-
-### Cloud OpenRouter
-You can either preconfigure OpenRouter in `agent_config.yaml` / `.env`, or initialize it interactively from Weightslab UI.
-
-#### SDK Configuration
-
-Example static configuration:
-
-```yaml
-agent:
-  provider: openrouter
-  openrouter_model: meta-llama/llama-3.3-70b-instruct
-  fallback_to_local: false
-  # openrouter_api_key: ${OPENROUTER_API_KEY}
-```
-
-Environment variable:
-
-```bash
-export OPENROUTER_API_KEY=your_key_here
-```
-
-#### Interactive setup from Weightslab UI
-
-OpenRouter models can be initialized and set directly from the UI:
-1. Click in the agent bar or double-click to expand the agent window.
-2. Type `/init`.
-3. Choose either:
-   - `A` Enter your OpenRouter API key manually
-   - `B` Use the OpenRouter OAuth flow
-4. Select a model from the fetched list, then confirm.
-
-The default OpenRouter model, as recommended by Graybx, is `meta-llama/llama-3.3-70b-instruct`.
-
-### Typical Usage Flow
-
-1. Start your WeightsLab backend (e.g., "main.py").
-2. Start Weightslab UI.
-3. If you use Ollama, query the agent directly.
-4. If you use OpenRouter and the agent is not configured yet, type `/init`.
-5. Ask natural-language data operations such as sorting, filtering, slicing, and inspection requests. You can also ask questions about the data.
-6. Use `/model` to try another cloud model without re-entering the key.
-7. Use `/reset` if you want to clear the current connection and start over.
+Find our [sandbox](https://preview.graybx.com) online. The password is **graybx**.
 
 
 ## Documentation (API + SDK)

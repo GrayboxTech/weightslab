@@ -29,6 +29,27 @@ except Exception:
     pass
 
 
+def _align_col_dtype_for_assign(existing: pd.DataFrame, source: pd.DataFrame, col: str) -> None:
+    """Upcast ``existing[col]`` to object before a partial ``.loc`` assignment when
+    the source column holds object data (numpy arrays, stringified masks) or bool
+    flags that don't fit the target's dtype.
+
+    pandas >= 2.1 raises a FutureWarning (a future hard error) when a partial
+    ``.loc`` assignment would change a column's dtype — e.g. assigning object or
+    bool values into a column that was just initialized as float64 via ``np.nan``.
+    Upcasting the target column to object first makes the assignment dtype-stable.
+    Compatible numeric assignments (e.g. int into float) are left untouched.
+    Best-effort: dtype alignment must never break a merge.
+    """
+    try:
+        src_kind = source[col].dtype.kind  # 'O' object, 'b' bool, 'i'/'u'/'f' numeric
+        tgt_dtype = existing[col].dtype
+        if src_kind in ("O", "b") and tgt_dtype != object and tgt_dtype.kind != src_kind:
+            existing[col] = existing[col].astype(object)
+    except Exception:
+        pass
+
+
 class _InterProcessFileLock:
     """Lightweight cross-platform file lock.
 
@@ -694,6 +715,7 @@ class H5DataFrameStore:
                                             if col not in existing.columns:
                                                 is_categorical = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
                                                 existing[col] = False if is_categorical else np.nan
+                                            _align_col_dtype_for_assign(existing, df_norm, col)
                                             existing.loc[matching_rows.index, col] = df_norm.loc[idx, col]
                                     elif isinstance(matching_rows, pd.Series):
                                         # Single row matched
@@ -701,6 +723,7 @@ class H5DataFrameStore:
                                             if col not in existing.columns:
                                                 is_categorical = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
                                                 existing[col] = False if is_categorical else np.nan
+                                            _align_col_dtype_for_assign(existing, df_norm, col)
                                             existing.loc[matching_rows.name, col] = df_norm.loc[idx, col]
                             else:
                                 # Normal case: same index structure
@@ -717,6 +740,7 @@ class H5DataFrameStore:
                                             is_categorical = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
                                             existing[col] = False if is_categorical else np.nan
                                         # Update values for common rows
+                                        _align_col_dtype_for_assign(existing, df_norm, col)
                                         existing.loc[common_idx, col] = df_norm.loc[common_idx, col]
 
                                 # 2. Append strictly new rows
