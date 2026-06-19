@@ -60,7 +60,7 @@ For a detailed installation guide and advanced configuration, see the [Installat
 
 <br>
 
-## Resrouces
+## Resources
 <details>
 <summary><b>Training script with Weightslab - Step-by-Step Integration</b></summary>
 
