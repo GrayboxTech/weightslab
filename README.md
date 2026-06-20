@@ -8,7 +8,10 @@
   </a>
 </div>
 <div align="center">
-  <h3>The IDE for mid-training model development.</h3>
+  <h3>PyTorch Dataset Debugger Powered by Training Signals.</h3>
+  <p>Pause training, mine live loss signals to surface mislabels, class imbalance & outliers,<br>then curate your image, video & LiDAR data — without restarting.</p>
+</div>
+
 </div>
 <div align="center">
   <a href="https://github.com/GrayboxTech/weightslab/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
@@ -17,9 +20,24 @@
 </div>
 <br>
 
-WeightsLab is an IDE for mid-training model development. Wrap your training script with the SDK to make it live, inspectable, and editable — then use Studio to supervise data distribution, fix problems, and ship without restarting.
+## What it does
 
-If weightslab saves you a training restart &rarr; **give it a star ⭐**
+Most data problems are invisible until your model tells you — through loss spikes,
+poor generalization, or silent underperformance. WeightsLab connects those training
+signals back to the exact samples causing them.
+
+**Wrap your training script with the SDK** to capture per-sample signals live.  
+**Open Studio** to inspect, filter, and curate your dataset — mid-training, without restarting.
+
+- 🔍 **Detect** - Surface mislabels, outliers & class imbalance using live loss signals 
+- ✂️ **Curate** - Discard bad samples, create data subsets, rebalance distributions 
+- ▶️ **Continue**  Resume training on your cleaned dataset — no restart required 
+
+<br>
+
+If WeightsLab saves you a training restart → **give it a star ⭐**
+
+<br>
 
 ## Quickstart
 
@@ -48,6 +66,8 @@ wl.serve(serving_grpc=True, serving_cli=False)
 ```bash
 weightslab ui launch  # then open https://localhost:5173 🚀
 ```
+<br>
+
 For a detailed installation guide and advanced configuration &rarr; [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 <br>
