@@ -39,7 +39,7 @@ WeightsLab is an open-source PyTorch tool for dataset debugging, data quality mo
 
 <br>
 
-If WeightsLab saves you a training restart → **give it a star ⭐** and join our [`early access ⏰`](https://grayboxtech.github.io/signup/)
+ → **`give it a star ⭐`** and join our [`early access ⏰`](https://grayboxtech.github.io/signup/)
 
 <br>
 
