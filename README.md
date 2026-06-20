@@ -31,7 +31,7 @@ signals back to the exact samples causing them.
 
 - 🔍 **Detect** - Surface mislabels, outliers & class imbalance using live loss signals 
 - ✂️ **Curate** - Discard bad samples, create data subsets, rebalance distributions 
-- ▶️ **Continue**  Resume training on your cleaned dataset — no restart required 
+- ▶️ **Continue** - Resume training on your cleaned dataset — no restart required 
 
 <br>
 
@@ -45,10 +45,11 @@ If WeightsLab saves you a training restart → **give it a star ⭐**
 ![Docker Desktop](https://img.shields.io/badge/Docker_Desktop-v4.77+-0db7ed?style=flat&logo=docker&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/Docker_Compose-v2_recommended-0db7ed?style=flat&logo=docker&logoColor=white)
 
+**1. Install**
 ```bash
 pip install weightslab
 ```
-
+**2. Wrap your training script**
 ```python
 # wrap the objects in your training script
 
@@ -62,7 +63,7 @@ loader = wl.watch_or_edit(dataset, flag='data', loader_name="train")
 wl.serve(serving_grpc=True, serving_cli=False)
 ...
 ```
-
+**3. Launch Studio**
 ```bash
 weightslab ui launch  # then open https://localhost:5173 🚀
 ```
@@ -291,7 +292,7 @@ any single file. It's the fastest way to orient before a first change.
 
 <br>
 
-Graybx is building a wonderful community of AI researchers and engineers.
-Are you interested in joining our project? Contact us at hello [at] graybx [dot] com
+We're building a community of ML engineers around data-centric training tooling. 
+Interested in contributing or just want to say hi? → hello [at] graybx [dot] com
 
 </details>
