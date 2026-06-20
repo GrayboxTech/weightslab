@@ -22,9 +22,11 @@
 
 ## What it does
 
-Most data problems are invisible until your model tells you — through loss spikes,
-poor generalization, or silent underperformance. WeightsLab connects those training
-signals back to the exact samples causing them.
+WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets — images, video & LiDAR point clouds.
+
+<br>
+
+Most data problems are invisible until your model tells you — through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them
 
 **Wrap your training script with the SDK** to capture per-sample signals live.  
 **Open Studio** to inspect, filter, and curate your dataset — mid-training, without restarting.
@@ -33,13 +35,15 @@ signals back to the exact samples causing them.
 - ✂️ **Curate** - Discard bad samples, create data subsets, rebalance distributions 
 - ▶️ **Continue** - Resume training on your cleaned dataset — no restart required 
 
+WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets — images, video & LiDAR point clouds.
+
 <br>
 
 If WeightsLab saves you a training restart → **give it a star ⭐**
 
 <br>
 
-## Quickstart
+## Quickstart 
 
 ![Python](https://img.shields.io/badge/Python-3.10--3.14-5865F2?style=flat&logo=python&logoColor=white)
 ![Docker Desktop](https://img.shields.io/badge/Docker_Desktop-v4.77+-0db7ed?style=flat&logo=docker&logoColor=white)
@@ -86,7 +90,7 @@ For a detailed installation guide and advanced configuration &rarr; [Installatio
 
 <br>
 
-## Resources
+## Resources & Community
 <details>
 <summary><b>Training script with Weightslab - Step-by-Step Integration</b></summary>
 
@@ -180,7 +184,12 @@ if __name__ == "__main__":
 </details>
 
 <details>
-<summary><b>Migrating from wandb?</b></summary>
+<summary><b>Migrating from Weights & Biases?</b></summary>
+
+## WeightsLab vs Weights & Biases
+
+Weights & Biases (wandb) tracks experiments. WeightsLab connects training signals back to 
+the exact samples causing them — so you can fix your data, not just log it.
 
 <br>
 
