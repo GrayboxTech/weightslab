@@ -19,6 +19,8 @@
 
 WeightsLab is an IDE for mid-training model development. Wrap your training script with the SDK to make it live, inspectable, and editable — then use Studio to supervise data distribution, fix problems, and ship without restarting.
 
+If weightslab saves you a training restart &rarr; **give it a star ⭐**
+
 ## Quickstart
 
 ![Python](https://img.shields.io/badge/Python-3.10--3.14-5865F2?style=flat&logo=python&logoColor=white)
@@ -46,7 +48,7 @@ wl.serve(serving_grpc=True, serving_cli=False)
 ```bash
 weightslab ui launch  # then open https://localhost:5173 🚀
 ```
-For a detailed installation guide and advanced configuration, see the [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
+For a detailed installation guide and advanced configuration &rarr; [Installation Documentation](https://grayboxtech.github.io/weightslab/latest/quickstart.html).
 
 <br>
 
