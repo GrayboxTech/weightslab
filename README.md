@@ -22,20 +22,20 @@
 
 ## What it does
 
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets — images, video & LiDAR point clouds.
+WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets: images, video & LiDAR point clouds.
 
 <br>
 
-Most data problems are invisible until your model tells you — through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them
+Most data problems are invisible until your model tells you: through loss spikes, poor generalization, or silent underperformance. WeightsLab connects those training signals back to the exact samples causing them
 
 **Wrap your training script with the SDK** to capture per-sample signals live.  
-**Open Studio** to inspect, filter, and curate your dataset — mid-training, without restarting.
+**Open Studio** to inspect, filter, and curate your dataset mid-training, without restarting.
 
-- 🔍 **Detect** - Surface mislabels, outliers & class imbalance using live loss signals 
-- ✂️ **Curate** - Discard bad samples, create data subsets, rebalance distributions 
-- ▶️ **Continue** - Resume training on your cleaned dataset — no restart required 
+- **Detect** - Surface mislabels, outliers & class imbalance using live loss signals 
+- **Curate** - Discard bad samples, create data subsets, rebalance distributions 
+- **Continue** - Resume training on your cleaned dataset, no restart required 
 
-WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets — images, video & LiDAR point clouds.
+WeightsLab is an open-source PyTorch tool for dataset debugging, data quality monitoring, mislabel detection, and mid-training data curation for computer vision datasets (images, video & LiDAR point clouds).
 
 <br>
 
