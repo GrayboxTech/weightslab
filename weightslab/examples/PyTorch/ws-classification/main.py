@@ -261,6 +261,7 @@ if __name__ == "__main__":
     log_dir = parameters["root_log_dir"]
     tqdm_display = parameters.get("tqdm_display", True)
     eval_full_to_train_steps_ratio = parameters.get("eval_full_to_train_steps_ratio", 50)
+    write_export_ratio = parameters.get("write_export_ratio", 100)
     enable_h5_persistence = parameters.get("enable_h5_persistence", True)
     training_steps_to_do = parameters.get("training_steps_to_do", 1000)
 
@@ -406,6 +407,11 @@ if __name__ == "__main__":
                 test_loader_len
             )
 
+        # Periodic history + dataframe export (JSON/CSV snapshots to root_log_dir)
+        if age > 0 and age % write_export_ratio == 0:
+            wl.write_history()
+            wl.write_dataframe()
+
         # Verbose
         if verbose and not tqdm_display:
             import sys
@@ -431,6 +437,10 @@ if __name__ == "__main__":
     print(f" Training completed in {time.time() - start_time:.2f} seconds")
     print(f" Logs saved to: {log_dir}")
     print("=" * 60)
+
+    # Final export of signal history and data grid to root_log_dir
+    wl.write_history()
+    wl.write_dataframe()
 
     # Keep the main thread alive to allow background serving threads to run
     wl.keep_serving()

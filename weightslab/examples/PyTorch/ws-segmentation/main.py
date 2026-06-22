@@ -194,6 +194,7 @@ if __name__ == "__main__":
     log_dir = parameters["root_log_dir"]
     max_steps = parameters["training_steps_to_do"]
     eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
+    write_export_ratio = parameters.get("write_export_ratio", 100)
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
 
@@ -356,6 +357,11 @@ if __name__ == "__main__":
             test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(test_loader_it, model, test_sig, device, test_loader_len)
 
+        # Periodic history + dataframe export (JSON/CSV snapshots to root_log_dir)
+        if age > 0 and age % write_export_ratio == 0:
+            wl.write_history()
+            wl.write_dataframe()
+
         # Verbose
         if verbose and not tqdm_display:
             print(
@@ -377,6 +383,10 @@ if __name__ == "__main__":
     print(f" Training completed in {time.time() - start_time:.2f} seconds")
     print(f" Logs saved to: {log_dir}")
     print("=" * 60)
+
+    # Final export of signal history and data grid to root_log_dir
+    wl.write_history()
+    wl.write_dataframe()
 
     # Keep the main thread alive to allow background serving threads to run
     wl.keep_serving()
