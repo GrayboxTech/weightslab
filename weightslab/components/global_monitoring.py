@@ -229,17 +229,16 @@ class GuardContext:
         context = Context.TRAINING if self.for_training else Context.TESTING
         self._context_token = set_current_context(context)
 
-        # Update model — get_model() returns a Proxy(None) placeholder when nothing
-        # is registered; only use it if the proxy target is actually resolved.
+        # Update model — always resolve from the current ledger so stale references
+        # from previous calls never bleed through. get_model() returns a Proxy(None)
+        # placeholder when nothing is registered; treat that as "no model".
         _model = get_model()
-        if _model is not None:
-            try:
-                _target = object.__getattribute__(_model, '_obj')
-                if _target is not None:
-                    self.model = _model
-            except AttributeError:
-                # _model is a plain (non-Proxy) object; use it directly
-                self.model = _model
+        try:
+            _target = object.__getattribute__(_model, '_obj')
+            self.model = _model if _target is not None else None
+        except AttributeError:
+            # _model is a plain (non-Proxy) object; use it directly
+            self.model = _model
 
         # The exact logic requested by the user:
         if self.model is not None:
