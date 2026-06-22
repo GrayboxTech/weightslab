@@ -1113,6 +1113,116 @@ def keep_serving(timeout: int = None, release_gpu: bool = True) -> None:
         logger.info("Shutting down WeightsLab services.")
 
 
+def _rehydrate_dataframe_from_disk(root_log_dir) -> list:
+    """Best-effort: rebuild the data grid from the persisted H5 store so samples
+    are browsable in explore mode without the original ``Dataset`` object.
+
+    Returns the list of data origins (splits) that were rehydrated. Any failure
+    is non-fatal — logs/plots still work without the data grid.
+    """
+    from pathlib import Path
+    import pandas as _pd
+    from weightslab.backend import ledgers as _ledgers
+    from weightslab.data.h5_dataframe_store import H5DataFrameStore
+    from weightslab.data.dataframe_manager import LedgeredDataFrameManager
+
+    data_h5 = Path(str(root_log_dir)) / "checkpoints" / "data" / "data.h5"
+    if not data_h5.exists():
+        logger.info("Explore: no persisted data store at %s; data grid unavailable.", data_h5)
+        return []
+    try:
+        store = H5DataFrameStore(str(data_h5))
+        # Enumerate origins (HDF groups under the store's key prefix).
+        prefix = f"/{getattr(store, '_key_prefix', 'stats')}_"
+        origins: list = []
+        try:
+            with _pd.HDFStore(str(data_h5), mode="r") as h5:
+                origins = sorted({k[len(prefix):] for k in h5.keys() if k.startswith(prefix)})
+        except Exception:
+            logger.debug("Explore: could not enumerate data origins", exc_info=True)
+        if not origins:
+            return []
+
+        # No flush threads in a read-only explorer; data writes (tags/discard) are
+        # still applied in-memory and persisted on demand.
+        dfm = LedgeredDataFrameManager(enable_flushing_threads=False, enable_h5_persistence=True)
+        dfm.set_store(store)
+        loaded = []
+        for origin in origins:
+            try:
+                dfm.register_split(origin, _pd.DataFrame(), store, autoload_arrays=False)
+                loaded.append(origin)
+            except Exception:
+                logger.warning("Explore: failed to rehydrate data split '%s'", origin, exc_info=True)
+        if loaded:
+            _ledgers.register_dataframe(dfm)
+        return loaded
+    except Exception:
+        logger.warning("Explore: data rehydration from disk failed; logs/plots still available.", exc_info=True)
+        return []
+
+
+def load_experiment_for_explore(root_log_dir, exp_hash: str = None) -> dict:
+    """Load a finished experiment from ``root_log_dir`` into a fresh, read-only ledger.
+
+    Reconstructs hyperparameters, logger history, the checkpoint manager (and,
+    best-effort, the model and the data grid) purely from disk, then flips the
+    process into read-only **explore mode** (see
+    :mod:`weightslab.backend.explore_mode`). No training script, dataset, GPU, or
+    network is required — intended for browsing a run that is finished or still
+    training elsewhere (e.g. on a cluster).
+
+    After this returns, start the gRPC server with :func:`serve` (``serving_grpc=True``)
+    and the UI can read everything while training/HP/weight mutations are refused.
+
+    Args:
+        root_log_dir: An experiment ``root_log_dir`` produced by a previous run.
+        exp_hash: Optional specific experiment hash to open (defaults to the latest).
+
+    Returns:
+        A dict summary: ``{root_log_dir, experiment_hash, has_logger, origins}``.
+    """
+    from pathlib import Path
+    from weightslab.backend import ledgers as _ledgers
+    from weightslab.backend.explore_mode import set_explore_mode
+    from weightslab.components.checkpoint_manager import CheckpointManager
+
+    root = Path(str(root_log_dir)).absolute()
+    if not root.exists():
+        raise FileNotFoundError(f"root_log_dir does not exist: {root}")
+
+    # A read-only explorer must not inherit any live training objects.
+    _ledgers.clear_all()
+
+    # CheckpointManager.__init__ loads the manifest + logger snapshots (registering
+    # a logger with the saved history) and bootstraps the latest experiment state
+    # (config/HP, model best-effort, data snapshot) from disk.
+    manager = CheckpointManager(str(root))
+    _ledgers.register_checkpoint_manager(manager)
+
+    if exp_hash:
+        try:
+            manager.load_state(exp_hash)
+        except Exception:
+            logger.warning(
+                "Explore: could not load requested hash %s; using bootstrapped state.",
+                exp_hash, exc_info=True,
+            )
+
+    origins = _rehydrate_dataframe_from_disk(root)
+
+    set_explore_mode(True)
+
+    summary = {
+        "root_log_dir": str(root),
+        "experiment_hash": manager.get_current_experiment_hash(),
+        "has_logger": _ledgers.get_logger() is not None,
+        "origins": origins,
+    }
+    logger.info("Explore mode ready: %s", summary)
+    return summary
+
+
 def signal(name: str, subscribe_to: str = None, compute_every_n_steps: int = 1, **kwargs):
     """
     Decorator that registers a custom signal function.

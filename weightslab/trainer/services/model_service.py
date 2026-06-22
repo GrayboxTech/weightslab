@@ -10,6 +10,7 @@ import weightslab.proto.experiment_service_pb2 as pb2
 from weightslab.trainer.trainer_tools import process_sample, _get_input_tensor_for_sample
 from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 from weightslab.components.global_monitoring import weightslab_rlock, try_acquire_rlock, _GRPC_LOCK_TIMEOUT_S
+from weightslab.backend.explore_mode import is_explore_mode, EXPLORE_BLOCKED_MESSAGE
 
 
 logger = logging.getLogger(__name__)
@@ -311,6 +312,10 @@ class ModelService:
     # Weight manipulation (architecture operations)
     # -------------------------------------------------------------------------
     def ManipulateWeights(self, request, context):
+        # Read-only explore mode: architecture/weight edits are disabled.
+        if is_explore_mode():
+            return pb2.WeightsOperationResponse(success=False, message=EXPLORE_BLOCKED_MESSAGE)
+
         self._ctx.ensure_components()
 
         components = self._ctx.components

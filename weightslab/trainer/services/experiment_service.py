@@ -14,6 +14,7 @@ from weightslab.trainer.trainer_tools import get_hyper_parameters_pb, get_layer_
 from weightslab.backend.ledgers import set_hyperparam, list_hyperparams, resolve_hp_name, get_hyperparams
 from weightslab.backend import ledgers
 from weightslab.backend.audit_logger import AuditLogger
+from weightslab.backend.explore_mode import is_explore_mode, EXPLORE_BLOCKED_MESSAGE
 from weightslab.trainer.services.model_service import ModelService
 from weightslab.trainer.services.data_service import DataService
 from weightslab.trainer.services.agent_service import AgentService
@@ -364,6 +365,8 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         - Calls checkpoint manager to load the state
         - Returns success flag and message
         """
+        if is_explore_mode():
+            return pb2.RestoreCheckpointResponse(success=False, message=EXPLORE_BLOCKED_MESSAGE)
         try:
             raw_experiment_hash = request.experiment_hash
             experiment_hash = raw_experiment_hash
@@ -477,6 +480,10 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
         This stores the evaluation request in the global eval_controller.
         The actual pass runs in the training thread via ``run_pending_evaluation()``.
         """
+        # No training thread runs in explore mode, so evaluation can't execute.
+        if is_explore_mode():
+            return pb2.TriggerEvaluationResponse(success=False, message=EXPLORE_BLOCKED_MESSAGE)
+
         split_name = request.split_name or ""
         tags = list(request.tags) if request.tags else []
         use_full_set = bool(request.use_full_set)
@@ -729,6 +736,18 @@ class ExperimentService(pb2_grpc.ExperimentServiceServicer):
     def ExperimentCommand(self, request, context):
         self._ctx.ensure_components()
         components = self._ctx.components
+
+        # Read-only explore mode: refuse the mutating commands that would change
+        # the model or the training run. Data management (deny/tag operations,
+        # plot notes) and all read requests below stay allowed.
+        if is_explore_mode():
+            for forbidden in (
+                "hyper_parameter_change",
+                "save_checkpoint_operation",
+                "load_checkpoint_operation",
+            ):
+                if request.HasField(forbidden):
+                    return pb2.CommandResponse(success=False, message=EXPLORE_BLOCKED_MESSAGE)
 
         # Write requests
         if request.HasField("save_checkpoint_operation"):
