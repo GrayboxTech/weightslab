@@ -905,26 +905,23 @@ class DataService:
 
         logger.info(f"[DataService] Starting natural sort stats computation with weights: {SORT_WEIGHTS}")
 
-        try:
-            import cv2
-        except ImportError:
-            logger.warning("[DataService] OpenCV not found. Skipping natural sort computation.")
-            return "OpenCV not installed"
-
         if self._all_datasets_df is None or self._all_datasets_df.empty:
              return "No data to process"
 
-        # Helper: Calculate Shannon Entropy (Complexity)
+        # Helper: Calculate Shannon Entropy (Complexity).
+        # 256-bin histogram of the 8-bit grayscale image via numpy (no OpenCV).
         def calc_entropy(img_gray):
             try:
-                # Calculate histogram (256 bins for 8-bit)
-                hist = cv2.calcHist([img_gray], [0], None, [256], [0, 256])
-                # Normalize histogram to get probabilities
-                p = hist.ravel() / hist.sum()
-                # Filter out zero probabilities to avoid log(0)
+                gray_u8 = np.clip(np.rint(img_gray), 0, 255).astype(np.uint8)
+                counts = np.bincount(gray_u8.ravel(), minlength=256).astype(np.float64)
+                total = counts.sum()
+                if total <= 0:
+                    return 0.0
+                # Normalize to probabilities, dropping zeros to avoid log(0)
+                p = counts / total
                 p = p[p > 0]
                 # Shannon Entropy in bits
-                return -np.sum(p * np.log2(p))
+                return float(-np.sum(p * np.log2(p)))
             except Exception:
                 return 0.0
 
@@ -965,27 +962,28 @@ class DataService:
                 # Convert to numpy (RGB)
                 img_np = np.array(pil_img)
 
-                # Brightness (mean pixel intensity)
-                # If RGB, convert to Gray, else just mean
-                if img_np.ndim == 3:
-                    # OpenCV expects BGR usually, but PIL gives RGB.
-                    # cvtColor RGB2GRAY is correct.
-                    try:
-                        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-                    except Exception:
-                         gray = img_np
+                # Brightness (mean pixel intensity). For color images, reduce to
+                # luma using the ITU-R 601-2 transform — the same weights PIL's
+                # "L" mode uses — with plain numpy.
+                if img_np.ndim == 3 and img_np.shape[2] >= 3:
+                    luma = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+                    gray = img_np[..., :3].astype(np.float32) @ luma
+                elif img_np.ndim == 3:
+                    gray = img_np[..., 0].astype(np.float32)
                 else:
-                    gray = img_np
+                    gray = img_np.astype(np.float32)
 
-                brightness = np.mean(gray)
+                brightness = float(np.mean(gray))
                 entropy = calc_entropy(gray)
 
-                # HSV Stats
-                if img_np.ndim == 3:
+                # HSV stats (hue/saturation). Computed with Pillow's "HSV" mode
+                # (H, S, V each in 0-255) to avoid an OpenCV dependency.
+                if img_np.ndim == 3 and img_np.shape[2] >= 3:
                     try:
-                        hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
-                        hue = np.mean(hsv[:, :, 0])
-                        saturation = np.mean(hsv[:, :, 1])
+                        rgb_img = pil_img if pil_img.mode == "RGB" else pil_img.convert("RGB")
+                        hsv = np.asarray(rgb_img.convert("HSV"))
+                        hue = float(np.mean(hsv[:, :, 0]))
+                        saturation = float(np.mean(hsv[:, :, 1]))
                     except Exception:
                         hue = 0.0
                         saturation = 0.0
@@ -1001,8 +999,8 @@ class DataService:
                 # Entropy: 0-8 bits typical for 8-bit image
                 norm_entropy = min(max(entropy / 8.0, 0.0), 1.0)
 
-                # Hue: 0-179 in OpenCV
-                norm_hue = min(max(hue / 179.0, 0.0), 1.0)
+                # Hue: 0-255 in Pillow's HSV space
+                norm_hue = min(max(hue / 255.0, 0.0), 1.0)
 
                 score = (
                     SORT_WEIGHTS.get("brightness", 0) * norm_brightness +
@@ -1125,7 +1123,7 @@ class DataService:
         try:
             origin = row.get(SampleStatsEx.ORIGIN.value, 'unknown')
             sample_id = row.get(SampleStatsEx.SAMPLE_ID.value, 0)
-            # logger.debug(f"Processing sample_id={sample_id} from origin={origin} with request: {request}")
+            logger.debug(f"Processing sample_id={sample_id} from origin={origin} with request: {request}")
 
             # ===== Timing accumulators =====
             t_image_load = 0.0
@@ -1208,58 +1206,14 @@ class DataService:
                             except Exception:
                                 pass
 
-            # ====== Step 5a: Process stats ======
-            stats_to_retrieve = list(request.stats_to_retrieve)
+            # ====== Step 5a: Metadata stats — moved to GetMetaData ======
+            # Generic dataframe metadata columns (signals, tags, custom fields, etc.)
+            # are no longer returned by GetDataSamples; the dedicated GetMetaData RPC
+            # serves them. GetDataSamples returns only the rendering flags
+            # origin / task_type / discarded (needed for the split border, overlay
+            # mode and gray-out) plus image / label / prediction data below.
 
-            # These columns are handled explicitly later in the pipeline
-            exclude_cols = {
-                SampleStatsEx.SAMPLE_ID.value,
-                SampleStatsEx.ORIGIN.value,
-                SampleStatsEx.TARGET.value if not skip_label_for_request else None,
-                SampleStatsEx.PREDICTION.value,
-                SampleStatsEx.TASK_TYPE.value,
-                '_instance_signals',  # Special handling for multi-instance signals
-                'annotation_id',       # Internal multi-index tracking
-            }
-
-            if not stats_to_retrieve:
-                stats_to_retrieve = [col for col in df_columns if col not in exclude_cols]
-
-            # Optimized bulk processing of stats
-            for stat_name in stats_to_retrieve:
-                # Never re-process core fields generically (prevents duplicates/bad db state overwriting calculated state)
-                if stat_name in exclude_cols:
-                    continue
-
-                value = row.get(stat_name)
-
-                # Skip prediction raw array
-                if (isinstance(value, np.ndarray) and value.ndim > 1) or (isinstance(value, (list, tuple, np.ndarray)) and len(value) == 0):
-                    continue
-                elif isinstance(value, float):
-                    value = round(value, 7)
-                elif isinstance(value, bool):
-                    value = int(value)
-
-                # Check if it s a tag column here and handle it as a string stat with the tag name as value
-                value_string = str(value)
-                if stat_name.startswith(f"{SampleStatsEx.TAG.value}"):
-                    tag_name = stat_name[len(f"{SampleStatsEx.TAG.value}:"):]  # Remove "tags_" prefix to get tag name
-                    data_stats.append(
-                        create_data_stat(
-                            f"{SampleStatsEx.TAG.value}:{tag_name}",
-                            "string",
-                            shape=[1],
-                            value_string=value_string,
-                            thumbnail=b""
-                        )
-                    )
-                else:
-                    data_stats.append(
-                        create_data_stat(stat_name, "string", shape=[1], value_string=value_string[:512], thumbnail=b"")
-                    )
-
-            # ====== Step 6: Add origin and task_type stats ======
+            # ====== Step 6: Add origin, task_type and discarded rendering flags ======
             data_stats.append(
                 create_data_stat(
                     "origin", 'string', shape=[1], value_string=origin, thumbnail=b""
@@ -1268,6 +1222,18 @@ class DataService:
             data_stats.append(
                 create_data_stat(
                     "task_type", 'string', shape=[1], value_string=str(task_type), thumbnail=b""
+                )
+            )
+            # 'discarded' drives the grayed-out cell rendering, so it rides with the
+            # image data as "1"/"0" (not treated as analytical metadata). This keeps
+            # the gray-out reliable on every grid (re)fetch / scroll.
+            try:
+                _discarded_str = "1" if bool(row.get(SampleStatsEx.DISCARDED.value)) else "0"
+            except Exception:
+                _discarded_str = "0"
+            data_stats.append(
+                create_data_stat(
+                    SampleStatsEx.DISCARDED.value, 'string', shape=[1], value_string=_discarded_str, thumbnail=b""
                 )
             )
 
@@ -2748,12 +2714,13 @@ class DataService:
         except Exception:
             return False
 
-    def _build_metadata_only_response(self, df_slice: pd.DataFrame, request):
-        """Build DataSamplesResponse from dataframe columns only (no dataset/image traversal).
+    def _build_metadata_only_response(self, df_slice: pd.DataFrame, requested_cols=None):
+        """Build a DataSamplesResponse of metadata DataRecords from dataframe columns only.
 
-        This is a single-job vectorized path: the entire df_slice is processed
-        at once using pandas operations rather than dispatching per-sample_id
-        work to the thread pool.
+        No dataset/image traversal: the entire df_slice is processed at once using
+        vectorized pandas operations rather than dispatching per-sample_id work to
+        the thread pool. ``requested_cols`` restricts the columns; when None/empty
+        all columns are returned except heavy per-sample blobs. Used by GetMetaData.
         """
         if df_slice is None or df_slice.empty:
             return pb2.DataSamplesResponse(
@@ -2762,7 +2729,7 @@ class DataService:
                 data_records=[],
             )
 
-        requested_cols = list(getattr(request, 'stats_to_retrieve', []) or [])
+        requested_cols = list(requested_cols or [])
         # NOTE: ORIGIN is intentionally NOT excluded. The histogram (and any caller
         # that needs per-sample split coloring) requests 'origin' explicitly and
         # relies on this fast vectorized path to return it — without this, the client
@@ -2824,6 +2791,11 @@ class DataService:
             series = df_slice[col]
             if series.dtype.kind == 'f':
                 str_vals = series.round(7).astype(str).str[:512].tolist()
+            elif series.dtype.kind == 'b':
+                # Booleans (e.g. 'discarded') → "1"/"0" so the UI's boolean/discarded
+                # handling — which expects the legacy per-sample "1"/"0" form — keeps
+                # working now that metadata is served exclusively by GetMetaData.
+                str_vals = series.astype(int).astype(str).tolist()
             else:
                 str_vals = series.astype(str).str[:512].tolist()
             # NaN → None
@@ -2872,6 +2844,132 @@ class DataService:
             message=f"Retrieved {len(data_records)} metadata records (columns: {', '.join(metadata_cols)})",
             data_records=data_records,
         )
+
+    def _get_all_metadata_column_names(self) -> list:
+        """Return every metadata column name available across the WHOLE dataset.
+
+        Excludes heavy per-sample blob columns (pred/target) and internal
+        bookkeeping columns, matching the column set _build_metadata_only_response
+        emits. Order follows the dataframe columns (de-duplicated) so the UI column
+        picker stays stable across refreshes.
+        """
+        try:
+            df = self._all_datasets_df
+            if df is None or df.empty:
+                return []
+            _HEAVY_BLOB_COLS = {"pred", "prediction", "prediction_raw", "target"}
+            _INTERNAL_COLS = {
+                SampleStatsEx.SAMPLE_ID.value,
+                SampleStatsEx.TASK_TYPE.value,
+                "annotation_id",
+                "_instance_signals",
+            }
+            seen, names = set(), []
+            for col in df.columns:
+                name = str(col)
+                if col in _HEAVY_BLOB_COLS or col in _INTERNAL_COLS:
+                    continue
+                if name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+            # Include index-level names too (e.g. 'origin' in the (origin, sample_id)
+            # multi-index), excluding internal levels like sample_id/annotation_id.
+            if isinstance(df.index, pd.MultiIndex):
+                index_names = [n for n in (df.index.names or []) if n]
+            elif df.index.name:
+                index_names = [df.index.name]
+            else:
+                index_names = []
+            for n in index_names:
+                name = str(n)
+                if n in _HEAVY_BLOB_COLS or n in _INTERNAL_COLS or name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+            return names
+        except Exception as e:
+            logger.warning("Error enumerating metadata column names: %s", e)
+            return []
+
+    def GetMetaData(self, request, context):
+        """Metadata-only retrieval, separated from GetDataSamples.
+
+        Returns:
+            - all_metadata_names: every metadata column for the WHOLE dataset
+            - grid_records: per-sample metadata for the requested grid slice
+            - modal_record: metadata for the open modal sample (by sample_id), if any
+        """
+        try:
+            # Read the current view directly (kept fresh by the same mechanisms
+            # GetDataSamples relies on); no forced refresh on the 15s metadata poll.
+            all_names = self._get_all_metadata_column_names()
+            df = self._all_datasets_df
+
+            if df is None or df.empty:
+                return pb2.GetMetaDataResponse(
+                    success=False,
+                    message="Internal dataframe is empty or not initialized.",
+                    all_metadata_names=all_names,
+                    grid_records=[],
+                )
+
+            # ---- Grid slice metadata (current view order) ----
+            grid_records = []
+            start = max(0, int(getattr(request, "start_index", 0)))
+            count = int(getattr(request, "records_cnt", 0))
+            if count > 0:
+                try:
+                    df_slice = safe_reset_index(df.iloc[start:start + count])
+                except IndexError:
+                    df_slice = None
+                if df_slice is not None and not df_slice.empty:
+                    df_slice, _ = self._merge_multi_instance_signals(df_slice)
+                    grid_resp = self._build_metadata_only_response(df_slice)
+                    if grid_resp.success:
+                        grid_records = list(grid_resp.data_records)
+
+            # ---- Modal sample metadata (optional, by sample_id) ----
+            modal_record = None
+            modal_id = str(getattr(request, "modal_sample_id", "") or "").strip()
+            if modal_id:
+                try:
+                    sid_col = SampleStatsEx.SAMPLE_ID.value
+                    matches = None
+                    if sid_col in df.columns:
+                        matches = df[df[sid_col].astype(str) == modal_id]
+                    elif isinstance(df.index, pd.MultiIndex) and sid_col in (df.index.names or []):
+                        # sample_id is a multi-index level (origin, sample_id).
+                        level_vals = df.index.get_level_values(sid_col).astype(str)
+                        matches = df[level_vals == modal_id]
+                    else:
+                        matches = df[df.index.astype(str) == modal_id]
+                    if matches is not None and not matches.empty:
+                        modal_df = safe_reset_index(matches.iloc[[0]])
+                        modal_df, _ = self._merge_multi_instance_signals(modal_df)
+                        modal_resp = self._build_metadata_only_response(modal_df)
+                        if modal_resp.success and modal_resp.data_records:
+                            modal_record = modal_resp.data_records[0]
+                except Exception as e:
+                    logger.warning("GetMetaData modal lookup failed for %s: %s", modal_id, e)
+
+            resp = pb2.GetMetaDataResponse(
+                success=True,
+                message=f"Retrieved {len(grid_records)} metadata records, {len(all_names)} columns",
+                all_metadata_names=all_names,
+                grid_records=grid_records,
+            )
+            if modal_record is not None:
+                resp.modal_record.CopyFrom(modal_record)
+            return resp
+        except Exception as e:
+            logger.error("Error in GetMetaData: %s", str(e), exc_info=True)
+            return pb2.GetMetaDataResponse(
+                success=False,
+                message=f"Failed to retrieve metadata: {str(e)}",
+                all_metadata_names=[],
+                grid_records=[],
+            )
 
     def _merge_multi_instance_signals(self, df_slice):
         """Merge per-instance signals into dictionaries for multi-index dataframes.
@@ -3020,8 +3118,9 @@ class DataService:
             logger.debug(
                 "Retrieving samples from %s to %s", request.start_index, request.start_index + request.records_cnt)
 
-            if self._is_metadata_only_request(request):
-                return self._build_metadata_only_response(df_slice, request)
+            # NOTE: metadata-only requests are no longer served here. GetDataSamples
+            # returns image / label / prediction data only; metadata columns are
+            # served by the dedicated GetMetaData RPC.
 
             # ---- Preview-cache tolerant path -------------------------------
             # For preview-tier requests, serve what is available from cache

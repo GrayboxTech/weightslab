@@ -197,6 +197,29 @@ class LedgerTests(unittest.TestCase):
         hp_handle["lr"] = 0.02
         self.assertEqual(lr.get(), 0.02)
 
+    def test_value_proxy_subscript_access(self):
+        """ValueProxy subscript [key] is equivalent to .get(key) and chains."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(
+            params={"dataset": {"batch_size": 32, "splits": {"train": 0.8}}}
+        )
+
+        dataset = hp_handle.get("dataset")
+        # [key] matches .get(key) for the resolved mapping.
+        self.assertEqual(dataset["batch_size"], dataset.get("batch_size"))
+        self.assertEqual(dataset["batch_size"], 32)
+
+        # Nested dicts are wrapped in a live proxy so chaining keeps resolving.
+        self.assertEqual(dataset["splits"]["train"], 0.8)
+
+        # Reads stay fresh against the underlying mapping.
+        hp_handle["dataset"] = {"batch_size": 64, "splits": {"train": 0.9}}
+        self.assertEqual(dataset["batch_size"], 64)
+
+        # Missing keys raise KeyError, matching standard subscript semantics.
+        with self.assertRaises(KeyError):
+            dataset["missing"]
+
     def test_proxy_pickles_and_restores(self):
         proxy = Proxy({"flag": True, "count": 3})
 

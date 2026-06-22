@@ -341,8 +341,9 @@ class TestReverseIndex(unittest.TestCase):
         lg = _fresh_logger()
         lg.add_scalars("loss", {"loss": 0.5}, 1,
                        signal_per_sample={"img0": 0.5, "img1": 0.3}, aggregate_by_step=False)
-        idx = lg._sample_index.get("loss", {})
-        self.assertTrue(any("img0" in h_idx for h_idx in idx.values()))
+        rows = lg.query_per_sample("loss", sample_ids=["img0"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "img0")
 
     def test_sample_index_points_to_correct_rows(self):
         lg = _fresh_logger()
@@ -350,28 +351,24 @@ class TestReverseIndex(unittest.TestCase):
                        signal_per_sample={"img0": 0.5}, aggregate_by_step=False)
         lg.add_scalars("loss", {"loss": 0.3}, 2,
                        signal_per_sample={"img0": 0.3}, aggregate_by_step=False)
-        # img0 appears twice — both rows should be indexed
-        h = list(lg._sample_index["loss"].keys())[0]
-        rows = lg._sample_index["loss"][h]["img0"]
+        # img0 appears twice — both rows should be returned, at steps 1 and 2
+        rows = lg.query_per_sample("loss", sample_ids=["img0"])
         self.assertEqual(len(rows), 2)
-        buf = list(lg._signal_history_per_sample["loss"].values())[0]
-        self.assertEqual(buf["steps"][rows[0]], 1)
-        self.assertEqual(buf["steps"][rows[1]], 2)
+        self.assertEqual({r[1] for r in rows}, {1, 2})
 
     def test_instance_index_built_on_add(self):
         lg = _fresh_logger()
         lg.add_instance_scalars("iou", ["s0", "s0", "s1"], [1, 2, 1], [0.9, 0.8, 0.7], 5, "h1")
-        idx = lg._instance_index["iou"]["h1"]
-        self.assertIn(("s0", 1), idx)
-        self.assertIn(("s0", 2), idx)
-        self.assertIn(("s1", 1), idx)
+        keys = {(r[0], r[1]) for r in lg.query_per_instance("iou")}
+        self.assertIn(("s0", 1), keys)
+        self.assertIn(("s0", 2), keys)
+        self.assertIn(("s1", 1), keys)
 
     def test_instance_index_points_to_correct_values(self):
         lg = _fresh_logger()
         lg.add_instance_scalars("iou", ["s0", "s0"], [1, 1], [0.9, 0.8], 5, "h1")
-        # Same (s0, 1) at two different steps → two rows
-        idx = lg._instance_index["iou"]["h1"]
-        rows = idx[("s0", 1)]
+        # Same (s0, 1) recorded twice → two rows returned
+        rows = lg.query_per_instance("iou", sample_id="s0", annotation_id=1)
         self.assertEqual(len(rows), 2)
 
     def test_sample_index_rebuilt_after_snapshot_load(self):
@@ -381,8 +378,8 @@ class TestReverseIndex(unittest.TestCase):
         snap = lg.save_snapshot()
         lg2 = _fresh_logger()
         lg2.load_snapshot(snap)
-        self.assertIn("img0", list(lg2._sample_index.get("loss", {}).values())[0])
-        self.assertIn("img1", list(lg2._sample_index.get("loss", {}).values())[0])
+        self.assertEqual(len(lg2.query_per_sample("loss", sample_ids=["img0"])), 1)
+        self.assertEqual(len(lg2.query_per_sample("loss", sample_ids=["img1"])), 1)
 
     def test_instance_index_rebuilt_after_snapshot_load(self):
         lg = _fresh_logger()
@@ -390,9 +387,9 @@ class TestReverseIndex(unittest.TestCase):
         snap = lg.save_snapshot()
         lg2 = _fresh_logger()
         lg2.load_snapshot(snap)
-        idx = lg2._instance_index.get("iou", {}).get("h1", {})
-        self.assertIn(("s0", 1), idx)
-        self.assertIn(("s1", 2), idx)
+        keys = {(r[0], r[1]) for r in lg2.query_per_instance("iou", exp_hash="h1")}
+        self.assertIn(("s0", 1), keys)
+        self.assertIn(("s1", 2), keys)
 
     def test_clear_signal_histories_also_clears_indices(self):
         lg = _fresh_logger()
@@ -400,8 +397,8 @@ class TestReverseIndex(unittest.TestCase):
                        signal_per_sample={"img0": 0.5}, aggregate_by_step=False)
         lg.add_instance_scalars("iou", ["s0"], [1], [0.8], 1, "h1")
         lg.clear_signal_histories()
-        self.assertEqual(lg._sample_index, {})
-        self.assertEqual(lg._instance_index, {})
+        self.assertEqual(lg.query_per_sample("loss"), [])
+        self.assertEqual(lg.query_per_instance("iou"), [])
 
     def test_query_uses_index_not_full_scan(self):
         """query_per_sample with filter returns correct results via index path."""
@@ -422,10 +419,10 @@ class TestReverseIndex(unittest.TestCase):
         lg.add_scalars("loss", {"loss": 0.5}, 1,
                        signal_per_sample={"imgA": 0.5, "imgB": 0.3}, aggregate_by_step=False)
         lg._eval_mode_active = False
-        idx = lg._sample_index.get("loss", {}).get("eval_h1", {})
-        self.assertIn("imgA", idx)
-        self.assertIn("imgB", idx)
-        # Query must find them
+        # Per-sample data was written under the eval hash and is queryable
+        under_eval = {r[0] for r in lg.query_per_sample("loss", exp_hash="eval_h1")}
+        self.assertIn("imgA", under_eval)
+        self.assertIn("imgB", under_eval)
         rows = lg.query_per_sample("loss", sample_ids=["imgA"])
         self.assertEqual(len(rows), 1)
 
@@ -445,9 +442,9 @@ class TestReverseIndex(unittest.TestCase):
             },
         }
         lg.load_snapshot(legacy_snap)
-        idx = lg._sample_index.get("loss", {}).get("h1", {})
-        self.assertIn("img0", idx)
-        self.assertIn("img1", idx)
+        under_h1 = {r[0] for r in lg.query_per_sample("loss", exp_hash="h1")}
+        self.assertIn("img0", under_h1)
+        self.assertIn("img1", under_h1)
         rows = lg.query_per_sample("loss", sample_ids=["img0"])
         self.assertEqual(len(rows), 1)
 
@@ -456,14 +453,8 @@ class TestReverseIndex(unittest.TestCase):
         lg = _fresh_logger()
         lg.add_scalars("loss", {"loss": 0.1}, 1,
                        signal_per_sample={"s0": 0.1}, aggregate_by_step=False)
-        # Manually inject a second hash entry to simulate two runs
-        from array import array as _array
-        lg._signal_history_per_sample["loss"]["h2"] = {
-            "sample_ids": ["s0"],
-            "steps": _array('i', [1]),
-            "values": _array('f', [0.9]),
-        }
-        lg._sample_index.setdefault("loss", {}).setdefault("h2", {})["s0"] = [0]
+        # Add a second run's data under hash "h2"
+        lg.ingest_per_sample("loss", "h2", [("s0", 1, 0.9)])
         rows_h2 = lg.query_per_sample("loss", sample_ids=["s0"], exp_hash="h2")
         self.assertEqual(len(rows_h2), 1)
         self.assertAlmostEqual(rows_h2[0][2], 0.9, places=4)
