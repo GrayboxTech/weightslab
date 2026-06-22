@@ -252,11 +252,7 @@ class Proxy:
             return int(self._resolve())
 
         def __float__(self) -> float:
-            v = self._resolve()
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return None
+            return float(self._resolve())
 
         def __index__(self) -> int:
             v = self._resolve()
@@ -452,14 +448,19 @@ class Proxy:
                 except for ``str`` values, which are returned raw (see below).
         """
         if ref is not None:
-            if proxy:
+            value = self._obj.get(ref, default) if hasattr(self._obj, "get") else default
+            # Avoid wrapping a python list, dict, or any callable in a live proxy —
+            # only "simple" values become live key proxies. (The previous form put
+            # `not callable(...)` INSIDE the isinstance group, so callables — which
+            # are not lists/dicts — slipped through and got proxied.)
+            if proxy and not (isinstance(value, (list, dict)) or callable(value)):
                 vp = Proxy._ValueProxy(self, ref, default)
                 # str and torch.device are handed back as plain values (see
-                # _plain_get_value); other types (dict/list/int/float/...) stay
+                # _plain_get_value); other simple types (int/float/bool/...) stay
                 # live proxies so studio edits keep tracking.
                 plain = _plain_get_value(vp._resolve())
                 return vp if plain is _KEEP_AS_PROXY else plain
-            return self._obj.get(ref, default)
+            return value
         return self._obj if self._obj is not None else default
 
     def __getattr__(self, item):
@@ -726,6 +727,68 @@ class Proxy:
 # Register Proxy as a virtual subclass of MutableMapping so isinstance(proxy, dict) works
 # Note: This makes Proxy compatible with dict-like checks but doesn't inherit from dict
 MutableMapping.register(Proxy)
+
+
+def _register_yaml_representers() -> None:
+    """Teach PyYAML to dump ledger proxies as their underlying value.
+
+    A hyperparameter handle returned by ``watch_or_edit(..., flag='hyperparameters')``
+    is a live ``Proxy`` / ``Proxy._ValueProxy``. When such a value flows into a
+    library that serializes it (e.g. Ultralytics writes its run args to ``args.yaml``
+    via ``yaml.safe_dump``), PyYAML has no representer for the proxy type and raises
+    ``RepresenterError`` — and because the proxy masquerades as its wrapped type via
+    ``__class__``, callers' ``isinstance(x, (int, str, ...))`` "stringify" guards skip
+    it too. Registering representers that emit the *resolved* value makes proxies
+    transparently serializable everywhere, so the live-proxy HP design stays
+    compatible with such libraries. Registered on both the default and Safe dumpers.
+    """
+    def _represent_obj_proxy(dumper, data):
+        return dumper.represent_data(data.get())          # Proxy -> wrapped object
+
+    def _represent_value_proxy(dumper, data):
+        return dumper.represent_data(data._resolve())     # _ValueProxy -> resolved value
+
+    # Register on every dumper variant: the pure-Python Dumper/SafeDumper, the
+    # libyaml C dumpers (CDumper/CSafeDumper — Ultralytics dumps with CSafeDumper),
+    # and the base Representer/SafeRepresenter. Each keeps its own representer
+    # table, so registering on one does not cover the others.
+    for _name in ("Dumper", "SafeDumper", "CDumper", "CSafeDumper", "Representer", "SafeRepresenter"):
+        _dumper = getattr(yaml, _name, None)
+        if _dumper is not None:
+            _dumper.add_representer(Proxy, _represent_obj_proxy)
+            _dumper.add_representer(Proxy._ValueProxy, _represent_value_proxy)
+
+
+def _register_json_default() -> None:
+    """Teach the stdlib ``json`` encoder to serialize ledger proxies as their
+    underlying value, mirroring :func:`_register_yaml_representers`.
+
+    ``json`` has no global representer registry, so we wrap ``JSONEncoder.default``
+    (the hook called for objects the encoder doesn't natively handle). The C
+    encoder dispatches by concrete type, so a proxy — whose real type is not int/
+    str/dict/... despite its ``__class__`` masquerade — reaches ``default`` and is
+    replaced by its resolved value. Makes ``json.dumps``/``json.dump`` of HP
+    proxies work everywhere (e.g. audit/JSON config dumps) without per-call hooks.
+    """
+    import json
+
+    if getattr(json.JSONEncoder, "_wl_proxy_patched", False):
+        return
+    _orig_default = json.JSONEncoder.default
+
+    def default(self, obj):
+        if isinstance(obj, Proxy._ValueProxy):
+            return obj._resolve()
+        if isinstance(obj, Proxy):
+            return obj.get()
+        return _orig_default(self, obj)
+
+    json.JSONEncoder.default = default
+    json.JSONEncoder._wl_proxy_patched = True
+
+
+_register_yaml_representers()
+_register_json_default()
 
 
 class Ledger:

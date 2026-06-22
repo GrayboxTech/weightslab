@@ -197,26 +197,26 @@ class LedgerTests(unittest.TestCase):
         hp_handle["lr"] = 0.02
         self.assertEqual(lr.get(), 0.02)
 
-    def test_value_proxy_subscript_access(self):
-        """ValueProxy subscript [key] is equivalent to .get(key) and chains."""
+    def test_dict_value_returned_raw_not_proxied(self):
+        """Dict (and list / callable) values come back RAW, not wrapped in a live
+        proxy (see Proxy.get's list/dict/callable exclusion), so subscripting just
+        reads the plain mapping."""
         hp_handle = GLOBAL_LEDGER.get_hyperparams()
         GLOBAL_LEDGER.register_hyperparams(
             params={"dataset": {"batch_size": 32, "splits": {"train": 0.8}}}
         )
 
         dataset = hp_handle.get("dataset")
-        # [key] matches .get(key) for the resolved mapping.
+        # A dict value is handed back raw, not as a live ValueProxy.
+        self.assertIsInstance(dataset, dict)
+        self.assertFalse(hasattr(dataset, "set"))
+
+        # Plain mapping access (and nesting) works.
         self.assertEqual(dataset["batch_size"], dataset.get("batch_size"))
         self.assertEqual(dataset["batch_size"], 32)
-
-        # Nested dicts are wrapped in a live proxy so chaining keeps resolving.
         self.assertEqual(dataset["splits"]["train"], 0.8)
 
-        # Reads stay fresh against the underlying mapping.
-        hp_handle["dataset"] = {"batch_size": 64, "splits": {"train": 0.9}}
-        self.assertEqual(dataset["batch_size"], 64)
-
-        # Missing keys raise KeyError, matching standard subscript semantics.
+        # Missing keys raise KeyError, matching standard dict subscript semantics.
         with self.assertRaises(KeyError):
             dataset["missing"]
 
@@ -253,6 +253,37 @@ class LedgerTests(unittest.TestCase):
 
         hp_handle["data_root"] = "C:/data/v2"
         self.assertEqual(data_root, "C:/data/v1")
+
+    def test_proxy_yaml_and_json_serialization(self):
+        """Ledger proxies serialize to their underlying value for both YAML and
+        JSON, so libraries that dump their config (e.g. Ultralytics' args.yaml,
+        or JSON audit/config dumps) don't choke on a live hyperparameter proxy."""
+        import json
+        import yaml
+
+        hp = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"image_size": 320, "lr": 0.01})
+
+        img = hp.get("image_size")  # a live ValueProxy, not a plain int
+        self.assertEqual(type(img).__name__, "_ValueProxy")
+
+        # YAML: cover every dumper variant — Ultralytics dumps with CSafeDumper
+        # (the libyaml C dumper), which keeps its own representer table.
+        for dumper_name in ("Dumper", "SafeDumper", "CDumper", "CSafeDumper"):
+            dumper = getattr(yaml, dumper_name, None)
+            if dumper is None:
+                continue
+            self.assertEqual(
+                yaml.dump({"imgsz": img}, Dumper=dumper).strip(), "imgsz: 320",
+                f"{dumper_name} did not serialize the proxy",
+            )
+        self.assertEqual(
+            yaml.safe_load(yaml.safe_dump(hp)), {"image_size": 320, "lr": 0.01}
+        )
+
+        # JSON: json.dumps of a scalar proxy and of the whole HP proxy.
+        self.assertEqual(json.loads(json.dumps({"imgsz": img})), {"imgsz": 320})
+        self.assertEqual(json.loads(json.dumps(hp)), {"image_size": 320, "lr": 0.01})
 
     def test_value_proxy_numeric_comparisons(self):
         """ValueProxy supports all standard numeric and string comparison operators."""

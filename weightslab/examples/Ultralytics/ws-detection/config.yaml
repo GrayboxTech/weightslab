@@ -38,7 +38,7 @@ ledger_flush_interval: 60.0
 # Data
 num_classes: 2
 image_size: 320
-data_root: .\data\data.yaml  # Uncomment and set the path to your data.yaml file. YOLO format.
+data_root: C:\Users\GuillaumePELLUET\Documents\Codes\weightslab_kitchen\guillaume_playground\ws-ultralytics_yolo\data\data.yaml  # Uncomment and set the path to your data.yaml file. YOLO format.
 data:
   train_loader:
     batch_size: 4
