@@ -23,7 +23,7 @@ import numpy as np
 
 # Config global logger
 logger = logging.getLogger(__name__)
-UINT_DEFAULT = 16  # Default to uint8 for array normalization
+UINT_DEFAULT = 16 # Default to uint8 for array normalization
 
 
 class LRUArrayCache:
@@ -34,7 +34,7 @@ class LRUArrayCache:
     Tracks memory usage and provides cache statistics.
     """
 
-    def __init__(self, max_size_bytes: int = 2 * 1024**3):  # 2GB default
+    def __init__(self, max_size_bytes: int = 2 * 1024**3): # 2GB default
         """
         Initialize LRU cache.
 
@@ -42,7 +42,7 @@ class LRUArrayCache:
             max_size_bytes: Maximum total memory for cached arrays in bytes
         """
         self._max_size = max_size_bytes
-        self._cache = OrderedDict()  # Maintains insertion/access order
+        self._cache = OrderedDict() # Maintains insertion/access order
         self._current_size = 0
         self._lock = threading.RLock()
         self._hits = 0
@@ -93,7 +93,7 @@ class LRUArrayCache:
 
             # Evict LRU entries until there's space
             while self._current_size + array_size > self._max_size and self._cache:
-                lru_key, lru_array = self._cache.popitem(last=False)  # FIFO = LRU
+                lru_key, lru_array = self._cache.popitem(last=False) # FIFO = LRU
                 self._current_size -= self._array_size(lru_array)
                 logger.debug(f"[LRUArrayCache] Evicted {lru_key} to free memory (cache size: {self._current_size / 1024**2:.1f}MB)")
 
@@ -283,7 +283,7 @@ def normalize_array_to_uint(arr: np.ndarray, preserve_original: bool = False, ui
     if arr_max == arr_min:
         if arr_max == 0:
             # All zeros, can store as uint with zero values
-            metadata['normalized'] = False  # No need to normalize if all values are the same
+            metadata['normalized'] = False # No need to normalize if all values are the same
             return np.zeros(arr.shape, dtype=uint_dtype), metadata
         elif arr_max < 2**uint - 1:
             # Constant array
@@ -320,7 +320,7 @@ def denormalize_array(arr: np.ndarray, metadata: Dict[str, Any], uint: int = 16)
     # Denormalize from uint range
     arr_min = metadata['min']
     arr_max = metadata['max']
-    uint = metadata.get('uint', uint)  # Default to 16 if not specified
+    uint = metadata.get('uint', uint) # Default to 16 if not specified
     original_dtype = np.dtype(metadata['original_dtype'])
 
     # Scale back from 0-65535 to original range
@@ -361,7 +361,7 @@ class H5ArrayStore:
         """
         self._path = Path(path)
         self._local_lock = threading.RLock()
-        self._rw_lock = _ReadWriteLock()  # Read-write lock for concurrent reads
+        self._rw_lock = _ReadWriteLock() # Read-write lock for concurrent reads
         self._lock_path = self._path.with_suffix(self._path.suffix + ".lock")
         self._lock_timeout = lock_timeout
         self._poll_interval = poll_interval

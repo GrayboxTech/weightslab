@@ -12,7 +12,7 @@ import grpc
 
 from threading import Lock, Event
 
-from weightslab.watchdog.log_level import WATCHDOG  # noqa: F401 — registers level
+from weightslab.watchdog.log_level import WATCHDOG # noqa: F401 — registers level
 
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ class GrpcServerManager:
     def stop(self, grace: float = 5.0) -> None:
         with self._lock:
             if self._server:
-                logger.watchdog("[gRPC] Requesting graceful shutdown with %.1fs grace", grace)  # type: ignore[attr-defined]
+                logger.watchdog("[gRPC] Requesting graceful shutdown with %.1fs grace", grace) # type: ignore[attr-defined]
                 self._server.stop(grace=grace)
                 self._server = None
 

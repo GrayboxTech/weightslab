@@ -146,7 +146,7 @@ class PauseController:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager != None:
             self.checkpoint_manager.update_experiment_hash(first_time=True)
-            self.checkpoint_manager.save_pending_changes()  # Write pending change to disk
+            self.checkpoint_manager.save_pending_changes() # Write pending change to disk
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:
             logger.warning('Cannot access checkpoint manager on resume.')
@@ -291,7 +291,7 @@ class GuardContext:
             logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__:")
             traceback.print_exc() if os.getenv("WL_DEBUG", "0") == "1" else None
             self.architecture_guard.__exit__(exc_type, exc_value, traceback)
-            return True  # suppress the exception
+            return True # suppress the exception
 
         self.architecture_guard.__exit__(exc_type, exc_value, traceback)
 
@@ -357,11 +357,11 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
                 # # Drive controller from ledger when ledger explicitly sets the flag
                 # controller_running = not controller_paused
                 # if isinstance(hp_is_training, bool):
-                #     if controller_paused and hp_is_training:
-                #         resumed = pause_controller.resume()
-                #         firstresume = False if resumed else True
-                #     elif controller_running and not hp_is_training:
-                #         pause_controller.pause()
+                # if controller_paused and hp_is_training:
+                # resumed = pause_controller.resume()
+                # firstresume = False if resumed else True
+                # elif controller_running and not hp_is_training:
+                # pause_controller.pause()
 
                 # Re-evaluate controller state after potential changes
                 controller_paused = pause_controller.is_paused()
@@ -386,5 +386,5 @@ def start_hp_sync_thread_event():
 
 # Start sync thread once at module import
 if _pause_sync_thread_started:
-    _pause_sync_thread_started = False  # already activated
+    _pause_sync_thread_started = False # already activated
     start_hp_sync_thread_event()

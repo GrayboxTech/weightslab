@@ -74,7 +74,7 @@ def monkey_patch_modules(module: nn.Module):
             data=input
         )
         return output
-    module.forward = types.MethodType(wrapped_forward, module)  # Monkey patch
+    module.forward = types.MethodType(wrapped_forward, module) # Monkey patch
     module.is_leaf = True
 
     return module

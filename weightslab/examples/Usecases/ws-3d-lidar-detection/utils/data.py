@@ -11,23 +11,23 @@ from torch.utils.data import Dataset
 # =============================================================================
 # Self-driving 3D detection over LiDAR point clouds. Two sources:
 #
-#   * "kitti":     the KITTI 3D Object Detection benchmark. Expected layout
-#                  (download from https://www.cvlibs.net/datasets/kitti/eval_object.php?obj_benchmark=3d):
-#                    <root>/kitti/training/velodyne/000000.bin ...  (x, y, z, intensity float32)
-#                    <root>/kitti/training/label_2/000000.txt ...   (camera-frame 3D boxes)
-#                    <root>/kitti/training/calib/000000.txt ...     (velo->cam calibration)
-#   * "synthetic": procedurally generated road scenes (ground plane + car /
-#                  pedestrian / cyclist point clusters). Lets the example run
-#                  out-of-the-box with zero download; useful to validate the
-#                  whole WL pipeline before pointing it at real data.
+# * "kitti": the KITTI 3D Object Detection benchmark. Expected layout
+# (download from https://www.cvlibs.net/datasets/kitti/eval_object.php?obj_benchmark=3d):
+# <root>/kitti/training/velodyne/000000.bin ... (x, y, z, intensity float32)
+# <root>/kitti/training/label_2/000000.txt ... (camera-frame 3D boxes)
+# <root>/kitti/training/calib/000000.txt ... (velo->cam calibration)
+# * "synthetic": procedurally generated road scenes (ground plane + car /
+# pedestrian / cyclist point clusters). Lets the example run
+# out-of-the-box with zero download; useful to validate the
+# whole WL pipeline before pointing it at real data.
 #
 # Per-sample target is a [N, 9] float32 array, one row per ground-truth box,
 # all in the LiDAR (velodyne) frame, metric units:
 #
-#     [cx, cy, cz, dx, dy, dz, yaw, class_id, confidence]
+# [cx, cy, cz, dx, dy, dz, yaw, class_id, confidence]
 #
-#   cx/cy/cz: box center (m); dx/dy/dz: size along the object's x/y/z axes
-#   (length, width, height); yaw: rotation around +z; GT confidence = 1.0.
+# cx/cy/cz: box center (m); dx/dy/dz: size along the object's x/y/z axes
+# (length, width, height); yaw: rotation around +z; GT confidence = 1.0.
 
 CLASS_NAMES = ["Car", "Pedestrian", "Cyclist"]
 
@@ -42,14 +42,14 @@ PAD_VALUE = -1000.0
 # Typical (length, width, height) per class, used by the synthetic generator.
 _CLASS_DIMS = np.array(
     [
-        [4.0, 1.7, 1.5],    # Car
-        [0.8, 0.6, 1.75],   # Pedestrian
-        [1.8, 0.6, 1.7],    # Cyclist
+        [4.0, 1.7, 1.5], # Car
+        [0.8, 0.6, 1.75], # Pedestrian
+        [1.8, 0.6, 1.7], # Cyclist
     ],
     dtype=np.float32,
 )
 
-_GROUND_Z = -1.7  # LiDAR is mounted ~1.7 m above the road in KITTI.
+_GROUND_Z = -1.7 # LiDAR is mounted ~1.7 m above the road in KITTI.
 
 
 # =============================================================================
@@ -78,7 +78,7 @@ def read_kitti_calib(path):
                 m[:3, :4] = vals.reshape(3, 4)
                 mats["Tr_velo_to_cam"] = m
             elif key.strip() == "P2":
-                mats["P2"] = vals.reshape(3, 4)  # left colour camera projection
+                mats["P2"] = vals.reshape(3, 4) # left colour camera projection
     return mats
 
 
@@ -89,10 +89,10 @@ def project_velo_to_image(points_xyz, calib):
     the camera (positive depth). Used to colourise the cloud from image_2.
     """
     n = points_xyz.shape[0]
-    homo = np.concatenate([points_xyz, np.ones((n, 1))], axis=1)        # [N, 4]
-    cam = (calib["R0_rect"] @ calib["Tr_velo_to_cam"] @ homo.T)         # [4, N]
+    homo = np.concatenate([points_xyz, np.ones((n, 1))], axis=1) # [N, 4]
+    cam = (calib["R0_rect"] @ calib["Tr_velo_to_cam"] @ homo.T) # [4, N]
     depth = cam[2]
-    pix = calib["P2"] @ cam                                             # [3, N]
+    pix = calib["P2"] @ cam # [3, N]
     valid = depth > 1e-3
     uv = np.zeros((n, 2), dtype=np.float32)
     uv[valid] = (pix[:2, valid] / pix[2, valid]).T
@@ -113,7 +113,7 @@ def _read_kitti_kv_file(path):
             try:
                 out[key.strip()] = np.array([float(v) for v in vals.split()], dtype=np.float64)
             except ValueError:
-                pass  # non-numeric header lines (calib_time, etc.)
+                pass # non-numeric header lines (calib_time, etc.)
     return out
 
 
@@ -158,7 +158,7 @@ def parse_tracklets(xml_path):
     for tracklet in root.iter("item"):
         otype = tracklet.findtext("objectType")
         if otype is None or otype not in _TRACKLET_CLASS_MAP:
-            continue  # not a tracklet item, or a class we don't keep
+            continue # not a tracklet item, or a class we don't keep
         h = tracklet.findtext("h"); w = tracklet.findtext("w"); l = tracklet.findtext("l")
         first = tracklet.findtext("first_frame")
         poses = tracklet.find("poses")
@@ -207,8 +207,8 @@ def read_kitti_label(label_path, calib, pc_range):
             ry = float(parts[14])
 
             center = _cam_to_velo(loc_cam, calib)[0]
-            center[2] += h / 2.0  # KITTI location is the bottom face center
-            yaw = -ry - np.pi / 2.0  # camera rotation_y -> velo-frame yaw
+            center[2] += h / 2.0 # KITTI location is the bottom face center
+            yaw = -ry - np.pi / 2.0 # camera rotation_y -> velo-frame yaw
 
             x_min, y_min, z_min, x_max, y_max, z_max = pc_range
             if not (x_min <= center[0] <= x_max and y_min <= center[1] <= y_max
@@ -225,14 +225,14 @@ def read_kitti_label(label_path, calib, pc_range):
 def _sample_box_surface(rng, dims, n):
     """Uniformly sample n points on the surface of an axis-aligned box at origin."""
     l, w, h = dims
-    areas = np.array([w * h, w * h, l * h, l * h, l * w, l * w])  # +-x, +-y, +-z faces
+    areas = np.array([w * h, w * h, l * h, l * h, l * w, l * w]) # +-x, +-y, +-z faces
     face = rng.choice(6, size=n, p=areas / areas.sum())
     u = rng.uniform(-0.5, 0.5, size=n)
     v = rng.uniform(-0.5, 0.5, size=n)
 
     pts = np.zeros((n, 3), dtype=np.float32)
     sign = np.where(face % 2 == 0, 0.5, -0.5)
-    ax = face // 2  # 0: x faces, 1: y faces, 2: z faces
+    ax = face // 2 # 0: x faces, 1: y faces, 2: z faces
     pts[ax == 0] = np.stack(
         [sign[ax == 0] * l, u[ax == 0] * w, v[ax == 0] * h], axis=1)
     pts[ax == 1] = np.stack(
@@ -307,15 +307,15 @@ class Lidar3DDetectionDataset(Dataset):
     """LiDAR 3D box detection over KITTI scans or synthetic scenes.
 
     Args:
-        root:          data directory (expects <root>/kitti/training/* for KITTI).
-        split:         "train" or "val" (deterministic split).
-        source:        "kitti", "synthetic", or "auto" (kitti if present on disk).
-        num_classes:   how many of CLASS_NAMES to keep.
-        pc_range:      (x_min, y_min, z_min, x_max, y_max, z_max) crop, meters.
-        max_points:    random subsample cap per cloud (speed / memory).
+        root: data directory (expects <root>/kitti/training/* for KITTI).
+        split: "train" or "val" (deterministic split).
+        source: "kitti", "synthetic", or "auto" (kitti if present on disk).
+        num_classes: how many of CLASS_NAMES to keep.
+        pc_range: (x_min, y_min, z_min, x_max, y_max, z_max) crop, meters.
+        max_points: random subsample cap per cloud (speed / memory).
         num_synthetic: number of generated scenes when source is synthetic.
-        val_fraction:  fraction of frames held out for validation.
-        max_samples:   optional cap on the split size (for quick runs).
+        val_fraction: fraction of frames held out for validation.
+        max_samples: optional cap on the split size (for quick runs).
     """
 
     def __init__(
@@ -353,9 +353,9 @@ class Lidar3DDetectionDataset(Dataset):
         # Per-point channels. xyz + intensity are always present (the model
         # consumes the first 4 columns); ``extra_features`` appends extra
         # VISUALISATION-only channels the studio viewer can colour/shade by:
-        #   "normals" -> nx, ny, nz   (PCA over neighbours)
-        #   "rgb"     -> r, g, b      (camera image projection; KITTI only,
-        #                              synthetic falls back to a height pseudo-colour)
+        # "normals" -> nx, ny, nz (PCA over neighbours)
+        # "rgb" -> r, g, b (camera image projection; KITTI only,
+        # synthetic falls back to a height pseudo-colour)
         self.extra_features = tuple(str(f).strip().lower() for f in (extra_features or ()))
         # Real KITTI drives ship camera images + calibration, so colourise by
         # default (set extra_features explicitly to override, e.g. [] or [normals]).
@@ -407,7 +407,7 @@ class Lidar3DDetectionDataset(Dataset):
             download_dir = kitti_download_dir or default_download_dir()
             drives = list(kitti_raw_drives) or ["drive_0001"]
             frames = []
-            self._raw_tracklets = {}  # drive -> {frame_index: [N, 9] GT boxes}
+            self._raw_tracklets = {} # drive -> {frame_index: [N, 9] GT boxes}
             for drive in drives:
                 if download:
                     self._raw_date_dir = ensure_sequence(kitti_raw_date, drive, dest_dir=download_dir)
@@ -513,7 +513,7 @@ class Lidar3DDetectionDataset(Dataset):
         """Append the configured visualisation channels (normals, rgb) to [M, 4]."""
         if points.shape[0] == 0 or not self.extra_features:
             return points.astype(np.float32)
-        channels = [points[:, :4]]  # x, y, z, intensity (always)
+        channels = [points[:, :4]] # x, y, z, intensity (always)
 
         if "normals" in self.extra_features:
             from weightslab.data.point_cloud_utils import compute_point_normals
@@ -536,7 +536,7 @@ class Lidar3DDetectionDataset(Dataset):
                     points[:, :3], image,
                     lambda p: project_velo_to_image(p, calib))
             except Exception:
-                pass  # fall through to pseudo-colour
+                pass # fall through to pseudo-colour
 
         # Synthetic / no image: pseudo-colour from height so the channel is useful.
         z_min, z_max = self.pc_range[2], self.pc_range[5]
@@ -546,9 +546,9 @@ class Lidar3DDetectionDataset(Dataset):
     def __getitem__(self, idx):
         """Returns (item, uid, target, metadata).
 
-        - item:     point cloud FloatTensor [M, 4] (x, y, z, intensity)
-        - uid:      unique sample id (string)
-        - target:   [N, 9] float32 = [cx, cy, cz, dx, dy, dz, yaw, cls, conf]
+        - item: point cloud FloatTensor [M, 4] (x, y, z, intensity)
+        - uid: unique sample id (string)
+        - target: [N, 9] float32 = [cx, cy, cz, dx, dy, dz, yaw, cls, conf]
         - metadata: dict with source paths / generation seed
         """
         return self.get_items(idx, include_metadata=True, include_labels=True, include_images=True)
@@ -571,10 +571,10 @@ def lidar_collate(batch):
     layout WL's per-instance helpers expect.
 
     Returns:
-        points:  FloatTensor [B, M_max, 4]
-        ids:     list[str] of length B
+        points: FloatTensor [B, M_max, 4]
+        ids: list[str] of length B
         targets: list[B] of [N_i, 9] float tensors
-        metas:   list[B] of metadata dicts
+        metas: list[B] of metadata dicts
     """
     clouds = [
         b[0] if isinstance(b[0], torch.Tensor) else torch.as_tensor(b[0], dtype=torch.float32)

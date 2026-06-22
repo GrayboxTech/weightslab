@@ -546,7 +546,7 @@ class Proxy:
                     return next(self._it)
                 except StopIteration:
                     # Let StopIteration propagate naturally
-                    self._it.is_a_loop = False  # Loop ends here
+                    self._it.is_a_loop = False # Loop ends here
                     raise
                 except KeyError:
                     # Quiet by default; only surface this diagnostic when the user
@@ -743,10 +743,10 @@ def _register_yaml_representers() -> None:
     compatible with such libraries. Registered on both the default and Safe dumpers.
     """
     def _represent_obj_proxy(dumper, data):
-        return dumper.represent_data(data.get())          # Proxy -> wrapped object
+        return dumper.represent_data(data.get()) # Proxy -> wrapped object
 
     def _represent_value_proxy(dumper, data):
-        return dumper.represent_data(data._resolve())     # _ValueProxy -> resolved value
+        return dumper.represent_data(data._resolve()) # _ValueProxy -> resolved value
 
     # Register on every dumper variant: the pure-Python Dumper/SafeDumper, the
     # libyaml C dumpers (CDumper/CSafeDumper — Ultralytics dumps with CSafeDumper),
@@ -1257,7 +1257,7 @@ def list_models() -> List[str]:
 
 def register_model(model: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_model(name)  # Init empty proxy
+    get_model(name) # Init empty proxy
     GLOBAL_LEDGER.register_model(model, weak=weak, name=name)
 
 
@@ -1275,7 +1275,7 @@ def get_dataloaders(names: Optional[List[str]] = None) -> Dict[str, Any]:
 def register_dataloaders(dataloaders: Dict[str, Any], weak: bool = False) -> None:
     """Register multiple dataloaders from a dict, e.g., {'train': train_loader, 'val': val_loader}."""
     for k in dataloaders.keys():
-        get_dataloader(k)  # Init empty proxy - get_dataloaders(list(dataloaders.keys()))
+        get_dataloader(k) # Init empty proxy - get_dataloaders(list(dataloaders.keys()))
     GLOBAL_LEDGER.register_dataloaders_dict(dataloaders, weak=weak)
 
 def list_dataloaders() -> List[str]:
@@ -1283,7 +1283,7 @@ def list_dataloaders() -> List[str]:
 
 def register_dataloader(dataloader: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_dataloader(name)  # Init the empty proxy first
+    get_dataloader(name) # Init the empty proxy first
     GLOBAL_LEDGER.register_dataloader(dataloader, weak=weak, name=name)
 
 
@@ -1299,7 +1299,7 @@ def list_optimizers() -> List[str]:
 
 def register_optimizer(optimizer: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_optimizer(name)  # Init the empty proxy first
+    get_optimizer(name) # Init the empty proxy first
     GLOBAL_LEDGER.register_optimizer(optimizer, weak=weak, name=name)
 
 # Hyperparameters
@@ -1322,7 +1322,7 @@ def resolve_hp_name() -> str | None:
         return 'experiment'
     # If we have any names at all, returning the first one is better than returning None
     # and causing a "Cannot resolve hyperparams name" error in the UI.
-    return names[-1]  # first is empty proxy parameters generated at init
+    return names[-1] # first is empty proxy parameters generated at init
 
 def set_hyperparam(key_path: str, value: Any, name: str = DEFAULT_NAME) -> None:
     try:
@@ -1338,14 +1338,14 @@ def unwatch_hyperparams_file(name: str = DEFAULT_NAME) -> None:
 
 def register_hyperparams(params: Dict[str, Any] = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_hyperparams(name)  # Init empty proxy
+    get_hyperparams(name) # Init empty proxy
     GLOBAL_LEDGER.register_hyperparams(params, weak=weak, name=name)
 
 
 # Logger
 def register_logger(logger: Any = None, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_logger(name)  # Init empty proxy
+    get_logger(name) # Init empty proxy
     GLOBAL_LEDGER.register_logger(logger, name=name)
 
 def get_logger(name: str = DEFAULT_NAME) -> Any:
@@ -1361,7 +1361,7 @@ def unregister_logger(name: str = DEFAULT_NAME) -> None:
 # Signals
 def register_signal(signal: Any = None, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_signal(name)  # Init empty proxy
+    get_signal(name) # Init empty proxy
     GLOBAL_LEDGER.register_signal(signal, name=name)
 
 def get_signal(name: str = DEFAULT_NAME) -> Any:
@@ -1377,7 +1377,7 @@ def unregister_signal(name: str = DEFAULT_NAME) -> None:
 # Checkpoint managers
 def register_checkpoint_manager(manager: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> Any:
     name = DEFAULT_NAME if name is None else name
-    get_checkpoint_manager(name)  # Init empty proxy
+    get_checkpoint_manager(name) # Init empty proxy
     return GLOBAL_LEDGER.register_checkpoint_manager(manager, weak=weak, name=name)
 
 def get_checkpoint_manager(name: str = DEFAULT_NAME) -> Any:
@@ -1393,7 +1393,7 @@ def unregister_checkpoint_manager(name: str = DEFAULT_NAME) -> None:
 # DataFrames
 def register_dataframe(dataframe: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_dataframe(name)  # Init empty proxy
+    get_dataframe(name) # Init empty proxy
     return GLOBAL_LEDGER.register_dataframe(dataframe, weak=weak, name=name)
 
 def get_dataframe(name: str = DEFAULT_NAME) -> Any:

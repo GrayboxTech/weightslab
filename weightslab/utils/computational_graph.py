@@ -144,11 +144,11 @@ def _generate_mappings(
         # Case 2: Many-to-one (src > dst)
         # A "batch" of source neurons maps to a single dstination neuron.
         # if len(src_channels) % len(dst_channels) != 0:
-        #     raise ValueError(
-        #         f"Source channels ({src_channels}) must be perfectly \
-        #          divisible by dstination channels ({dst_channels}) \
-        #          for many-to-one mapping."
-        #     )
+        # raise ValueError(
+        # f"Source channels ({src_channels}) must be perfectly \
+        # divisible by dstination channels ({dst_channels}) \
+        # for many-to-one mapping."
+        # )
 
         # 1. Calculate the block size.
         # This determines how many linear layer neurons map to one convolution channel.
@@ -184,7 +184,7 @@ def _generate_mappings(
                 # We map the individual code back to the original index
                 dst_to_src_mapping[code] = [index]
 
-    else:  # src_channels < dst_channels
+    else: # src_channels < dst_channels
         # 1. Calculate the block size.
         # This determines how many linear layer neurons map to one convolution channel.
         # We use integer division to ensure a clean split.
@@ -359,7 +359,7 @@ def _propagate_constraints_through_dependencies(
                 propagated_constraints[module_id].get('outgoing', {})[cname] = cval
 
         # BFS to propagate OUTGOING constraints downstream
-        queue = [(module_id, native_constraints.copy(), {module_id})]  # (current_id, outgoing_constraints, visited)
+        queue = [(module_id, native_constraints.copy(), {module_id})] # (current_id, outgoing_constraints, visited)
 
         while queue:
             current_id, current_constraints, visited_set = queue.pop(0)
@@ -531,7 +531,7 @@ def _alias_from_tensor_name(tensor_name: str) -> Optional[str]:
             next_part = module_parts[i + 1]
             # If next part starts with current part + '.', it's redundant
             if next_part.startswith(part + '.'):
-                continue  # Skip this redundant part
+                continue # Skip this redundant part
         deduplicated.append(part)
 
     return '.'.join(deduplicated)
@@ -712,23 +712,23 @@ def generate_graph_dependencies_from_torchfx(
 
                 # # SEED NEURONS: Use FX metadata to seed neurons if possible
                 # for mod in make_safelist(current_module):
-                #     if 'tensor_meta' in node.meta:
-                #         meta = node.meta['tensor_meta']
-                #         if hasattr(meta, 'shape') and len(meta.shape) >= 2:
-                #             out_ch = meta.shape[1]
-                #             if out_ch is not None and out_ch > 0:
-                #                 mod.set_neurons('out_neurons', out_ch)
-                #                 if getattr(mod, 'wl_same_flag', False):
-                #                     mod.set_neurons('in_neurons', out_ch)
+                # if 'tensor_meta' in node.meta:
+                # meta = node.meta['tensor_meta']
+                # if hasattr(meta, 'shape') and len(meta.shape) >= 2:
+                # out_ch = meta.shape[1]
+                # if out_ch is not None and out_ch > 0:
+                # mod.set_neurons('out_neurons', out_ch)
+                # if getattr(mod, 'wl_same_flag', False):
+                # mod.set_neurons('in_neurons', out_ch)
 
-                #     # Also check inputs to seed in_neurons
-                #     for arg in node.args:
-                #         if isinstance(arg, th.fx.Node) and 'tensor_meta' in arg.meta:
-                #             meta_in = arg.meta['tensor_meta']
-                #             if hasattr(meta_in, 'shape') and len(meta_in.shape) >= 2:
-                #                 in_ch = meta_in.shape[1]
-                #                 if in_ch is not None and in_ch > 0:
-                #                     mod.set_neurons('in_neurons', in_ch)
+                # # Also check inputs to seed in_neurons
+                # for arg in node.args:
+                # if isinstance(arg, th.fx.Node) and 'tensor_meta' in arg.meta:
+                # meta_in = arg.meta['tensor_meta']
+                # if hasattr(meta_in, 'shape') and len(meta_in.shape) >= 2:
+                # in_ch = meta_in.shape[1]
+                # if in_ch is not None and in_ch > 0:
+                # mod.set_neurons('in_neurons', in_ch)
 
         # --- Handle General Merge Operations (Any call_function with multiple
         # module inputs) ---
@@ -744,8 +744,8 @@ def generate_graph_dependencies_from_torchfx(
             # TODO (GP): cat of cat of cat, should be nested list also ?
             # TODO (GP): e.g., cat([conv1, conv2, cat([conv3, cat([conv4,
             # TODO (GP): conv5])])])])
-            source_modules_ = []  # Collect modules to check for single input
-            source_nodes = []  # Collect nodes to check for single input
+            source_modules_ = [] # Collect modules to check for single input
+            source_nodes = [] # Collect nodes to check for single input
             for arg in node.args:
                 if not isinstance(arg, list):
                     arg = make_safelist(arg)
@@ -795,7 +795,7 @@ def generate_graph_dependencies_from_torchfx(
                 # dependent on the first module in the merge
                 node_to_module[node] = distinct_source_modules
             else:
-                node_to_module[node] = None  # Placeholder or constant input
+                node_to_module[node] = None # Placeholder or constant input
 
     # Clean dependencies (remove duplicates and self-loops)
     dependencies = _clean_dependencies(dependencies)
@@ -835,9 +835,9 @@ def generate_layer_dependencies_from_onnx(
 
         Returns:
         [
-            ('conv1', 'bn1', DepType.SAME),       # Conv output = BN input/output
-            ('bn1', 'relu', DepType.SAME),         # BN output = ReLU input/output
-            ('relu', 'conv2', DepType.INCOMING),   # ReLU output = Conv2 input only
+            ('conv1', 'bn1', DepType.SAME), # Conv output = BN input/output
+            ('bn1', 'relu', DepType.SAME), # BN output = ReLU input/output
+            ('relu', 'conv2', DepType.INCOMING), # ReLU output = Conv2 input only
         ]
 
     Note:
@@ -916,7 +916,7 @@ def generate_layer_dependencies_from_onnx(
         if onnx_shapes_map:
             shape = onnx_shapes_map.get(tensor_name)
             if shape and len(shape) >= 2:
-                return shape[1]  # NCHW format, C is dimension 1
+                return shape[1] # NCHW format, C is dimension 1
 
         # Fallback to node attributes
         producer = producer_for_tensor.get(tensor_name)
@@ -925,19 +925,19 @@ def generate_layer_dependencies_from_onnx(
                 weight_name = producer.input[1]
                 for init in graph.initializer:
                     if init.name == weight_name and len(init.dims) >= 1:
-                        return init.dims[0]  # out_channels
+                        return init.dims[0] # out_channels
 
             elif producer.op_type == 'Gemm' and len(producer.input) >= 2:
                 weight_name = producer.input[1]
                 for init in graph.initializer:
                     if init.name == weight_name and len(init.dims) >= 1:
-                        return init.dims[0]  # out_features
+                        return init.dims[0] # out_features
 
             elif producer.op_type == 'BatchNormalization' and len(producer.input) >= 2:
                 weight_name = producer.input[1]
                 for init in graph.initializer:
                     if init.name == weight_name and len(init.dims) >= 1:
-                        return init.dims[0]  # num_features
+                        return init.dims[0] # num_features
 
         return None
 
@@ -1018,8 +1018,8 @@ def generate_layer_dependencies_from_onnx(
 
     for node in graph.node:
         logger.debug(f"\nNode: {node.op_type} | name: {node.name}")
-        logger.debug(f"  Inputs: {node.input[:3]}")  # Show first 3 inputs
-        logger.debug(f"  Outputs: {node.output}")
+        logger.debug(f" Inputs: {node.input[:3]}") # Show first 3 inputs
+        logger.debug(f" Outputs: {node.output}")
 
         # Find source modules from inputs
         src_modules = []
@@ -1028,7 +1028,7 @@ def generate_layer_dependencies_from_onnx(
         for inp in node.input:
             # Skip constant/initializer inputs (weights, biases, etc.)
             if any(param in inp for param in ['.weight', '.bias', '.running_mean', '.running_var', '.num_batches_tracked']):
-                logger.debug(f"  Skipping parameter input: {inp[:50]}")
+                logger.debug(f" Skipping parameter input: {inp[:50]}")
                 continue
 
             src_mods = module_for_tensor(inp)
@@ -1037,12 +1037,12 @@ def generate_layer_dependencies_from_onnx(
                     src_modules.append(src_mod)
                     src_tensors.append(inp)
                     src_name = module_to_name.get(src_mod, "<??>")
-                    logger.debug(f"  Found source: {src_name} (from tensor: {inp[:50]})")
+                    logger.debug(f" Found source: {src_name} (from tensor: {inp[:50]})")
                 else:
-                    logger.debug(f"  Could not find source module for input: {inp[:50]}")
+                    logger.debug(f" Could not find source module for input: {inp[:50]}")
 
         if not src_modules:
-            logger.debug(f"  -> No source modules found, skipping")
+            logger.debug(f" -> No source modules found, skipping")
             continue
 
         # Handle merge operations (Add, Sub, Sum, Concat, Mul, Div) - create REC dependencies between branches
@@ -1050,8 +1050,8 @@ def generate_layer_dependencies_from_onnx(
         is_concat = "Concat" in node.op_type.capitalize() or "Cat" in node.op_type.capitalize()
 
         if is_merge:
-            logger.debug(f"  Detected merge operation: {node.op_type} with {len(src_modules)} source modules")
-            logger.debug(f"  Source modules: {[module_to_name.get(m, '?') for m in src_modules]}")
+            logger.debug(f" Detected merge operation: {node.op_type} with {len(src_modules)} source modules")
+            logger.debug(f" Source modules: {[module_to_name.get(m, '?') for m in src_modules]}")
 
         if is_merge and len(src_modules) >= 2:
             # Create REC dependencies between all pairs of source modules
@@ -1073,15 +1073,15 @@ def generate_layer_dependencies_from_onnx(
                     channels_a = get_channel_count(tensor_a)
                     channels_b = get_channel_count(tensor_b)
 
-                    logger.debug(f"  Checking REC: {name_a} (ch={channels_a}) <-> {name_b} (ch={channels_b})")
+                    logger.debug(f" Checking REC: {name_a} (ch={channels_a}) <-> {name_b} (ch={channels_b})")
 
                     # For Add/Sub/Mul/Div, channels must match
                     # For Concat, channels can differ (concatenated along channel dim)
                     create_rec = False
                     if is_concat:
-                        create_rec = True  # Always create REC for concat
+                        create_rec = True # Always create REC for concat
                     elif channels_a is not None and channels_b is not None and channels_a == channels_b:
-                        create_rec = True  # Channels match for Add/Sub/etc
+                        create_rec = True # Channels match for Add/Sub/etc
                     elif channels_a is None or channels_b is None:
                         # Can't verify channels, but merge operation requires compatibility
                         create_rec = True
@@ -1092,16 +1092,16 @@ def generate_layer_dependencies_from_onnx(
                         edge_key_ba = (name_b, name_a)
 
                         if edge_key_ab not in seen_edges:
-                            logger.debug(f"  ✓ Adding REC dependency: {name_a} <-> {name_b}")
+                            logger.debug(f" Adding REC dependency: {name_a} <-> {name_b}")
                             dependencies.append((mod_a, mod_b, DepType.REC))
                             seen_edges.add(edge_key_ab)
 
                         if edge_key_ba not in seen_edges:
-                            logger.debug(f"  ✓ Adding REC dependency: {name_b} <-> {name_a}")
+                            logger.debug(f" Adding REC dependency: {name_b} <-> {name_a}")
                             dependencies.append((mod_b, mod_a, DepType.REC))
                             seen_edges.add(edge_key_ba)
                     else:
-                        logger.debug(f"  ✗ Skipping REC dependency (channel mismatch: {channels_a} vs {channels_b})")
+                        logger.debug(f" Skipping REC dependency (channel mismatch: {channels_a} vs {channels_b})")
 
         # Find destination module from outputs
         # First try: direct alias from output tensor name
@@ -1113,7 +1113,7 @@ def generate_layer_dependencies_from_onnx(
             if alias and alias in name_to_module:
                 dst_mod = name_to_module[alias]
                 dst_tensor = out_name
-                logger.debug(f"  Found dest (method 1 - alias): {alias}")
+                logger.debug(f" Found dest (method 1 - alias): {alias}")
                 break
 
         # Second try: For ops that correspond to nn.Module, extract module from node itself
@@ -1125,15 +1125,15 @@ def generate_layer_dependencies_from_onnx(
                 if len(parts) >= 2:
                     # The module name is typically everything except the last part (op type)
                     potential_names = [
-                        '.'.join(parts[:-1]),  # e.g., 'model.bn1' from '/model/bn1/BatchNormalization'
-                        parts[-2] if len(parts) >= 2 else parts[0],  # e.g., 'bn1' from above
+                        '.'.join(parts[:-1]), # e.g., 'model.bn1' from '/model/bn1/BatchNormalization'
+                        parts[-2] if len(parts) >= 2 else parts[0], # e.g., 'bn1' from above
                     ]
                     for pname in potential_names:
                         if pname in name_to_module:
                             dst_mod = name_to_module[pname]
                             if node.output:
                                 dst_tensor = node.output[0]
-                            logger.debug(f"  Found dest (method 2 - node name): {pname}")
+                            logger.debug(f" Found dest (method 2 - node name): {pname}")
                             break
 
             # Third try: For weight-based ops (Conv, Gemm, BatchNorm), check input parameters
@@ -1148,7 +1148,7 @@ def generate_layer_dependencies_from_onnx(
                                 dst_mod = name_to_module[potential_name]
                                 if node.output:
                                     dst_tensor = node.output[0]
-                                logger.debug(f"  Found dest (method 3 - params): {potential_name} (from {inp})")
+                                logger.debug(f" Found dest (method 3 - params): {potential_name} (from {inp})")
                                 break
                         if dst_mod:
                             break
@@ -1159,17 +1159,17 @@ def generate_layer_dependencies_from_onnx(
             # if not hasattr(src_mod, 'bypass'):
                 # src_mod.bypass = 0
             bypassed.extend(make_safelist(list(node.output)))
-            logger.debug(f"  Setting bypass=0 for module after Concat: {module_to_name.get(src_mod, '?')}")
+            logger.debug(f" Setting bypass=0 for module after Concat: {module_to_name.get(src_mod, '?')}")
         for k in make_safelist(list(node.input)):
             if k in bypassed:
                 if dst_mod is not None:
                     dst_mod.bypass = 0
-                    logger.debug(f"  Setting bypass=0 for destination module: {module_to_name.get(dst_mod, '?')}")
+                    logger.debug(f" Setting bypass=0 for destination module: {module_to_name.get(dst_mod, '?')}")
                 break
 
         # If no destination module found, skip as it s the end
         if dst_mod is None:
-            logger.debug(f"  -> No destination module found, skipping")
+            logger.debug(f" -> No destination module found, skipping")
             continue
 
         # Determine dependency type for each source -> destination connection
@@ -1196,17 +1196,17 @@ def generate_layer_dependencies_from_onnx(
 
             # # SEED NEURONS: Use ONNX metadata to seed neurons if possible
             # if src_channels is not None and src_channels > 0:
-            #     src_mod.set_neurons('out_neurons', src_channels)
-            #     if getattr(src_mod, 'wl_same_flag', False):
-            #         src_mod.set_neurons('in_neurons', src_channels)
+            # src_mod.set_neurons('out_neurons', src_channels)
+            # if getattr(src_mod, 'wl_same_flag', False):
+            # src_mod.set_neurons('in_neurons', src_channels)
 
             # if dst_channels is not None and dst_channels > 0:
-            #     dst_mod.set_neurons('in_neurons', dst_channels)
-            #     if getattr(dst_mod, 'wl_same_flag', False):
-            #         dst_mod.set_neurons('out_neurons', dst_channels)
+            # dst_mod.set_neurons('in_neurons', dst_channels)
+            # if getattr(dst_mod, 'wl_same_flag', False):
+            # dst_mod.set_neurons('out_neurons', dst_channels)
 
             logger.debug(f"Analyzing dependency {src_name} -> {dst_name}")
-            logger.debug(f"  Source channels: {src_channels}, Destination channels: {dst_channels}")
+            logger.debug(f" Source channels: {src_channels}, Destination channels: {dst_channels}")
 
             # Use helper function to infer dependency type
             dep_type = _infer_dependency_type(dst_mod)
@@ -1215,7 +1215,7 @@ def generate_layer_dependencies_from_onnx(
             if dep_type == DepType.SAME:
                 dst_mod.wl_same_flag = True
 
-            logger.debug(f"  ✓ Adding dependency: {src_name} -> {dst_name} [{dep_type.name}]")
+            logger.debug(f" Adding dependency: {src_name} -> {dst_name} [{dep_type.name}]")
 
             dependencies.append((src_mod, dst_mod, dep_type))
             seen_edges.add(edge_key)
@@ -1247,7 +1247,7 @@ def generate_index_maps(
     for edge in dependencies:
         # Get src and dst modules and type
         src_mod, dst_mod, edge_label = edge[0], edge[1], edge[2]
-        recursive_dep = edge_label == DepType.REC  # A recursive dependency ?
+        recursive_dep = edge_label == DepType.REC # A recursive dependency ?
 
         # 1.1. Determine the number of neurons in each direction
         # # Src - First will always be is not None and int
@@ -1264,7 +1264,7 @@ def generate_index_maps(
             dst_mod.set_neurons(
                 'in_neurons' if not recursive_dep and not hasattr(dst_mod, 'wl_transposed') else 'out_neurons',
                 dst_nb_neurons
-            )  # So next will have neurons
+            ) # So next will have neurons
             dst_mod_out_neurons = dst_mod.get_neurons(
                 'in_neurons' if not (not recursive_dep and not hasattr(dst_mod, 'wl_transposed')) else 'out_neurons'
             )
@@ -1279,7 +1279,7 @@ def generate_index_maps(
             src_mod.set_neurons(
                 'out_neurons' if not hasattr(src_mod, 'wl_transposed') else 'in_neurons',
                 src_nb_neurons
-            )  # So next will have neurons
+            ) # So next will have neurons
             src_mod_out_neurons = src_mod.get_neurons(
                 'out_neurons' if not hasattr(src_mod, 'wl_transposed') else 'in_neurons'
             )
@@ -1360,7 +1360,7 @@ def generate_index_maps(
                     dst_mod.get_name_wi_id():
                         deepcopy(src_to_dst_mapping_tnsr)
                 } if not hasattr(dst_mod, 'bypass') else {}
-            )  # Child equivalent here
+            ) # Child equivalent here
             dst_mod.src_to_dst_mapping_tnsrs = normalize_dicts(dst_mod.src_to_dst_mapping_tnsrs)
             dst_mod.related_dst_to_src_mapping_tnsrs = normalize_dicts(dst_mod.related_dst_to_src_mapping_tnsrs)
 
@@ -1392,7 +1392,7 @@ if __name__ == '__main__':
     """
     # Enable debug logging
     logging.basicConfig(
-        level=logging.DEBUG,  # Set to DEBUG to see detailed merge operation detection
+        level=logging.DEBUG, # Set to DEBUG to see detailed merge operation detection
         format='%(levelname)s - %(message)s'
     )
     logger.setLevel(logging.DEBUG)
@@ -1523,14 +1523,14 @@ if __name__ == '__main__':
             self.enc_relu1 = nn.ReLU()
 
             self.enc_residual1 = ResidualBlockWithUpsampling(64, 64)
-            self.enc_pool1 = nn.MaxPool2d(2, 2)  # 32x32 -> 16x16
+            self.enc_pool1 = nn.MaxPool2d(2, 2) # 32x32 -> 16x16
 
             self.enc_conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
             self.enc_bn2 = nn.BatchNorm2d(128)
             self.enc_relu2 = nn.ReLU()
 
             self.enc_residual2 = ResidualBlockWithUpsampling(128, 128)
-            self.enc_pool2 = nn.MaxPool2d(2, 2)  # 16x16 -> 8x8
+            self.enc_pool2 = nn.MaxPool2d(2, 2) # 16x16 -> 8x8
 
             # Bottleneck
             self.bottleneck_conv = nn.Conv2d(128, 256, kernel_size=3, padding=1)
@@ -1539,8 +1539,8 @@ if __name__ == '__main__':
             self.bottleneck_residual = ResidualBlockWithUpsampling(256, 256)
 
             # Decoder: Upsampling path
-            self.dec_upsample1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 8x8 -> 16x16
-            self.dec_conv1 = nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1)  # Concatenate with encoder features
+            self.dec_upsample1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False) # 8x8 -> 16x16
+            self.dec_conv1 = nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1) # Concatenate with encoder features
             self.dec_bn1 = nn.BatchNorm2d(128)
             self.dec_residual1 = ResidualBlockWithUpsampling(128, 128)
 
@@ -1569,7 +1569,7 @@ if __name__ == '__main__':
 
             # Decoder with skip connections
             dec1 = self.dec_upsample1(bottleneck)
-            dec1 = th.cat([dec1, enc2], dim=1)  # Skip connection via concatenation
+            dec1 = th.cat([dec1, enc2], dim=1) # Skip connection via concatenation
             dec1 = self.dec_conv1(dec1)
             dec1 = self.dec_bn1(dec1)
             dec1 = self.dec_residual1(dec1)
@@ -1595,14 +1595,14 @@ if __name__ == '__main__':
             self.enc_relu1 = nn.ReLU()
 
             self.enc_residual1 = ResidualBlockWithUpsampling(64, 64)
-            self.enc_pool1 = nn.MaxPool2d(3, 3)  # 27x27 -> 9x9
+            self.enc_pool1 = nn.MaxPool2d(3, 3) # 27x27 -> 9x9
 
             self.enc_conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
             self.enc_bn2 = nn.BatchNorm2d(128)
             self.enc_relu2 = nn.ReLU()
 
             self.enc_residual2 = ResidualBlockWithUpsampling(128, 128)
-            self.enc_pool2 = nn.MaxPool2d(3, 3)  # 9x9 -> 3x3
+            self.enc_pool2 = nn.MaxPool2d(3, 3) # 9x9 -> 3x3
 
             # Bottleneck
             self.bottleneck_conv = nn.Conv2d(128, 256, kernel_size=3, padding=1)
@@ -1611,13 +1611,13 @@ if __name__ == '__main__':
             self.bottleneck_residual = ResidualBlockWithUpsampling(256, 256)
 
             # Decoder: Mixed upsampling (3x and 2x)
-            self.dec_upsample1 = nn.Upsample(scale_factor=3, mode='bilinear', align_corners=False)  # 3x3 -> 9x9
-            self.dec_conv1 = nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1)  # Concatenate with encoder features
+            self.dec_upsample1 = nn.Upsample(scale_factor=3, mode='bilinear', align_corners=False) # 3x3 -> 9x9
+            self.dec_conv1 = nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1) # Concatenate with encoder features
             self.dec_bn1 = nn.BatchNorm2d(128)
             self.dec_residual1 = ResidualBlockWithUpsampling(128, 128)
 
-            self.dec_upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 9x9 -> 18x18
-            self.dec_conv2 = nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1)  # Concatenate with encoder features
+            self.dec_upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False) # 9x9 -> 18x18
+            self.dec_conv2 = nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1) # Concatenate with encoder features
             self.dec_bn2 = nn.BatchNorm2d(64)
             self.dec_residual2 = ResidualBlockWithUpsampling(64, 64)
 
@@ -1646,13 +1646,13 @@ if __name__ == '__main__':
 
             # Decoder with skip connections
             dec1 = self.dec_upsample1(bottleneck)
-            dec1 = th.cat([dec1, enc2], dim=1)  # Skip connection via concatenation
+            dec1 = th.cat([dec1, enc2], dim=1) # Skip connection via concatenation
             dec1 = self.dec_conv1(dec1)
             dec1 = self.dec_bn1(dec1)
             dec1 = self.dec_residual1(dec1)
 
             dec2 = self.dec_upsample2(dec1)
-            dec2 = th.cat([dec2, enc1], dim=1)  # Skip connection via concatenation
+            dec2 = th.cat([dec2, enc1], dim=1) # Skip connection via concatenation
             dec2 = self.dec_conv2(dec2)
             dec2 = self.dec_bn2(dec2)
             dec2 = self.dec_residual2(dec2)
@@ -1694,23 +1694,23 @@ if __name__ == '__main__':
     incoming_deps = [(s, d) for s, d, t in dependencies3 if t == DepType.INCOMING]
     rec_deps = [(s, d) for s, d, t in dependencies3 if t == DepType.REC]
 
-    print(f"\n  SAME Dependencies ({len(same_deps)}):")
-    for src, dst in same_deps:  # Show first 5
+    print(f"\n SAME Dependencies ({len(same_deps)}):")
+    for src, dst in same_deps: # Show first 5
         src_name = next((name for name, mod in model.named_modules() if mod is src), "<??>")
         dst_name = next((name for name, mod in model.named_modules() if mod is dst), "<??>")
-        print(f"    [{src_name:30s}] --SAME-----> [{dst_name:30s}]")
+        print(f" [{src_name:30s}] --SAME-----> [{dst_name:30s}]")
 
-    print(f"\n  INCOMING Dependencies ({len(incoming_deps)}):")
-    for src, dst in incoming_deps:  # Show first 5
+    print(f"\n INCOMING Dependencies ({len(incoming_deps)}):")
+    for src, dst in incoming_deps: # Show first 5
         src_name = next((name for name, mod in model.named_modules() if mod is src), "<??>")
         dst_name = next((name for name, mod in model.named_modules() if mod is dst), "<??>")
-        print(f"    [{src_name:30s}] --INCOMING-> [{dst_name:30s}]")
+        print(f" [{src_name:30s}] --INCOMING-> [{dst_name:30s}]")
 
-    print(f"\n  REC Dependencies ({len(rec_deps)}):")
-    for src, dst in rec_deps:  # Show first 5
+    print(f"\n REC Dependencies ({len(rec_deps)}):")
+    for src, dst in rec_deps: # Show first 5
         src_name = next((name for name, mod in model.named_modules() if mod is src), "<??>")
         dst_name = next((name for name, mod in model.named_modules() if mod is dst), "<??>")
-        print(f"    [{src_name:30s}] <--REC----> [{dst_name:30s}]")
+        print(f" [{src_name:30s}] <--REC----> [{dst_name:30s}]")
 
     print("""
 Model Architecture Notes:

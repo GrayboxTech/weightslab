@@ -41,7 +41,7 @@ the scalar sink, not the compute) and non-serializable args.
 import logging
 import os
 
-from weightslab.utils import ddp_info   # single source of truth for (rank, world)
+from weightslab.utils import ddp_info # single source of truth for (rank, world)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def ddp_log(msg):
         print(f"[ddp r{r}/{w}] {msg}", flush=True)
 
 
-_collectives = 0  # collectives since the last reset (i.e. during this step)
+_collectives = 0 # collectives since the last reset (i.e. during this step)
 
 
 def reset_collectives():
@@ -149,7 +149,7 @@ def _gather(obj, what):
 # ---------------------------------------------------------------------------
 # State registry — reconciled in ONE bundled broadcast at the anchor.
 # ---------------------------------------------------------------------------
-_REGISTRY = []  # (name, snapshot, apply)
+_REGISTRY = [] # (name, snapshot, apply)
 
 
 def register_consistent_state(name, snapshot, apply):
@@ -182,7 +182,7 @@ def reconcile_all():
         payload = [snapshot]
     else:
         payload = [None]
-    bundle = _broadcast(payload, what="reconcile_all")   # collective ALWAYS reached
+    bundle = _broadcast(payload, what="reconcile_all") # collective ALWAYS reached
     if r != 0 and bundle:
         for name, _snap, apply in _REGISTRY:
             if name in bundle:
@@ -222,7 +222,7 @@ def clear_registry():
 # payload bounded by the per-step change set, not the dataset size. Merge MUST
 # be idempotent (a delta may re-flush on retry / respawn).
 # ---------------------------------------------------------------------------
-_OUTBOXES = []  # (name, local_dump, merge)
+_OUTBOXES = [] # (name, local_dump, merge)
 
 
 def register_outbox(name, local_dump, merge):
@@ -252,7 +252,7 @@ def flush_outbox():
         except Exception as exc:
             payload[name] = None
             logger.debug("[flush_outbox] dump '%s' failed: %s", name, exc)
-    bucket = _gather(payload, what="flush_outbox")       # collective ALWAYS reached
+    bucket = _gather(payload, what="flush_outbox") # collective ALWAYS reached
     if r != 0 or not bucket:
         return
     for name, _dump, merge in _OUTBOXES:
@@ -278,10 +278,10 @@ def _ensure_core_ddp_registered():
     `guard_training_context.__enter__` on first entry per process — by that point
     the hparam store + dataloaders + pause_controller are all wired up.
 
-    - "hparams"   — rank 0's hyperparams dict; children diff-apply each leaf.
+    - "hparams" — rank 0's hyperparams dict; children diff-apply each leaf.
     - "deny-list" — {origin: discarded sample-id set} across all known loaders;
                     children mirror via the WL discard_samples API.
-    - "paused"    — rank 0's pause_controller.is_paused(); rides in the same
+    - "paused" — rank 0's pause_controller.is_paused(); rides in the same
                     bundle so sync_step's spin uses ONE broadcast per iter.
     """
     global _CORE_REGISTERED
@@ -290,10 +290,10 @@ def _ensure_core_ddp_registered():
     # Imports are deferred — this module must stay import-light + cycle-free.
     from weightslab.components.global_monitoring import pause_controller
     from weightslab.components.parallel_state import (
-        rank0_hparams, apply_hparams,                                # CONFIG plane    ↓
-        rank0_df_down_state, apply_df_down_state,                    # DATAFRAME plane ↓
-        local_df_writes, merge_df_writes,                            # DATAFRAME plane ↑
-        local_signal_triples, merge_signal_triples_into_logger,      # LOGGER plane    ↑
+        rank0_hparams, apply_hparams, # CONFIG plane ↓
+        rank0_df_down_state, apply_df_down_state, # DATAFRAME plane ↓
+        local_df_writes, merge_df_writes, # DATAFRAME plane ↑
+        local_signal_triples, merge_signal_triples_into_logger, # LOGGER plane ↑
     )
     # DOWN reconcile — CONFIG + CONTROL + DATAFRAME (DOWN_ONLY cols) — 1 broadcast
     register_consistent_state("hparams", rank0_hparams, apply_hparams)
@@ -322,11 +322,11 @@ def sync_step(spin_wait=0.5):
     if not _active():
         return
     rank, _ = ddp_info()
-    reset_collectives()             # logs prior step's count (down+up), then resets
+    reset_collectives() # logs prior step's count (down+up), then resets
     while True:
-        bundle = reconcile_all()    # DOWN: 1 broadcast, ALL consistent states
+        bundle = reconcile_all() # DOWN: 1 broadcast, ALL consistent states
         if not bundle or not bundle.get("paused", False):
-            return                  # → step body runs; UP flush happens in __exit__
+            return # → step body runs; UP flush happens in __exit__
         # Paused: no busy-spin. Rank 0 blocks on the resume Event (wakes on the gRPC
         # resume); rank-1+ block inside the next reconcile_all broadcast. Cheap only on
         # gloo (socket-wait); NCCL would spin (NCCL_BLOCKING_WAIT). The bounded timeout

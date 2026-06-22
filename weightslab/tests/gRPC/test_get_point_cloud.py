@@ -110,7 +110,7 @@ def test_point_cloud_chunk_bytes_invalid_falls_back(monkeypatch):
 def test_get_point_cloud_honours_configured_chunk_size():
     """A smaller chunk size splits the same cloud into more (correct) messages."""
     class _SmallChunkService(_StubService):
-        _POINT_CLOUD_CHUNK_BYTES = 4096  # bytes
+        _POINT_CLOUD_CHUNK_BYTES = 4096 # bytes
 
     stub = _SmallChunkService(_FakeLidarDataset())
     chunks = _collect(stub, pb2.PointCloudRequest(sample_id="7", origin="train_loader"))

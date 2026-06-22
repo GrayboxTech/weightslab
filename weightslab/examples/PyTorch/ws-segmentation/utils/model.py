@@ -58,7 +58,7 @@ class SmallUNet(nn.Module):
 
         # Decoder
         u2 = self.up2(b)
-        # ⚠️ Important: no `if` on shapes; always interpolate
+        # Important: no `if` on shapes; always interpolate
         u2 = F.interpolate(u2, size=e2.shape[-2:], mode="bilinear", align_corners=False)
         d2 = self.dec2(torch.cat([u2, e2], dim=1))
 
@@ -66,5 +66,5 @@ class SmallUNet(nn.Module):
         u1 = F.interpolate(u1, size=e1.shape[-2:], mode="bilinear", align_corners=False)
         d1 = self.dec1(torch.cat([u1, e1], dim=1))
 
-        logits = self.head(d1)  # [B, C, H, W]
+        logits = self.head(d1) # [B, C, H, W]
         return logits

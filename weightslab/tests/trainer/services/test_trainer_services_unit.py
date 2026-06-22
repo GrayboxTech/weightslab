@@ -115,7 +115,7 @@ class TestExperimentServiceUnit(unittest.TestCase):
 
         # Only sample 11 is 'hard'-tagged → mean curve over {11} = one aggregated point.
         self.assertEqual(len(response.points), 1)
-        self.assertEqual(response.points[0].sample_id, "")  # aggregated, not a single sample
+        self.assertEqual(response.points[0].sample_id, "") # aggregated, not a single sample
         self.assertEqual(response.points[0].metric_name, "test/loss")
         self.assertAlmostEqual(response.points[0].metric_value, 0.3, places=5)
 

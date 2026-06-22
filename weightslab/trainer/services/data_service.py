@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # Streamed chunk size for GetPointCloud (raw float32 bytes per gRPC message).
 # Larger chunks mean fewer messages but more memory per message. Override with
 # the WL_POINT_CLOUD_CHUNK_BYTES env variable (see docs/configuration.rst).
-_DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20  # 1 MiB
+_DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20 # 1 MiB
 
 
 def _point_cloud_chunk_bytes() -> int:
@@ -259,12 +259,12 @@ class DataService:
         # rather than queuing to redo the same work.
         #
         # Protocol:
-        #   1. try_acquire(_update_lock, blocking=False)
-        #      → won: clear _update_done, do the update, release, set _update_done
-        #      → lost: _update_done.wait() then return (result already fresh)
+        # 1. try_acquire(_update_lock, blocking=False)
+        # → won: clear _update_done, do the update, release, set _update_done
+        # → lost: _update_done.wait() then return (result already fresh)
         self._update_lock = threading.Lock()
         self._update_done = threading.Event()
-        self._update_done.set()   # "done" initially so the very first call proceeds
+        self._update_done.set() # "done" initially so the very first call proceeds
         # Guard so a non-force (reader-triggered) view refresh runs in the BACKGROUND
         # at most once at a time — readers never pay the rebuild cost (they read the
         # current snapshot; the bg thread swaps in fresh data when ready).
@@ -290,7 +290,7 @@ class DataService:
         # Check hyperparameters for compute_natural_sort flag (default: False)
         # Users can enable it by setting compute_natural_sort=True in their hyperparameters.
         hp = self._ctx.components.get("hyperparams") if self._ctx and self._ctx.components else None
-        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {})  # is it already a proxy ?
+        hp_dict = hp.get() if Proxy.is_proxy(hp) else (hp if isinstance(hp, dict) else {}) # is it already a proxy ?
         self._compute_natural_sort = bool((hp_dict or {}).get("compute_natural_sort", False))
 
         # How per-instance (per-annotation) numeric columns are folded to a single
@@ -323,14 +323,14 @@ class DataService:
             max_workers=8
         )
 
-        self._is_filtered = False  # Track if the current view is filtered/modified by user
+        self._is_filtered = False # Track if the current view is filtered/modified by user
         # logger.info("[DataService] Skipping expensive startup computations (aspect ratio, natural sort, signals).")
         # These should be triggered on-demand or run in background to avoid blocking training start.
 
         if self._compute_natural_sort:
            self._compute_natural_sort_stats()
 
-        self._is_filtered = False  # Track if the current view is filtered/modified by user
+        self._is_filtered = False # Track if the current view is filtered/modified by user
 
         # =====================================================================
         # Preview cache: pre-generate 64×64 or less WebP thumbnails + RLE masks for
@@ -353,7 +353,7 @@ class DataService:
                 daemon=True,
             ).start()
         else:
-            self._preview_cache_ready.set()  # No preload → mark immediately ready
+            self._preview_cache_ready.set() # No preload → mark immediately ready
 
         logger.info("DataService initialized.")
 
@@ -378,8 +378,8 @@ class DataService:
         """Pre-generate 64×64 or less or less thumbnail + RLE mask for every row in the DF.
 
                 Each entry is a lightweight ``DataRecord`` containing only:
-                    • raw_data  (bytes) — 64×64 or less or less WebP thumbnail
-                    • target    (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
+                    • raw_data (bytes) — 64×64 or less or less WebP thumbnail
+                    • target (rle_mask) — RLE-encoded GT mask resized to 64×64 or less or less
                     • pred_mask (rle_mask) — RLE-encoded prediction mask resized to 64×64 or less or less
                     • origin, task_type, num_classes, class_names (metadata)
             Respects ``_preview_cache_max`` to cap memory usage.
@@ -395,7 +395,7 @@ class DataService:
             logger.info("[PreviewCache] Building 64×64 or less or less preview cache for %d samples …", total)
             t0 = time.time()
 
-            PREVIEW_SIZE = 64  # fixed low-res dimension
+            PREVIEW_SIZE = 64 # fixed low-res dimension
             built = 0
 
             index_names = list(getattr(df.index, "names", []) or [])
@@ -847,7 +847,7 @@ class DataService:
                 if val:
                     # Normalize to list
                     if isinstance(val, str):
-                        origins = [val] if val.strip() else []  # Filter empty strings
+                        origins = [val] if val.strip() else [] # Filter empty strings
                     else:
                         # Filter out empty strings from list
                         origins = [o for o in list(val) if o and str(o).strip()]
@@ -925,9 +925,9 @@ class DataService:
         # 4. "Grouped" (Pseudo-primary key): Brightness=5.0, Entropy=1.0 (Forces clustering by light)
 
         SORT_WEIGHTS = {
-            "brightness": 0.7,  # Primary cue: Lighting conditions
-            "entropy": 0.3,     # Secondary cue: Texture/Scene complexity
-            "hue": 0.0          # Optional: Color tint
+            "brightness": 0.7, # Primary cue: Lighting conditions
+            "entropy": 0.3, # Secondary cue: Texture/Scene complexity
+            "hue": 0.0 # Optional: Color tint
         }
 
         logger.info(f"[DataService] Starting natural sort stats computation with weights: {SORT_WEIGHTS}")
@@ -1208,7 +1208,7 @@ class DataService:
                 task_type = "unknown"
             else:
                 # 4. Safe Heuristic evaluation
-                task_type = "classification"  # Default fallback
+                task_type = "classification" # Default fallback
                 if label is not None:
                     if isinstance(label, dict):
                         if ('boxes' in label or 'bboxes' in label):
@@ -1400,7 +1400,7 @@ class DataService:
                         max_id = int(label_arr.max())
                         num_classes = max(1, max_id) + 1
                     else:
-                        num_classes = 2  # Always at least 2 classes for segmentation (foreground/background)
+                        num_classes = 2 # Always at least 2 classes for segmentation (foreground/background)
 
                 data_stats.append(
                     create_data_stat(
@@ -1465,7 +1465,7 @@ class DataService:
                 else:
                     # Check if label is NaN (handle both scalars and arrays)
                     if self._is_nan_value(label):
-                        pass  # Skip NaN labels
+                        pass # Skip NaN labels
 
                     # Handle scalar labels
                     try:
@@ -1614,7 +1614,7 @@ class DataService:
             else:
                 # Classification: get prediction from row or dataset
                 if pred is None:
-                    pass  # No prediction to process
+                    pass # No prediction to process
 
                 else:
                     # Handle scalar predictions (int, float, or unwrapped from H5)
@@ -1696,7 +1696,7 @@ class DataService:
                             target_width = w_limit
                             target_height = int(target_width / aspect_ratio)
                     elif request.resize_width == 0 and request.resize_height == 0:
-                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180))  # Default full resolution image is 360p on the longest side, but can be overridden by env var
+                        target_height = int(os.environ.get("WL_DEFAULT_THUMBNAIL_SIZE", 180)) # Default full resolution image is 360p on the longest side, but can be overridden by env var
                         target_width = int(target_height * aspect_ratio)
 
                     if is_full_resolution:
@@ -1874,7 +1874,7 @@ class DataService:
         """
         total_count = len(df)
         discarded_count = (
-            len(df[df.get(SampleStatsEx.DISCARDED.value, False) == True])  # noqa: E712
+            len(df[df.get(SampleStatsEx.DISCARDED.value, False) == True]) # noqa: E712
             if df is not None and SampleStatsEx.DISCARDED.value in df.columns
             else 0
         )
@@ -2219,7 +2219,7 @@ class DataService:
                 # We must split the updates by origin and upsert them to the manager
                 if self._df_manager is not None:
                     # Create a minimal update dataframe with just the modified column
-                    update_payload = df[[col]]  #  .copy()  # Remove copy because memory waste and slowdown
+                    update_payload = df[[col]] # .copy() # Remove copy because memory waste and slowdown
 
                     # Ensure origin is available for grouping
                     if isinstance(df.index, pd.MultiIndex) and "origin" in df.index.names:
@@ -2268,7 +2268,7 @@ class DataService:
                      if start < len(df):
                          logger.debug(f"[sort_view_slice] Sorting slice {start}:{end}")
                          # Extract and sort slice
-                         sub_df = df.iloc[start:end]  #  .copy()  # Remove copy because memory waste and slowdown
+                         sub_df = df.iloc[start:end] # .copy() # Remove copy because memory waste and slowdown
 
                          # Apply sort to slice
                          # Filter params for sort_values
@@ -2328,12 +2328,12 @@ class DataService:
                          # otherwise Sample ID X will point to data from Sample ID Y (corruption).
                          try:
                              if isinstance(df.index, pd.MultiIndex):
-                                 new_index_values = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
+                                 new_index_values = df.index.to_numpy() # .copy() # Remove copy because memory waste and slowdown
                                  new_index_values[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.MultiIndex.from_tuples(new_index_values, names=df.index.names)
                              else:
                                  idx_name = df.index.name
-                                 new_index = df.index.to_numpy()  #  .copy()  # Remove copy because memory waste and slowdown
+                                 new_index = df.index.to_numpy() # .copy() # Remove copy because memory waste and slowdown
                                  new_index[start:end] = sub_df.index.to_numpy()
                                  df.index = pd.Index(new_index, name=idx_name)
                          except Exception as e:
@@ -2463,7 +2463,7 @@ class DataService:
     # Lock watchdog helpers
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
-    # Lock watchdog helpers  (build on MonitoredRLock from watchdog/)
+    # Lock watchdog helpers (build on MonitoredRLock from watchdog/)
     # ------------------------------------------------------------------
     @staticmethod
     def _lock_caller() -> str:
@@ -2500,7 +2500,7 @@ class DataService:
         self._lock.acquire()
         waited_ms = (time.time() - t0) * 1000
         logger.debug(
-            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            "[LockWatchdog] %-36s ACQUIRED by %-30s caller=%s (waited %.1f ms)",
             lock_name, thread, caller, waited_ms,
         )
         t_held = time.time()
@@ -2511,12 +2511,12 @@ class DataService:
             self._lock.release()
             if held_ms > 1000:
                 logger.warning(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms ← SLOW",
                     lock_name, thread, held_ms,
                 )
             else:
                 logger.debug(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms",
                     lock_name, thread, held_ms,
                 )
 
@@ -2576,7 +2576,7 @@ class DataService:
                         target=self._bg_view_refresh, name="WL-ViewRefresh", daemon=True
                     ).start()
                 except Exception:
-                    self._refresh_in_flight.release()   # never leak the guard
+                    self._refresh_in_flight.release() # never leak the guard
                     logger.exception("[ViewRefresh] failed to start background refresh")
             return
 
@@ -2585,7 +2585,7 @@ class DataService:
         acquired = self._update_lock.acquire(blocking=False)
 
         if not acquired:
-            # Another worker is already updating.  Wait for it to finish (bounded),
+            # Another worker is already updating. Wait for it to finish (bounded),
             # then return — the caller will read the already-refreshed view.
             thread = threading.current_thread().name
             logger.debug(
@@ -2601,7 +2601,7 @@ class DataService:
         thread = threading.current_thread().name
         caller = self._lock_caller()
         logger.debug(
-            "[LockWatchdog] %-36s ACQUIRED by %-30s  caller=%s  (waited %.1f ms)",
+            "[LockWatchdog] %-36s ACQUIRED by %-30s caller=%s (waited %.1f ms)",
             "_update_lock[_slowUpdateInternals]", thread, caller, waited_ms,
         )
         # Signal to latecomers that an update is now in progress.
@@ -2710,12 +2710,12 @@ class DataService:
             self._update_lock.release()
             if held_ms > 1000:
                 logger.warning(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms  ← SLOW",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms ← SLOW",
                     "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
                 )
             else:
                 logger.debug(
-                    "[LockWatchdog] %-36s RELEASED by %-30s  held %.1f ms",
+                    "[LockWatchdog] %-36s RELEASED by %-30s held %.1f ms",
                     "_update_lock[_slowUpdateInternals]", threading.current_thread().name, held_ms,
                 )
             # Unblock all workers that were waiting on this update.
@@ -2795,7 +2795,7 @@ class DataService:
 
         # -- Vectorized pre-processing: build string matrices via pandas ------
         # Separate tag columns from regular metadata columns for different
-        # handling.  All heavy conversion is done once on the full column
+        # handling. All heavy conversion is done once on the full column
         # vectors, not per-row.
         tag_cols = [c for c in metadata_cols if c.startswith(tag_prefix)]
         meta_cols = [c for c in metadata_cols if not c.startswith(tag_prefix)]
@@ -2809,10 +2809,10 @@ class DataService:
         # -- Column-wise DataStat construction --------------------------------
         # Build all DataStat objects for one column at a time using list
         # comprehensions (CPython fast-path) and inline pb2.DataStat() to
-        # eliminate the create_data_stat wrapper overhead.  Then scatter
-        # them into the per-row bins.  At 1M rows × 10 cols this avoids
+        # eliminate the create_data_stat wrapper overhead. Then scatter
+        # them into the per-row bins. At 1M rows × 10 cols this avoids
         # a 10M-iteration nested Python loop.
-        _DataStat = pb2.DataStat  # local ref – avoids repeated attr lookup
+        _DataStat = pb2.DataStat # local ref – avoids repeated attr lookup
 
         for col in meta_cols:
             series = df_slice[col]
@@ -3079,14 +3079,14 @@ class DataService:
            resolution (both dims ≤ ``_PREVIEW_CACHE_THRESHOLD``), serve from
            the cache instantly without touching the file system.
         2. **Parallel batch processing** – All samples are submitted to the
-           thread pool at once so all 8 workers stay busy.  The chunk-size
+           thread pool at once so all 8 workers stay busy. The chunk-size
            env-var ``WL_BATCH_CHUNK_SIZE`` is kept for backward compat but
            the default is now the full request size (all at once).
         """
-        _PREVIEW_CACHE_THRESHOLD = 80      # max px to consider a "preview" request
+        _PREVIEW_CACHE_THRESHOLD = 80 # max px to consider a "preview" request
         # Default: process ALL rows at once in the thread pool (workers = 8).
         # Override with WL_BATCH_CHUNK_SIZE to throttle concurrency.
-        _BATCH_CHUNK_SIZE = int(os.environ.get("WL_BATCH_CHUNK_SIZE", "0"))  # 0 = all at once
+        _BATCH_CHUNK_SIZE = int(os.environ.get("WL_BATCH_CHUNK_SIZE", "0")) # 0 = all at once
 
         try:
             start_time = time.time()
@@ -3253,7 +3253,7 @@ class DataService:
 
             # ---- Parallel batch processing ---------------------------------
             # Submit ALL rows to the thread pool at once so all 8 workers
-            # stay busy.  This avoids the old sequential-chunk bottleneck
+            # stay busy. This avoids the old sequential-chunk bottleneck
             # where each sub-batch had to finish before the next started.
             data_records: list = []
             rows_list = list(df_slice.iterrows())
@@ -3319,7 +3319,7 @@ class DataService:
         new_tag_name = f'{SampleStatsEx.TAG.value}:{stripped_tag_name}'
 
         # Get current tags from the in-memory dataframe or df_manager
-        existing_tag_value = True  # Default to True for new tags
+        existing_tag_value = True # Default to True for new tags
         try:
             if self._all_datasets_df is not None:
                 # Read current tag columns from in-memory dataframe
@@ -3335,7 +3335,7 @@ class DataService:
 
                 if row is not None:
                     for col in row.index:
-                        if col == new_tag_name and row[col]:  # If existing, revert the value
+                        if col == new_tag_name and row[col]: # If existing, revert the value
                             existing_tag_value = bool(1 - row[col])
 
         except (KeyError, AttributeError) as e:
@@ -3343,7 +3343,7 @@ class DataService:
 
         # Calculate target tags based on edit type
         if edit_type == SampleEditType.EDIT_REMOVE:
-            existing_tag_value = False  # For removal, we set the tag to False
+            existing_tag_value = False # For removal, we set the tag to False
             target_tags_set = self._parse_tags(new_tag_name)
         else:
             # Override: replace all tags with the new value
@@ -3385,8 +3385,8 @@ class DataService:
         Apply a query on the in-memory dataframe.
 
         Modes:
-          - request.query == ""  -> just return counts, do not modify df
-          - request.query != ""  -> always handled by the agent (natural language path)
+          - request.query == "" -> just return counts, do not modify df
+          - request.query != "" -> always handled by the agent (natural language path)
 
         Counts returned:
           - number_of_all_samples: all rows currently in the dataframe
@@ -3430,10 +3430,10 @@ class DataService:
                     is_sort_only = bool(operations) and all(
                         op.get("function") in _SORT_FUNCS for op in operations)
                     if not is_sort_only:
-                        self._slowUpdateInternals(force=True)  # Refresh internals before applying non-sort operations
+                        self._slowUpdateInternals(force=True) # Refresh internals before applying non-sort operations
 
                     # Work on a copy to allow concurrent readers to see a consistent state
-                    df = self._all_datasets_df  # Remove copy because memory waste and slowdown
+                    df = self._all_datasets_df # Remove copy because memory waste and slowdown
                     messages = []
 
                     for op in operations:
@@ -3464,7 +3464,7 @@ class DataService:
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct DataFrame operation: {request.query[:100]}...")
 
                     with self._lock:
-                        self._all_datasets_df, message = execute_df_operation(self._all_datasets_df, request.query)  # in-place operation, or replace previous dataframe
+                        self._all_datasets_df, message = execute_df_operation(self._all_datasets_df, request.query) # in-place operation, or replace previous dataframe
                         logger.info(f"[ApplyDataQuery] Executed direct DataFrame operation. Message: {message}")
 
                         if operations:
@@ -3480,8 +3480,8 @@ class DataService:
                     logger.info(f"[ApplyDataQuery] BYPASSING AGENT - Direct reset/clear operation: {request.query[:100]}...")
                     # Force view reset
                     with self._lock:
-                        self._is_filtered = False  # Unfreeze view first
-                        self._slowUpdateInternals(force=True)  # Force update to ensure we have the latest data
+                        self._is_filtered = False # Unfreeze view first
+                        self._slowUpdateInternals(force=True) # Force update to ensure we have the latest data
                         logger.info(f"[ApplyDataQuery] Force view reset and unfrozen.")
 
                         return pb2.DataQueryResponse(
@@ -3531,7 +3531,7 @@ class DataService:
                         if self._all_datasets_df is None:
                             self._all_datasets_df = self._pull_into_all_data_view_df() or pd.DataFrame()
 
-                        df = self._all_datasets_df  #  .copy()  # Remove copy because memory waste and slowdown
+                        df = self._all_datasets_df # .copy() # Remove copy because memory waste and slowdown
                         messages = []
                         intent_type = pb2.INTENT_FILTER
                         analysis_result = ""

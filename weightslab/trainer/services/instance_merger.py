@@ -102,7 +102,7 @@ def merge_segmentation_instances(instance_values: List[Any], task_type: str = "s
           mask1: [[0, 1], [0, 1]]
           mask2: [[1, 0], [0, 1]]
           Output: np.max([mask0, mask1, mask2], axis=0)
-                = [[1, 1], [1, 1]]  [MAX aggregated!]
+                = [[1, 1], [1, 1]] [MAX aggregated!]
 
         - Input: [mask0] (single mask)
           Output: mask0 as-is (512, 512)
@@ -133,7 +133,7 @@ def merge_segmentation_instances(instance_values: List[Any], task_type: str = "s
         # Multiple masks: aggregate using max at each pixel
         # Stack temporarily for max operation, then return result
         stacked = np.stack(masks_np, axis=0)
-        return np.max(stacked, axis=0)  # Take max across instances → (H, W)
+        return np.max(stacked, axis=0) # Take max across instances → (H, W)
 
 
 def merge_classification_instances(instance_values: List[Any], task_type: str = "classification") -> Union[list, None]:
@@ -152,7 +152,7 @@ def merge_classification_instances(instance_values: List[Any], task_type: str = 
         - All None: Return None
 
     Example:
-        - Input: ['cat', None, None] → Output: ['cat']  [LIST!]
+        - Input: ['cat', None, None] → Output: ['cat'] [LIST!]
         - Input: ['cat', 'dog', 'animal'] → Output: ['cat', 'dog', 'animal']
     """
     labels = []
@@ -212,9 +212,9 @@ def group_instances_by_sample(df_slice, target_column: str, task_type: str):
     Returns:
         Dict mapping sample_id to merged value
         Example: {
-            'sample_0': [bbox0, bbox1, bbox2],  # Detection: list of bboxes
-            'sample_1': [mask0, mask1],          # Segmentation: list of masks
-            'sample_2': 'cat',                   # Classification: single label
+            'sample_0': [bbox0, bbox1, bbox2], # Detection: list of bboxes
+            'sample_1': [mask0, mask1], # Segmentation: list of masks
+            'sample_2': 'cat', # Classification: single label
         }
     """
     if df_slice.empty or target_column not in df_slice.columns:

@@ -3,10 +3,10 @@
 ``LoggerQueue`` is a thin interface that maps the logger's public methods onto
 a DuckDB database holding three history tables:
 
-* ``signals``       — aggregated training-curve points (one row per averaged
+* ``signals`` — aggregated training-curve points (one row per averaged
                       step entry / evaluation marker).
-* ``per_sample``    — per-sample signal values ``(sample_id, step, value)``.
-* ``per_instance``  — per-instance values ``(sample_id, annotation_id, step, value)``
+* ``per_sample`` — per-sample signal values ``(sample_id, step, value)``.
+* ``per_instance`` — per-instance values ``(sample_id, annotation_id, step, value)``
                       for detection / segmentation.
 
 Design notes
@@ -71,7 +71,7 @@ class LoggerQueue:
         self._eval_mode_hash: str = ""
         self._eval_mode_split: str = ""
         self._eval_mode_tags: list[str] = []
-        self._eval_accum: dict = {}  # {graph_name: [sum, count]}
+        self._eval_accum: dict = {} # {graph_name: [sum, count]}
 
         # DuckDB connection + write-staging buffers.
         self._lock = threading.RLock()
@@ -357,7 +357,7 @@ class LoggerQueue:
         """Redirect subsequent add_scalars() calls into the evaluation buffer.
 
         While evaluation mode is active, signals are NOT added to the normal
-        curve history.  Instead they accumulate in an internal buffer.
+        curve history. Instead they accumulate in an internal buffer.
         ``stop_evaluation_mode()`` finalises the buffer into a single marker.
 
         Per-sample history *is* still updated (for Break-By-Slice on eval
@@ -488,7 +488,7 @@ class LoggerQueue:
                     for sid, value in signal_per_sample.items():
                         self._stage_sample_row(graph_name, eval_hash, sid, step_i, self._to_float(value))
 
-                return  # Do NOT add to normal history during evaluation mode
+                return # Do NOT add to normal history during evaluation mode
             # ------------------------------------------------------------
 
             exp_hash = self.chkpt_manager.get_current_experiment_hash() if self.chkpt_manager else None
@@ -581,11 +581,11 @@ class LoggerQueue:
         for metric_name, experiments in history.items():
             print(f"Metric: {metric_name}")
             for exp_hash, steps in experiments.items():
-                print(f"  Experiment Hash: {exp_hash}")
+                print(f" Experiment Hash: {exp_hash}")
                 for step, signals in steps.items():
-                    print(f"    Step: {step}")
+                    print(f" Step: {step}")
                     for signal in signals:
-                        print(f"      Signal: {signal}")
+                        print(f" Signal: {signal}")
         return history
 
     def print_history_per_sample(self):
@@ -593,9 +593,9 @@ class LoggerQueue:
         for metric_name, exps in history.items():
             print(f"Metric: {metric_name}")
             for exp_hash, entries in exps.items():
-                print(f"  Experiment Hash: {exp_hash}")
+                print(f" Experiment Hash: {exp_hash}")
                 for e in entries:
-                    print(f"    Sample ID: {e['sample_id']}, Step: {e['model_age']}, Value: {e['metric_value']}")
+                    print(f" Sample ID: {e['sample_id']}, Step: {e['model_age']}, Value: {e['metric_value']}")
         return history
 
     def print_buffer(self):
@@ -736,7 +736,7 @@ class LoggerQueue:
         """Query per-instance signal history.
 
         Returns a list of ``(sample_id, annotation_id, step, value, exp_hash)``
-        tuples.  Any of *sample_id*, *annotation_id*, *exp_hash* may be ``None``
+        tuples. Any of *sample_id*, *annotation_id*, *exp_hash* may be ``None``
         to return all values along that dimension.
         """
         with self._lock:
@@ -1013,9 +1013,9 @@ class LoggerQueue:
         """Load per-sample history.
 
         Handles three formats:
-          - Compact:     {graph: {hash: {"_compact": True, "sample_ids": [...], "steps": [...], "values": [...]}}}
+          - Compact: {graph: {hash: {"_compact": True, "sample_ids": [...], "steps": [...], "values": [...]}}}
           - Legacy list: {graph: {hash: [{sample_id, model_age, metric_value, ...}, ...]}}
-          - Legacy dict: {graph: {sample_id_as_key: {model_age, metric_value, ...}}}  → stored under None hash
+          - Legacy dict: {graph: {sample_id_as_key: {model_age, metric_value, ...}}} → stored under None hash
         """
         if not signals_per_sample:
             return

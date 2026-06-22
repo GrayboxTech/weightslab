@@ -114,7 +114,7 @@ class MinimalResidualBlock(nn.Module):
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
-        out = out + out1  # Residual connection (REC dependency)
+        out = out + out1 # Residual connection (REC dependency)
         return out
 
 
@@ -142,7 +142,7 @@ class MinimalSkipConnectionCat(nn.Module):
         branch2 = self.conv2(x)
         branch2 = self.relu2(branch2)
 
-        merged = torch.cat([branch1, branch2], dim=1)  # REC: both branches constrained
+        merged = torch.cat([branch1, branch2], dim=1) # REC: both branches constrained
         out = self.conv_merged(merged)
         return out
 
@@ -341,10 +341,10 @@ class ResidualOfResidual(nn.Module):
         out_id = out
         out = self.conv2(out)
         out = self.bn2(out)
-        out = out + out_id  # inner residual
+        out = out + out_id # inner residual
         out = self.conv3(out)
         out = self.bn3(out)
-        out = out + out1      # outer residual
+        out = out + out1 # outer residual
         return out
 
 
@@ -965,7 +965,7 @@ class TestConv1DChain(DependencyPatternTest):
         self.model = MinimalConv1DChain()
         self.model.eval()
         self._model = self.model
-        self.dummy_input = torch.randn(1, 4, 64)  # N, C, L
+        self.dummy_input = torch.randn(1, 4, 64) # N, C, L
 
     def test_conv1d_onnx(self):
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)
@@ -998,7 +998,7 @@ class TestConv3DChain(DependencyPatternTest):
         self.model = MinimalConv3DChain()
         self.model.eval()
         self._model = self.model
-        self.dummy_input = torch.randn(1, 2, 8, 16, 16)  # N, C, D, H, W
+        self.dummy_input = torch.randn(1, 2, 8, 16, 16) # N, C, D, H, W
 
     def test_conv3d_onnx(self):
         self.model = self.get_dependencies_onnx(self.model, self.dummy_input)

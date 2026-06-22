@@ -195,7 +195,7 @@ class TestEvaluationMode(unittest.TestCase):
     def test_stop_skips_zero_count_signals(self):
         lg = _lg()
         lg.start_evaluation_mode("val", "h1_1")
-        lg._eval_accum["loss"] = [0.0, 0]  # injected directly with count=0
+        lg._eval_accum["loss"] = [0.0, 0] # injected directly with count=0
         results = lg.stop_evaluation_mode(model_age=1)
         self.assertNotIn("loss", results)
 
@@ -226,7 +226,7 @@ class TestAbortEvaluationMode(unittest.TestCase):
 
     def test_abort_when_not_active_is_noop(self):
         lg = _lg()
-        lg.abort_evaluation_mode()  # should not raise
+        lg.abort_evaluation_mode() # should not raise
         self.assertFalse(lg._eval_mode_active)
 
     def test_abort_clears_active_flag_and_accum(self):
@@ -253,7 +253,7 @@ class TestAbortEvaluationMode(unittest.TestCase):
         lg.add_scalars("loss", {"loss": 0.5}, 1, signal_per_sample=None, aggregate_by_step=False)
         # Manually inject a queue entry for the eval hash
         lg._pending_queue.append({"experiment_hash": "h1_1", "metric_name": "loss"})
-        lg._eval_mode_active = True  # re-arm
+        lg._eval_mode_active = True # re-arm
         lg.abort_evaluation_mode()
         hashes_in_queue = {e.get("experiment_hash") for e in lg._pending_queue}
         self.assertNotIn("h1_1", hashes_in_queue)
@@ -290,7 +290,7 @@ class TestRemoveEvaluationHash(unittest.TestCase):
         lg = _lg()
         lg._pending_queue = [
             {"experiment_hash": "h1_1", "metric_name": "loss"},
-            {"experiment_hash": "h1",   "metric_name": "loss"},
+            {"experiment_hash": "h1", "metric_name": "loss"},
         ]
         lg.remove_evaluation_hash("h1_1")
         self.assertEqual(len(lg._pending_queue), 1)
@@ -304,7 +304,7 @@ class TestRemoveEvaluationHash(unittest.TestCase):
 
     def test_missing_hash_does_not_raise(self):
         lg = _lg()
-        lg.remove_evaluation_hash("nonexistent_hash_1")  # must not raise
+        lg.remove_evaluation_hash("nonexistent_hash_1") # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +393,7 @@ class TestIngestPerSample(unittest.TestCase):
     def test_dedup_same_sample_and_step(self):
         lg = _lg()
         lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.4)])
-        lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.9)])  # same (sid, step) → ignored
+        lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.9)]) # same (sid, step) → ignored
         rows = lg.query_per_sample("loss")
         self.assertEqual(len(rows), 1)
         self.assertAlmostEqual(rows[0][2], 0.4, places=4)
@@ -401,7 +401,7 @@ class TestIngestPerSample(unittest.TestCase):
     def test_different_step_is_not_dedup(self):
         lg = _lg()
         lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.4)])
-        lg.ingest_per_sample("loss", "h1", [("s0", 2, 0.9)])  # different step → accepted
+        lg.ingest_per_sample("loss", "h1", [("s0", 2, 0.9)]) # different step → accepted
         rows = lg.query_per_sample("loss")
         self.assertEqual(len(rows), 2)
 
@@ -419,7 +419,7 @@ class TestIngestPerSample(unittest.TestCase):
     def test_dedup_does_not_corrupt_index(self):
         lg = _lg()
         lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.4)])
-        lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.9)])  # duplicate ignored
+        lg.ingest_per_sample("loss", "h1", [("s0", 1, 0.9)]) # duplicate ignored
         # exactly one row should remain queryable for (s0, h1)
         rows = lg.query_per_sample("loss", sample_ids=["s0"], exp_hash="h1")
         self.assertEqual(len(rows), 1)
@@ -673,7 +673,7 @@ class TestSetPointNote(unittest.TestCase):
     def test_does_not_modify_non_matching_queue_entries(self):
         lg = self._lg_with_hash("run1")
         _add(lg, "loss", "s0", 5, 0.4)
-        _add(lg, "acc",  "s0", 5, 0.9)
+        _add(lg, "acc", "s0", 5, 0.9)
         lg.set_point_note("loss", "run1", 5, "only loss")
         acc_entry = next(e for e in lg._pending_queue if e["metric_name"] == "acc")
         self.assertNotIn("point_note", acc_entry)

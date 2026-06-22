@@ -12,10 +12,10 @@ from torch.utils.data import Dataset
 # task is to detect axis-aligned 2D boxes around object clusters.
 #
 # Per sample:
-#   * cloud:  [M, 2] float32 (x, y)  — genuinely 2D (the studio viewer renders
-#             it top-down; no z channel, so it is treated as a 2D cloud).
-#   * target: [N, 6] float32 = [cx, cy, dx, dy, class_id, confidence]
-#             (metric units; 2D box schema — exactly 6 columns).
+# * cloud: [M, 2] float32 (x, y) — genuinely 2D (the studio viewer renders
+# it top-down; no z channel, so it is treated as a 2D cloud).
+# * target: [N, 6] float32 = [cx, cy, dx, dy, class_id, confidence]
+# (metric units; 2D box schema — exactly 6 columns).
 #
 # task_type "detection_pointcloud" is shared with the 3D example; the box-row
 # column count (<= 6) is what marks this as 2D.
@@ -29,7 +29,7 @@ DEFAULT_PC_RANGE = (0.0, -20.0, 0.0, 40.0, 20.0, 1.0)
 PAD_VALUE = -1000.0
 
 # Typical (length, width) per class for the generator.
-_CLASS_DIMS = np.array([[3.6, 1.7], [0.7, 0.7]], dtype=np.float32)  # Vehicle, Pedestrian
+_CLASS_DIMS = np.array([[3.6, 1.7], [0.7, 0.7]], dtype=np.float32) # Vehicle, Pedestrian
 
 
 def _sample_rect_perimeter(rng, dims, n):
@@ -74,7 +74,7 @@ def generate_synthetic_scene(seed, pc_range):
         n_pts = int(np.clip(400.0 / (1.0 + dist / 6.0), 20, 200))
         local = _sample_rect_perimeter(rng, dims, n_pts)
         world = local + np.array([cx, cy], dtype=np.float32)
-        world += rng.normal(0.0, 0.03, world.shape).astype(np.float32)  # sensor noise
+        world += rng.normal(0.0, 0.03, world.shape).astype(np.float32) # sensor noise
         clouds.append(world)
         boxes.append([cx, cy, dims[0], dims[1], float(cls), 1.0])
 
@@ -96,7 +96,7 @@ class Lidar2DDetectionDataset(Dataset):
         max_samples=None,
         seed=0,
         thumbnail_projection="bev",
-        **_ignored,  # tolerate shared kwargs (kitti_*, extra_features) for parity
+        **_ignored, # tolerate shared kwargs (kitti_*, extra_features) for parity
     ):
         super().__init__()
         self.split = split

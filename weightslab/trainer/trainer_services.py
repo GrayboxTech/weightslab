@@ -282,7 +282,7 @@ class AuthTokenInterceptor(grpc.ServerInterceptor):
 # ---------------------------------------------------------------------------
 # Backward-compat note: RpcWatchdogState, RpcTimingAndWatchdogInterceptor and
 # GrpcServerManager are now defined in weightslab.watchdog.grpc_watchdog and
-# re-exported above.  External code that imported them from trainer_services
+# re-exported above. External code that imported them from trainer_services
 # continues to work unchanged.
 # ---------------------------------------------------------------------------
 
@@ -468,12 +468,12 @@ def grpc_serve(
 
     grpc_host = os.getenv("GRPC_BACKEND_HOST", "0.0.0.0") if not force_parameters or grpc_host is None else grpc_host
     grpc_port = int(os.getenv("GRPC_BACKEND_PORT", 50051)) if not force_parameters or grpc_port is None else grpc_port
-    watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "180"))  # 3 minutes default stuck threshold
+    watchdog_threshold_s = float(os.getenv("GRPC_WATCHDOG_STUCK_SECONDS", "180")) # 3 minutes default stuck threshold
     watchdog_interval_s = float(os.getenv("GRPC_WATCHDOG_INTERVAL_SECONDS", "5"))
     watchdog_exit_on_stuck = str(os.getenv("GRPC_WATCHDOG_EXIT_ON_STUCK", "0")).strip().lower() in {"1", "true", "yes", "on"}
-    watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3"))  # Restart after 3 unhealthy checks
+    watchdog_restart_threshold = int(os.getenv("GRPC_WATCHDOG_RESTART_THRESHOLD", "3")) # Restart after 3 unhealthy checks
     watchdog_details_limit = int(os.getenv("GRPC_WATCHDOG_INFLIGHT_DETAILS_LIMIT", "10"))
-    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "1")).strip().lower() in {"1", "true", "yes", "on"}  # Default state: disabled
+    watchdog_disabled = str(os.getenv("WEIGHTSLAB_DISABLE_WATCHDOGS", "1")).strip().lower() in {"1", "true", "yes", "on"} # Default state: disabled
     config = get_hyperparams()
     grpc_tls_enabled = _resolve_bool_setting(config, "grpc_tls_enabled", "GRPC_TLS_ENABLED", "0")
     grpc_tls_key_file = _resolve_grpc_tls_path(
@@ -528,7 +528,7 @@ def grpc_serve(
         )
         watchdog.register_lock("weightslab_rlock", weightslab_rlock)
 
-        # Eval thread monitor — no timeout, just liveness.  Lazy imports avoid
+        # Eval thread monitor — no timeout, just liveness. Lazy imports avoid
         # circular dependencies since weightslab.src imports trainer code.
         def _get_eval_controller():
             from weightslab.components.evaluation_controller import eval_controller as _ec
@@ -542,8 +542,8 @@ def grpc_serve(
             get_controller=_get_eval_controller,
             get_thread=_get_eval_thread,
         )
-        watchdog_state = watchdog.rpc_state       # shared with RpcTimingAndWatchdogInterceptor
-        server_manager = watchdog.server_manager  # shared with serving_thread_callback
+        watchdog_state = watchdog.rpc_state # shared with RpcTimingAndWatchdogInterceptor
+        server_manager = watchdog.server_manager # shared with serving_thread_callback
     logger.debug(
         f"grpc_serve called with parameters: n_workers_grpc={n_workers_grpc}, grpc_host={grpc_host}, grpc_port={grpc_port}, "
         f"watchdog_threshold_s={watchdog_threshold_s}, watchdog_interval_s={watchdog_interval_s}, watchdog_exit_on_stuck={watchdog_exit_on_stuck}, watchdog_restart_threshold={watchdog_restart_threshold}, "
@@ -553,13 +553,13 @@ def grpc_serve(
     def serving_thread_callback():
         logger.info("[gRPC] Thread callback started")
         try:
-            while True:  # Loop to allow restarts
+            while True: # Loop to allow restarts
                 _effective_workers = n_workers_grpc or min(32, (os.cpu_count() or 1) + 4)
                 logger.info(
                     "[gRPC] Creating ThreadPoolExecutor with %d worker threads (n_workers_grpc=%s, max_concurrent_rpcs=%s)",
                     _effective_workers, n_workers_grpc, max_concurrent_rpcs,
                 )
-                _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024))  # 256 MB
+                _max_msg = int(os.getenv("GRPC_MAX_MESSAGE_BYTES", 256 * 1024 * 1024)) # 256 MB
                 server = grpc.server(
                     futures.ThreadPoolExecutor(
                         thread_name_prefix="WL-gRPC-Worker",
@@ -636,16 +636,16 @@ def grpc_serve(
                 while not server_manager.should_restart():
                     time.sleep(0.5)
 
-                logger.watchdog("[gRPC] Restart requested. Gracefully shutting down (5s grace)...")  # type: ignore[attr-defined]
+                logger.watchdog("[gRPC] Restart requested. Gracefully shutting down (5s grace)...") # type: ignore[attr-defined]
                 stop_event = server.stop(grace=5)
                 stopped = stop_event.wait(timeout=6.0)
                 if not stopped:
-                    logger.watchdog("[gRPC] Graceful stop timed out; forcing immediate stop.")  # type: ignore[attr-defined]
+                    logger.watchdog("[gRPC] Graceful stop timed out; forcing immediate stop.") # type: ignore[attr-defined]
                     server.stop(grace=0).wait(timeout=1.0)
 
                 cleared = watchdog_state.clear_for_restart()
                 if cleared:
-                    logger.watchdog("[gRPC] Cleared %d stale in-flight RPC records after restart.", cleared)  # type: ignore[attr-defined]
+                    logger.watchdog("[gRPC] Cleared %d stale in-flight RPC records after restart.", cleared) # type: ignore[attr-defined]
                 server_manager.clear_restart_request()
                 logger.info("[gRPC] Server stopped. Restarting in 2s...")
                 time.sleep(2)

@@ -99,7 +99,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         self.assertEqual(rec["signal:bbox_loss"], 0.2)
         self.assertEqual(rec[SampleStats.Ex.LAST_SEEN.value], 3)
         self.assertIn(SampleStats.Ex.TARGET.value, rec)
-        self.assertTrue(mgr._df.empty)  # df untouched until flush
+        self.assertTrue(mgr._df.empty) # df untouched until flush
 
     def test_flush_applies_instance_records(self):
         """Flushing instance records writes per-(sample_id, annotation_id) values."""
@@ -119,7 +119,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         mgr.flush()
 
         result = mgr.get_df_view()
-        self.assertEqual(len(result), 4)  # sample row (0) + 3 instance rows
+        self.assertEqual(len(result), 4) # sample row (0) + 3 instance rows
         self.assertAlmostEqual(float(result.loc[("1", 1), "signal:il"]), 0.5)
         self.assertAlmostEqual(float(result.loc[("1", 2), "signal:il"]), 0.6)
         self.assertAlmostEqual(float(result.loc[("1", 3), "signal:il"]), 0.7)
@@ -178,9 +178,9 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         # Single sample with 3 instances (detections/annotations)
         # Use list of arrays to indicate multiple instances
         target = [
-            np.array([10, 20, 30, 40]),  # instance 0
-            np.array([50, 60, 70, 80]),  # instance 1
-            np.array([90, 100, 110, 120])  # instance 2
+            np.array([10, 20, 30, 40]), # instance 0
+            np.array([50, 60, 70, 80]), # instance 1
+            np.array([90, 100, 110, 120]) # instance 2
         ]
         df = pd.DataFrame([{
             "sample_id": 1,
@@ -296,7 +296,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
         self.assertTrue((result_df["metadata"] == "urban").sum() > 0)
 
         # Memory usage comparison
-        # original_bytes = 100 * (len("train") + len("urban"))  # Rough estimate
+        # original_bytes = 100 * (len("train") + len("urban")) # Rough estimate
         # With categorical: ~100 bytes for codes + ~40 bytes for categories = ~140 bytes
         # Real compression achieved by pandas
 
@@ -357,7 +357,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
             losses={"signals//train/clsf_sample": np.array([0.99])},
             step=11,
         )
-        mgr.flush()  # Would raise if bug regressed
+        mgr.flush() # Would raise if bug regressed
         result = mgr.get_df_view()
         self.assertAlmostEqual(result.loc[("1", 0), col], 0.99)
 
@@ -385,7 +385,7 @@ class TestDataFrameManagerUnit(unittest.TestCase):
             "origin": "train",
             SampleStats.Ex.TARGET.value: np.zeros((30, 30), dtype=np.float32),
         })
-        row.name = ("12", 0)  # MultiIndex-style row.name
+        row.name = ("12", 0) # MultiIndex-style row.name
 
         # Should not raise and should pass just the sample_id, not the tuple
         mgr._normalize_arrays_for_storage(row)

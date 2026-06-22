@@ -134,7 +134,7 @@ class ModelInterface(NetworkWithOps):
                 if dummy_input is None:
                     raise ValueError("Model object must have 'input_shape' attribute for proper registration with WeightsLab.")
                 else:
-                    self.model.input_shape = tuple(dummy_input.shape[1:])  # Exclude batch dimension
+                    self.model.input_shape = tuple(dummy_input.shape[1:]) # Exclude batch dimension
 
             # Move dummy input to the correct device, or create a default one if not provided
             if dummy_input is not None:
@@ -443,7 +443,7 @@ class ModelInterface(NetworkWithOps):
             True if an exception occurred and it was successfully handled by
             this method, preventing it from being re-raised.
         """
-        self.visited_nodes = set()  # Reset NetworkWithOps nodes visited
+        self.visited_nodes = set() # Reset NetworkWithOps nodes visited
         if exc_type is not None:
             logger.error(
                 f"[{self.__class__.__name__}]: An exception occurred: \
@@ -492,7 +492,7 @@ class ModelInterface(NetworkWithOps):
 
         Note: `assign=False` is explicitly passed so that parameter tensors
         are updated **in-place** (data copy) rather than replaced with new
-        objects.  Replacing parameter objects (assign=True, the NetworkWithOps
+        objects. Replacing parameter objects (assign=True, the NetworkWithOps
         default) would silently invalidate any optimizer that was created
         before this load_state_dict call, because the optimizer holds
         references to the old Parameter objects.
@@ -885,9 +885,9 @@ class ModelInterface(NetworkWithOps):
                             pass
                     seq_lines = seq_module_repr.split('\n')
                     # The first line is formatted with the name, the rest are indented
-                    seq_string += f"  ({seq_name}): {seq_lines[0]}\n"
+                    seq_string += f" ({seq_name}): {seq_lines[0]}\n"
                     for seq_line in seq_lines[1:]:
-                        seq_string += f"  {seq_line}\n"
+                        seq_string += f" {seq_line}\n"
                 module_repr = f"{seq_string}"
             else:
                 module_repr = f"ID=None | {module_repr}"
@@ -899,9 +899,9 @@ class ModelInterface(NetworkWithOps):
             lines = module_repr.split('\n')
 
             # The first line is formatted with the name, the rest are indented
-            string += f"  ({name}): {lines[0]}\n"
+            string += f" ({name}): {lines[0]}\n"
             for line in lines[1:]:
-                string += f"  {line}\n"
+                string += f" {line}\n"
 
         string += ")"
         return string

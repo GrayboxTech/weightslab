@@ -59,32 +59,32 @@ class CustomLidarDataset(Lidar3DDetectionDataset):
         # You can customize parameters here (resolution, FOV, rendering mode):
         return point_cloud_to_range_image(
             points,
-            image_height=80,      # Custom height (default 64)
-            image_width=512,      # Custom width (default 512, like KITTI)
-            fov_up=3.0,           # Max elevation angle in degrees
-            fov_down=-25.0,       # Min elevation angle (typical LiDAR)
-            mode="distance+intensity",  # or "distance", "intensity"
+            image_height=80, # Custom height (default 64)
+            image_width=512, # Custom width (default 512, like KITTI)
+            fov_up=3.0, # Max elevation angle in degrees
+            fov_down=-25.0, # Min elevation angle (typical LiDAR)
+            mode="distance+intensity", # or "distance", "intensity"
         )
 
     # Optional: override box projection for your custom 2D frame.
     # Uncomment if needed:
     #
     # def project_boxes_2d(self, boxes_3d):
-    #     """Custom box projection to your 2D frame.
+    # """Custom box projection to your 2D frame.
     #
-    #     Args:
-    #         boxes_3d: [N, C] where C >= 7 is 3D ([cx,cy,cz,dx,dy,dz,yaw,...])
-    #                              or C <= 6 is 2D ([cx,cy,dx,dy,...])
+    # Args:
+    # boxes_3d: [N, C] where C >= 7 is 3D ([cx,cy,cz,dx,dy,dz,yaw,...])
+    # or C <= 6 is 2D ([cx,cy,dx,dy,...])
     #
-    #     Returns:
-    #         [N, 6] normalized xyxy boxes [x1, y1, x2, y2, class_id, confidence]
-    #         in [0, 1] range (image coordinates, y down).
-    #     """
-    #     from weightslab.data.point_cloud_utils import project_boxes_to_bev, get_pc_range
-    #     # For now, just use the standard BEV projection as fallback.
-    #     # Implement your custom projection here.
-    #     pc_range = get_pc_range(self)
-    #     return project_boxes_to_bev(boxes_3d, pc_range)
+    # Returns:
+    # [N, 6] normalized xyxy boxes [x1, y1, x2, y2, class_id, confidence]
+    # in [0, 1] range (image coordinates, y down).
+    # """
+    # from weightslab.data.point_cloud_utils import project_boxes_to_bev, get_pc_range
+    # # For now, just use the standard BEV projection as fallback.
+    # # Implement your custom projection here.
+    # pc_range = get_pc_range(self)
+    # return project_boxes_to_bev(boxes_3d, pc_range)
 
 
 # =============================================================================
@@ -105,7 +105,7 @@ def train(loader, model, optimizer, sig, device, grid_size, pc_range, conf_thres
         targets = [t.to(device) for t in targets]
 
         optimizer.zero_grad()
-        outputs = model(points)  # [B, S, S, 9 + num_classes]
+        outputs = model(points) # [B, S, S, 9 + num_classes]
 
         # Decoded 3D boxes (detached — stored alongside the loss for analysis).
         preds = decode_predictions(
@@ -147,7 +147,7 @@ def test(loader, model, sig, device, grid_size, pc_range, conf_thresh, test_load
 
     loss = float((losses / test_loader_len).detach().cpu().item())
     iou = float((ious / test_loader_len).detach().cpu().item())
-    return loss, iou * 100.0  # Return mean BEV IoU as percentage
+    return loss, iou * 100.0 # Return mean BEV IoU as percentage
 
 
 # =============================================================================
@@ -168,7 +168,7 @@ if __name__ == "__main__":
     parameters.setdefault("training_steps_to_do", 500)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     parameters.setdefault("number_of_workers", 4)
-    parameters.setdefault("num_classes", 3)        # Car, Pedestrian, Cyclist
+    parameters.setdefault("num_classes", 3) # Car, Pedestrian, Cyclist
     parameters.setdefault("point_cloud_range", list(DEFAULT_PC_RANGE))
     parameters.setdefault("voxel_size", 0.5)
     parameters.setdefault("grid_size", 32)
@@ -340,7 +340,7 @@ if __name__ == "__main__":
         class_counts = np.zeros(num_classes, dtype=np.float64)
         num_samples = min(len(dataset), max_samples)
 
-        for idx in tqdm.tqdm(range(num_samples), desc="📊 Analyzing Distribution"):
+        for idx in tqdm.tqdm(range(num_samples), desc=" Analyzing Distribution"):
             _, _, target, _ = dataset.get_items(idx, include_labels=True)
             if target is None or len(target) == 0:
                 continue
@@ -348,10 +348,10 @@ if __name__ == "__main__":
                 if 0 <= c < num_classes:
                     class_counts[c] += 1
 
-        class_counts = np.maximum(class_counts, 1)  # Avoid div by zero
+        class_counts = np.maximum(class_counts, 1) # Avoid div by zero
         total = class_counts.sum()
         class_weights = total / (num_classes * class_counts)
-        class_weights = class_weights / class_weights.mean()  # Normalize
+        class_weights = class_weights / class_weights.mean() # Normalize
 
         print("\nClass distribution and weights:", flush=True)
         for c in range(num_classes):
@@ -372,18 +372,18 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("🚀 STARTING LIDAR 3D DETECTION TRAINING (PointPillars-lite)")
-    print(f"📡 Data source: {_train_dataset.source} "
+    print(" STARTING LIDAR 3D DETECTION TRAINING (PointPillars-lite)")
+    print(f" Data source: {_train_dataset.source} "
           f"({len(_train_dataset)} train / {len(_val_dataset)} val frames)")
-    print(f"📈 Total steps: {max_steps}")
-    print(f"🔄 Evaluation every {eval_full_to_train_steps_ratio} steps")
-    print(f"💾 Logs will be saved to: {log_dir}")
-    print(f"📂 Data root: {data_root}")
+    print(f" Total steps: {max_steps}")
+    print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
+    print(f" Logs will be saved to: {log_dir}")
+    print(f" Data root: {data_root}")
     print("=" * 60 + "\n")
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
@@ -399,7 +399,7 @@ if __name__ == "__main__":
 
         # Test
         if age == 0 or age % eval_full_to_train_steps_ratio == 0:
-            test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+            test_loader_len = len(test_loader) # Store length before wrapping with tqdm
             test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(
                 test_loader_it, model, test_sig, device,
@@ -423,8 +423,8 @@ if __name__ == "__main__":
             )
 
     print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
-    print(f"💾 Logs saved to: {log_dir}")
+    print(f" Training completed in {time.time() - start_time:.2f} seconds")
+    print(f" Logs saved to: {log_dir}")
     print("=" * 60)
 
     # Keep the main thread alive to allow background serving threads to run

@@ -32,13 +32,13 @@ class LedgerTests(unittest.TestCase):
         # Register without providing name - should use DEFAULT_NAME
         GLOBAL_LEDGER.register_model(model=d)
         self.assertIn(DEFAULT_NAME, GLOBAL_LEDGER.list_models())
-        got = GLOBAL_LEDGER.get_model()  # Should get 'main' by default
+        got = GLOBAL_LEDGER.get_model() # Should get 'main' by default
         self.assertIs(got, d)
 
     def test_proxy_initialization_pattern(self):
         """Test that get before register returns Proxy(None), then updates on register."""
         # Get before register - should return Proxy(None)
-        hp = GLOBAL_LEDGER.get_hyperparams()  # Uses DEFAULT_NAME
+        hp = GLOBAL_LEDGER.get_hyperparams() # Uses DEFAULT_NAME
 
         # Proxy should exist but not have underlying object yet
         self.assertEqual(hp.get(), {})
@@ -107,7 +107,7 @@ class LedgerTests(unittest.TestCase):
         self.assertNotIn("w", names)
 
     def test_optimizer_live_update_through_proxy(self):
-        GLOBAL_LEDGER.get_optimizer('opt_live')  # Init opt with a proxy entry
+        GLOBAL_LEDGER.get_optimizer('opt_live') # Init opt with a proxy entry
 
         # define a simple optimizer-like object
         class DummyOpt:
@@ -264,7 +264,7 @@ class LedgerTests(unittest.TestCase):
         hp = GLOBAL_LEDGER.get_hyperparams()
         GLOBAL_LEDGER.register_hyperparams(params={"image_size": 320, "lr": 0.01})
 
-        img = hp.get("image_size")  # a live ValueProxy, not a plain int
+        img = hp.get("image_size") # a live ValueProxy, not a plain int
         self.assertEqual(type(img).__name__, "_ValueProxy")
 
         # YAML: cover every dumper variant — Ultralytics dumps with CSafeDumper

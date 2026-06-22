@@ -3,9 +3,9 @@
 The fair baseline isn't "no logging" — anyone wanting per-sample signals must decode
 preds, compute per-sample loss/metrics, and store them. So we compare two modes with
 identical model / batch / imgsz / data:
-  ulmanual  — ultralytics + a HAND-ROLLED minimal per-sample logger: decode + per-sample
+  ulmanual — ultralytics + a HAND-ROLLED minimal per-sample logger: decode + per-sample
               loss/IoU + append the scalars to a plain list. The "classic" way.
-  wl        — full WL pipeline: wrapped model/loss/loader, save_signals, anchor
+  wl — full WL pipeline: wrapped model/loss/loader, save_signals, anchor
               (reconcile DOWN + flush UP), decode-for-logging.
 
 (wl - ulmanual) = WL's internal machinery (dataframe upserts + ledger/H5 + the DDP
@@ -14,7 +14,7 @@ they cancel in the delta — what's left is purely WL. Per mode it prints per-se
 ms/step + rank-0 RSS; `wl` also prints the global dataframe RAM + H5 store sizes.
 
   WL_ABLATE=ulmanual WL_DDP_CUDA=1 python ddp_ablation.py
-  WL_ABLATE=wl       WL_DDP_CUDA=1 python ddp_ablation.py
+  WL_ABLATE=wl WL_DDP_CUDA=1 python ddp_ablation.py
 """
 import os
 os.environ.setdefault("WEIGHTSLAB_SKIP_SECURE_INIT", "true")
@@ -54,7 +54,7 @@ def _rss_mb():
         with open("/proc/self/status") as f:
             for ln in f:
                 if ln.startswith("VmRSS:"):
-                    return int(ln.split()[1]) / 1024.0   # KB -> MB
+                    return int(ln.split()[1]) / 1024.0 # KB -> MB
     except Exception:
         pass
     return -1.0
@@ -134,7 +134,7 @@ def _worker(rank, world, master_port):
     batch_size = int(os.environ.get("WL_DDP_BATCH", "16"))
     num_workers = int(os.environ.get("WL_DDP_WORKERS", "0"))
 
-    is_wl = MODE == "wl"                 # else: ulmanual (the hand-rolled classic baseline)
+    is_wl = MODE == "wl" # else: ulmanual (the hand-rolled classic baseline)
     if is_wl:
         import yolo_pipeline
         cfg["compute_natural_sort"] = False
@@ -154,7 +154,7 @@ def _worker(rank, world, master_port):
     else:
         model, loader, crit, iou, optimizer = _build_ul(cfg, device, batch_size, num_workers)
         from yolo_pipeline import _decode_preds_to_6col as decode
-    _manual_store = []                   # the "classic" sink: a plain in-memory list
+    _manual_store = [] # the "classic" sink: a plain in-memory list
 
     # identical initial weights on every rank (flattened broadcast)
     with torch.no_grad():
@@ -191,7 +191,7 @@ def _worker(rank, world, master_port):
     for step in range(_WARMUP + _STEPS):
         timed = step >= _WARMUP
         if step == _WARMUP:
-            io0 = _proc_io()            # I/O counters at the start of the timed window
+            io0 = _proc_io() # I/O counters at the start of the timed window
         t0 = time.perf_counter()
         inputs = next(batches)
         if is_wl:
@@ -282,21 +282,21 @@ def _worker(rank, world, master_port):
     # Each rank prints its OWN per-rank line (no gather collective — it was flaky on
     # gloo+CUDA; per-process I/O reads are independent anyway).
     io = io_d
-    print(f"[mode={MODE} rank {rank}] RSS={rss:7.0f}MB  anchor={t.ms('anchor(WL)'):6.1f}ms  "
+    print(f"[mode={MODE} rank {rank}] RSS={rss:7.0f}MB anchor={t.ms('anchor(WL)'):6.1f}ms "
           f"IO(MB): rchar={io.get('rchar',0)/1e6:7.1f} wchar={io.get('wchar',0)/1e6:7.1f} "
           f"read_dsk={io.get('read_bytes',0)/1e6:6.1f} write_dsk={io.get('write_bytes',0)/1e6:6.1f}",
           flush=True)
     if rank == 0:
         total = sum(t.ms(k) for k in order)
         print("\n" + "=" * 74)
-        print(f"ABLATION mode={MODE}  device={device}  world={world}  batch={batch_size}  steps={_STEPS}")
+        print(f"ABLATION mode={MODE} device={device} world={world} batch={batch_size} steps={_STEPS}")
         print("=" * 74)
         for k in order:
-            print(f"    {k:18s} {t.ms(k):8.1f} ms/step")
-        print(f"    {'STEP TOTAL':18s} {total:8.1f} ms/step")
-        print(f"    {'grad on the wire':18s} {grad_bytes/1e6:8.1f} MB/step")
+            print(f" {k:18s} {t.ms(k):8.1f} ms/step")
+        print(f" {'STEP TOTAL':18s} {total:8.1f} ms/step")
+        print(f" {'grad on the wire':18s} {grad_bytes/1e6:8.1f} MB/step")
         if is_wl:
-            print(f"  WL df RAM {df_mb:.1f} MB | WL H5 {h5_mb:.1f} MB disk | "
+            print(f" WL df RAM {df_mb:.1f} MB | WL H5 {h5_mb:.1f} MB disk | "
                   f"H5 cfg: persist={cfg.get('ledger_enable_h5_persistence')} "
                   f"max_rows={cfg.get('ledger_flush_max_rows')} "
                   f"interval={cfg.get('ledger_flush_interval')}s "

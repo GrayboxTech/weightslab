@@ -1,11 +1,11 @@
 """Lock monitoring for weightslab watchdog.
 
 Provides:
-  - MonitoredRLock  : drop-in RLock replacement that tracks the holder thread
+  - MonitoredRLock : drop-in RLock replacement that tracks the holder thread
                       and how long it has been held, so the watchdog can detect
                       and recover from stuck locks.
   - _WatchdogInterrupt : BaseException raised asynchronously in stuck threads.
-  - raise_in_thread    : deliver _WatchdogInterrupt to any thread by id.
+  - raise_in_thread : deliver _WatchdogInterrupt to any thread by id.
 
 When the watchdog raises _WatchdogInterrupt in a thread that holds a
 MonitoredRLock via ``with`` or a ``try/finally: release()``, Python's
@@ -36,7 +36,7 @@ def raise_in_thread(tid: int, exc_type: type = _WatchdogInterrupt) -> bool:
     """Raise *exc_type* asynchronously in the thread identified by *tid*.
 
     Uses ``ctypes.pythonapi.PyThreadState_SetAsyncExc`` which delivers the
-    exception at the next Python bytecode boundary.  Any active ``finally:``
+    exception at the next Python bytecode boundary. Any active ``finally:``
     or ``with`` block in the target thread will execute before the exception
     propagates, so held locks are released cleanly.
 
@@ -48,7 +48,7 @@ def raise_in_thread(tid: int, exc_type: type = _WatchdogInterrupt) -> bool:
         ctypes.py_object(exc_type),
     )
     if res == 0:
-        return False  # thread not found
+        return False # thread not found
     if res > 1:
         # More than one state was modified — undo to be safe (shouldn't happen)
         ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
@@ -72,17 +72,17 @@ class MonitoredRLock:
     whether to kill the holder via ``raise_in_thread``.
 
     Re-entrancy is fully supported: the same thread can acquire multiple
-    times.  ``_acquired_at`` records the time of the *first* acquisition and
+    times. ``_acquired_at`` records the time of the *first* acquisition and
     is cleared only when the lock becomes fully free (count reaches 0).
     """
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._meta = threading.Lock()   # guards the three fields below
+        self._meta = threading.Lock() # guards the three fields below
         self._holder_tid: Optional[int] = None
         self._acquired_at: Optional[float] = None
         self._count: int = 0
-        self._timeout: Optional[float] = None  # Optional per-lock timeout for watchdog (None to use global default)
+        self._timeout: Optional[float] = None # Optional per-lock timeout for watchdog (None to use global default)
 
     # ------------------------------------------------------------------
     # Core acquire / release

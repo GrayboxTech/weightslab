@@ -22,4 +22,4 @@ def _watchdog(self: logging.Logger, message: str, *args, **kwargs) -> None:
 
 
 # Patch Logger class once so every logger instance gets the method
-logging.Logger.watchdog = _watchdog  # type: ignore[attr-defined]
+logging.Logger.watchdog = _watchdog # type: ignore[attr-defined]

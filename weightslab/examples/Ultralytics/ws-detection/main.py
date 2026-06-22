@@ -60,7 +60,7 @@ def main():
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     YOLO(model_name).train(
         trainer=WLAwareTrainer,
@@ -68,7 +68,7 @@ def main():
         imgsz=image_size,
         epochs=1000 if max_steps == None else max(1, int(max_steps)),
         device=device,
-        project=project, name=name,  # → UL save_dir → WL logger log_dir/name
+        project=project, name=name, # → UL save_dir → WL logger log_dir/name
         resume=False,
         cache=False,
         optimizer="SGD",
@@ -86,7 +86,7 @@ def main():
         # would make Ultralytics reject keys like `train_nms` as invalid YOLO args.
     )
 
-    wl.keep_serving()  # Keep main thread alive to analyze training results directly
+    wl.keep_serving() # Keep main thread alive to analyze training results directly
 
 
 if __name__ == "__main__":

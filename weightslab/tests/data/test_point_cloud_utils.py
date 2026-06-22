@@ -65,7 +65,7 @@ def test_is_point_cloud_task():
 def test_is_point_cloud_detection_task():
     assert is_point_cloud_detection_task("detection_pointcloud")
     assert is_point_cloud_detection_task("Detection_PointCloud")
-    assert is_point_cloud_detection_task("detection_3d")  # legacy alias
+    assert is_point_cloud_detection_task("detection_3d") # legacy alias
     assert not is_point_cloud_detection_task("detection")
     assert not is_point_cloud_detection_task("segmentation")
     assert not is_point_cloud_detection_task(None)
@@ -77,10 +77,10 @@ def test_looks_like_point_cloud():
     assert looks_like_point_cloud(_cloud()[:, :2])
     # Multi-channel clouds (xyz + intensity + normals + rgb = 10 cols) qualify.
     assert looks_like_point_cloud(np.zeros((100, 10), np.float32))
-    assert not looks_like_point_cloud(_cloud()[:8])          # too few rows
-    assert not looks_like_point_cloud(np.zeros((100, 20), np.float32))  # too many cols
-    assert not looks_like_point_cloud(np.zeros((64, 64), np.uint8))    # int image
-    assert not looks_like_point_cloud(np.zeros((64, 64, 3), np.float32))  # 3D array
+    assert not looks_like_point_cloud(_cloud()[:8]) # too few rows
+    assert not looks_like_point_cloud(np.zeros((100, 20), np.float32)) # too many cols
+    assert not looks_like_point_cloud(np.zeros((64, 64), np.uint8)) # int image
+    assert not looks_like_point_cloud(np.zeros((64, 64, 3), np.float32)) # 3D array
 
 
 def test_point_distances():
@@ -97,7 +97,7 @@ def test_compute_point_normals_planar():
     normals = compute_point_normals(pts, k=12)
     assert normals.shape == (500, 3)
     np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1e-4)
-    assert np.abs(normals[:, 2]).mean() > 0.95  # mostly aligned with z
+    assert np.abs(normals[:, 2]).mean() > 0.95 # mostly aligned with z
 
 
 def test_voxel_downsample_reduces_points():
@@ -106,12 +106,12 @@ def test_voxel_downsample_reduces_points():
     out = voxel_downsample(pts, voxel_size=0.25)
     assert out.shape[1] == 4
     assert out.shape[0] < pts.shape[0]
-    assert out.shape[0] <= 4 ** 3  # at most one point per 0.25 voxel in the unit cube
+    assert out.shape[0] <= 4 ** 3 # at most one point per 0.25 voxel in the unit cube
 
 
 def test_colorize_from_image():
     image = np.zeros((10, 20, 3), np.uint8)
-    image[:, :, 0] = 255  # all red
+    image[:, :, 0] = 255 # all red
     pts = np.array([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], np.float32)
 
     def project(p):
@@ -119,15 +119,15 @@ def test_colorize_from_image():
         return uv, np.array([True, False])
 
     rgb = colorize_from_image(pts, image, project)
-    np.testing.assert_allclose(rgb[0], [1.0, 0.0, 0.0], atol=1e-5)  # sampled red
-    np.testing.assert_allclose(rgb[1], [0.5, 0.5, 0.5], atol=1e-5)  # invalid -> grey
+    np.testing.assert_allclose(rgb[0], [1.0, 0.0, 0.0], atol=1e-5) # sampled red
+    np.testing.assert_allclose(rgb[1], [0.5, 0.5, 0.5], atol=1e-5) # invalid -> grey
 
 
 def test_range_image_shape():
     img = point_cloud_to_range_image(_cloud(2000), image_height=48, image_width=256)
     assert img.size == (256, 48)
     arr = np.asarray(img)
-    assert (arr != arr[0, 0]).any()  # some points were projected
+    assert (arr != arr[0, 0]).any() # some points were projected
 
 
 def test_get_point_feature_names_from_dataset_and_default():
@@ -151,7 +151,7 @@ def test_registered_thumbnail_and_boxes_fns():
         img = render_thumbnail_2d_for_dataset(object(), _cloud())
         assert marker["called"] and np.asarray(img)[0, 0, 0] == 9
     finally:
-        register_thumbnail_fn(None)  # reset global state
+        register_thumbnail_fn(None) # reset global state
 
     def my_boxes(boxes):
         return np.zeros((len(boxes), 6), np.float32)
@@ -167,7 +167,7 @@ def test_registered_thumbnail_and_boxes_fns():
 
 def test_filter_valid_points_drops_pads_and_nonfinite():
     pts = _cloud(100)
-    pts[10] = -1000.0  # pad row (all coords at PAD_VALUE)
+    pts[10] = -1000.0 # pad row (all coords at PAD_VALUE)
     pts[20, 2] = np.nan
     out = filter_valid_points(pts)
     assert out.shape[0] == 98
@@ -234,7 +234,7 @@ def test_project_boxes_min_size_clamp():
 
 
 def test_project_boxes_2d_rows():
-    boxes = np.array([[10.0, 5.0, 2.0, 2.0, 2.0, 0.7]], np.float32)  # cx,cy,dx,dy,cls,conf
+    boxes = np.array([[10.0, 5.0, 2.0, 2.0, 2.0, 0.7]], np.float32) # cx,cy,dx,dy,cls,conf
     assert boxes_dimensionality(boxes) == 2
     bev = project_boxes_to_bev(boxes, PC_RANGE, 0.0)
     assert bev[0, 4] == 2.0
@@ -311,7 +311,7 @@ def test_load_raw_image_array_renders_bev_for_point_cloud():
     np_img, is_volumetric, shape, pil = load_raw_image_array(PcDataset(), 0)
     assert not is_volumetric
     assert pil is not None and pil.mode == "RGB"
-    assert pil.size[0] == pil.size[1]  # square BEV render
+    assert pil.size[0] == pil.size[1] # square BEV render
     assert np_img.ndim == 3 and np_img.shape[2] == 3
 
 

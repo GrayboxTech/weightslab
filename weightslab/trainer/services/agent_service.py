@@ -4,16 +4,16 @@ services/agent_service.py
 gRPC surface for AI-agent lifecycle management.
 
 Responsibilities:
-  - CheckAgentHealth  : report whether any LLM provider is ready.
-  - InitializeAgent   : wire up a cloud provider from a user-supplied API key.
+  - CheckAgentHealth : report whether any LLM provider is ready.
+  - InitializeAgent : wire up a cloud provider from a user-supplied API key.
 
 The actual ``DataManipulationAgent`` instance lives inside ``DataService``
 because it requires the live dataframe context (schema, column index, etc.)
-that ``DataService`` owns.  ``AgentService`` receives a reference to
+that ``DataService`` owns. ``AgentService`` receives a reference to
 ``DataService`` at construction time and delegates to its agent.
 
 Wire-up (in ExperimentService):
-    data_service  = DataService(ctx)
+    data_service = DataService(ctx)
     agent_service = AgentService(data_service)
 """
 
@@ -62,7 +62,7 @@ class AgentService:
 
         Returns:
             AgentHealthResponse { available: bool, message: str }
-              - available=True  → "Ready to help you."
+              - available=True → "Ready to help you."
               - available=False → "Agent not configured. Type /init to set up."
         """
         available = self._is_available()

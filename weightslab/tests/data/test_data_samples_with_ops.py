@@ -46,7 +46,7 @@ class SimpleDataset(Dataset):
         # Return random data with shape (3, 32, 32) to simulate images
         data = np.random.randn(3, 32, 32).astype(np.float32)
         uid = str(idx) # Consistent with string UID preference
-        label = idx % 10  # Simulate 10 classes
+        label = idx % 10 # Simulate 10 classes
         return data, uid, label
 
 
@@ -214,7 +214,7 @@ class TestDataSampleTrackingWrapperGetItem(unittest.TestCase):
 
         # Should return tuple with (data, id, target, ...)
         self.assertIsInstance(result, tuple)
-        self.assertGreaterEqual(len(result), 3)  # data, id, target at minimum
+        self.assertGreaterEqual(len(result), 3) # data, id, target at minimum
 
         # First element should be numpy array or tensor
         self.assertTrue(isinstance(result[0], (np.ndarray, torch.Tensor)))
@@ -315,7 +315,7 @@ class TestDataSampleTrackingWrapperTagBasedLabeling(unittest.TestCase):
         """
 
         self.temp_dir = tempfile.mkdtemp()
-        tags_mapping = {"target_tag": 1}  # Binary: only 1 tag in mapping
+        tags_mapping = {"target_tag": 1} # Binary: only 1 tag in mapping
         wrapper = DataSampleTrackingWrapper(
             wrapped_dataset=self.dataset,
             root_log_dir=self.temp_dir,

@@ -44,7 +44,7 @@ class MNISTCustomDataset(Dataset):
             root=root,
             train=train,
             download=download,
-            transform=None  # We'll apply transform manually to track filepath
+            transform=None # We'll apply transform manually to track filepath
         )
         self.transform = transform
         self.train = train
@@ -111,7 +111,7 @@ class LitMNIST(pl.LightningModule):
     def training_step(self, batch):
         with guard_training_context:
             x, ids, y = batch
-            logits = self(x)  # forward pass
+            logits = self(x) # forward pass
             preds = torch.argmax(logits, dim=1)
 
             # WeightsLab tracked loss
@@ -368,14 +368,14 @@ def main():
     )
 
     print("=" * 60)
-    print("🚀 STARTING TRAINING (PyTorch Lightning)")
-    print(f"📊 Max epochs: {max_epochs}")
+    print(" STARTING TRAINING (PyTorch Lightning)")
+    print(f" Max epochs: {max_epochs}")
     print(
-        f"⚙️ Trainer: accelerator={trainer_accelerator}, devices={trainer_devices}, "
+        f" Trainer: accelerator={trainer_accelerator}, devices={trainer_devices}, "
         f"strategy={trainer_strategy}"
     )
-    print(f"📦 Dataset splits: train={len(_train_dataset)}, val={len(_val_dataset)}")
-    print(f"💾 Logs will be saved to: {log_dir}")
+    print(f" Dataset splits: train={len(_train_dataset)}, val={len(_val_dataset)}")
+    print(f" Logs will be saved to: {log_dir}")
     print("=" * 60 + "\n")
 
     # PyTorch Lightning Trainer
@@ -383,7 +383,7 @@ def main():
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     trainer = pl.Trainer(
         max_epochs=max_epochs,
@@ -401,8 +401,8 @@ def main():
     trainer.fit(L_model, train_loader, val_loader)
 
     print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
-    print(f"💾 Logs saved to: {log_dir}")
+    print(f" Training completed in {time.time() - start_time:.2f} seconds")
+    print(f" Logs saved to: {log_dir}")
     print("=" * 60)
 
     # Keep the main thread alive to allow background serving threads to run

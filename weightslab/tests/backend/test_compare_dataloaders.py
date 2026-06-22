@@ -62,7 +62,7 @@ class TestDataLoaderComparison(unittest.TestCase):
         # worker parallelism measurable for the multi-worker throughput test.
         self.dataset_size = 256
         self.batch_size = 32
-        self.delay_per_sample = 0.01  # 10ms per sample to justify worker overhead
+        self.delay_per_sample = 0.01 # 10ms per sample to justify worker overhead
         pause_controller.resume()
 
     def _create_torch_dataloader(self, num_workers=0):
@@ -123,7 +123,7 @@ class TestDataLoaderComparison(unittest.TestCase):
             self.assertTrue(torch.equal(torch_target, wl_target),
                           f"Batch {i} target mismatch")
 
-        print(f"✓ Single worker: {len(torch_batches)} batches match perfectly")
+        print(f" Single worker: {len(torch_batches)} batches match perfectly")
 
     @_SKIP_MULTIWORKER_ON_WIN
     def test_multi_worker_correctness(self):
@@ -141,7 +141,7 @@ class TestDataLoaderComparison(unittest.TestCase):
         for batch in torch_loader:
             torch_batches.append(batch)
 
-        wl_loader.reset_iterator()  # Reset for fresh iteration
+        wl_loader.reset_iterator() # Reset for fresh iteration
         for batch in wl_loader:
             wl_batches.append(batch)
 
@@ -158,67 +158,67 @@ class TestDataLoaderComparison(unittest.TestCase):
         self.assertTrue(torch.allclose(torch_sorted, wl_sorted),
                        "All data samples must be present")
 
-        print(f"✓ Multi-worker: {len(torch_batches)} batches, all samples present")
+        print(f" Multi-worker: {len(torch_batches)} batches, all samples present")
 
     # def test_throughput_comparison(self):
-    #     """Compare throughput: single worker vs multi-worker."""
-    #     print("\n" + "="*70)
-    #     print("TEST: Throughput Comparison")
-    #     print("="*70)
+    # """Compare throughput: single worker vs multi-worker."""
+    # print("\n" + "="*70)
+    # print("TEST: Throughput Comparison")
+    # print("="*70)
 
-    #     results = {}
+    # results = {}
 
-    #     # Torch DataLoader: Single Worker
-    #     torch_loader = self._create_torch_dataloader(num_workers=0)
-    #     start = time.time()
-    #     for _ in torch_loader:
-    #         pass
-    #     torch_single_time = time.time() - start
-    #     results['PyTorch (1 worker)'] = torch_single_time
+    # # Torch DataLoader: Single Worker
+    # torch_loader = self._create_torch_dataloader(num_workers=0)
+    # start = time.time()
+    # for _ in torch_loader:
+    # pass
+    # torch_single_time = time.time() - start
+    # results['PyTorch (1 worker)'] = torch_single_time
 
-    #     # Torch DataLoader: Multiple Workers
-    #     torch_loader = self._create_torch_dataloader(num_workers=4)
-    #     start = time.time()
-    #     for _ in torch_loader:
-    #         pass
-    #     torch_multi_time = time.time() - start
-    #     results['PyTorch (4 workers)'] = torch_multi_time
+    # # Torch DataLoader: Multiple Workers
+    # torch_loader = self._create_torch_dataloader(num_workers=4)
+    # start = time.time()
+    # for _ in torch_loader:
+    # pass
+    # torch_multi_time = time.time() - start
+    # results['PyTorch (4 workers)'] = torch_multi_time
 
-    #     # WeightsLab DataLoaderInterface: Single Worker
-    #     wl_loader = self._create_weightslab_dataloader(num_workers=0)
-    #     start = time.time()
-    #     for _ in wl_loader:
-    #         pass
-    #     wl_single_time = time.time() - start
-    #     results['WeightsLab (1 worker)'] = wl_single_time
+    # # WeightsLab DataLoaderInterface: Single Worker
+    # wl_loader = self._create_weightslab_dataloader(num_workers=0)
+    # start = time.time()
+    # for _ in wl_loader:
+    # pass
+    # wl_single_time = time.time() - start
+    # results['WeightsLab (1 worker)'] = wl_single_time
 
-    #     # WeightsLab DataLoaderInterface: Multiple Workers
-    #     wl_loader = self._create_weightslab_dataloader(num_workers=4)
-    #     wl_loader.reset_iterator()  # Ensure fresh start
-    #     start = time.time()
-    #     for _ in wl_loader:
-    #         pass
-    #     wl_multi_time = time.time() - start
-    #     results['WeightsLab (4 workers)'] = wl_multi_time
+    # # WeightsLab DataLoaderInterface: Multiple Workers
+    # wl_loader = self._create_weightslab_dataloader(num_workers=4)
+    # wl_loader.reset_iterator() # Ensure fresh start
+    # start = time.time()
+    # for _ in wl_loader:
+    # pass
+    # wl_multi_time = time.time() - start
+    # results['WeightsLab (4 workers)'] = wl_multi_time
 
-    #     # Print comparison
-    #     print("\nThroughput Results (loading {} batches):".format(self.dataset_size // self.batch_size))
-    #     print("-" * 70)
-    #     for name, elapsed in results.items():
-    #         throughput = (self.dataset_size / self.batch_size) / elapsed if elapsed > 0 else 0
-    #         print(f"{name:35} {elapsed:8.3f}s  ({throughput:6.2f} batches/sec)")
+    # # Print comparison
+    # print("\nThroughput Results (loading {} batches):".format(self.dataset_size // self.batch_size))
+    # print("-" * 70)
+    # for name, elapsed in results.items():
+    # throughput = (self.dataset_size / self.batch_size) / elapsed if elapsed > 0 else 0
+    # print(f"{name:35} {elapsed:8.3f}s ({throughput:6.2f} batches/sec)")
 
-    #     print("-" * 70)
-    #     speedup_wl = results['WeightsLab (1 worker)'] / results['WeightsLab (4 workers)']
-    #     speedup_torch = results['PyTorch (1 worker)'] / results['PyTorch (4 workers)']
+    # print("-" * 70)
+    # speedup_wl = results['WeightsLab (1 worker)'] / results['WeightsLab (4 workers)']
+    # speedup_torch = results['PyTorch (1 worker)'] / results['PyTorch (4 workers)']
 
-    #     print(f"Multi-worker speedup:")
-    #     print(f"  PyTorch:      {speedup_torch:.2f}x faster")
-    #     print(f"  WeightsLab:   {speedup_wl:.2f}x faster")
+    # print(f"Multi-worker speedup:")
+    # print(f" PyTorch: {speedup_torch:.2f}x faster")
+    # print(f" WeightsLab: {speedup_wl:.2f}x faster")
 
-    #     # Verify multi-worker is faster than single-worker
-    #     self.assertGreater(wl_single_time, wl_multi_time * 0.8,
-    #                       "Multi-worker should be faster or comparable to single-worker")
+    # # Verify multi-worker is faster than single-worker
+    # self.assertGreater(wl_single_time, wl_multi_time * 0.8,
+    # "Multi-worker should be faster or comparable to single-worker")
 
     @_SKIP_MULTIWORKER_ON_WIN
     def test_correctness_with_reset(self):
@@ -233,7 +233,7 @@ class TestDataLoaderComparison(unittest.TestCase):
         first_iteration = []
         for i, batch in enumerate(wl_loader):
             first_iteration.append(batch[0].clone())
-            if i >= 5:  # Just collect a few batches
+            if i >= 5: # Just collect a few batches
                 break
 
         # Reset and iterate again
@@ -250,7 +250,7 @@ class TestDataLoaderComparison(unittest.TestCase):
             self.assertTrue(torch.allclose(first, second),
                           f"Batch {i} differs after reset")
 
-        print(f"✓ Reset iterator works: {len(first_iteration)} batches verified")
+        print(f" Reset iterator works: {len(first_iteration)} batches verified")
 
 
 if __name__ == '__main__':

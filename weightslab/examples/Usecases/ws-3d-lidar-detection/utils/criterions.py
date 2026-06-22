@@ -13,25 +13,25 @@ from .model import decode_grid_3d
 # coordinates. Each GT box is assigned to the BEV grid cell containing its
 # (cx, cy) center; that cell is "responsible" for predicting the box.
 #
-#   * PerSampleDetection3DLoss -> one differentiable loss scalar per sample
-#     ([B]), wrapped with ``per_sample=True`` (the value WL backprops +
-#     dashboards).
-#   * PerSampleBevIoU          -> mean BEV IoU over a sample's boxes ([B]).
-#   * PerInstanceBevIoU        -> flat tensor of one IoU per GT box
-#     (sample-major order), wrapped with ``per_instance=True`` so WL auto-saves
-#     it at (sample_id, annotation_id). The ordering matches the per-sample
-#     target iteration, so the wrapper's auto ``batch_idx`` maps each value
-#     correctly.
+# * PerSampleDetection3DLoss -> one differentiable loss scalar per sample
+# ([B]), wrapped with ``per_sample=True`` (the value WL backprops +
+# dashboards).
+# * PerSampleBevIoU -> mean BEV IoU over a sample's boxes ([B]).
+# * PerInstanceBevIoU -> flat tensor of one IoU per GT box
+# (sample-major order), wrapped with ``per_instance=True`` so WL auto-saves
+# it at (sample_id, annotation_id). The ordering matches the per-sample
+# target iteration, so the wrapper's auto ``batch_idx`` maps each value
+# correctly.
 #
 # The IoU metric is axis-aligned in the BEV plane (yaw ignored) — a cheap,
 # dependency-free proxy for rotated-box IoU that is monotone enough to rank
 # samples / instances in the dashboards.
 
 _EPS = 1e-6
-_LAMBDA_COORD = 2.0   # x, y, z localization
-_LAMBDA_SIZE = 1.0    # log-dims
-_LAMBDA_YAW = 1.0     # sin / cos regression
-_LAMBDA_NOOBJ = 0.5   # empty-cell objectness down-weighting
+_LAMBDA_COORD = 2.0 # x, y, z localization
+_LAMBDA_SIZE = 1.0 # log-dims
+_LAMBDA_YAW = 1.0 # sin / cos regression
+_LAMBDA_NOOBJ = 0.5 # empty-cell objectness down-weighting
 
 
 def bev_iou_axis_aligned(a, b):
@@ -55,14 +55,14 @@ def _responsible_cells(boxes, grid_size, pc_range):
     """Map GT boxes -> their responsible BEV (row, col) cell and cell offsets.
 
     Args:
-        boxes:     [N, 9] target rows (metric).
+        boxes: [N, 9] target rows (metric).
         grid_size: S.
-        pc_range:  (x_min, y_min, z_min, x_max, y_max, z_max).
+        pc_range: (x_min, y_min, z_min, x_max, y_max, z_max).
 
     Returns:
-        rows, cols:    [N] long, the responsible cell indices.
-        off_x, off_y:  [N] center offset within the cell, in [0, 1).
-        z_t:           [N] z center normalized to [0, 1] over the z range.
+        rows, cols: [N] long, the responsible cell indices.
+        off_x, off_y: [N] center offset within the cell, in [0, 1).
+        z_t: [N] z center normalized to [0, 1] over the z range.
     """
     x_min, y_min, z_min, x_max, y_max, z_max = pc_range
     S = grid_size
@@ -82,14 +82,14 @@ def _per_sample_loss(outputs, targets, num_classes, grid_size, pc_range, weights
     B, S = outputs.shape[0], grid_size
     device = outputs.device
 
-    obj_logit = outputs[..., 0]                 # [B, S, S]
+    obj_logit = outputs[..., 0] # [B, S, S]
     tx = torch.sigmoid(outputs[..., 1])
     ty = torch.sigmoid(outputs[..., 2])
     tz = torch.sigmoid(outputs[..., 3])
-    log_dims = outputs[..., 4:7]                # [B, S, S, 3]
+    log_dims = outputs[..., 4:7] # [B, S, S, 3]
     t_sin = outputs[..., 7]
     t_cos = outputs[..., 8]
-    cls_logits = outputs[..., 9:]               # [B, S, S, C]
+    cls_logits = outputs[..., 9:] # [B, S, S, C]
 
     if weights is not None:
         weights = torch.as_tensor(weights, device=device, dtype=outputs.dtype)
@@ -162,7 +162,7 @@ def _per_box_bev_iou(outputs, targets, grid_size, pc_range):
     Returns a list[B] of 1-D tensors (one IoU per box for that sample, in
     annotation order). Detached — this is a metric, not a loss.
     """
-    boxes_grid, _, _ = decode_grid_3d(outputs, grid_size, pc_range)  # [B, S, S, 7]
+    boxes_grid, _, _ = decode_grid_3d(outputs, grid_size, pc_range) # [B, S, S, 7]
     B, S = outputs.shape[0], grid_size
     device = outputs.device
 
@@ -176,7 +176,7 @@ def _per_box_bev_iou(outputs, targets, grid_size, pc_range):
             tgt = tgt.view(-1, 9)
 
         rows, cols, _, _, _ = _responsible_cells(tgt, S, pc_range)
-        pred = boxes_grid[s, rows, cols]                  # [N, 7]
+        pred = boxes_grid[s, rows, cols] # [N, 7]
         pred_bev = torch.stack(
             [pred[:, 0], pred[:, 1], pred[:, 3], pred[:, 4]], dim=1)
         gt_bev = torch.stack(
@@ -254,8 +254,8 @@ def decode_predictions(outputs, grid_size, pc_range, conf_thresh=0.3, max_det=20
     boxes_grid, obj, cls_probs = decode_grid_3d(outputs, grid_size, pc_range)
     B, S = outputs.shape[0], grid_size
 
-    cls_conf, cls_id = cls_probs.max(dim=-1)        # [B, S, S]
-    score = obj * cls_conf                           # combined confidence
+    cls_conf, cls_id = cls_probs.max(dim=-1) # [B, S, S]
+    score = obj * cls_conf # combined confidence
 
     flat_boxes = boxes_grid.view(B, S * S, 7)
     flat_score = score.view(B, S * S)
