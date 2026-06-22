@@ -116,7 +116,7 @@ class Lidar2DDetectionDataset(Dataset):
         else:
             val_set = set(frames[::k])
             selected = [f for f in frames if f not in val_set]
-        self.frames = selected[:max_samples] if max_samples is not None else selected
+        self.frames = selected[:max_samples] if max_samples != None else selected
 
     def __len__(self):
         return len(self.frames)

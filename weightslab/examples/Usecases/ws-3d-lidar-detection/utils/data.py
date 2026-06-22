@@ -446,7 +446,7 @@ class Lidar3DDetectionDataset(Dataset):
         else:
             val_set = set(frames[::k])
             selected = [f for f in frames if f not in val_set]
-        self.frames = selected[:max_samples] if max_samples is not None else selected
+        self.frames = selected[:max_samples] if max_samples != None else selected
 
         if len(self.frames) == 0:
             raise RuntimeError(f"No LiDAR frames found (source={source}, root={root})")

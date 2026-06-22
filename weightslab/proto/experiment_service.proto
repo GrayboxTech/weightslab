@@ -426,6 +426,8 @@ message HistogramResponse {
   string message = 2;
   int64 total_rows = 3;  // rows in the view that were binned
   repeated HistogramBin bins = 4;
+}
+
 // --- Metadata retrieval (separated from GetDataSamples) ---
 message GetMetaDataRequest {
   int32 start_index = 1;        // grid slice start (current view order)

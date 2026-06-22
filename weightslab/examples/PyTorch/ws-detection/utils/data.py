@@ -131,7 +131,7 @@ class PennFudanDetectionDataset(Dataset):
             val_set = set(all_imgs[::k])
             selected = [f for f in all_imgs if f not in val_set]
 
-        selected = selected[:max_samples] if max_samples is not None else selected
+        selected = selected[:max_samples] if max_samples != None else selected
 
         self.images = []
         self.masks = []
