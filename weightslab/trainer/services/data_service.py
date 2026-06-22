@@ -52,6 +52,34 @@ from weightslab.trainer.services.data_image_utils import (
 logger = logging.getLogger(__name__)
 
 
+# Streamed chunk size for GetPointCloud (raw float32 bytes per gRPC message).
+# Larger chunks mean fewer messages but more memory per message. Override with
+# the WL_POINT_CLOUD_CHUNK_BYTES env variable (see docs/configuration.rst).
+_DEFAULT_POINT_CLOUD_CHUNK_BYTES = 1 << 20  # 1 MiB
+
+
+def _point_cloud_chunk_bytes() -> int:
+    """Read WL_POINT_CLOUD_CHUNK_BYTES; non-positive/invalid falls back to the default."""
+    raw = os.getenv("WL_POINT_CLOUD_CHUNK_BYTES")
+    if raw is None or raw == "":
+        return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "WL_POINT_CLOUD_CHUNK_BYTES=%r is not an integer — using default %d",
+            raw, _DEFAULT_POINT_CLOUD_CHUNK_BYTES,
+        )
+        return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    if val <= 0:
+        logger.warning(
+            "WL_POINT_CLOUD_CHUNK_BYTES=%r must be > 0 — using default %d",
+            raw, _DEFAULT_POINT_CLOUD_CHUNK_BYTES,
+        )
+        return _DEFAULT_POINT_CLOUD_CHUNK_BYTES
+    return val
+
+
 def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str = None) -> str:
     """Normalize a source metadata name for deterministic copied-column naming."""
     name = str(source_name or "").strip()
@@ -766,49 +794,49 @@ class DataService:
             return True
 
     def _pull_into_all_data_view_df(self):
-            """Stream stats from the global in-memory dataframe (ledger manager).
+        """Stream stats from the global in-memory dataframe (ledger manager).
 
-            Uses the shared dataframe manager instead of the H5 store and avoids
-            blocking on IO. Falls back to last snapshot if retrieval fails.
-            """
-            try:
-                # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
-                df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
-                if df.empty:
-                    logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
-                    return df
-
-                # The manager now expands samples into one row per (sample_id, annotation_id)
-                # instance. Collapse back to one row per sample for the sample-centric UI/agent
-                # view, nesting per-instance signals into a dict column.
-                df = self._df_manager.get_collapse_annotations_to_samples_df()
-
-                # Ensure sample_id is a column if it was the index
-                df = safe_reset_index(df)
-
-                # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
-                # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
-                # exploding the dataframe size due to duplicate sample_id index labels.
-                if SampleStatsEx.ORIGIN.value in df.columns:
-                    # Use drop=True to ensure origin is NOT in both index and columns (avoids ambiguity)
-                    # GetDataSamples calls reset_index() before processing rows, which restores them as columns
-                    df = df.set_index([SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value], drop=True)
-                else:
-                    # Fallback to single index if origin is missing, though manager should provide it
-                    df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=True)
-
-                # DEDUPLICATE: Ensure index is unique before returning.
-                # If duplicates exist, reindex() will fail later.
-                if df.index.has_duplicates:
-                    logger.debug(f"[DataService] Dropping {df.index.duplicated().sum()} duplicate index labels from data view.")
-                    df = df[~df.index.duplicated(keep='last')]
-
+        Uses the shared dataframe manager instead of the H5 store and avoids
+        blocking on IO. Falls back to last snapshot if retrieval fails.
+        """
+        try:
+            # Load dataframe from the shared dataframe manager with arrays autoloaded from h5 storage
+            df = self._df_manager.get_combined_df() if self._df_manager is not None else pd.DataFrame()
+            if df.empty:
+                logger.debug(f"[DataService] Pull returned empty dataframe (manager: {self._df_manager is not None})")
                 return df
-            except Exception as e:
-                logger.debug(f"[DataService] Error pulling data view: {e}")
-                # Use getattr to safely check for attribute during __init__
-                current_df = getattr(self, "_all_datasets_df", None)
-                return current_df if current_df is not None else pd.DataFrame()
+
+            # The manager now expands samples into one row per (sample_id, annotation_id)
+            # instance. Collapse back to one row per sample for the sample-centric UI/agent
+            # view, nesting per-instance signals into a dict column.
+            df = self._df_manager.get_collapse_annotations_to_samples_df()
+
+            # Ensure sample_id is a column if it was the index
+            df = safe_reset_index(df)
+
+            # Ensure we have a unique index across all origins by using a MultiIndex (origin, sample_id)
+            # This is CRITICAL for correctly applying reindex() in _slowUpdateInternals without
+            # exploding the dataframe size due to duplicate sample_id index labels.
+            if SampleStatsEx.ORIGIN.value in df.columns:
+                # Use drop=True to ensure origin is NOT in both index and columns (avoids ambiguity)
+                # GetDataSamples calls reset_index() before processing rows, which restores them as columns
+                df = df.set_index([SampleStatsEx.ORIGIN.value, SampleStatsEx.SAMPLE_ID.value], drop=True)
+            else:
+                # Fallback to single index if origin is missing, though manager should provide it
+                df = df.set_index([SampleStatsEx.SAMPLE_ID.value], drop=True)
+
+            # DEDUPLICATE: Ensure index is unique before returning.
+            # If duplicates exist, reindex() will fail later.
+            if df.index.has_duplicates:
+                logger.debug(f"[DataService] Dropping {df.index.duplicated().sum()} duplicate index labels from data view.")
+                df = df[~df.index.duplicated(keep='last')]
+
+            return df
+        except Exception as e:
+            logger.debug(f"[DataService] Error pulling data view: {e}")
+            # Use getattr to safely check for attribute during __init__
+            current_df = getattr(self, "_all_datasets_df", None)
+            return current_df if current_df is not None else pd.DataFrame()
 
     def _get_origin_filter(self, request):
         """Extract requested origins if present on request (backward compatible)."""
@@ -880,7 +908,6 @@ class DataService:
                 return value_arr.size == 1 and np.isnan(value_arr.item())
             except (TypeError, ValueError):
                 return False
-
 
     def _compute_natural_sort_stats(self):
         """
@@ -3642,8 +3669,9 @@ class DataService:
                 success=False, message=f"histogram failed: {str(e)}",
                 total_rows=0, bins=[])
 
-    # Streamed chunk size for GetPointCloud (raw float32 bytes per message).
-    _POINT_CLOUD_CHUNK_BYTES = 1 << 20  # 1 MiB
+    # Streamed chunk size for GetPointCloud (raw float32 bytes per message),
+    # configurable via the WL_POINT_CLOUD_CHUNK_BYTES env var (default 1 MiB).
+    _POINT_CLOUD_CHUNK_BYTES = _point_cloud_chunk_bytes()
 
     def GetPointCloud(self, request, context):
         """Stream one sample's raw point cloud as binary float32 chunks.

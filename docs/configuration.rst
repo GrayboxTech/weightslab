@@ -245,6 +245,14 @@ Data and Cache
        uniformly downsampled — keeping the first and last point and an evenly-spaced
        subset in between (no values are interpolated/invented). Set to ``0`` to
        disable the cap and return every step of the mean curve.
+   * - ``WL_POINT_CLOUD_CHUNK_BYTES``
+     - ``1048576``
+     - Size, in bytes, of each chunk streamed by the ``GetPointCloud`` RPC
+       (raw ``float32`` point-cloud data is sent as a sequence of binary
+       messages). Defaults to ``1048576`` (1 MiB). Larger chunks mean fewer
+       gRPC messages but more memory held per message; smaller chunks lower
+       peak memory at the cost of more round-trips. Must be a positive integer
+       — non-positive or non-numeric values fall back to the 1 MiB default.
 
 
 Evaluation Mode

@@ -453,6 +453,13 @@ def load_label(dataset, sample_id):
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
 
+    def _convert_label(lbl):
+        if isinstance(lbl, list) and len(lbl) and isinstance(lbl[0], (th.Tensor, np.ndarray)):
+            label = to_numpy_safe(lbl).max(0)  # Aggr. instances
+        else:
+            label = to_numpy_safe(lbl)  # Third element is typically the label
+        return label
+
     # Try common dataset patterns first
     if hasattr(wrapped, '__getitem__'):
         data = wrapped.get_items(index, include_metadata=False, include_labels=True, include_images=False) if hasattr(wrapped, 'get_items') else wrapped[index]
@@ -460,23 +467,21 @@ def load_label(dataset, sample_id):
         if isinstance(data, (list, tuple)):
             if len(data) == 1:
                 return None  # Only data, no label
-            elif len(data) == 2:  # Commonly (data, label) in standard PyTorch datasets
-                label = to_numpy_safe(data[1])
-            elif len(data) == 3:  # if len==3, data, uids, label, no extra info
-                label = to_numpy_safe(data[2])  # Third element is typically the label
+            elif len(data) <= 3:  # if len==2|3, data, uids, label, no extra info
+                label = _convert_label(data[2])
             elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
                 if len(data) == 4:
-                    label = to_numpy_safe(data[2])  # Third element is typically the label
                     metadata = data[3]
                     classes = to_numpy_safe(metadata['classes']) if isinstance(metadata, dict) and 'classes' in metadata else None
                     if classes is not None:
-                        label = to_numpy_safe(data[2])  # Second element is typically the label
+                        label = _convert_label(data[2])
+
                         # Concat label with classes if available (bbox detection, i.e., (4,) -> (5,) with class id)
                         label = np.concatenate([label, classes[..., None]], axis=1)
                     else:
-                        label = to_numpy_safe(data[2])  # Second element is typically the label
+                        label = _convert_label(data[2])
                 else:
-                    label = to_numpy_safe(data[2])  # Third element is typically the label
+                    label = _convert_label(data[2])
                     metadata = data[3:]
             if label is not None:
                 return label[0] if label.ndim == 1 and label.shape[0] == 1 else label
