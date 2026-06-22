@@ -51,7 +51,7 @@ class BDD100kSegDataset(Dataset):
             for f in os.listdir(img_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
-        image_files = sorted(set(image_files))[:max_samples] if max_samples is not None else sorted(set(image_files))  # Optionally limit number of samples for faster testing
+        image_files = sorted(set(image_files))[:max_samples] if max_samples != None else sorted(set(image_files))  # Optionally limit number of samples for faster testing
 
         self.images = []
         self.masks = []

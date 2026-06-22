@@ -64,7 +64,7 @@ def main():
         trainer=WLAwareTrainer,
         data=data_root,
         imgsz=image_size,
-        epochs=1000 if max_steps is None else max(1, int(max_steps)),
+        epochs=1000 if max_steps == None else max(1, int(max_steps)),
         device=device,
         project=project, name=name,  # → UL save_dir → WL logger log_dir/name
         resume=False,

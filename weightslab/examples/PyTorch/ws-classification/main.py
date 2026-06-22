@@ -89,7 +89,7 @@ class MNISTCustomDataset(Dataset):
         # For each index, construct a meaningful filepath
         # MNIST doesn't have original individual files, so we create virtual paths
         for idx in range(len(self.mnist)):
-            if self.max_samples is not None and idx >= self.max_samples:
+            if self.max_samples != None and idx >= self.max_samples:
                 break
             label = self.mnist.targets[idx].item() if hasattr(self.mnist.targets[idx], 'item') else self.mnist.targets[idx]
             split = 'train' if self.train else 'test'
@@ -105,7 +105,7 @@ class MNISTCustomDataset(Dataset):
             self.filepaths[idx] = virtual_path
 
     def __len__(self):
-        if self.max_samples is not None:
+        if self.max_samples != None:
             return min(len(self.mnist), self.max_samples)
         return len(self.mnist)
 
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     # Setup clean progress bar with custom format
     if tqdm_display:
         train_range = tqdm.tqdm(
-            range(training_steps_to_do) if training_steps_to_do is not None else itertools.count(),
+            range(training_steps_to_do) if training_steps_to_do != None else itertools.count(),
             desc="Training",
             bar_format="{desc}: {n}/{total} [{elapsed}<{remaining}, {rate_fmt}] {bar} | {postfix}",
             ncols=140,
@@ -379,7 +379,7 @@ if __name__ == "__main__":
             leave=True
         )
     else:
-        train_range = range(training_steps_to_do) if training_steps_to_do is not None else itertools.count()
+        train_range = range(training_steps_to_do) if training_steps_to_do != None else itertools.count()
 
     # ================
     # Training Loop
