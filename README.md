@@ -46,7 +46,7 @@ WeightsLab is an open-source PyTorch tool for dataset debugging, data quality mo
 ## Quickstart 
 
 ![Python](https://img.shields.io/badge/Python-3.10--3.14-5865F2?style=flat&logo=python&logoColor=white)
-![Docker Desktop](https://img.shields.io/badge/Docker_Desktop-v4.77+-0db7ed?style=flat&logo=docker&logoColor=white)
+![Docker Desktop](https://img.shields.io/badge/Docker_Desktop-v4-0db7ed?style=flat&logo=docker&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/Docker_Compose-v2-0db7ed?style=flat&logo=docker&logoColor=white)
 
 **1. Install**
