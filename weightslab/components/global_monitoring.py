@@ -229,9 +229,17 @@ class GuardContext:
         context = Context.TRAINING if self.for_training else Context.TESTING
         self._context_token = set_current_context(context)
 
-        # Update model
+        # Update model — get_model() returns a Proxy(None) placeholder when nothing
+        # is registered; only use it if the proxy target is actually resolved.
         _model = get_model()
-        self.model = _model if _model != None else self.model
+        if _model is not None:
+            try:
+                _target = object.__getattribute__(_model, '_obj')
+                if _target is not None:
+                    self.model = _model
+            except AttributeError:
+                # _model is a plain (non-Proxy) object; use it directly
+                self.model = _model
 
         # The exact logic requested by the user:
         if self.model is not None:

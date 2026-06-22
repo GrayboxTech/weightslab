@@ -1,0 +1,38 @@
+# Multi-task MNIST: digit classification + bounding-box localization
+experiment_name: mnist_multitask
+device: auto
+training_steps_to_do: null  # null = run until stopped
+# root_log_dir: ./logs/mnist_multitask
+
+# Task loss weights — increase loc_loss_weight if localization is underfitting
+cls_loss_weight: 1.0
+loc_loss_weight: 5.0
+
+num_classes: 10
+eval_full_to_train_steps_ratio: 500
+write_export_ratio: 100
+
+tqdm_display: true
+compute_natural_sort: false
+skip_checkpoint_load: false
+
+# H5 / dataframe persistence
+ledger_enable_flushing_threads: true
+ledger_enable_h5_persistence: true
+ledger_flush_max_rows: 15000
+ledger_flush_interval: 30.0
+
+# Services
+serving_grpc: true
+serving_cli: false
+
+optimizer:
+  lr: 0.001
+
+data:
+  train_loader:
+    batch_size: 32
+    shuffle: true
+  test_loader:
+    batch_size: 64
+    shuffle: false
