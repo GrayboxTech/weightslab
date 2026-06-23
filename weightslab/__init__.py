@@ -44,7 +44,7 @@ if _IS_MAIN_PROCESS:
     if os.getenv('WEIGHTSLAB_SUPPRESS_BANNER', '0') != '1':
         logger.info(_BANNER)
     try:
-        from weightslab.telemetry import ping_import
+        from weightslab.utils.telemetry import ping_import
         ping_import(__version__)
     except Exception:
         pass

@@ -730,7 +730,7 @@ def ui_launch(args):
       --dev use the dev compose overlay
     """
     try:
-        from weightslab.telemetry import ping_ui_launch
+        from weightslab.utils.telemetry import ping_ui_launch
         from weightslab import __version__ as _wl_version
         ping_ui_launch(_wl_version)
     except Exception:
