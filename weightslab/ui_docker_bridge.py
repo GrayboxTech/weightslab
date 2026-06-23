@@ -53,21 +53,6 @@ _DERIVED_DEPLOY_ENV_VARS = (
 )
 
 
-def _is_ui_running() -> bool:
-    """Return True if all stack containers are currently running."""
-    for container in _STACK_CONTAINERS:
-        try:
-            result = subprocess.run(
-                ["docker", "inspect", "--format", "{{.State.Running}}", container],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0 or result.stdout.strip() != "true":
-                return False
-        except FileNotFoundError:
-            return False
-    return True
-
-
 def _persist_certs_dir(certs_dir_str: str) -> None:
     """Persist WEIGHTSLAB_CERTS_DIR so future terminals and the training backend find it.
 
@@ -1032,71 +1017,6 @@ def example_start(args):
         sys.exit(result.returncode)
 
 
-def logdir_explore(args):
-    """`weightslab logdir <path> [--no-ui]`: offline explore mode for a downloaded log dir.
-
-    Loads the experiment from disk into a read-only ledger (no training script,
-    GPU, or original dataset required), starts the gRPC backend server, and —
-    unless ``--no-ui`` is given — also brings up the Weights Studio Docker UI
-    stack so the experiment can be browsed immediately.
-
-    Intended workflow::
-
-        # On your dev machine, after rsync-ing the cluster run:
-        weightslab logdir ./root_log_dir
-
-    Once running, open http://localhost:5173 (or the URL printed on startup).
-    Press Ctrl+C to stop the gRPC server (Docker UI keeps running in the
-    background; stop it separately with ``weightslab ui launch`` or
-    ``docker compose down`` if needed).
-    """
-    root_log_dir = args.root_log_dir
-
-    if not getattr(args, "no_ui", False):
-        if _is_ui_running():
-            logger.info("UI is already running — skipping launch.")
-        else:
-            ui_args = argparse.Namespace(
-                certs=getattr(args, "certs", False),
-                force_certs=False,
-                no_clean=False,
-                no_auth=False,
-                dev=False,
-                certs_dir=getattr(args, "certs_dir", None),
-            )
-            ui_launch(ui_args)
-
-    logger.info("Loading experiment from disk: %s", root_log_dir)
-    # Lazy import: pulls in torch and the full weightslab stack only when this
-    # command is actually invoked, keeping other commands fast.
-    try:
-        from weightslab.src import load_experiment_for_explore, serve, keep_serving
-    except ImportError as exc:
-        logger.error("Failed to import weightslab core: %s", exc)
-        sys.exit(1)
-
-    try:
-        summary = load_experiment_for_explore(
-            root_log_dir,
-            exp_hash=getattr(args, "exp_hash", None),
-        )
-    except FileNotFoundError as exc:
-        logger.error(str(exc))
-        sys.exit(1)
-
-    logger.info("Experiment loaded: hash=%s, origins=%s",
-                summary.get("experiment_hash"), summary.get("origins"))
-
-    grpc_port = getattr(args, "grpc_port", None) or int(os.getenv("GRPC_BACKEND_PORT", 50051))
-    os.environ["GRPC_BACKEND_PORT"] = str(grpc_port)
-    logger.info("Starting WeightsLab gRPC server on port %d (read-only explore mode)...", grpc_port)
-    serve(serving_grpc=True)
-
-    logger.info("WeightsLab is running in read-only explore mode.")
-    logger.info("Open the UI, then press Ctrl+C to stop.")
-    keep_serving(release_gpu=False)
-
-
 def _add_example_kind_flags(p: argparse.ArgumentParser) -> None:
     """Attach the mutually-exclusive example-kind flags (default: classification)."""
     group = p.add_mutually_exclusive_group()
@@ -1125,7 +1045,6 @@ def _build_parser() -> argparse.ArgumentParser:
         weightslab se [--force-certs]
         weightslab ui launch [--certs]
         weightslab start example [--cls|--seg|--det|--clus|--gen|--3d_det|--2d_det]
-        weightslab logdir <root_log_dir> [--no-ui] [--certs] [--grpc-port PORT]
     """
     parser = argparse.ArgumentParser(
         prog="weightslab",
@@ -1135,7 +1054,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # metavar lists only the documented commands; the `example` alias is accepted
     # but intentionally omitted here (and help=SUPPRESS'd below) so it stays hidden.
-    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,logdir,help}")
+    sub = parser.add_subparsers(dest="command", metavar="{se,ui,start,help}")
 
     # weightslab se [--force-certs] [certs_dir]
     se_parser = sub.add_parser("se", help="Set up the secure environment (TLS certs + gRPC auth token)")
@@ -1171,47 +1090,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("help", help="Show this help message")
 
-    # weightslab logdir <root_log_dir> [--no-ui] [--certs] [--grpc-port PORT]
-    logdir_parser = sub.add_parser(
-        "logdir",
-        help="Open a finished experiment from disk in read-only explore mode, "
-             "then serve it through Weights Studio",
-    )
-    logdir_parser.add_argument(
-        "root_log_dir",
-        help="Path to the root_log_dir produced by a previous training run",
-    )
-    logdir_parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Skip launching the Weights Studio Docker UI stack "
-             "(useful when the UI is already running)",
-    )
-    logdir_parser.add_argument(
-        "--certs",
-        action="store_true",
-        help="Generate TLS certs + gRPC auth token if missing, then launch UI secured",
-    )
-    logdir_parser.add_argument(
-        "--grpc-port",
-        type=int,
-        default=None,
-        metavar="PORT",
-        help=f"gRPC backend port (default: $GRPC_BACKEND_PORT or 50051)",
-    )
-    logdir_parser.add_argument(
-        "--exp-hash",
-        default=None,
-        metavar="HASH",
-        help="Specific experiment hash to open (default: latest)",
-    )
-    logdir_parser.add_argument(
-        "certs_dir",
-        nargs="?",
-        default=None,
-        help="Custom directory for certs/token (default: $WEIGHTSLAB_CERTS_DIR or ~/.weightslab-certs)",
-    )
-
     return parser, ui_parser, start_parser
 
 
@@ -1237,8 +1115,6 @@ def main():
         # Alias for `start example` — tolerate the swapped subcommand order
         # (`weightslab example start [flags]`) and the bare `weightslab example`.
         example_start(args)
-    elif args.command == "logdir":
-        logdir_explore(args)
     else:
         parser.print_help()
 
