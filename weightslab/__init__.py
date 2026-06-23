@@ -43,6 +43,11 @@ if _IS_MAIN_PROCESS:
     logger.info(f"WeightsLab package initialized - Log level: {log_level}, Log to file: {log_to_file}")
     if os.getenv('WEIGHTSLAB_SUPPRESS_BANNER', '0') != '1':
         logger.info(_BANNER)
+    try:
+        from weightslab.telemetry import ping_import
+        ping_import(__version__)
+    except Exception:
+        pass
 
 grpc_tls_enabled = os.environ.get('GRPC_TLS_ENABLED', 'true').lower() == 'true'
 if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SECURE_INIT', 'false').lower() != 'true':

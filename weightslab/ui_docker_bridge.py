@@ -729,6 +729,12 @@ def ui_launch(args):
       --no-clean skip the stale Docker resource cleanup step
       --dev use the dev compose overlay
     """
+    try:
+        from weightslab.telemetry import ping_ui_launch
+        from weightslab import __version__ as _wl_version
+        ping_ui_launch(_wl_version)
+    except Exception:
+        pass
     _check_docker()
     # pip installs the bundled .sh scripts without the execute bit; make them
     # runnable so the user never has to `chmod +x` before `weightslab ui launch`.
