@@ -31,7 +31,8 @@ _CI_ENV_VARS = (
 # tests and reloads can re-trigger __init__.py).
 _import_pinged_this_process = False
 _DEBUG = os.environ.get("WL_TELEMETRY_DEBUG", "0").lower() in ("1", "true")
-
+if _DEBUG in ('1', 'true', 1):
+    _ENDPOINT = 'http://localhost:8000/v1/ping'
 
 def _disabled() -> bool:
     return os.environ.get("WL_NO_TELEMETRY", "0").lower() in ("1", "true", "yes")
@@ -123,7 +124,7 @@ def ping_import(version: str) -> None:
     if _import_pinged_this_process or _disabled() or _is_ci():
         return
     _import_pinged_this_process = True
-    if not _import_ping_due():
+    if not _import_ping_due() and not _DEBUG:
         if _DEBUG:
             print("[telemetry] import ping skipped (24 h cooldown active)")
         return
