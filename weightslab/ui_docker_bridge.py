@@ -53,6 +53,21 @@ _DERIVED_DEPLOY_ENV_VARS = (
 )
 
 
+def _is_ui_running() -> bool:
+    """Return True if all stack containers are currently running."""
+    for container in _STACK_CONTAINERS:
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Running}}", container],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0 or result.stdout.strip() != "true":
+                return False
+        except FileNotFoundError:
+            return False
+    return True
+
+
 def _persist_certs_dir(certs_dir_str: str) -> None:
     """Persist WEIGHTSLAB_CERTS_DIR so future terminals and the training backend find it.
 
@@ -1038,18 +1053,18 @@ def logdir_explore(args):
     root_log_dir = args.root_log_dir
 
     if not getattr(args, "no_ui", False):
-        # Launch the Weights Studio UI stack (Docker + Envoy) the same way
-        # `weightslab ui launch` does.  Build an args namespace that is
-        # compatible with ui_launch, inheriting relevant flags.
-        ui_args = argparse.Namespace(
-            certs=getattr(args, "certs", False),
-            force_certs=False,
-            no_clean=False,
-            no_auth=False,
-            dev=False,
-            certs_dir=getattr(args, "certs_dir", None),
-        )
-        ui_launch(ui_args)
+        if _is_ui_running():
+            logger.info("UI is already running — skipping launch.")
+        else:
+            ui_args = argparse.Namespace(
+                certs=getattr(args, "certs", False),
+                force_certs=False,
+                no_clean=False,
+                no_auth=False,
+                dev=False,
+                certs_dir=getattr(args, "certs_dir", None),
+            )
+            ui_launch(ui_args)
 
     logger.info("Loading experiment from disk: %s", root_log_dir)
     # Lazy import: pulls in torch and the full weightslab stack only when this
