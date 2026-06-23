@@ -30,6 +30,7 @@ _CI_ENV_VARS = (
 # how many times `import weightslab` is executed (Python caches modules but
 # tests and reloads can re-trigger __init__.py).
 _import_pinged_this_process = False
+_DEBUG = os.environ.get("WL_TELEMETRY_DEBUG", "0").lower() in ("1", "true")
 
 
 def _disabled() -> bool:
@@ -103,12 +104,17 @@ def _post(payload: bytes, version: str) -> None:
             method="POST",
         )
         urllib.request.urlopen(req, timeout=3.0)
-    except Exception:
-        pass  # telemetry is always best-effort
+        if _DEBUG:
+            print(f"[telemetry] ping sent OK → {_ENDPOINT}")
+    except Exception as exc:
+        if _DEBUG:
+            print(f"[telemetry] ping failed: {exc}")
 
 
 def _fire(event: str, version: str) -> None:
-    threading.Thread(target=_post, args=(_payload(event, version), version), daemon=True).start()
+    # Non-daemon so the thread can complete before a short-lived process exits.
+    # The HTTP timeout (3 s) bounds the worst-case delay.
+    threading.Thread(target=_post, args=(_payload(event, version), version), daemon=False).start()
 
 
 def ping_import(version: str) -> None:
@@ -118,6 +124,8 @@ def ping_import(version: str) -> None:
         return
     _import_pinged_this_process = True
     if not _import_ping_due():
+        if _DEBUG:
+            print("[telemetry] import ping skipped (24 h cooldown active)")
         return
     _record_import_ping()
     _fire("import", version)
