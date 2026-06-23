@@ -26,6 +26,11 @@ _CI_ENV_VARS = (
     "JENKINS_URL", "TF_BUILD", "BUILDKITE", "TEAMCITY_VERSION", "DRONE",
 )
 
+# In-process guard: only one import ping per Python process, regardless of
+# how many times `import weightslab` is executed (Python caches modules but
+# tests and reloads can re-trigger __init__.py).
+_import_pinged_this_process = False
+
 
 def _disabled() -> bool:
     return os.environ.get("WL_NO_TELEMETRY", "0").lower() in ("1", "true", "yes")
@@ -107,9 +112,11 @@ def _fire(event: str, version: str) -> None:
 
 
 def ping_import(version: str) -> None:
-    """Async ping on package import — fires at most once per 24 h. No-op in CI."""
-    if _disabled() or _is_ci():
+    """Async ping on package import — once per process AND at most once per 24 h. No-op in CI."""
+    global _import_pinged_this_process
+    if _import_pinged_this_process or _disabled() or _is_ci():
         return
+    _import_pinged_this_process = True
     if not _import_ping_due():
         return
     _record_import_ping()
