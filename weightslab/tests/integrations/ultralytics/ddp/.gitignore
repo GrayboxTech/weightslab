@@ -1,0 +1,8 @@
+# run artifacts — never commit
+reports/
+ddp_run/
+ddp_run.*/
+*.folded
+*.perf.data
+*.perfstat
+__pycache__/
