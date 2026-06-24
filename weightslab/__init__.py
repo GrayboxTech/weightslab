@@ -69,15 +69,12 @@ except Exception:
 	from datetime import datetime
 	__version__ = datetime.utcnow().strftime("%Y%m%d%H%M%S")
 
-logger.debug(f'Is the main process: {_IS_MAIN_PROCESS}')
 if _IS_MAIN_PROCESS:
     try:
         from weightslab.utils.telemetry import ping_import
-        logger.debug('Telem occuring...')
         ping_import(__version__)
     except Exception as e:
-        logger.debug('Telem error with {e}')
-        pass
+        logger.debug("Telemetry ping failed: %s", e)
 
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
