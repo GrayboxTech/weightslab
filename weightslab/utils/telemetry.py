@@ -19,7 +19,6 @@ _ENDPOINT = "https://sandbox.graybx.com/v1/ping"
 _STATE_DIR = Path.home() / ".weightslab"
 _UUID_FILE = _STATE_DIR / "telemetry_id"
 _LAST_IMPORT_PING_FILE = _STATE_DIR / "last_import_ping"
-_NOTICED_FILE = _STATE_DIR / "telemetry_noticed"
 _IMPORT_COOLDOWN_S = 86_400  # ping import at most once per 24 h
 
 _CI_ENV_VARS = (
@@ -31,9 +30,6 @@ _CI_ENV_VARS = (
 # how many times `import weightslab` is executed (Python caches modules but
 # tests and reloads can re-trigger __init__.py).
 _import_pinged_this_process = False
-_DEBUG = os.environ.get("WL_TELEMETRY_DEBUG", "0").lower() in ("1", "true")
-if _DEBUG in ('1', 'true', 1):
-    _ENDPOINT = 'http://localhost:8000/v1/ping'
 
 
 def _disabled() -> bool:
@@ -78,31 +74,6 @@ def _record_import_ping() -> None:
         pass
 
 
-def _show_notice_once() -> None:
-    """Print a one-time disclosure notice the first time telemetry fires."""
-    try:
-        if _NOTICED_FILE.exists():
-            return
-        _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _NOTICED_FILE.touch()
-    except Exception:
-        return
-    print(
-        "\n"
-        "####################################################################\n"
-        "# weightslab telemetry notice                                      #\n"
-        "#  weightslab collects anonymous usage data to help improve the    #\n"
-        "#  library.                                                        #\n"
-        "#  Collected: package version, Python version, OS, approximate     #\n"
-        "#             location (country/city derived from IP —             #\n"
-        "#             raw IP is never stored).                             #\n"
-        "#  Not collected: personal data, code, model weights, file paths.  #\n"
-        "#  Opt out at any time:  export WL_NO_TELEMETRY=1                 #\n"
-        "####################################################################\n",
-        file=sys.stderr,
-    )
-
-
 def _payload(event: str, version: str) -> bytes:
     try:
         tz = __import__("time").tzname[0]
@@ -132,11 +103,9 @@ def _post(payload: bytes, version: str) -> None:
             method="POST",
         )
         urllib.request.urlopen(req, timeout=3.0)
-        if _DEBUG:
-            print(f"[telemetry] ping sent OK → {_ENDPOINT}")
+        logger.debug("Telemetry ping sent OK → %s", _ENDPOINT)
     except Exception as exc:
-        if _DEBUG:
-            print(f"[telemetry] ping failed: {exc}")
+        logger.debug("Telemetry ping failed: %s", exc)
 
 
 def _fire(event: str, version: str) -> None:
@@ -151,11 +120,9 @@ def ping_import(version: str) -> None:
     if _import_pinged_this_process or _disabled() or _is_ci():
         return
     _import_pinged_this_process = True
-    if not _import_ping_due() and not _DEBUG:
-        if _DEBUG:
-            print("[telemetry] import ping skipped (24 h cooldown active)")
+    if not _import_ping_due():
+        logger.debug("Telemetry import ping skipped (24 h cooldown active)")
         return
-    _show_notice_once()
     _record_import_ping()
     _fire("import", version)
 
@@ -164,5 +131,4 @@ def ping_ui_launch(version: str) -> None:
     """Async ping on `weightslab ui launch`. No-op in CI."""
     if _disabled() or _is_ci():
         return
-    _show_notice_once()
     _fire("ui_launch", version)
