@@ -68,18 +68,15 @@ except Exception:
     # Fallback when developing locally or before build; keeps behavior stable.
 	from datetime import datetime
 	__version__ = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-if _IS_MAIN_PROCESS:
-    try:
-        from weightslab.utils.telemetry import ping_import
-        ping_import(__version__)
-    except Exception:
-        pass
 
+logger.debug(f'Is the main process: {_IS_MAIN_PROCESS}')
 if _IS_MAIN_PROCESS:
     try:
         from weightslab.utils.telemetry import ping_import
+        logger.debug('Telem occuring...')
         ping_import(__version__)
-    except Exception:
+    except Exception as e:
+        logger.debug('Telem error with {e}')
         pass
 
 __author__ = 'Alexandru-Andrei ROTARY'
