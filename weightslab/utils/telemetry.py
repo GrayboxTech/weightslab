@@ -89,12 +89,16 @@ def _show_notice_once() -> None:
         return
     print(
         "\n"
-        "weightslab telemetry notice\n"
-        "  weightslab collects anonymous usage data to help improve the library.\n"
-        "  Collected: package version, Python version, OS, approximate location\n"
-        "             (country/city derived from IP — raw IP is never stored).\n"
-        "  Not collected: personal data, code, model weights, or file paths.\n"
-        "  Opt out at any time:  export WL_NO_TELEMETRY=1\n",
+        "####################################################################\n"
+        "# weightslab telemetry notice                                      #\n"
+        "#  weightslab collects anonymous usage data to help improve the    #\n"
+        "#  library.                                                        #\n"
+        "#  Collected: package version, Python version, OS, approximate     #\n"
+        "#             location (country/city derived from IP —             #\n"
+        "#             raw IP is never stored).                             #\n"
+        "#  Not collected: personal data, code, model weights, file paths.  #\n"
+        "#  Opt out at any time:  export WL_NO_TELEMETRY=1                 #\n"
+        "####################################################################\n",
         file=sys.stderr,
     )
 
