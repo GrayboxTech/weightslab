@@ -1699,7 +1699,7 @@ def save_signals(
         if x is None:
             return None
         if isinstance(x, list) and isinstance(x[0], list):
-            return [np.max(np.array([to_numpy(t) for t in row]), axis=0) for row in x]
+            return [ (np.max(np.array([to_numpy(t) for t in row]), axis=0) if len(row) else np.zeros((0,), dtype=np.uint16)) for row in x]
         elif isinstance(x, list):
             return [to_numpy(t) for t in x]
         if isinstance(x, th.Tensor):
@@ -1945,6 +1945,17 @@ def save_instance_signals(
 
     if not losses_data:
         return
+
+    # Move per-instance targets OFF the GPU at enqueue time (gated by WL_INSTANCE_TARGETS_CPU):
+    # otherwise raw target tensors (e.g. seg [H,W] masks) sit in the pending-records buffer
+    # on-GPU until flush, so VRAM grows with flush_max (the disproportionate per-rank VRAM).
+    if targets is not None and os.environ.get("WL_INSTANCE_TARGETS_CPU", "0").lower() in ("1","true","yes","on"):
+        def _to_cpu(t):
+            return t.detach().cpu() if hasattr(t, "detach") else t
+        if isinstance(targets, (list, tuple)):
+            targets = [[_to_cpu(t) for t in s] if isinstance(s, (list, tuple)) else _to_cpu(s) for s in targets]
+        else:
+            targets = _to_cpu(targets)
 
     # origin is intentionally NOT forwarded: instance rows (annotation_id >= 1) don't
     # carry an origin; the flush derives it from the sample row (annotation_id 0).
