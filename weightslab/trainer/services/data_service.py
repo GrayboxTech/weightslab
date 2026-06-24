@@ -3765,10 +3765,64 @@ class DataService:
                         message=f"Failed to delete metadata column: {str(e)}",
                     )
 
+        if request.stat_name == "__discard_by_tag__":
+            tag_name = str(request.string_value or "").strip()
+            if not tag_name:
+                return pb2.DataEditsResponse(
+                    success=False,
+                    message="Missing tag name for discard-by-tag operation.",
+                )
+
+            with self._watched_lock("_lock[EditDataSample/__discard_by_tag__]"):
+                try:
+                    self._slowUpdateInternals()
+                    if self._all_datasets_df is None or self._all_datasets_df.empty:
+                        return pb2.DataEditsResponse(
+                            success=False,
+                            message="No dataframe available.",
+                        )
+
+                    tag_col = f"{SampleStatsEx.TAG.value}:{tag_name}"
+                    df = safe_reset_index(self._all_datasets_df)
+                    if tag_col not in df.columns:
+                        return pb2.DataEditsResponse(
+                            success=True,
+                            message=f"No samples found with tag '{tag_name}'.",
+                        )
+
+                    tagged = df[df[tag_col] == 1]
+                    if tagged.empty:
+                        return pb2.DataEditsResponse(
+                            success=True,
+                            message=f"No samples found with tag '{tag_name}'.",
+                        )
+
+                    for origin, origin_df in tagged.groupby(SampleStatsEx.ORIGIN.value, sort=False):
+                        sample_ids = origin_df.index.astype(str).tolist()
+                        rows = [
+                            {"sample_id": sid, SampleStatsEx.ORIGIN.value: origin, SampleStatsEx.DISCARDED.value: True}
+                            for sid in sample_ids
+                        ]
+                        df_update = pd.DataFrame(rows).set_index("sample_id")
+                        self._df_manager.upsert_df(df_update, origin=origin, force_flush=True)
+
+                    count = len(tagged)
+                    self._slowUpdateInternals(force=True)
+                    return pb2.DataEditsResponse(
+                        success=True,
+                        message=f"Discarded {count} samples with tag '{tag_name}'.",
+                    )
+                except Exception as e:
+                    logger.error(f"[EditDataSample] discard_by_tag failed: {e}", exc_info=True)
+                    return pb2.DataEditsResponse(
+                        success=False,
+                        message=f"Failed to discard by tag: {str(e)}",
+                    )
+
         if not request.stat_name or not request.stat_name.startswith(SampleStatsEx.TAG.value) and request.stat_name not in [SampleStatsEx.DISCARDED.value]:
             return pb2.DataEditsResponse(
                 success=False,
-                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', and '__force_h5_write_and_save__' edits are supported.",
+                message="Only 'tags', 'discarded', '__copy_metadata__', '__delete_metadata__', '__save_data_state__', '__force_h5_write_and_save__', and '__discard_by_tag__' edits are supported.",
             )
 
         # =====================================================================
