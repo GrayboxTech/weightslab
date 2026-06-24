@@ -15,10 +15,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_ENDPOINT = "https://sandbox.graybx.com//v1/ping"
+_ENDPOINT = "https://sandbox.graybx.com/v1/ping"
 _STATE_DIR = Path.home() / ".weightslab"
 _UUID_FILE = _STATE_DIR / "telemetry_id"
 _LAST_IMPORT_PING_FILE = _STATE_DIR / "last_import_ping"
+_NOTICED_FILE = _STATE_DIR / "telemetry_noticed"
 _IMPORT_COOLDOWN_S = 86_400  # ping import at most once per 24 h
 
 _CI_ENV_VARS = (
@@ -33,6 +34,7 @@ _import_pinged_this_process = False
 _DEBUG = os.environ.get("WL_TELEMETRY_DEBUG", "0").lower() in ("1", "true")
 if _DEBUG in ('1', 'true', 1):
     _ENDPOINT = 'http://localhost:8000/v1/ping'
+
 
 def _disabled() -> bool:
     return os.environ.get("WL_NO_TELEMETRY", "0").lower() in ("1", "true", "yes")
@@ -74,6 +76,27 @@ def _record_import_ping() -> None:
         _LAST_IMPORT_PING_FILE.write_text(str(time.time()))
     except Exception:
         pass
+
+
+def _show_notice_once() -> None:
+    """Print a one-time disclosure notice the first time telemetry fires."""
+    try:
+        if _NOTICED_FILE.exists():
+            return
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _NOTICED_FILE.touch()
+    except Exception:
+        return
+    print(
+        "\n"
+        "weightslab telemetry notice\n"
+        "  weightslab collects anonymous usage data to help improve the library.\n"
+        "  Collected: package version, Python version, OS, approximate location\n"
+        "             (country/city derived from IP — raw IP is never stored).\n"
+        "  Not collected: personal data, code, model weights, or file paths.\n"
+        "  Opt out at any time:  export WL_NO_TELEMETRY=1\n",
+        file=sys.stderr,
+    )
 
 
 def _payload(event: str, version: str) -> bytes:
@@ -128,6 +151,7 @@ def ping_import(version: str) -> None:
         if _DEBUG:
             print("[telemetry] import ping skipped (24 h cooldown active)")
         return
+    _show_notice_once()
     _record_import_ping()
     _fire("import", version)
 
@@ -136,4 +160,5 @@ def ping_ui_launch(version: str) -> None:
     """Async ping on `weightslab ui launch`. No-op in CI."""
     if _disabled() or _is_ci():
         return
+    _show_notice_once()
     _fire("ui_launch", version)
