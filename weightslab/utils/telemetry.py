@@ -15,7 +15,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_ENDPOINT = "https://telemetry.graybx.com/v1/ping"
+_ENDPOINT = "https://sandbox.graybx.com//v1/ping"
 _STATE_DIR = Path.home() / ".weightslab"
 _UUID_FILE = _STATE_DIR / "telemetry_id"
 _LAST_IMPORT_PING_FILE = _STATE_DIR / "last_import_ping"
