@@ -34,10 +34,12 @@ def safe_reset_index(df: "pd.DataFrame") -> "pd.DataFrame":
     """
     import pandas as _pd
     if not isinstance(df, _pd.DataFrame) or not isinstance(df.index, _pd.MultiIndex):
-        # Single-level index: only reset if the name isn't already a column.
-        if df.index.name and df.index.name in df.columns:
-            return df
-        return df.reset_index()
+        # Single-level index: only promote if the name is meaningful and missing.
+        # Unnamed index (None) has nothing to promote; drop it to avoid inserting
+        # a spurious 'index' / 'level_0' column when one already exists.
+        if df.index.name and df.index.name not in df.columns:
+            return df.reset_index()
+        return df.reset_index(drop=True)
     missing = [n for n in df.index.names if n and n not in df.columns]
     if not missing:
         # All levels already present as columns — nothing to promote.
