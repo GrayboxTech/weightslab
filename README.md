@@ -430,27 +430,6 @@ Find our [sandbox](https://preview.graybx.com) online. The password is **graybx*
 Find our documentation [online](https://grayboxtech.github.io/weightslab/latest/index.html).
 
 
-## Telemetry
-
-WeightsLab collects **anonymous** usage data to help us understand adoption and improve the library.
-
-**What is collected:**
-- Package version, Python version, OS type
-- Approximate location: country and city derived from IP address on the server — the raw IP is **never stored**
-- Event type: `import` (first daily import) or `ui_launch`
-- A random UUID local to your machine (not linked to any account)
-
-**What is NOT collected:** personal data, IP addresses, source code, model weights, file paths, or any user-identifiable information.
-
-**Opt out at any time:**
-```bash
-export WL_NO_TELEMETRY=1
-```
-
-Telemetry is automatically skipped in CI environments (`GITHUB_ACTIONS`, `CI`, `GITLAB_CI`, etc.).
-
-A one-time notice is printed to stderr the first time telemetry fires. After that it is silent.
-
 ## Contributing & onboarding
 
 New here (human or AI coding agent)? Start with [AGENTS.md](AGENTS.md) — it
