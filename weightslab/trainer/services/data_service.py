@@ -72,19 +72,39 @@ def normalize_metadata_copy_source_name(source_name: str, experiment_hash: str =
     return name
 
 
-def build_metadata_copy_column_names(existing_columns, experiment_hash: str, source_name: str):
-    """Build backend/ui copied metadata names with incrementing suffix _1, _2, ..."""
-    exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
-    normalized_source = normalize_metadata_copy_source_name(source_name, exp_hash)
+def build_metadata_copy_column_names(existing_columns, experiment_hash: str, source_name: str) -> str:
+    """Build backend/ui copied metadata column names.
+
+    Naming rules:
+    - Cloning an original field (no '@'): first copy is ``{source}@{hash}``;
+      subsequent copies of the same source get ``{source}@{hash}_1``, ``_2``, ...
+    - Cloning an already-cloned field (contains '@'): strip any trailing ``_N``
+      suffix to find the base name, then append ``_1``, ``_2``, ... — no new hash.
+    """
     existing_iterable = [] if existing_columns is None else existing_columns
     existing = {str(col) for col in existing_iterable}
 
-    index = 1
-    while True:
-        copy_name = f"{normalized_source}_{index}@{exp_hash}"
-        if copy_name not in existing:
-            return copy_name
-        index += 1
+    if "@" in source_name:
+        # Cloning a clone: reuse the same @hash suffix, just increment _{n}
+        base = re.sub(r"_\d+$", "", source_name)
+        n = 1
+        while True:
+            candidate = f"{base}_{n}"
+            if candidate not in existing:
+                return candidate
+            n += 1
+    else:
+        # Cloning an original field: first copy has no index, then _1, _2, ...
+        exp_hash = str(experiment_hash or "current_experiment_hash").strip() or "current_experiment_hash"
+        base = f"{source_name}@{exp_hash}"
+        if base not in existing:
+            return base
+        n = 1
+        while True:
+            candidate = f"{base}_{n}"
+            if candidate not in existing:
+                return candidate
+            n += 1
 
 
 def duplicate_metadata_column_in_dataframe(df: pd.DataFrame, source_column: str, experiment_hash: str):
@@ -99,7 +119,9 @@ def duplicate_metadata_column_in_dataframe(df: pd.DataFrame, source_column: str,
 
 def is_copy_metadata_column_name(column_name: str) -> bool:
     name = str(column_name or "").strip()
-    return bool(re.match(r".+_\d+@.+$", name))
+    # Matches any column that was produced by a clone operation: contains '@'
+    # with at least one character on each side (e.g. "loss@abc123" or "loss@abc123_2").
+    return bool(re.match(r".+@.+", name))
 
 
 def detect_bbox_format(bboxes: np.ndarray) -> str:
@@ -3752,7 +3774,10 @@ class DataService:
                     if target_column in self._all_datasets_df.columns:
                         self._all_datasets_df = self._all_datasets_df.drop(columns=[target_column])
 
-                    self._slowUpdateInternals(force=True)
+                    # Kick a background view-refresh (non-blocking) — the in-memory view
+                    # is already consistent after the drop above, so blocking inline rebuild
+                    # is unnecessary and causes the gRPC response to stall for 5-10 s.
+                    self._slowUpdateInternals()
 
                     return pb2.DataEditsResponse(
                         success=True,
