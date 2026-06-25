@@ -68,6 +68,14 @@ except Exception:
     # Fallback when developing locally or before build; keeps behavior stable.
 	from datetime import datetime
 	__version__ = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
+if _IS_MAIN_PROCESS:
+    try:
+        from weightslab.utils.telemetry import ping_import
+        ping_import(__version__)
+    except Exception as e:
+        logger.debug("Telemetry ping failed: %s", e)
+
 __author__ = 'Alexandru-Andrei ROTARY'
 __maintainer__ = 'Guillaume PELLUET'
 __credits__ = 'GrayBx'
