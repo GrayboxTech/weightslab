@@ -343,7 +343,7 @@ if __name__ == "__main__":
 
     # ================
     # Training Loop
-    # wl.start_training(timeout=3) # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
+    wl.start_training(timeout=3) # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
 
     # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()

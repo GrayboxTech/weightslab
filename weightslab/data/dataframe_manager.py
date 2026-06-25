@@ -4,6 +4,7 @@ import traceback
 import threading
 import logging
 import traceback
+import warnings
 import numpy as np
 import pandas as pd
 import torch
@@ -27,7 +28,7 @@ from weightslab.backend.ledgers import get_hyperparams
 
 
 pd.set_option('future.no_silent_downcasting', True)
-logger = logging.getLogger(__name__)  # Set up logger
+logger = logging.getLogger(__name__) # Set up logger
 
 
 def _safe_update(target: pd.DataFrame, source: pd.DataFrame) -> None:
@@ -60,6 +61,16 @@ def _safe_update(target: pd.DataFrame, source: pd.DataFrame) -> None:
         mask = src.notna()
         if not mask.any():
             continue
+        # Widen the target to object before assigning object (arrays/masks) or
+        # bool values into a numeric (e.g. NaN -> float64) column. Otherwise
+        # pandas >= 2.1 emits an incompatible-dtype FutureWarning (a future hard
+        # error). Compatible numeric assignments keep their dtype (fast path).
+        try:
+            if src.dtype.kind in ("O", "b") and target[col].dtype != object \
+                    and target[col].dtype.kind != src.dtype.kind:
+                target[col] = target[col].astype(object)
+        except Exception:
+            pass
         try:
             target.loc[common_idx[mask.values], col] = src[common_idx].values
         except Exception:
@@ -87,10 +98,10 @@ class LedgeredDataFrameManager:
         self._flush_max_rows = flush_max_rows
         self._flush_thread: threading.Thread | None = None
         self._flush_stop = threading.Event()
-        self._flush_event = threading.Event()  # Event to wake thread for force flush
+        self._flush_event = threading.Event() # Event to wake thread for force flush
         self._flush_queue_count = 0
         self._dense_store: Dict[str, Dict[int, np.ndarray]] = {}
-        self._buffer: Dict[int, Dict[str, Any]] = {}  # {sample_id: {col: value}}
+        self._buffer: Dict[int, Dict[str, Any]] = {} # {sample_id: {col: value}}
         # Registry of categorical tags: tag_name (without "tag:" prefix) -> ordered
         # list of allowed category values. Distinguishes multi-value string tags
         # (e.g. weather -> [rainy, sunny]) from the legacy boolean tags.
@@ -164,7 +175,7 @@ class LedgeredDataFrameManager:
                 # Check if all items are scalar-like
                 all_scalar = all(isinstance(item, (int, float, np.integer, np.floating)) for item in target)
                 if all_scalar:
-                    return 1  # Single instance with multiple values
+                    return 1 # Single instance with multiple values
             except Exception:
                 pass
 
@@ -187,8 +198,8 @@ class LedgeredDataFrameManager:
         A single array/tensor/scalar/label is the sample's OWN target and lives
         on the sample row (instance_id 0), so it yields no separate instance rows.
 
-        - list/tuple of array-likes  → the list (one entry per instance, rows 1..N)
-        - everything else            → ``[]`` (single-target / classification → only the sample row)
+        - list/tuple of array-likes → the list (one entry per instance, rows 1..N)
+        - everything else → ``[]`` (single-target / classification → only the sample row)
         """
         if isinstance(target, (list, tuple)) and len(target) > 0 \
                 and isinstance(target[0], (np.ndarray, torch.Tensor, list)):
@@ -238,10 +249,10 @@ class LedgeredDataFrameManager:
             sid = self._normalize_sample_id(rec.get(SID))
             inst_targets = self._instance_targets_list(rec.get(TARGET))
             n_inst = len(inst_targets)
-            total = n_inst + 1  # +1 for the sample row at instance_id 0
+            total = n_inst + 1 # +1 for the sample row at instance_id 0
 
             sample_ids.extend([sid] * total)
-            annotation_ids.extend(range(total))  # 0 (sample), 1..N (instances)
+            annotation_ids.extend(range(total)) # 0 (sample), 1..N (instances)
 
             for key in keys:
                 val = rec.get(key)
@@ -454,7 +465,7 @@ class LedgeredDataFrameManager:
                 if isinstance(s.dtype, pd.CategoricalDtype):
                     cats = s.dtype.categories.tolist()
                     if any(isinstance(c, bool) for c in cats):
-                        continue  # boolean-style categorical → not a categorical tag
+                        continue # boolean-style categorical → not a categorical tag
                     candidate = cats
                 elif pd.api.types.is_bool_dtype(s.dtype):
                     continue
@@ -584,12 +595,12 @@ class LedgeredDataFrameManager:
                     _safe_update(self._df, loaded_df)
 
                     # 2) Append rows that exist ONLY in the loaded df. This is the key
-                    #    fix: a freshly-registered loader has just the sample row
-                    #    (annotation_id == 0) per sample, while the persisted df from a
-                    #    previous run also has the instance rows (annotation_id >= 1).
-                    #    Those instance rows must be added back, not dropped. Use a
-                    #    boolean mask (not .loc[difference]) so duplicate keys can't be
-                    #    re-expanded by the label lookup.
+                    # fix: a freshly-registered loader has just the sample row
+                    # (annotation_id == 0) per sample, while the persisted df from a
+                    # previous run also has the instance rows (annotation_id >= 1).
+                    # Those instance rows must be added back, not dropped. Use a
+                    # boolean mask (not .loc[difference]) so duplicate keys can't be
+                    # re-expanded by the label lookup.
                     new_rows = loaded_df[~loaded_df.index.isin(self._df.index)]
                     if not new_rows.empty:
                         self._df = pd.concat([self._df, new_rows])
@@ -743,7 +754,7 @@ class LedgeredDataFrameManager:
 
     def _should_array_be_stored(self, array_name) -> bool:
         """Check if array storage is enabled."""
-        return array_name in SAMPLES_STATS_TO_SAVE_TO_H5  # Regexed signals are not considered here
+        return array_name in SAMPLES_STATS_TO_SAVE_TO_H5 # Regexed signals are not considered here
 
     def _is_array_column_to_norm(self, column_name: str, value: Any) -> bool:
         """True if ``column_name`` is an array column whose ``value`` is an array
@@ -765,7 +776,7 @@ class LedgeredDataFrameManager:
             arr = np.asanyarray(value)
         except Exception:
             return False
-        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in (4, 5, 6)
+        return arr.ndim == 2 and arr.shape[0] >= 0 and arr.shape[-1] in range(3, 9+1)
 
     @staticmethod
     def _is_empty(value: Any) -> bool:
@@ -910,7 +921,7 @@ class LedgeredDataFrameManager:
         preds_raw: np.ndarray | dict | None,
         preds: np.ndarray | dict | None,
         losses: Dict[str, Any] | None,
-        targets: np.ndarray |  dict | None = None,
+        targets: np.ndarray | dict | None = None,
         step: int | None = None
     ):
         """
@@ -959,9 +970,9 @@ class LedgeredDataFrameManager:
                     pred = index_batch(pred, batch_index)
                 else:
                     pred = index_batch(preds, batch_index)
-                pred = pred if is_meaningful(pred) else None  # Replace nan by None
+                pred = pred if is_meaningful(pred) else None # Replace nan by None
                 if pred is not None:
-                    rec[SampleStats.Ex.PREDICTION.value] = self._normalize_preds_raw_uint16(pred)  # Not normalized as already integer
+                    rec[SampleStats.Ex.PREDICTION.value] = self._normalize_preds_raw_uint16(pred) # Not normalized as already integer
             ## Target
             if targets is not None:
                 target = None
@@ -975,9 +986,9 @@ class LedgeredDataFrameManager:
                             target = torch.cat((target, targets['cls'][mask]), -1)
                 else:
                     target = index_batch(targets, batch_index)
-                    target = target if is_meaningful(target) else None  # Replace nan by None
+                    target = target if is_meaningful(target) else None # Replace nan by None
                 if target is not None:
-                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target) # Not normalized as already integer
             ## Step
             if step is not None and is_meaningful(step):
                 rec[SampleStats.Ex.LAST_SEEN.value] = int(step)
@@ -994,7 +1005,7 @@ class LedgeredDataFrameManager:
             for sample_id, record in records_to_add.items():
                 self._buffer.setdefault(sample_id, {}).update(record)
             logger.debug(f"Enqueued {len(records_to_add)} records to buffer. Buffer size is now {len(self._buffer)}.")
-            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init  # Check buffer size and trigger flush if needed
+            should_flush = len(self._buffer) >= self._flush_max_rows or self.first_init # Check buffer size and trigger flush if needed
 
         # Trigger flush outside lock
         if should_flush:
@@ -1119,11 +1130,11 @@ class LedgeredDataFrameManager:
                                 bid = int(targets['batch_idx'][mask].ravel()[0].item())
                             if sid == usid[bid]:
                                 if 'bboxes' in targets:
-                                    target = targets['bboxes'][mask][aid_i-1]  # aid start to 1 for instance rows
+                                    target = targets['bboxes'][mask][aid_i-1] # aid start to 1 for instance rows
                                 if 'cls' in targets:
-                                    target = torch.cat((target, targets['cls'][mask][aid_i-1]), -1)  # aid start to 1 for instance rows
+                                    target = torch.cat((target, targets['cls'][mask][aid_i-1]), -1) # aid start to 1 for instance rows
                 if target is not None:
-                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target)  # Not normalized as already integer
+                    rec[SampleStats.Ex.TARGET.value] = self._normalize_preds_raw_uint16(target) # Not normalized as already integer
             else:
                 # Nested-list targets are flattened sample-major (targets_rav), so the
                 # i-th flat entry is this i-th instance's target — index by i, not the
@@ -1268,7 +1279,7 @@ class LedgeredDataFrameManager:
                         self._df.loc[indices, col] = val
                     affected_ids.extend(indices)
                 else:
-                    if not affected_ids:  # Only print once to avoid log spam
+                    if not affected_ids: # Only print once to avoid log spam
                         print(f"[DEBUG] Could not find gid {repr(gid)} in gid_to_indices keys. Sample key: {repr(list(gid_to_indices.keys())[0]) if gid_to_indices else 'None'}")
 
             if affected_ids:
@@ -1624,17 +1635,31 @@ class LedgeredDataFrameManager:
         if self._df.index.has_duplicates:
             self._df = self._df[~self._df.index.duplicated(keep='last')]
 
-        # Widen categorical target columns so a new value doesn't raise
-        # "Cannot setitem on a Categorical with a new category".
+        # Categorical target columns must be widened up front: assigning a value
+        # outside the category list raises an UNCATCHABLE AssertionError, so it
+        # cannot be handled by the try/except below.
         for col in df_updates.columns:
             if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
                 self._df[col] = self._df[col].astype(object)
 
         # Masked update: only overwrite where df_updates is non-NaN.
         mask = df_updates.notna()
-        self._df.loc[df_updates.index, df_updates.columns] = (
-            self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
-        )
+        combined = self._df.loc[df_updates.index, df_updates.columns].where(~mask, df_updates)
+        try:
+            with warnings.catch_warnings():
+                # pandas >= 2.1 only *warns* when a partial assignment changes a
+                # column's dtype (object arrays/masks or bool into a numeric column),
+                # but will raise in a future version. Promote it so we widen the
+                # affected columns to object and retry. Compatible assignments take
+                # this fast path unchanged.
+                warnings.filterwarnings(
+                    "error", message=".*incompatible dtype.*", category=FutureWarning)
+                self._df.loc[df_updates.index, df_updates.columns] = combined
+        except Exception:
+            for col in df_updates.columns:
+                if col in self._df.columns and self._df[col].dtype != object:
+                    self._df[col] = self._df[col].astype(object)
+            self._df.loc[df_updates.index, df_updates.columns] = combined
         return df_updates.index
 
     def _merge_buffer_frames_into(self, df: pd.DataFrame, sample_df: pd.DataFrame, instance_df: pd.DataFrame) -> pd.DataFrame:
@@ -1695,7 +1720,7 @@ class LedgeredDataFrameManager:
         if not records:
             return
 
-        current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
+        current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3] # Milliseconds
         logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applying {len(records)} buffered records to Global DataFrame.")
 
         sample_ids = [rec["sample_id"] for rec in records]
@@ -1715,7 +1740,7 @@ class LedgeredDataFrameManager:
         # Mark all as pending for h5 flush (outside lock)
         self.mark_dirty_batch(sample_ids)
 
-        current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Milliseconds
+        current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3] # Milliseconds
         logger.debug(f"[{current_time}] [LedgeredDataFrameManager] Applied {len(records)} buffered records to Global DataFrame.")
 
     def _apply_buffer_records_nonblocking(self, records: List[Dict[str, Any]]):
@@ -1748,7 +1773,8 @@ class LedgeredDataFrameManager:
             applied_index = written_s.append(written_i) if len(written_i) else written_s
             update_cols = sample_df.columns.union(instance_df.columns)
             # Keep newly-added signal columns float32 and empty object cells as None.
-            self._df = self._optimize_dataframe_memory(self._df)
+            _df = self._optimize_dataframe_memory(self._df)
+            self._df = _df
         finally:
             self._lock.release()
 
@@ -1969,8 +1995,8 @@ class LedgeredDataFrameManager:
         # === 3) Categorical conversion (LAST step) ===
         # Columns that are typically repetitive (good candidates for categorical)
         categorical_candidates = [
-            SampleStats.Ex.ORIGIN.value,  # Alias for origin (if different column name)
-            SampleStats.Ex.TASK_TYPE.value,  # Task type (e.g. 'classification', 'segmentation')
+            SampleStats.Ex.ORIGIN.value, # Alias for origin (if different column name)
+            SampleStats.Ex.TASK_TYPE.value, # Task type (e.g. 'classification', 'segmentation')
         ]
 
         for col in categorical_candidates:
@@ -1995,7 +2021,7 @@ class LedgeredDataFrameManager:
                     n_rows = len(df)
                 compression_ratio = n_unique / n_rows if n_rows > 0 else 1.0
 
-                if compression_ratio < 0.5 and n_unique > 1:  # Worth compressing if < 50% unique
+                if compression_ratio < 0.5 and n_unique > 1: # Worth compressing if < 50% unique
                     try:
                         df[col] = df[col].astype('category')
                         logger.debug(
@@ -2060,7 +2086,7 @@ class LedgeredDataFrameManager:
 
                     # Forced when buffer is full
                     if force_requested:
-                        self._flush_event.clear()  # Clear before flush
+                        self._flush_event.clear() # Clear before flush
                         self.flush()
 
                     # Wait for flush event (force) or timeout (periodic)
@@ -2072,11 +2098,11 @@ class LedgeredDataFrameManager:
 
                     if not self._flush_stop.is_set():
                         self.flush_if_needed_nonblocking(force=True)
-                        self._flush_queue_count = 0  # Reset queue count after periodic flush
+                        self._flush_queue_count = 0 # Reset queue count after periodic flush
                 except Exception as e:
                     traceback_str = traceback.format_exc()
                     logger.error(f"[LedgeredDataFrameManager] Flush loop error: {e}\n{traceback_str}")
-                st = time.time()  # Reset start time after each loop
+                st = time.time() # Reset start time after each loop
 
         self._flush_thread = threading.Thread(target=_worker, name="WL-Ledger_Dataframe_Flush", daemon=True)
         self._flush_thread.start()
@@ -2127,7 +2153,7 @@ class LedgeredDataFrameManager:
         The shared dataframe manager now expands every sample into one row per
         instance/annotation using a ``(sample_id, annotation_id)`` MultiIndex.
         The studio UI and the agent, however, are sample-centric: they expect a
-        single row per sample.  This helper folds the annotation rows back down:
+        single row per sample. This helper folds the annotation rows back down:
 
         - Sample-level columns (metadata, target, prediction, tags, ...) are
           duplicated identically on every annotation row, so we keep the first.
@@ -2171,7 +2197,7 @@ class LedgeredDataFrameManager:
             # straight off the index (or columns) as numpy arrays — no reindex of ``df``.
             if has_annot_index:
                 if SID not in (df.index.names or []):
-                    return df  # Cannot locate the sample level — leave untouched.
+                    return df # Cannot locate the sample level — leave untouched.
                 sid_arr = df.index.get_level_values(SID).to_numpy()
                 annot_arr = np.asarray(df.index.get_level_values(ANNOT).to_numpy())
             else:
@@ -2244,7 +2270,7 @@ class LedgeredDataFrameManager:
                         vals = None
                         for c in per_instance_cols:
                             v = col_lists[c][i]
-                            if v is None or v != v:  # None or NaN
+                            if v is None or v != v: # None or NaN
                                 continue
                             if vals is None:
                                 vals = {}
@@ -2306,7 +2332,7 @@ class LedgeredDataFrameManager:
             target_dtype = SAMPLES_STATS_DEFAULTS_TYPES[col]
 
             # Handle union types (e.g., int | list, str | list)
-            if hasattr(target_dtype, '__origin__'):  # Python 3.10+ union types
+            if hasattr(target_dtype, '__origin__'): # Python 3.10+ union types
                 if hasattr(target_dtype, '__args__'):
                     target_dtype = target_dtype.__args__[0]
 
@@ -2365,7 +2391,7 @@ class LedgeredDataFrameManager:
         """Signal flush thread. Returns once buffer has been drained (not after H5 write).
 
         Training is only blocked for the brief buffer-drain window (~1ms), not for the
-        full DF→H5 write.  If the buffer refills before the flush thread loops back, the
+        full DF→H5 write. If the buffer refills before the flush thread loops back, the
         next call will wait again — bounding in-memory usage to 2×flush_max_rows records.
         """
         with self._queue_lock:
@@ -2448,7 +2474,7 @@ def create_ledger_manager():
                 enable_flushing_threads=enable_flush
             )
     except Exception:
-        pass  # Use defaults if hyperparams not available
+        pass # Use defaults if hyperparams not available
 
     return None
 
@@ -2457,6 +2483,6 @@ def create_ledger_manager():
 # from weightslab.backend import ledgers
 # LM = create_ledger_manager()
 # try:
-#     ledgers.register_dataframe(LM)
+# ledgers.register_dataframe(LM)
 # except Exception as e:
-#     logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")
+# logger.debug(f"Failed to register LedgeredDataFrameManager in ledger: {e}")

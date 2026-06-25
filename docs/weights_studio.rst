@@ -71,6 +71,8 @@ Default values in ``../weights_studio/docker/.env``:
 
 - ``VITE_PORT=5173``
 - ``VITE_HISTOGRAM_MAX_BINS=512``
+- ``BB_THUMB_RENDER=10`` (max bounding boxes drawn per thumbnail image, per overlay)
+- ``BB_MODAL_RENDER=100`` (max bounding boxes drawn per modal image, per overlay)
 - ``WS_SERVER_HOST=localhost``
 - ``WS_SERVER_PORT=8080``
 - ``WS_SERVER_PROTOCOL=https``
@@ -313,6 +315,8 @@ consistently with your deployed endpoints:
    WS_SERVER_HOST=studio.your-domain.com
    WS_SERVER_PORT=443
    VITE_HISTOGRAM_MAX_BINS=512
+   BB_THUMB_RENDER=10
+   BB_MODAL_RENDER=100
 
    # envoy / backend internal wiring
    ENVOY_PORT=8080
@@ -369,7 +373,9 @@ Use this pattern for a simple single-VM production-like deployment.
     WS_SERVER_PROTOCOL=https
     WS_SERVER_HOST=studio.your-domain.com
     WS_SERVER_PORT=443
-   VITE_HISTOGRAM_MAX_BINS=512
+    VITE_HISTOGRAM_MAX_BINS=512
+    BB_THUMB_RENDER=10
+    BB_MODAL_RENDER=100
 
     ENVOY_PORT=8080
     ENVOY_ADMIN_PORT=9901

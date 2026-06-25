@@ -197,7 +197,7 @@ class TestWriteDataframeNoManager:
              patch("weightslab.src.get_logger", return_value=None):
             result = write_dataframe(tmp_json)
         assert result == tmp_json
-        assert not os.path.isfile(tmp_json)  # nothing written
+        assert not os.path.isfile(tmp_json) # nothing written
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +264,7 @@ class TestWriteDataframeIndexFilters:
         _call(tmp_json, mgr, sample_id="s1")
         data = json.loads(open(tmp_json).read())
         assert all(r["sample_id"] == "s1" for r in data)
-        assert len(data) == 2  # s1 has annotation_ids 0 and 1
+        assert len(data) == 2 # s1 has annotation_ids 0 and 1
 
     def test_sample_id_list(self, mgr, tmp_json):
         _call(tmp_json, mgr, sample_id=["s1", "s2"])
@@ -277,7 +277,7 @@ class TestWriteDataframeIndexFilters:
         _call(tmp_json, mgr, instance_id=0)
         data = json.loads(open(tmp_json).read())
         assert all(r["annotation_id"] == 0 for r in data)
-        assert len(data) == 2  # s1 and s2 both have annotation_id=0
+        assert len(data) == 2 # s1 and s2 both have annotation_id=0
 
     def test_instance_id_list(self, mgr, tmp_json):
         _call(tmp_json, mgr, instance_id=[1, 2])

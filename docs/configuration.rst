@@ -245,6 +245,14 @@ Data and Cache
        uniformly downsampled — keeping the first and last point and an evenly-spaced
        subset in between (no values are interpolated/invented). Set to ``0`` to
        disable the cap and return every step of the mean curve.
+   * - ``WL_POINT_CLOUD_CHUNK_BYTES``
+     - ``1048576``
+     - Size, in bytes, of each chunk streamed by the ``GetPointCloud`` RPC
+       (raw ``float32`` point-cloud data is sent as a sequence of binary
+       messages). Defaults to ``1048576`` (1 MiB). Larger chunks mean fewer
+       gRPC messages but more memory held per message; smaller chunks lower
+       peak memory at the cost of more round-trips. Must be a positive integer
+       — non-positive or non-numeric values fall back to the 1 MiB default.
 
 
 Evaluation Mode
@@ -547,3 +555,101 @@ These variables are injected into the browser bundle at build / dev time.
    * - ``VITE_WS_MODAL_CACHE_MAX_MB``
      - ``64``
      - Maximum memory (MB) for the full-resolution modal image cache.
+
+
+Bounding-box render limits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Detection samples can carry many bounding boxes per image (dense scenes,
+high-recall predictions). Drawing them all slows rendering and turns the
+overlay into noise, so the number of boxes drawn per image is capped. The cap
+is applied **separately** to ground-truth (GT) and predictions (PRED) — a value
+of ``10`` allows up to 10 GT boxes *and* 10 PRED boxes per image. Boxes beyond
+the cap are simply not drawn (predictions are typically score-ordered, so the
+most confident ones are kept).
+
+These are set on the Weights Studio frontend container (for example in
+``../weights_studio/docker/docker-compose.yml``) and injected into the page at
+startup by the nginx entrypoint — changing them needs no rebuild, just a
+container restart. For a local ``vite`` dev server, use the ``VITE_`` fallbacks
+shown below. Values are clamped to a hard ceiling of ``10000``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 12 58
+
+   * - Variable
+     - Default
+     - Description
+   * - ``BB_THUMB_RENDER``
+     - ``10``
+     - Maximum bounding boxes drawn per image in the grid **thumbnails**, per
+       overlay (up to N ground-truth and N predictions). Dev-server fallback:
+       ``VITE_BB_THUMB_RENDER``.
+   * - ``BB_MODAL_RENDER``
+     - ``100``
+     - Maximum bounding boxes drawn per image in the **modal** detail view, per
+       overlay (up to N ground-truth and N predictions). A ``?`` button in the
+       top-right of the modal image surfaces the active limit on hover.
+       Dev-server fallback: ``VITE_BB_MODAL_RENDER``.
+
+.. note::
+
+   These caps only affect *rendering* — no sample data is dropped. They apply to
+   detection bounding-box overlays; segmentation masks are unaffected.
+
+
+Feature toggles
+~~~~~~~~~~~~~~~
+
+Whole areas of the Studio UI can be turned off for a given deployment — for
+example a read-only demo that only shows plots, or a labelling-only view with no
+agent. Each toggle **removes the area from the UI** (the elements are hidden)
+**and stops its background work** (auto-refresh timers and gRPC polls are never
+started), so a disabled area costs nothing at runtime.
+
+Like the bounding-box render limits, these are set on the Weights Studio frontend
+container (for example in ``../weights_studio/docker/docker-compose.yml``) and
+injected into the page at startup by the nginx entrypoint — changing them needs
+no rebuild, just a container restart + browser reload. For a local ``vite`` dev
+server, use the ``VITE_`` fallbacks shown below. Every toggle **defaults to
+enabled**; set it to ``0`` / ``false`` / ``no`` / ``off`` (any case) to disable.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 38 10 52
+
+   * - Variable
+     - Default
+     - Description
+   * - ``ENABLE_PLOTS``
+     - ``1``
+     - When disabled, removes the plots board and the left-panel Signals/metrics
+       card, and stops the plot-data auto-refresh (the ``GetLatestLoggerData``
+       poll and the chart redraw loop). Dev-server fallback:
+       ``VITE_ENABLE_PLOTS``.
+   * - ``ENABLE_DATA_EXPLORATION``
+     - ``1``
+     - When disabled, removes the data sample grid and the metadata / details
+       left panel, and stops the data auto-refresh (the ``GetDataSamples`` /
+       ``GetMetaData`` timers and the slider-histogram poll). Dev-server
+       fallback: ``VITE_ENABLE_DATA_EXPLORATION``.
+   * - ``ENABLE_HYPERPARAMETERS_OPTIMIZATION``
+     - ``1``
+     - When disabled, removes the Hyperparameters section from the left panel,
+       makes the hyperparameter inputs read-only (no user edits are sent to the
+       backend), and stops the hyperparameter sync poll. Dev-server fallback:
+       ``VITE_ENABLE_HYPERPARAMETERS_OPTIMIZATION``.
+   * - ``ENABLE_AGENT``
+     - ``1``
+     - When disabled, removes the agent chat input bar (and its send button) and
+       the chat-history panel, and stops the agent health-check poll. Dev-server
+       fallback: ``VITE_ENABLE_AGENT``.
+
+.. note::
+
+   Each variable maps to a ``window.WS_ENABLE_*`` global injected into
+   ``config.js`` at container start (the same mechanism as the bounding-box
+   limits), with a build-time ``VITE_ENABLE_*`` fallback for the dev server.
+   Because ``config.js`` is served ``no-store``, a container restart + normal
+   reload is enough to pick up a change.

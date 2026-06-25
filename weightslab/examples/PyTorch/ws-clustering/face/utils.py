@@ -21,13 +21,13 @@ def pairwise_distances(embeddings: torch.Tensor, squared: bool = False) -> torch
 
     Args:
         embeddings: (B, D) tensor
-        squared:    return squared L2 distances when True
+        squared: return squared L2 distances when True
 
     Returns:
         (B, B) distance matrix
     """
     dot = torch.matmul(embeddings, embeddings.t())
-    sq_norms = torch.diagonal(dot)                            # (B,)
+    sq_norms = torch.diagonal(dot) # (B,)
     distances = sq_norms.unsqueeze(0) - 2.0 * dot + sq_norms.unsqueeze(1)
     distances = distances.clamp(min=0.0)
 
@@ -58,8 +58,8 @@ def mine_batch_hard(
 
     Args:
         embeddings: (B, D) detached from graph during mining
-        labels:     (B,) integer class ids
-        squared:    use squared L2 distances for mining
+        labels: (B,) integer class ids
+        squared: use squared L2 distances for mining
 
     Returns:
         anc_idx, pos_idx, neg_idx 1-D LongTensors; only valid anchors
@@ -69,7 +69,7 @@ def mine_batch_hard(
     B = labels.shape[0]
     device = labels.device
 
-    same = labels.unsqueeze(0) == labels.unsqueeze(1)   # (B, B)
+    same = labels.unsqueeze(0) == labels.unsqueeze(1) # (B, B)
     diff = ~same
     eye = torch.eye(B, dtype=torch.bool, device=device)
 
@@ -105,12 +105,12 @@ def compute_verification_metrics(
     n = len(embeddings)
 
     # Pairwise L2 distances
-    dot = embeddings @ embeddings.T                           # (N, N)
+    dot = embeddings @ embeddings.T # (N, N)
     sq = np.sum(embeddings ** 2, axis=1)
     dist_mat = (sq[:, None] - 2.0 * dot + sq[None, :]).clip(min=0.0)
     dist_mat = np.sqrt(dist_mat.clip(min=1e-16)) * (dist_mat != 0.0)
 
-    same_pair = labels[:, None] == labels[None, :]            # (N, N)
+    same_pair = labels[:, None] == labels[None, :] # (N, N)
 
     # Upper triangle only (avoid double-counting)
     iu = np.triu_indices(n, k=1)

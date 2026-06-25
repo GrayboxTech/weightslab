@@ -280,11 +280,15 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         # the first call proceeds (mirrors DataService.__init__).
         ds._update_done = threading.Event()
         ds._update_done.set()
+        ds._refresh_in_flight = threading.Lock() # mirrors __init__: bg view-refresh guard
         ds._df_manager = df_manager
         ds._all_datasets_df = df.copy()
         ds._compute_natural_sort = False
         ds._is_filtered = False
         ds._last_internals_update_time = 0
+        # Thread pool used by GetDataSamples' per-sample path (GetMetaData uses the
+        # vectorized path and doesn't need it, but GetDataSamples does).
+        ds._data_executor = ThreadPoolExecutor(max_workers=2)
         ds._agent = MagicMock()
         ds._agent.is_ollama_available.return_value = True
         ds.audit_logger = MagicMock()
@@ -426,9 +430,9 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         kept = [idx[1] for idx in data_service._all_datasets_df.index.tolist()]
         self.assertEqual(sorted(kept), ["2", "3"])
 
-    def test_grpc_get_data_samples_returns_scalar_stats(self):
-        """GetDataSamples must stream per-sample records with requested scalar stats
-        (no raw images needed for this path)."""
+    def test_grpc_get_data_samples_excludes_metadata(self):
+        """GetDataSamples returns image / label / prediction data only — metadata
+        columns (e.g. 'loss') are now served exclusively by GetMetaData."""
         data_service, _ = self._make_real_data_service()
         servicer = self._make_servicer_with_real_data_service(data_service)
 
@@ -444,10 +448,42 @@ class TestGRPCWeightsStudioSDKState(_TimeoutMixin, unittest.TestCase):
         self.assertEqual(len(response.data_records), 3)
         returned_ids = {r.sample_id for r in response.data_records}
         self.assertEqual(returned_ids, {"1", "2", "3"})
-        # The requested 'loss' stat is present on each record.
         for rec in response.data_records:
             names = {s.name for s in rec.data_stats}
+            # The 'loss' metadata stat must NOT leak through GetDataSamples anymore.
+            self.assertNotIn("loss", names)
+            # Rendering flags (origin/task_type/discarded) still travel with image data.
+            self.assertIn("origin", names)
+            self.assertIn("discarded", names)
+
+    def test_grpc_get_metadata_returns_names_records_and_modal(self):
+        """GetMetaData returns whole-dataset column names, per-sample grid metadata
+        for the slice, and the open modal sample's metadata."""
+        data_service, _ = self._make_real_data_service()
+        servicer = self._make_servicer_with_real_data_service(data_service)
+
+        request = pb2.GetMetaDataRequest(
+            start_index=0,
+            records_cnt=10,
+            modal_sample_id="2",
+        )
+        response = servicer.GetMetaData(request, _MockContext())
+
+        self.assertTrue(response.success)
+        # All metadata column names for the whole dataset include 'loss'.
+        self.assertIn("loss", list(response.all_metadata_names))
+        # Grid records cover the slice and carry the 'loss' metadata stat.
+        self.assertEqual(len(response.grid_records), 3)
+        returned_ids = {r.sample_id for r in response.grid_records}
+        self.assertEqual(returned_ids, {"1", "2", "3"})
+        for rec in response.grid_records:
+            names = {s.name for s in rec.data_stats}
             self.assertIn("loss", names)
+        # Modal record resolves the requested sample_id with its metadata.
+        self.assertTrue(response.HasField("modal_record"))
+        self.assertEqual(response.modal_record.sample_id, "2")
+        modal_names = {s.name for s in response.modal_record.data_stats}
+        self.assertIn("loss", modal_names)
 
 
 class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):
@@ -496,16 +532,22 @@ class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):
             {"tag:hard": [True, False]},
             index=[11, 12],
         )
-        # break-by-slices reads compact (sample_id, step, value, hash) tuples via
-        # query_per_sample (filtered by the tag-derived sample_ids), then aggregates
-        # the matching samples into a single MEAN curve per experiment_hash.
+        # break-by-slices aggregates the tag-derived sample_ids into a single MEAN
+        # curve per experiment_hash via aggregate_per_sample_by_step.
         _pts = [("11", 5, 0.2, "exp-1"), ("12", 5, 0.8, "exp-1")]
 
-        def _qps(graph_name, sample_ids=None, exp_hash=None):
+        def _agg(graph_name, sample_ids=None, exp_hash=None):
             wanted = {str(s) for s in sample_ids} if sample_ids is not None else None
-            return [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            rows = [t for t in _pts if wanted is None or str(t[0]) in wanted]
+            by_hash: dict = {}
+            for sid, step, val, h in rows:
+                by_hash.setdefault(h, {}).setdefault(step, []).append(val)
+            return {
+                h: sorted((s, sum(v) / len(v)) for s, v in steps.items())
+                for h, steps in by_hash.items()
+            }
 
-        signal_logger.query_per_sample.side_effect = _qps
+        signal_logger.aggregate_per_sample_by_step.side_effect = _agg
         signal_logger.get_evaluation_marker_hashes.return_value = []
 
         servicer = ExperimentServiceServicer(exp_service=exp_service)
@@ -519,7 +561,7 @@ class TestGRPCLoggerOutputIntegration(_TimeoutMixin, unittest.TestCase):
 
         # Only sample 11 is 'hard'-tagged → mean curve over {11} = one aggregated point.
         self.assertEqual(len(response.points), 1)
-        self.assertEqual(response.points[0].sample_id, "")  # aggregated mean curve
+        self.assertEqual(response.points[0].sample_id, "") # aggregated mean curve
         self.assertEqual(response.points[0].metric_name, "test/loss")
         self.assertAlmostEqual(response.points[0].metric_value, 0.2, places=5)
 

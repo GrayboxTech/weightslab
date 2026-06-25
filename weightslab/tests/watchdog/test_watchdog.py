@@ -46,7 +46,7 @@ class TestWatchdogLogLevel(unittest.TestCase):
         log.addHandler(handler)
         log.setLevel(logging.DEBUG)
         try:
-            log.watchdog("hello %s", "world")  # type: ignore[attr-defined]
+            log.watchdog("hello %s", "world") # type: ignore[attr-defined]
         finally:
             log.removeHandler(handler)
 
@@ -104,11 +104,11 @@ class TestWeighlabsWatchdogLockMonitoring(unittest.TestCase):
 
         def quick_holder():
             lock.acquire()
-            time.sleep(0.02)    # well below threshold
+            time.sleep(0.02) # well below threshold
             lock.release()
 
         watchdog = WeighlabsWatchdog(
-            stuck_threshold_s=5.0,  # high threshold — should not fire
+            stuck_threshold_s=5.0, # high threshold — should not fire
             poll_interval_s=0.05,
         )
         watchdog.register_lock("safe_lock", lock)
@@ -147,16 +147,16 @@ class TestWeighlabsWatchdogGrpc(unittest.TestCase):
 
     def test_healthy_rpc_does_not_trigger_restart(self):
         watchdog = WeighlabsWatchdog(
-            stuck_threshold_s=5.0,  # high threshold
+            stuck_threshold_s=5.0, # high threshold
             poll_interval_s=0.05,
             restart_threshold=1,
         )
         watchdog.start()
 
         rpc_id = watchdog.rpc_state.begin("/test/FastMethod")
-        time.sleep(0.02)            # much less than threshold
+        time.sleep(0.02) # much less than threshold
         watchdog.rpc_state.end(rpc_id)
-        time.sleep(0.1)             # let watchdog tick
+        time.sleep(0.1) # let watchdog tick
 
         watchdog.stop()
         self.assertFalse(watchdog.server_manager.should_restart())
@@ -165,14 +165,14 @@ class TestWeighlabsWatchdogGrpc(unittest.TestCase):
         watchdog = WeighlabsWatchdog(
             stuck_threshold_s=0.02,
             poll_interval_s=0.02,
-            restart_threshold=10,  # high — won't restart
+            restart_threshold=10, # high — won't restart
         )
         watchdog.start()
 
         rpc_id = watchdog.rpc_state.begin("/test/SlowThenFast")
-        time.sleep(0.12)            # trigger unhealthy
+        time.sleep(0.12) # trigger unhealthy
         watchdog.rpc_state.end(rpc_id)
-        time.sleep(0.15)            # let watchdog see healthy state
+        time.sleep(0.15) # let watchdog see healthy state
 
         watchdog.stop()
         self.assertEqual(watchdog._unhealthy_count, 0, "unhealthy_count must reset to 0 on recovery")
@@ -194,7 +194,7 @@ class TestWatchdogConfigurability(unittest.TestCase):
     def test_per_lock_timeout_overrides_global_threshold(self):
         """A per-lock set_timeout() must take precedence over the global threshold."""
         lock = MonitoredRLock()
-        lock.set_timeout(0.05)  # this lock is allowed only 50ms, regardless of global
+        lock.set_timeout(0.05) # this lock is allowed only 50ms, regardless of global
         released = threading.Event()
         started = threading.Event()
 
@@ -230,7 +230,7 @@ class TestWatchdogConfigurability(unittest.TestCase):
         watchdog = WeighlabsWatchdog(stuck_threshold_s=0.01, poll_interval_s=0.03, restart_threshold=3)
         watchdog.start()
         rpc_id = watchdog.rpc_state.begin("/test/SlowMethod")
-        time.sleep(0.3)  # many poll cycles → unhealthy count climbs past 3
+        time.sleep(0.3) # many poll cycles → unhealthy count climbs past 3
         watchdog.stop()
         watchdog.rpc_state.end(rpc_id)
 
@@ -250,7 +250,7 @@ class TestWatchdogConfigurability(unittest.TestCase):
             started.set()
             try:
                 for _ in range(40):
-                    time.sleep(0.02)  # ~0.8s, far over the threshold
+                    time.sleep(0.02) # ~0.8s, far over the threshold
             except _WatchdogInterrupt:
                 interrupted.set()
             finally:
@@ -263,7 +263,7 @@ class TestWatchdogConfigurability(unittest.TestCase):
             watchdog = WeighlabsWatchdog(stuck_threshold_s=0.05, poll_interval_s=0.05)
             watchdog.register_lock("eval_lock", lock)
             watchdog.start()
-            time.sleep(0.4)  # let several poll cycles run
+            time.sleep(0.4) # let several poll cycles run
             watchdog.stop()
 
         t.join(timeout=2.0)
@@ -294,7 +294,7 @@ class TestWatchdogEvalThreadMonitoring(unittest.TestCase):
         controller = self._FakeController()
         dead_thread = threading.Thread(target=lambda: None)
         dead_thread.start()
-        dead_thread.join()  # now not alive
+        dead_thread.join() # now not alive
 
         watchdog = WeighlabsWatchdog(poll_interval_s=0.05)
         watchdog.register_eval_monitor(lambda: controller, lambda: dead_thread)

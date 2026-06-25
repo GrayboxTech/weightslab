@@ -32,13 +32,13 @@ class LedgerTests(unittest.TestCase):
         # Register without providing name - should use DEFAULT_NAME
         GLOBAL_LEDGER.register_model(model=d)
         self.assertIn(DEFAULT_NAME, GLOBAL_LEDGER.list_models())
-        got = GLOBAL_LEDGER.get_model()  # Should get 'main' by default
+        got = GLOBAL_LEDGER.get_model() # Should get 'main' by default
         self.assertIs(got, d)
 
     def test_proxy_initialization_pattern(self):
         """Test that get before register returns Proxy(None), then updates on register."""
         # Get before register - should return Proxy(None)
-        hp = GLOBAL_LEDGER.get_hyperparams()  # Uses DEFAULT_NAME
+        hp = GLOBAL_LEDGER.get_hyperparams() # Uses DEFAULT_NAME
 
         # Proxy should exist but not have underlying object yet
         self.assertEqual(hp.get(), {})
@@ -107,7 +107,7 @@ class LedgerTests(unittest.TestCase):
         self.assertNotIn("w", names)
 
     def test_optimizer_live_update_through_proxy(self):
-        GLOBAL_LEDGER.get_optimizer('opt_live')  # Init opt with a proxy entry
+        GLOBAL_LEDGER.get_optimizer('opt_live') # Init opt with a proxy entry
 
         # define a simple optimizer-like object
         class DummyOpt:
@@ -181,17 +181,44 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(GLOBAL_LEDGER.list_hyperparams(), [DEFAULT_NAME])
 
     def test_proxy_get_key_default_mode_returns_live_proxy(self):
-        """Default key get returns a live ValueProxy for dict-backed targets."""
+        """Non-str keys return a live ValueProxy; str keys return the raw string."""
         hp_handle = GLOBAL_LEDGER.get_hyperparams()
-        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1"})
+        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1", "lr": 0.01})
 
+        # Strings come back raw (immutable; avoids os.PathLike/__index__ breakage).
         data_root = hp_handle.get("data_root")
+        self.assertIsInstance(data_root, str)
         self.assertEqual(data_root, "C:/data/v1")
-        self.assertTrue(hasattr(data_root, "set"))
+        self.assertFalse(hasattr(data_root, "set"))
 
-        # Updating the underlying mapping is reflected through the live proxy.
-        hp_handle["data_root"] = "C:/data/v2"
-        self.assertEqual(data_root.get(), "C:/data/v2")
+        # Non-string values stay live proxies and track underlying updates.
+        lr = hp_handle.get("lr")
+        self.assertTrue(hasattr(lr, "set"))
+        hp_handle["lr"] = 0.02
+        self.assertEqual(lr.get(), 0.02)
+
+    def test_dict_value_returned_raw_not_proxied(self):
+        """Dict (and list / callable) values come back RAW, not wrapped in a live
+        proxy (see Proxy.get's list/dict/callable exclusion), so subscripting just
+        reads the plain mapping."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(
+            params={"dataset": {"batch_size": 32, "splits": {"train": 0.8}}}
+        )
+
+        dataset = hp_handle.get("dataset")
+        # A dict value is handed back raw, not as a live ValueProxy.
+        self.assertIsInstance(dataset, dict)
+        self.assertFalse(hasattr(dataset, "set"))
+
+        # Plain mapping access (and nesting) works.
+        self.assertEqual(dataset["batch_size"], dataset.get("batch_size"))
+        self.assertEqual(dataset["batch_size"], 32)
+        self.assertEqual(dataset["splits"]["train"], 0.8)
+
+        # Missing keys raise KeyError, matching standard dict subscript semantics.
+        with self.assertRaises(KeyError):
+            dataset["missing"]
 
     def test_proxy_pickles_and_restores(self):
         proxy = Proxy({"flag": True, "count": 3})
@@ -226,6 +253,37 @@ class LedgerTests(unittest.TestCase):
 
         hp_handle["data_root"] = "C:/data/v2"
         self.assertEqual(data_root, "C:/data/v1")
+
+    def test_proxy_yaml_and_json_serialization(self):
+        """Ledger proxies serialize to their underlying value for both YAML and
+        JSON, so libraries that dump their config (e.g. Ultralytics' args.yaml,
+        or JSON audit/config dumps) don't choke on a live hyperparameter proxy."""
+        import json
+        import yaml
+
+        hp = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"image_size": 320, "lr": 0.01})
+
+        img = hp.get("image_size") # a live ValueProxy, not a plain int
+        self.assertEqual(type(img).__name__, "_ValueProxy")
+
+        # YAML: cover every dumper variant — Ultralytics dumps with CSafeDumper
+        # (the libyaml C dumper), which keeps its own representer table.
+        for dumper_name in ("Dumper", "SafeDumper", "CDumper", "CSafeDumper"):
+            dumper = getattr(yaml, dumper_name, None)
+            if dumper is None:
+                continue
+            self.assertEqual(
+                yaml.dump({"imgsz": img}, Dumper=dumper).strip(), "imgsz: 320",
+                f"{dumper_name} did not serialize the proxy",
+            )
+        self.assertEqual(
+            yaml.safe_load(yaml.safe_dump(hp)), {"image_size": 320, "lr": 0.01}
+        )
+
+        # JSON: json.dumps of a scalar proxy and of the whole HP proxy.
+        self.assertEqual(json.loads(json.dumps({"imgsz": img})), {"imgsz": 320})
+        self.assertEqual(json.loads(json.dumps(hp)), {"image_size": 320, "lr": 0.01})
 
     def test_value_proxy_numeric_comparisons(self):
         """ValueProxy supports all standard numeric and string comparison operators."""
@@ -279,48 +337,106 @@ class LedgerTests(unittest.TestCase):
         s = {lr, 0.01}
         self.assertEqual(len(s), 1)
 
-    def test_proxy_get_key_proxy_mode_live_read_and_write(self):
-        """proxy=True returns a live key proxy that tracks and updates parent mapping."""
+    def test_value_proxy_iteration_and_subscript(self):
+        """ValueProxy is iterable and subscriptable (lists, slices, dict keys, str)."""
         hp_handle = GLOBAL_LEDGER.get_hyperparams()
-        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1"})
+        GLOBAL_LEDGER.register_hyperparams(params={
+            "point_cloud_range": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "data": {"train_loader": {"batch_size": 8}},
+            "name": "lidar",
+        })
 
-        data_root_proxy = hp_handle.get("data_root", proxy=True)
-        self.assertEqual(data_root_proxy.get(), "C:/data/v1")
+        pcr = hp_handle.get("point_cloud_range")
+
+        # Iteration — the reported bug was "'_ValueProxy' object is not iterable".
+        self.assertEqual(tuple(float(v) for v in pcr), (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+        self.assertEqual(list(pcr), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        first, second, *_ = pcr
+        self.assertEqual((first, second), (1.0, 2.0))
+
+        # Subscript: list index, slice, and string char.
+        self.assertEqual(pcr[0], 1.0)
+        self.assertEqual(pcr[1:3], [2.0, 3.0])
+        self.assertEqual(hp_handle.get("name")[0], "l")
+
+        # Dict subscript; nested mappings stay live proxies that resolve through.
+        data = hp_handle.get("data")
+        self.assertEqual(data["train_loader"]["batch_size"], 8)
+
+        # A None target iterates as empty and reports length 0.
+        missing = hp_handle.get("missing_key")
+        self.assertEqual(list(missing), [])
+        self.assertEqual(len(missing), 0)
+
+    def test_proxy_get_unwraps_torch_device_to_str(self):
+        """torch.device values are handed back as plain strings, not live proxies."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"device": torch.device("cpu")})
+
+        # Proxy.get returns a plain string (not a _ValueProxy), so torch's
+        # C-level torch.device()/.to() accept it instead of rejecting the proxy.
+        device = hp_handle.get("device")
+        self.assertIsInstance(device, str)
+        self.assertEqual(device, "cpu")
+        self.assertEqual(torch.device(device), torch.device("cpu"))
+
+        # _ValueProxy.get() applies the same coercion when called directly.
+        vp = Proxy._ValueProxy(Proxy({"d": torch.device("cpu")}), "d")
+        self.assertIsInstance(vp.get(), str)
+        self.assertEqual(vp.get(), "cpu")
+
+    def test_proxy_get_key_proxy_mode_live_read_and_write(self):
+        """proxy=True returns a live key proxy (non-str) that tracks and updates parent mapping."""
+        hp_handle = GLOBAL_LEDGER.get_hyperparams()
+        GLOBAL_LEDGER.register_hyperparams(params={"lr": 0.01, "data_root": "C:/data/v1"})
+
+        lr_proxy = hp_handle.get("lr", proxy=True)
+        self.assertEqual(lr_proxy.get(), 0.01)
 
         # External mapping update is visible from the key proxy.
-        hp_handle["data_root"] = "C:/data/v2"
-        self.assertEqual(data_root_proxy.get(), "C:/data/v2")
+        hp_handle["lr"] = 0.02
+        self.assertEqual(lr_proxy.get(), 0.02)
 
         # Key proxy update writes back into parent mapping.
-        data_root_proxy.set("C:/data/v3")
-        self.assertEqual(hp_handle.get("data_root"), "C:/data/v3")
+        lr_proxy.set(0.03)
+        self.assertEqual(hp_handle.get("lr"), 0.03)
+
+        # Strings are handed back raw even with proxy=True (not a live proxy).
+        self.assertIsInstance(hp_handle.get("data_root", proxy=True), str)
 
     def test_proxy_get_key_proxy_mode_survives_parent_replacement(self):
         """Live key proxy resolves against current parent object after re-registration."""
         hp_handle = GLOBAL_LEDGER.get_hyperparams()
-        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v1"})
+        GLOBAL_LEDGER.register_hyperparams(params={"lr": 0.01})
 
-        data_root_proxy = hp_handle.get("data_root", proxy=True)
-        self.assertEqual(data_root_proxy.get(), "C:/data/v1")
+        lr_proxy = hp_handle.get("lr", proxy=True)
+        self.assertEqual(lr_proxy.get(), 0.01)
 
         # Re-register hyperparams under same name; existing parent proxy is updated.
-        GLOBAL_LEDGER.register_hyperparams(params={"data_root": "C:/data/v4", "lr": 0.01})
-        self.assertEqual(data_root_proxy.get(), "C:/data/v4")
+        GLOBAL_LEDGER.register_hyperparams(params={"lr": 0.04, "batch_size": 32})
+        self.assertEqual(lr_proxy.get(), 0.04)
 
         # Updates through key proxy should target the latest registered mapping.
-        data_root_proxy.set("C:/data/v5")
-        self.assertEqual(hp_handle.get("data_root"), "C:/data/v5")
+        lr_proxy.set(0.05)
+        self.assertEqual(hp_handle.get("lr"), 0.05)
 
     def test_proxy_get_key_proxy_mode_default_and_late_set(self):
         """Missing-key live proxy returns default and can later populate the key."""
         hp_handle = GLOBAL_LEDGER.get_hyperparams()
         GLOBAL_LEDGER.register_hyperparams(params={})
 
-        data_root_proxy = hp_handle.get("data_root", default="C:/fallback", proxy=True)
-        self.assertEqual(data_root_proxy.get(), "C:/fallback")
+        # Non-str default + missing key -> stays a live proxy (str defaults would
+        # resolve to a raw string instead, by design).
+        lr_proxy = hp_handle.get("lr", default=0.01, proxy=True)
+        self.assertEqual(lr_proxy.get(), 0.01)
 
-        data_root_proxy.set("C:/data/live")
-        self.assertEqual(hp_handle.get("data_root"), "C:/data/live")
+        lr_proxy.set(0.02)
+        self.assertEqual(hp_handle.get("lr"), 0.02)
 
     def test_watch_or_edit_hyperparams_rebinds_caller_variable(self):
         """wl.watch_or_edit(parameters, flag='hyperparameters') rebinds the caller's

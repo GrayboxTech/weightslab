@@ -13,8 +13,8 @@ On-disk layout after extraction (under ``dest_dir``):
       calib_velo_to_cam.txt
       calib_imu_to_velo.txt
       <date>_<drive>_sync/
-        velodyne_points/data/0000000000.bin ...   (x, y, z, reflectance float32)
-        image_02/data/0000000000.png ...           (left colour camera)
+        velodyne_points/data/0000000000.bin ... (x, y, z, reflectance float32)
+        image_02/data/0000000000.png ... (left colour camera)
         ...
 
 Downloads stream to disk with a tqdm progress bar and are idempotent (a
@@ -149,8 +149,8 @@ def ensure_sequence(date, drive, dest_dir=None, keep_zip=False):
     """Download + extract one raw sequence (idempotent). Returns the date dir.
 
     Args:
-        date:     e.g. "2011_09_26".
-        drive:    e.g. "drive_0001".
+        date: e.g. "2011_09_26".
+        drive: e.g. "drive_0001".
         dest_dir: where to download/extract (default: a temp dir).
         keep_zip: keep the downloaded .zip after extraction (default: delete).
 
@@ -162,7 +162,7 @@ def ensure_sequence(date, drive, dest_dir=None, keep_zip=False):
 
     seq_dir = os.path.join(dest_dir, date, f"{date}_{drive}_sync")
     if os.path.isdir(os.path.join(seq_dir, "velodyne_points", "data")):
-        return os.path.join(dest_dir, date)  # already extracted
+        return os.path.join(dest_dir, date) # already extracted
 
     filename = f"{date}_{drive}_sync.zip"
     zip_path = os.path.join(dest_dir, filename)

@@ -455,7 +455,7 @@ class TestAgentPromptUnit(unittest.TestCase):
         ctx = SimpleNamespace(
             _all_datasets_df=agent_mod.pd.DataFrame(
                 {
-                    "signals//train_loss": [0.1, 0.15, 0.12, 0.14, 1.5],  # Last one is outlier
+                    "signals//train_loss": [0.1, 0.15, 0.12, 0.14, 1.5], # Last one is outlier
                 },
                 index=agent_mod.pd.MultiIndex.from_tuples(
                     [(f"train", i) for i in range(5)],

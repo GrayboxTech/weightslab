@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_NAME = "main"
 
 
+def _debug_logging_enabled() -> bool:
+    """True only when WEIGHTSLAB_LOG_LEVEL is 'debug' (case-insensitive).
+
+    Used to gate verbose diagnostics (traceback dumps) so they stay quiet in
+    normal runs and only surface when the user explicitly opts into debug.
+    """
+    return os.environ.get("WEIGHTSLAB_LOG_LEVEL", "").strip().lower() == "debug"
+
+
 def _rebuild_proxy(obj: Any) -> "Proxy":
     proxy = Proxy()
     proxy._obj = obj
@@ -37,6 +46,36 @@ def _rebuild_proxy(obj: Any) -> "Proxy":
 
 def _rebuild_value_proxy(parent: "Proxy", key: Any, default: Any = None) -> "Proxy._ValueProxy":
     return Proxy._ValueProxy(parent, key, default)
+
+
+# Sentinel: the resolved value should stay a live proxy (no plain-value coercion).
+_KEEP_AS_PROXY = object()
+
+
+def _is_torch_device(value: Any) -> bool:
+    """True if ``value`` is a ``torch.device``, matched by duck typing.
+
+    Checked via the type's module/name so this backend module never imports
+    torch (it must stay usable without a torch install).
+    """
+    t = type(value)
+    return t.__name__ == "device" and t.__module__ == "torch"
+
+
+def _plain_get_value(value: Any) -> Any:
+    """Plain value a ``get`` should hand back for types that must NOT be returned
+    as a live proxy, else the ``_KEEP_AS_PROXY`` sentinel.
+
+    - ``str``: immutable; as a live proxy it breaks os.PathLike consumers
+      (os.stat / os.path.isdir see ``__index__`` and treat it as a file descriptor).
+    - ``torch.device``: torch's C-level ``torch.device()`` / ``Tensor.to()`` reject
+      a proxy, so we return its string form (which torch accepts everywhere).
+    """
+    if isinstance(value, str):
+        return value
+    if _is_torch_device(value):
+        return str(value)
+    return _KEEP_AS_PROXY
 
 
 class Proxy:
@@ -115,7 +154,9 @@ class Proxy:
             """
             v = self._resolve()
             if not args and not kwargs:
-                return v
+                # Hand back the plain form for str / torch.device; raw value otherwise.
+                plain = _plain_get_value(v)
+                return v if plain is _KEEP_AS_PROXY else plain
             if hasattr(v, 'get'):
                 return v.get(*args, **kwargs)
             # Fallback for the proxy's own resolve-with-default logic
@@ -190,15 +231,28 @@ class Proxy:
             except TypeError:
                 return False
 
+        def __getitem__(self, key: Any) -> Any:
+            """Support subscript access: ``proxy[key]``.
+
+            Equivalent to ``.get(key)`` — reaches into the resolved value with
+            ``[]`` and wraps nested dicts in a fresh _ValueProxy so chaining
+            (e.g. ``proxy['dataset']['batch_size']``) keeps resolving live.
+            Missing keys raise ``KeyError``, matching standard subscript access.
+            """
+            key = self._unwrap(key)
+            v = self._resolve()
+            if v is None:
+                raise KeyError(key)
+            value = v[key]
+            if isinstance(value, dict):
+                return Proxy._ValueProxy(Proxy(v), key)
+            return value
+
         def __int__(self) -> int:
             return int(self._resolve())
 
         def __float__(self) -> float:
-            v = self._resolve()
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return None
+            return float(self._resolve())
 
         def __index__(self) -> int:
             v = self._resolve()
@@ -357,18 +411,56 @@ class Proxy:
                 return 0
             return len(v)
 
+        def __iter__(self):
+            """Iterate over the resolved value (e.g. a list/tuple hyperparameter).
+
+            Without this, ``for x in proxy`` / ``tuple(proxy)`` / unpacking raise
+            ``'_ValueProxy' object is not iterable`` even though the wrapped value
+            is iterable. A None target iterates as empty.
+            """
+            v = self._resolve()
+            if v is None:
+                return iter(())
+            return iter(v)
+
+        def __getitem__(self, item: Any) -> Any:
+            """Index, slice, or key into the resolved value.
+
+            Works for lists (``proxy[0]``, ``proxy[1:3]``), dicts (``proxy[key]``)
+            and strings. Nested mappings are re-wrapped in a live proxy to mirror
+            __getattr__, so chained subscripting keeps tracking edits.
+            """
+            v = self._resolve()
+            if v is None:
+                raise TypeError("ValueProxy target not set (resolved to None)")
+            value = v[item]
+            if isinstance(value, dict):
+                return Proxy._ValueProxy(Proxy(v), item)
+            return value
+
     def get(self, ref=None, default=None, proxy: bool = True) -> Any:
         """Get wrapped object or a key from the wrapped mapping.
 
         Args:
             ref: Mapping key when provided.
             default: Fallback value when key/target is missing.
-            proxy: When True and ref is provided, return a live key proxy.
+            proxy: When True and ref is provided, return a live key proxy —
+                except for ``str`` values, which are returned raw (see below).
         """
         if ref is not None:
-            if proxy:
-                return Proxy._ValueProxy(self, ref, default)
-            return self._obj.get(ref, default)
+            value = self._obj.get(ref, default) if hasattr(self._obj, "get") else default
+            # Avoid wrapping a python list, dict, or any callable in a live proxy —
+            # only "simple" values become live key proxies. (The previous form put
+            # `not callable(...)` INSIDE the isinstance group, so callables — which
+            # are not lists/dicts — slipped through and got proxied.)
+            if proxy and not (isinstance(value, (list, dict)) or callable(value)):
+                vp = Proxy._ValueProxy(self, ref, default)
+                # str and torch.device are handed back as plain values (see
+                # _plain_get_value); other simple types (int/float/bool/...) stay
+                # live proxies so studio edits keep tracking.
+                plain = _plain_get_value(vp._resolve())
+                return vp if plain is _KEEP_AS_PROXY else plain
+            return value
         return self._obj if self._obj is not None else default
 
     def __getattr__(self, item):
@@ -454,14 +546,17 @@ class Proxy:
                     return next(self._it)
                 except StopIteration:
                     # Let StopIteration propagate naturally
-                    self._it.is_a_loop = False  # Loop ends here
+                    self._it.is_a_loop = False # Loop ends here
                     raise
                 except KeyError:
-                    traceback.print_exc()
-                    logger.error(
-                        "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." +
-                        "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
-                    )
+                    # Quiet by default; only surface this diagnostic when the user
+                    # opted into debug logging (WEIGHTSLAB_LOG_LEVEL=debug).
+                    if _debug_logging_enabled():
+                        traceback.print_exc()
+                        logger.error(
+                            "KeyError during Proxy iteration. This may indicate the underlying object was modified during iteration. Returning StopIteration to end iteration gracefully." +
+                            "\nOtherwise there is a missmatch between data metadata returned, e.g., some metadata has augmentation parameters and other not. Please initialize all metadata with the same keys and types to avoid this error."
+                        )
                     raise StopIteration
         return _ProxyIterator(underlying_iter)
 
@@ -590,13 +685,15 @@ class Proxy:
             # Let StopIteration propagate naturally to signal end of iteration
             raise
         except Exception:
-            traceback.print_exc()
+            if _debug_logging_enabled():
+                traceback.print_exc()
             # clear cached iterator so future next(proxy) restarts
             try:
                 if '_iterator' in self.__dict__:
                     object.__delattr__(self, '_iterator')
             except Exception:
-                traceback.print_exc()
+                if _debug_logging_enabled():
+                    traceback.print_exc()
             raise StopIteration
 
     # Context manager support so `with proxy as x:` works when the proxy
@@ -630,6 +727,68 @@ class Proxy:
 # Register Proxy as a virtual subclass of MutableMapping so isinstance(proxy, dict) works
 # Note: This makes Proxy compatible with dict-like checks but doesn't inherit from dict
 MutableMapping.register(Proxy)
+
+
+def _register_yaml_representers() -> None:
+    """Teach PyYAML to dump ledger proxies as their underlying value.
+
+    A hyperparameter handle returned by ``watch_or_edit(..., flag='hyperparameters')``
+    is a live ``Proxy`` / ``Proxy._ValueProxy``. When such a value flows into a
+    library that serializes it (e.g. Ultralytics writes its run args to ``args.yaml``
+    via ``yaml.safe_dump``), PyYAML has no representer for the proxy type and raises
+    ``RepresenterError`` — and because the proxy masquerades as its wrapped type via
+    ``__class__``, callers' ``isinstance(x, (int, str, ...))`` "stringify" guards skip
+    it too. Registering representers that emit the *resolved* value makes proxies
+    transparently serializable everywhere, so the live-proxy HP design stays
+    compatible with such libraries. Registered on both the default and Safe dumpers.
+    """
+    def _represent_obj_proxy(dumper, data):
+        return dumper.represent_data(data.get()) # Proxy -> wrapped object
+
+    def _represent_value_proxy(dumper, data):
+        return dumper.represent_data(data._resolve()) # _ValueProxy -> resolved value
+
+    # Register on every dumper variant: the pure-Python Dumper/SafeDumper, the
+    # libyaml C dumpers (CDumper/CSafeDumper — Ultralytics dumps with CSafeDumper),
+    # and the base Representer/SafeRepresenter. Each keeps its own representer
+    # table, so registering on one does not cover the others.
+    for _name in ("Dumper", "SafeDumper", "CDumper", "CSafeDumper", "Representer", "SafeRepresenter"):
+        _dumper = getattr(yaml, _name, None)
+        if _dumper is not None:
+            _dumper.add_representer(Proxy, _represent_obj_proxy)
+            _dumper.add_representer(Proxy._ValueProxy, _represent_value_proxy)
+
+
+def _register_json_default() -> None:
+    """Teach the stdlib ``json`` encoder to serialize ledger proxies as their
+    underlying value, mirroring :func:`_register_yaml_representers`.
+
+    ``json`` has no global representer registry, so we wrap ``JSONEncoder.default``
+    (the hook called for objects the encoder doesn't natively handle). The C
+    encoder dispatches by concrete type, so a proxy — whose real type is not int/
+    str/dict/... despite its ``__class__`` masquerade — reaches ``default`` and is
+    replaced by its resolved value. Makes ``json.dumps``/``json.dump`` of HP
+    proxies work everywhere (e.g. audit/JSON config dumps) without per-call hooks.
+    """
+    import json
+
+    if getattr(json.JSONEncoder, "_wl_proxy_patched", False):
+        return
+    _orig_default = json.JSONEncoder.default
+
+    def default(self, obj):
+        if isinstance(obj, Proxy._ValueProxy):
+            return obj._resolve()
+        if isinstance(obj, Proxy):
+            return obj.get()
+        return _orig_default(self, obj)
+
+    json.JSONEncoder.default = default
+    json.JSONEncoder._wl_proxy_patched = True
+
+
+_register_yaml_representers()
+_register_json_default()
 
 
 class Ledger:
@@ -1098,7 +1257,7 @@ def list_models() -> List[str]:
 
 def register_model(model: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_model(name)  # Init empty proxy
+    get_model(name) # Init empty proxy
     GLOBAL_LEDGER.register_model(model, weak=weak, name=name)
 
 
@@ -1116,7 +1275,7 @@ def get_dataloaders(names: Optional[List[str]] = None) -> Dict[str, Any]:
 def register_dataloaders(dataloaders: Dict[str, Any], weak: bool = False) -> None:
     """Register multiple dataloaders from a dict, e.g., {'train': train_loader, 'val': val_loader}."""
     for k in dataloaders.keys():
-        get_dataloader(k)  # Init empty proxy - get_dataloaders(list(dataloaders.keys()))
+        get_dataloader(k) # Init empty proxy - get_dataloaders(list(dataloaders.keys()))
     GLOBAL_LEDGER.register_dataloaders_dict(dataloaders, weak=weak)
 
 def list_dataloaders() -> List[str]:
@@ -1124,7 +1283,7 @@ def list_dataloaders() -> List[str]:
 
 def register_dataloader(dataloader: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_dataloader(name)  # Init the empty proxy first
+    get_dataloader(name) # Init the empty proxy first
     GLOBAL_LEDGER.register_dataloader(dataloader, weak=weak, name=name)
 
 
@@ -1140,7 +1299,7 @@ def list_optimizers() -> List[str]:
 
 def register_optimizer(optimizer: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_optimizer(name)  # Init the empty proxy first
+    get_optimizer(name) # Init the empty proxy first
     GLOBAL_LEDGER.register_optimizer(optimizer, weak=weak, name=name)
 
 # Hyperparameters
@@ -1163,7 +1322,7 @@ def resolve_hp_name() -> str | None:
         return 'experiment'
     # If we have any names at all, returning the first one is better than returning None
     # and causing a "Cannot resolve hyperparams name" error in the UI.
-    return names[-1]  # first is empty proxy parameters generated at init
+    return names[-1] # first is empty proxy parameters generated at init
 
 def set_hyperparam(key_path: str, value: Any, name: str = DEFAULT_NAME) -> None:
     try:
@@ -1179,14 +1338,14 @@ def unwatch_hyperparams_file(name: str = DEFAULT_NAME) -> None:
 
 def register_hyperparams(params: Dict[str, Any] = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_hyperparams(name)  # Init empty proxy
+    get_hyperparams(name) # Init empty proxy
     GLOBAL_LEDGER.register_hyperparams(params, weak=weak, name=name)
 
 
 # Logger
 def register_logger(logger: Any = None, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_logger(name)  # Init empty proxy
+    get_logger(name) # Init empty proxy
     GLOBAL_LEDGER.register_logger(logger, name=name)
 
 def get_logger(name: str = DEFAULT_NAME) -> Any:
@@ -1202,7 +1361,7 @@ def unregister_logger(name: str = DEFAULT_NAME) -> None:
 # Signals
 def register_signal(signal: Any = None, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_signal(name)  # Init empty proxy
+    get_signal(name) # Init empty proxy
     GLOBAL_LEDGER.register_signal(signal, name=name)
 
 def get_signal(name: str = DEFAULT_NAME) -> Any:
@@ -1218,7 +1377,7 @@ def unregister_signal(name: str = DEFAULT_NAME) -> None:
 # Checkpoint managers
 def register_checkpoint_manager(manager: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> Any:
     name = DEFAULT_NAME if name is None else name
-    get_checkpoint_manager(name)  # Init empty proxy
+    get_checkpoint_manager(name) # Init empty proxy
     return GLOBAL_LEDGER.register_checkpoint_manager(manager, weak=weak, name=name)
 
 def get_checkpoint_manager(name: str = DEFAULT_NAME) -> Any:
@@ -1234,7 +1393,7 @@ def unregister_checkpoint_manager(name: str = DEFAULT_NAME) -> None:
 # DataFrames
 def register_dataframe(dataframe: Any = None, weak: bool = False, name: str = DEFAULT_NAME) -> None:
     name = DEFAULT_NAME if name is None else name
-    get_dataframe(name)  # Init empty proxy
+    get_dataframe(name) # Init empty proxy
     return GLOBAL_LEDGER.register_dataframe(dataframe, weak=weak, name=name)
 
 def get_dataframe(name: str = DEFAULT_NAME) -> Any:

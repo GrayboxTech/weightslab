@@ -172,7 +172,7 @@ def _handle_command(cmd: str) -> Any:
                 'hyperparams_examples': {
                     'list': 'hp',
                     'show': 'hp fashion_mnist',
-                    'set': "set_hp <hp_name?> <key.path> <value>  # e.g. set_hp fashion_mnist data.train_loader.batch_size 32",
+                    'set': "set_hp <hp_name?> <key.path> <value> # e.g. set_hp fashion_mnist data.train_loader.batch_size 32",
                 },
                 'evaluate_examples': {
                     'eval on default split': 'evaluate',
@@ -451,7 +451,7 @@ def _handle_command(cmd: str) -> Any:
                 for name in snap.get(k, []):
                     try:
                         getter = {
-                            # 'models': GLOBAL_LEDGER.get_model,  # don't print the model out
+                            # 'models': GLOBAL_LEDGER.get_model, # don't print the model out
                             'dataloaders': GLOBAL_LEDGER.get_dataloader,
                             'optimizers': GLOBAL_LEDGER.get_optimizer,
                         }[k]
@@ -823,7 +823,7 @@ def _handle_command(cmd: str) -> Any:
             names = GLOBAL_LEDGER.list_hyperparams() if hasattr(GLOBAL_LEDGER, 'list_hyperparams') else []
             if len(parts) == 1:
                 return {'ok': True, 'hyperparams': names}
-            # support: hp list  -> same as hp
+            # support: hp list -> same as hp
             name = parts[1]
             if name.lower() in ('list', 'ls', 'all'):
                 return {'ok': True, 'hyperparams': names}
@@ -998,7 +998,7 @@ def _handle_command(cmd: str) -> Any:
             elif toggle in ('off', 'false', '0', 'disable', 'disabled'):
                 value = False
             else:
-                return {'ok': False, 'error': f'Unknown audit toggle "{toggle}". Use: audit on  or  audit off'}
+                return {'ok': False, 'error': f'Unknown audit toggle "{toggle}". Use: audit on or audit off'}
 
             set_hyperparam(name=name, value=value, key_path='auditor_mode')
             label = 'enabled' if value else 'disabled'
@@ -1123,7 +1123,7 @@ def cli_serve(cli_host: str = 'localhost', cli_port: int = 0, *, spawn_client: b
                     pass
                 srv = None
             if attempt < max_attempts - 1:
-                continue  # Try next port
+                continue # Try next port
             else:
                 # All attempts failed
                 logger.exception("cli_bind_failed_all_attempts")

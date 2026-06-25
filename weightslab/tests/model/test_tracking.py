@@ -17,7 +17,7 @@ from weightslab.components.tracking import (
 
 # Set Global Default Settings
 DEVICE = 'cpu' if not th.cuda.is_available() else 'cuda'
-th.manual_seed(42)  # Set SEED
+th.manual_seed(42) # Set SEED
 
 
 @unittest.skip("Constraint detection and propagation tests are currently skipped due to ongoing refactor and potential changes in the underlying implementation. Will be re-enabled once the new system is in place more modeling.")

@@ -46,7 +46,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         self.module_name = module_name
         self.device = device
         self.tracking_mode = TrackingMode.DISABLED
-        self.operation_age = {op.name: 0 for op in ArchitectureNeuronsOpType}  # keep track of all operations performed
+        self.operation_age = {op.name: 0 for op in ArchitectureNeuronsOpType} # keep track of all operations performed
 
         # IN/OUT neurons indexing & mapping dictionary
         self.src_to_dst_mapping_tnsrs = {}
@@ -77,7 +77,7 @@ class LayerWiseOperations(NeuronWiseOperations):
             }
 
         # Naming
-        self.assign_id()  # assign ids
+        self.assign_id() # assign ids
 
         # Tracking
         self.register_trackers()
@@ -183,7 +183,7 @@ class LayerWiseOperations(NeuronWiseOperations):
     # Trackers Functions
     # ==================
     def register_trackers(self):
-        is_disabled = bool(getattr(self, "wl_same_flag", False))  # Remove SAME layer like BN from neurons stats ..etc
+        is_disabled = bool(getattr(self, "wl_same_flag", False)) # Remove SAME layer like BN from neurons stats ..etc
 
         # Train
         if self.get_neurons('out_neurons') is not None:
@@ -246,7 +246,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                 Callable: The operation function.
         """
         if callable(op_type):
-            return op_type  # if already got, just return the fct
+            return op_type # if already got, just return the fct
         elif op_type == ArchitectureNeuronsOpType.ADD or \
                 op_type == ArchitectureNeuronsOpType.ADD.value:
             return self._add_neurons
@@ -435,7 +435,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         elif not isinstance(neuron_indices, set):
             # If it's a single int, wrap; if it's iterable, cast to set
             try:
-                neuron_indices = set(neuron_indices)  # type: ignore[arg-type]
+                neuron_indices = set(neuron_indices) # type: ignore[arg-type]
             except TypeError:
                 neuron_indices = {neuron_indices}
 
@@ -470,7 +470,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         if mapped_indices_dict is not None:
             mapped_indexs = normalize_dicts(
                 {"mapped": mapped_indices_dict}
-            )["mapped"]  # TODO (GP): Improve this function
+            )["mapped"] # TODO (GP): Improve this function
         else:
             # No mapping tensors available: fall back to identity mapping
             n_neurons = self.get_neurons(
@@ -526,7 +526,7 @@ class LayerWiseOperations(NeuronWiseOperations):
         tracker = self.get_tracker()
         if tracker is None or activation_map is None or input is None:
             return
-        activation_map = (activation_map > 0).long()  # bool to int
+        activation_map = (activation_map > 0).long() # bool to int
         processed_activation_map = th.sum(activation_map, dim=(-2, -1)) if len(activation_map.shape) > 2 else activation_map
         copy_forward_tracked_attrs(processed_activation_map, activation_map)
         tracker.update(processed_activation_map)
@@ -995,7 +995,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                             self.related_dst_to_src_mapping_tnsrs[
                                 current_name
                             ].keys()
-                        )[neuron_indice + -1 + length]  # get new index
+                        )[neuron_indice + -1 + length] # get new index
 
                         # Update the mapping tensor with 1 or range(x) neurons
                         self.related_dst_to_src_mapping_tnsrs[
@@ -1013,7 +1013,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                                             channel_size,
                                             mapped_neuron_indice * channel_size
                                         )
-                                    )  # in range of x neurons
+                                    ) # in range of x neurons
                                 ]
                             }
                         )
@@ -1042,13 +1042,13 @@ class LayerWiseOperations(NeuronWiseOperations):
                             self.super_in_name,
                             self.get_neurons(self.super_in_name) + nb_neurons
                         )
-                    )  # Update neurons count
+                    ) # Update neurons count
             elif dependency == DepType.SAME:
                 if self.get_neurons(self.super_out_name) is not None:
                     self.set_neurons(
                         attr_name='in_neurons',
                         new_value=self.get_neurons(self.super_out_name)
-                    )  # Update neurons count
+                    ) # Update neurons count
 
             # By default get deps name from current relation
             deps_names = list(self.dst_to_src_mapping_tnsrs.keys())
@@ -1071,7 +1071,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                     )
                     if index >= len(mapped_neuron_indice):
                         logger.warning(
-                            f"Index {index} out of range for "  +
+                            f"Index {index} out of range for " +
                             f"mapped_neuron_indice with length " +
                             f"{len(mapped_neuron_indice)}"
                         )
@@ -1086,8 +1086,8 @@ class LayerWiseOperations(NeuronWiseOperations):
                                     self.dst_to_src_mapping_tnsrs[
                                         deps_name
                                     ][mapped_neuron_indice]
-                                ) for i in range(0, nb_neurons)  # neurons
-                            ] for j in range(0, nb_neurons)  # neurons | chan.
+                                ) for i in range(0, nb_neurons) # neurons
+                            ] for j in range(0, nb_neurons) # neurons | chan.
                         }
                     )
 
@@ -1195,7 +1195,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                 f"overlap: {neuron_indices} & {neurons} => "
                 f"{neuron_indices & neurons}"
             )
-            return  # Do not change
+            return # Do not change
 
         # # Enough neurons to operate
         if len(neurons) <= 1:
@@ -1221,7 +1221,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                     )
             self.weight = nn.Parameter(
                 tmp_tsnr.clone().detach()
-            ).to(self.device)  # Safe approach
+            ).to(self.device) # Safe approach
 
             if self.weight.grad is not None:
                 with th.no_grad():
@@ -1232,7 +1232,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                     )
                 self.weight.grad = nn.Parameter(
                     tmp_tsnr.clone().detach()
-                ).to(self.device)  # Safe approach
+                ).to(self.device) # Safe approach
 
             if hasattr(self, 'bias') and self.bias is not None and \
                     not is_incoming:
@@ -1244,7 +1244,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                         )
                 self.bias.data = nn.Parameter(
                     tmp_tsnr.clone().detach()
-                ).to(self.device)  # Safe approach
+                ).to(self.device) # Safe approach
 
                 if self.bias.grad is not None:
                     with th.no_grad():
@@ -1255,7 +1255,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                         )
                     self.bias.grad = nn.Parameter(
                         tmp_tsnr.clone().detach()
-                    ).to(self.device)  # Safe approach
+                    ).to(self.device) # Safe approach
 
             if hasattr(self, 'running_mean'):
                 tmp_tsnr = th.index_select(
@@ -1263,7 +1263,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                     dim=0,
                     index=idx_tnsr
                 )
-                self.running_mean = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+                self.running_mean = tmp_tsnr.clone().detach().to(self.device) # Safe approach
 
                 if self.running_mean.grad is not None:
                     tmp_tsnr = th.index_select(
@@ -1271,7 +1271,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                         dim=0,
                         index=idx_tnsr
                     )
-                    self.running_mean.grad = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+                    self.running_mean.grad = tmp_tsnr.clone().detach().to(self.device) # Safe approach
 
             if hasattr(self, 'running_var'):
                 tmp_tsnr = th.index_select(
@@ -1279,7 +1279,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                     dim=0,
                     index=idx_tnsr
                 )
-                self.running_var = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+                self.running_var = tmp_tsnr.clone().detach().to(self.device) # Safe approach
 
                 if self.running_var.grad is not None:
                     tmp_tsnr = th.index_select(
@@ -1287,7 +1287,7 @@ class LayerWiseOperations(NeuronWiseOperations):
                         dim=0,
                         index=idx_tnsr
                     )
-                    self.running_var.grad = tmp_tsnr.clone().detach().to(self.device)  # Safe approach
+                    self.running_var.grad = tmp_tsnr.clone().detach().to(self.device) # Safe approach
 
         # Sort indices to prune from last to first to maintain
         # the original order
@@ -1385,12 +1385,12 @@ class LayerWiseOperations(NeuronWiseOperations):
                         self.super_in_name,
                         len(idx_tokeep)
                     )
-                )  # Update neurons count
+                ) # Update neurons count
             elif dependency == DepType.SAME:
                 self.set_neurons(
                     attr_name='in_neurons',
                     new_value=self.get_neurons(self.super_out_name)
-                )  # Update neurons count
+                ) # Update neurons count
 
             # By default get deps name from current relation
             deps_names = self.dst_to_src_mapping_tnsrs.keys()
@@ -1494,7 +1494,7 @@ class LayerWiseOperations(NeuronWiseOperations):
 
         # Work on the output
         tensors_name = self.learnable_tensors_name if not is_incoming \
-            else ['weight']  # Weight is the only learnable tensor input
+            else ['weight'] # Weight is the only learnable tensor input
         for tensor_name in tensors_name:
             neurons_lr = {
                 neuron_indices[n]:

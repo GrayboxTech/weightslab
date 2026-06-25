@@ -63,7 +63,7 @@ if _IS_MAIN_PROCESS and grpc_tls_enabled and os.environ.get('WEIGHTSLAB_SKIP_SEC
 # Get Package Metadata
 try:
     # setuptools_scm will write weightslab/_version.py during build
-    from ._version import __version__  # type: ignore
+    from ._version import __version__ # type: ignore
 except Exception:
     # Fallback when developing locally or before build; keeps behavior stable.
 	from datetime import datetime
@@ -102,8 +102,10 @@ __all__ = [
     "query_signal_history",
     "query_sample_history",
     "query_instance_history",
+
     "write_history",
     "write_dataframe",
+
     "pointcloud_thumbnail",
     "pointcloud_boxes",
 

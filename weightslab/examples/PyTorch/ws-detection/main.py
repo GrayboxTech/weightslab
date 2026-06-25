@@ -294,9 +294,9 @@ if __name__ == "__main__":
     print(f" Data root: {data_root}")
     print("=" * 60 + "\n")
 
-    # # ================
-    # # Training Loop
-    # wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    # ================
+    # Training Loop
+    wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()

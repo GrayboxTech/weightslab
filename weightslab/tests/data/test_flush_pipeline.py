@@ -25,7 +25,7 @@ from weightslab.data.dataframe_manager import LedgeredDataFrameManager
 
 def _make_mgr(flush_max_rows=4, enable_flushing_threads=False) -> LedgeredDataFrameManager:
     mgr = LedgeredDataFrameManager(
-        flush_interval=60.0,          # disable periodic timer during tests
+        flush_interval=60.0, # disable periodic timer during tests
         flush_max_rows=flush_max_rows,
         enable_flushing_threads=enable_flushing_threads,
         enable_h5_persistence=False,
@@ -125,7 +125,7 @@ class TestFlushAsyncReturnsAfterBufferDrain(unittest.TestCase):
     """
 
     def test_flush_async_does_not_wait_for_h5(self):
-        H5_WRITE_DELAY = 1.0  # seconds — intentionally slow
+        H5_WRITE_DELAY = 1.0 # seconds — intentionally slow
 
         mgr = _make_mgr(flush_max_rows=4, enable_flushing_threads=True)
 
@@ -166,7 +166,7 @@ class TestBufferRefillDuringH5Write(unittest.TestCase):
 
     def test_training_resumes_after_second_drain(self):
         FLUSH_MAX = 4
-        H5_WRITE_DELAY = 0.3  # seconds
+        H5_WRITE_DELAY = 0.3 # seconds
 
         mgr = _make_mgr(flush_max_rows=FLUSH_MAX, enable_flushing_threads=True)
 
@@ -181,9 +181,9 @@ class TestBufferRefillDuringH5Write(unittest.TestCase):
         second_enqueue_returned = threading.Event()
 
         def training_sim():
-            _enqueue(mgr, [str(i) for i in range(FLUSH_MAX)])  # fills buffer, triggers flush
-            time.sleep(0.05)  # let flush thread start H5 write
-            _enqueue(mgr, [str(i) for i in range(FLUSH_MAX, FLUSH_MAX * 2)])  # refill
+            _enqueue(mgr, [str(i) for i in range(FLUSH_MAX)]) # fills buffer, triggers flush
+            time.sleep(0.05) # let flush thread start H5 write
+            _enqueue(mgr, [str(i) for i in range(FLUSH_MAX, FLUSH_MAX * 2)]) # refill
             second_enqueue_returned.set()
 
         with patch.object(mgr, "_flush_to_h5_if_needed", side_effect=counting_slow_h5):

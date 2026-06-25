@@ -146,7 +146,7 @@ class PauseController:
             self.checkpoint_manager = get_checkpoint_manager()
         if self.checkpoint_manager != None:
             self.checkpoint_manager.update_experiment_hash(first_time=True)
-            self.checkpoint_manager.save_pending_changes()  # Write pending change to disk
+            self.checkpoint_manager.save_pending_changes() # Write pending change to disk
             hash_by_module = self.checkpoint_manager.hash_by_module
         else:
             logger.warning('Cannot access checkpoint manager on resume.')
@@ -219,18 +219,26 @@ class GuardContext:
         Executed upon entering the 'with' block. Sets the model to training mode.
         """
         self._maybe_pause_at_step()
-        if f:
-            pause_controller.resume(force=f)
-        pause_controller.wait_if_paused()
+        if not is_in_evaluation():
+            if f:
+                pause_controller.resume(force=f)
+            pause_controller.wait_if_paused()
         self.architecture_guard.__enter__()
 
         # Set the current context for this execution
         context = Context.TRAINING if self.for_training else Context.TESTING
         self._context_token = set_current_context(context)
 
-        # Update model
+        # Update model — always resolve from the current ledger so stale references
+        # from previous calls never bleed through. get_model() returns a Proxy(None)
+        # placeholder when nothing is registered; treat that as "no model".
         _model = get_model()
-        self.model = _model if _model != None else self.model
+        try:
+            _target = object.__getattribute__(_model, '_obj')
+            self.model = _model if _target is not None else None
+        except AttributeError:
+            # _model is a plain (non-Proxy) object; use it directly
+            self.model = _model
 
         # The exact logic requested by the user:
         if self.model is not None:
@@ -290,7 +298,7 @@ class GuardContext:
             logger.debug(f"Suppressing exception: {exc_value} in GuardContext.__exit__:")
             traceback.print_exc() if os.getenv("WL_DEBUG", "0") == "1" else None
             self.architecture_guard.__exit__(exc_type, exc_value, traceback)
-            return True  # suppress the exception
+            return True # suppress the exception
 
         self.architecture_guard.__exit__(exc_type, exc_value, traceback)
 
@@ -356,11 +364,11 @@ def _pause_hp_sync_loop(poll_interval: float = 3):
                 # # Drive controller from ledger when ledger explicitly sets the flag
                 # controller_running = not controller_paused
                 # if isinstance(hp_is_training, bool):
-                #     if controller_paused and hp_is_training:
-                #         resumed = pause_controller.resume()
-                #         firstresume = False if resumed else True
-                #     elif controller_running and not hp_is_training:
-                #         pause_controller.pause()
+                # if controller_paused and hp_is_training:
+                # resumed = pause_controller.resume()
+                # firstresume = False if resumed else True
+                # elif controller_running and not hp_is_training:
+                # pause_controller.pause()
 
                 # Re-evaluate controller state after potential changes
                 controller_paused = pause_controller.is_paused()
@@ -385,5 +393,5 @@ def start_hp_sync_thread_event():
 
 # Start sync thread once at module import
 if _pause_sync_thread_started:
-    _pause_sync_thread_started = False  # already activated
+    _pause_sync_thread_started = False # already activated
     start_hp_sync_thread_event()

@@ -153,7 +153,7 @@ class TestBackendConnection:
         """Test backend connection with timeout."""
         result = _test_backend_connection(
             host='127.0.0.1',
-            port=59999,  # Likely not listening
+            port=59999, # Likely not listening
             timeout=0.5
         )
         assert result is False

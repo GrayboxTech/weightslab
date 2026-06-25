@@ -21,7 +21,7 @@ from weightslab.modules.neuron_ops import ArchitectureNeuronsOpType
 
 
 # Set Global Default Settings
-th.manual_seed(42)  # Set SEED
+th.manual_seed(42) # Set SEED
 TMP_DIR = '/tmp/utests/'; os.makedirs('/tmp/utests/', exist_ok=True)
 
 

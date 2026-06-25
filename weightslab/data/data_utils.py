@@ -35,10 +35,10 @@ def _to_uint8_image(img_float: np.ndarray) -> np.ndarray:
     img = np.asarray(img_float)
 
     if img.ndim == 2:
-        img = img[..., None]  # HxWx1
+        img = img[..., None] # HxWx1
 
     if img.shape[-1] == 1:
-        img = np.repeat(img, 3, axis=-1)  # grayscale -> RGB
+        img = np.repeat(img, 3, axis=-1) # grayscale -> RGB
 
     if img.shape[-1] != 3:
         raise ValueError(f"Expected image with 1 or 3 channels, got shape {img.shape}")
@@ -67,8 +67,8 @@ def overlay_gt_pred(
     pred_value=None,
     alpha_gt=0.45,
     alpha_pred=0.45,
-    color_gt=(0, 255, 0),      # green
-    color_pred=(255, 0, 0),    # red
+    color_gt=(0, 255, 0), # green
+    color_pred=(255, 0, 0), # red
     show_overlap_as_yellow=True
 ) -> np.ndarray:
     """
@@ -282,11 +282,11 @@ def get_mask(raw, dataset=None, dataset_index=None, raw_data=None):
             segmentation_map = np.zeros((height, width), dtype=np.int64)
 
             # Return segmentation map directly if it matches raw shape
-            if segmentation_map.shape == raw.shape[-2:]:  # B, C, H, W
+            if segmentation_map.shape == raw.shape[-2:]: # B, C, H, W
                 return raw
 
             # Generate segmentation map from bboxes
-            raw = raw[0] if raw.ndim == 3 else raw  # Handle batch dimension if present
+            raw = raw[0] if raw.ndim == 3 else raw # Handle batch dimension if present
             for bbox_data in raw:
                 x1, y1, x2, y2 = bbox_data[:4].astype(int) if bbox_data.max() > 1 else (bbox_data[:4] * [width, height, width, height]).astype(int)
                 # Extract class id if available, otherwise use 1
@@ -346,10 +346,10 @@ def _extract_slice_from_4d(np_img: np.ndarray, slice_idx: int = None) -> np.ndar
     # Now we should have (Z, H, W) or (Z, H, W, C)
     z_dim = np_img.shape[0]
     if slice_idx is None:
-        slice_idx = z_dim // 2  # Middle slice
+        slice_idx = z_dim // 2 # Middle slice
 
     slice_idx = max(0, min(slice_idx, z_dim - 1))
-    return np_img[slice_idx]  # Returns (H, W) or (H, W, C)
+    return np_img[slice_idx] # Returns (H, W) or (H, W, C)
 
 
 def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
@@ -385,7 +385,7 @@ def _get_image_array_and_metadata(wrapped, index, rank: int = 0) -> tuple:
     if hasattr(np_img, 'numpy'):
         np_img = np_img.numpy()
 
-    is_volumetric = np_img.ndim >= 4  # 3 is for RGB; while 4 is 3D  # TODO (GP): Should be fix because this will not work with grayscale image wo. color channel
+    is_volumetric = np_img.ndim >= 4 # 3 is for RGB; while 4 is 3D # TODO (GP): Should be fix because this will not work with grayscale image wo. color channel
 
     # For 4D volumetric data, detect and transpose channel-first formats:
     # 1. (C, Z, H, W) → (Z, H, W, C) - channels first in all dimensions
@@ -423,7 +423,7 @@ def to_uint8(np_img: np.ndarray) -> np.ndarray:
     if np.issubdtype(np_img.dtype, np.floating):
         min_v = float(np.nanmin(np_img)) if np_img.size else 0.0
         max_v = float(np.nanmax(np_img)) if np_img.size else 1.0
-        if max_v <= 128.0:  # Scale floats in [0, ~1] to [0, 255]
+        if max_v <= 128.0: # Scale floats in [0, ~1] to [0, 255]
             np_img = (np_img - min_v) / (max_v - min_v + 1e-8) * 255.0
     # Clip to valid byte range then cast
     np_img = np.clip(np_img, 0, 255)
@@ -455,30 +455,35 @@ def load_label(dataset, sample_id):
     # Get dataset wrapper if exists
     wrapped = getattr(dataset, "wrapped_dataset", dataset)
 
+    def _convert_label(lbl):
+        if isinstance(lbl, list) and len(lbl) and isinstance(lbl[0], (th.Tensor, np.ndarray)):
+            label = to_numpy_safe(lbl).max(0) # Aggr. instances
+        else:
+            label = to_numpy_safe(lbl) # Third element is typically the label
+        return label
+
     # Try common dataset patterns first
     if hasattr(wrapped, '__getitem__'):
         data = wrapped.get_items(index, include_metadata=False, include_labels=True, include_images=False) if hasattr(wrapped, 'get_items') else wrapped[index]
 
         if isinstance(data, (list, tuple)):
             if len(data) == 1:
-                return None  # Only data, no label
-            elif len(data) == 2:  # Commonly (data, label) in standard PyTorch datasets
-                label = to_numpy_safe(data[1])
-            elif len(data) == 3:  # if len==3, data, uids, label, no extra info
-                label = to_numpy_safe(data[2])  # Third element is typically the label
-            elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
+                return None # Only data, no label
+            elif len(data) <= 3: # if len==2|3, data, uids, label, no extra info
+                label = _convert_label(data[2])
+            elif len(data) > 3: # if len>3, data, uids, label, classes, extra info
                 if len(data) == 4:
-                    label = to_numpy_safe(data[2])  # Third element is typically the label
                     metadata = data[3]
                     classes = to_numpy_safe(metadata['classes']) if isinstance(metadata, dict) and 'classes' in metadata else None
                     if classes is not None:
-                        label = to_numpy_safe(data[2])  # Second element is typically the label
+                        label = _convert_label(data[2])
+
                         # Concat label with classes if available (bbox detection, i.e., (4,) -> (5,) with class id)
                         label = np.concatenate([label, classes[..., None]], axis=1)
                     else:
-                        label = to_numpy_safe(data[2])  # Second element is typically the label
+                        label = _convert_label(data[2])
                 else:
-                    label = to_numpy_safe(data[2])  # Third element is typically the label
+                    label = _convert_label(data[2])
                     metadata = data[3:]
             if label is not None:
                 return label[0] if label.ndim == 1 and label.shape[0] == 1 else label
@@ -517,12 +522,12 @@ def load_metadata(dataset, sample_id):
 
         if isinstance(data, (list, tuple)):
             if len(data) == 1:
-                return None  # Only data, no metadata
-            elif len(data) == 2:  # if len==2, only data and uid, no extra info
-                return None  # No metadata, only data and uid
-            elif len(data) == 3:  # if len==3, data, uids, label, no extra info
-                return None  # No metadata, only data, uid, and label
-            elif len(data) > 3:  # if len>3, data, uids, label, classes, extra info
+                return None # Only data, no metadata
+            elif len(data) == 2: # if len==2, only data and uid, no extra info
+                return None # No metadata, only data and uid
+            elif len(data) == 3: # if len==3, data, uids, label, no extra info
+                return None # No metadata, only data, uid, and label
+            elif len(data) > 3: # if len>3, data, uids, label, classes, extra info
                 metadata = {}
                 for item in data[3:]:
                     if isinstance(item, dict):
@@ -651,7 +656,7 @@ def load_raw_image_array(dataset, index, rank: int = 0) -> tuple:
             elif channels == 4:
                 middle_pil = Image.fromarray(middle_slice_uint8, mode="RGBA")
             else:
-                middle_pil = Image.fromarray(middle_slice_uint8[..., 0], mode="L")  # Fallback
+                middle_pil = Image.fromarray(middle_slice_uint8[..., 0], mode="L") # Fallback
 
         return np_img, is_volumetric, original_shape, middle_pil
 
@@ -707,7 +712,7 @@ def load_uid(dataset, sample_id):
 
         if isinstance(data, (list, tuple)):
             if len(data) == 1:
-                return None  # Only data, no metadata
-            elif len(data) >= 2:  # if len==2, only data and uid, no extra info
-                return data[1]  # Second element is typically the uid
+                return None # Only data, no metadata
+            elif len(data) >= 2: # if len==2, only data and uid, no extra info
+                return data[1] # Second element is typically the uid
     return None

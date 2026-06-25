@@ -164,7 +164,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             flag="model",
             device=DEVICE,
             skip_previous_auto_load=True,
-            compute_dependencies=False,  # dependency analysis is currently disabled
+            compute_dependencies=False, # dependency analysis is currently disabled
         )
 
         # Register dataloader
@@ -269,7 +269,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         response = self.data_service.EditDataSample(request, self.mock_context)
 
         self.assertTrue(response.success, f"Failed to add tags: {response.message}")
-        print(f"✓ Successfully added tag 'test_tag' to 10 samples")
+        print(f" Successfully added tag 'test_tag' to 10 samples")
 
         # Verify tags were added by checking the dataframe
         df = self.data_service._all_datasets_df
@@ -300,7 +300,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
                 self.assertTrue(value, f"Sample {sample_id} should have tag 'test_tag'")
 
-            print(f"✓ Verified tag column exists and has correct values")
+            print(f" Verified tag column exists and has correct values")
 
     def test_02_add_multiple_tags(self):
         """Test adding multiple different tags"""
@@ -319,7 +319,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         response1 = self.data_service.EditDataSample(request1, self.mock_context)
         self.assertTrue(response1.success)
-        print(f"✓ Added tag 'difficult' to samples 0-4")
+        print(f" Added tag 'difficult' to samples 0-4")
 
         # Add "outlier" tag to samples 5-9
         request2 = pb2.DataEditsRequest(
@@ -334,13 +334,13 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         response2 = self.data_service.EditDataSample(request2, self.mock_context)
         self.assertTrue(response2.success)
-        print(f"✓ Added tag 'outlier' to samples 5-9")
+        print(f" Added tag 'outlier' to samples 5-9")
 
         # Verify both tags exist
         df = self.data_service._all_datasets_df
         self.assertIn("tag:difficult", df.columns)
         self.assertIn("tag:outlier", df.columns)
-        print(f"✓ Both tag columns exist in dataframe")
+        print(f" Both tag columns exist in dataframe")
 
     def test_03_remove_tag_from_samples(self):
         """Test removing a tag from specific samples using EDIT_REMOVE"""
@@ -359,7 +359,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         response = self.data_service.EditDataSample(request, self.mock_context)
         self.assertTrue(response.success, f"Failed to remove tag: {response.message}")
-        print(f"✓ Removed tag 'test_tag' from samples 0-4")
+        print(f" Removed tag 'test_tag' from samples 0-4")
 
         # Verify tag was removed from those samples
         df = self.data_service._all_datasets_df
@@ -408,7 +408,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
             self.assertTrue(value, f"Sample {sample_id} should still have tag 'test_tag'")
 
-        print(f"✓ Verified tag removal worked correctly")
+        print(f" Verified tag removal worked correctly")
 
     def test_04_delete_entire_tag_column(self):
         """Test deleting an entire tag column using EDIT_REMOVE with value=-1"""
@@ -417,22 +417,22 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
         # Delete the "difficult" tag column completely
         request = pb2.DataEditsRequest(
             stat_name="tag:difficult",
-            float_value=-1,  # Signal for column deletion
+            float_value=-1, # Signal for column deletion
             string_value="",
             bool_value=False,
             type=SampleEditType.EDIT_REMOVE,
-            samples_ids=["0"],  # Just need one sample as reference
+            samples_ids=["0"], # Just need one sample as reference
             sample_origins=["test"]
         )
 
         response = self.data_service.EditDataSample(request, self.mock_context)
         self.assertTrue(response.success, f"Failed to delete tag column: {response.message}")
-        print(f"✓ Deleted entire 'difficult' tag column")
+        print(f" Deleted entire 'difficult' tag column")
 
         # Verify column no longer exists
         df = self.data_service._all_datasets_df
         self.assertNotIn("tag:difficult", df.columns, "Tag column should be deleted")
-        print(f"✓ Verified tag column no longer exists in dataframe")
+        print(f" Verified tag column no longer exists in dataframe")
 
     def test_05_deny_listed_operations(self):
         """Test discarded (discard/restore) operations"""
@@ -455,7 +455,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
             stat_name=SampleStatsEx.DISCARDED.value,
             float_value=0,
             string_value="",
-            bool_value=True,  # True = discarded
+            bool_value=True, # True = discarded
             type=SampleEditType.EDIT_OVERRIDE,
             samples_ids=sample_ids,
             sample_origins=origins
@@ -463,7 +463,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         response = self.data_service.EditDataSample(request_discard, self.mock_context)
         self.assertTrue(response.success, f"Failed to discard samples: {response.message}")
-        print(f"✓ Marked samples 10-14 as discarded")
+        print(f" Marked samples 10-14 as discarded")
 
         # Verify samples are marked as discarded
         df = self.data_service._all_datasets_df
@@ -488,14 +488,14 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
             self.assertTrue(value, f"Sample {sample_id} should be discarded")
 
-        print(f"✓ Verified samples are discarded")
+        print(f" Verified samples are discarded")
 
         # Now restore samples 10-12
         request_restore = pb2.DataEditsRequest(
             stat_name=SampleStatsEx.DISCARDED.value,
             float_value=0,
             string_value="",
-            bool_value=False,  # False = restored
+            bool_value=False, # False = restored
             type=SampleEditType.EDIT_OVERRIDE,
             samples_ids=[str(i) for i in range(10, 13)],
             sample_origins=["test"] * 3
@@ -503,7 +503,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         response = self.data_service.EditDataSample(request_restore, self.mock_context)
         self.assertTrue(response.success, f"Failed to restore samples: {response.message}")
-        print(f"✓ Restored samples 10-12")
+        print(f" Restored samples 10-12")
 
         # Verify restoration
         df = self.data_service._all_datasets_df
@@ -550,7 +550,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
             self.assertTrue(value, f"Sample {sample_id} should still be discarded")
 
-        print(f"✓ Verified restoration worked correctly")
+        print(f" Verified restoration worked correctly")
 
     def test_06_batch_tag_operations(self):
         """Test batch operations on many samples at once"""
@@ -583,7 +583,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         response = self.data_service.EditDataSample(request, self.mock_context)
         self.assertTrue(response.success, f"Failed to add batch tag: {response.message}")
-        print(f"✓ Added 'batch_tag' to 50 samples in one operation")
+        print(f" Added 'batch_tag' to 50 samples in one operation")
 
         # Verify all 50 samples have the tag
         df = self.data_service._all_datasets_df
@@ -614,7 +614,7 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
                 success_count += 1
 
         self.assertGreaterEqual(success_count, 45, f"Expected at least 45 samples to have batch_tag, got {success_count}")
-        print(f"✓ Verified {success_count}/50 samples have the batch tag")
+        print(f" Verified {success_count}/50 samples have the batch tag")
 
     def test_07_tag_persistence(self):
         """Test that tags persist and can be queried"""
@@ -624,14 +624,14 @@ class TestGRPCTagOperations(_TimeoutMixin, unittest.TestCase):
 
         # Count tag columns
         tag_columns = [col for col in df.columns if col.startswith(f"{SampleStatsEx.TAG.value}:")]
-        print(f"✓ Found {len(tag_columns)} tag columns: {tag_columns}")
+        print(f" Found {len(tag_columns)} tag columns: {tag_columns}")
 
         self.assertGreater(len(tag_columns), 0, "Should have at least one tag column")
 
         # Verify we can query tagged samples
         for tag_col in tag_columns:
             tagged_samples = df[df[tag_col] == True]
-            print(f"  - {tag_col}: {len(tagged_samples)} samples")
+            print(f" - {tag_col}: {len(tagged_samples)} samples")
             self.assertGreaterEqual(len(tagged_samples), 0)
 
 
@@ -661,14 +661,14 @@ if __name__ == '__main__':
     print("="*80 + "\n")
 
     if result.wasSuccessful():
-        print("✅ ALL TESTS PASSED!")
+        print(" ALL TESTS PASSED!")
     else:
-        print("❌ SOME TESTS FAILED")
+        print(" SOME TESTS FAILED")
         if result.failures:
             print("\nFailures:")
             for test, traceback in result.failures:
-                print(f"  - {test}: {traceback}")
+                print(f" - {test}: {traceback}")
         if result.errors:
             print("\nErrors:")
             for test, traceback in result.errors:
-                print(f"  - {test}: {traceback}")
+                print(f" - {test}: {traceback}")

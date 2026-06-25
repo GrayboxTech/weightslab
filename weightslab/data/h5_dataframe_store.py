@@ -16,7 +16,7 @@ from typing import Iterable, Optional, Union
 from weightslab.data.sample_stats import SampleStats
 
 
-logger = logging.getLogger(__name__)  # Initialize logger
+logger = logging.getLogger(__name__) # Initialize logger
 
 # WL signal columns use dotted names (e.g. "signals.defaults.brightness"), which
 # PyTables flags with NaturalNameWarning because they aren't valid Python
@@ -28,6 +28,27 @@ try:
     warnings.filterwarnings("ignore", category=NaturalNameWarning)
 except Exception:
     pass
+
+
+def _align_col_dtype_for_assign(existing: pd.DataFrame, source: pd.DataFrame, col: str) -> None:
+    """Upcast ``existing[col]`` to object before a partial ``.loc`` assignment when
+    the source column holds object data (numpy arrays, stringified masks) or bool
+    flags that don't fit the target's dtype.
+
+    pandas >= 2.1 raises a FutureWarning (a future hard error) when a partial
+    ``.loc`` assignment would change a column's dtype — e.g. assigning object or
+    bool values into a column that was just initialized as float64 via ``np.nan``.
+    Upcasting the target column to object first makes the assignment dtype-stable.
+    Compatible numeric assignments (e.g. int into float) are left untouched.
+    Best-effort: dtype alignment must never break a merge.
+    """
+    try:
+        src_kind = source[col].dtype.kind # 'O' object, 'b' bool, 'i'/'u'/'f' numeric
+        tgt_dtype = existing[col].dtype
+        if src_kind in ("O", "b") and tgt_dtype != object and tgt_dtype.kind != src_kind:
+            existing[col] = existing[col].astype(object)
+    except Exception:
+        pass
 
 
 class _InterProcessFileLock:
@@ -81,7 +102,7 @@ class _InterProcessFileLock:
                 except OSError:
                     pass
 
-        self._unlock = _unlock  # type: ignore[attr-defined]
+        self._unlock = _unlock # type: ignore[attr-defined]
 
         while True:
             if _try_lock():
@@ -93,7 +114,7 @@ class _InterProcessFileLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             if hasattr(self, "_unlock"):
-                self._unlock()  # type: ignore[attr-defined]
+                self._unlock() # type: ignore[attr-defined]
         finally:
             if self._fh:
                 try:
@@ -164,9 +185,9 @@ class H5DataFrameStore:
                 # Detect tag type from data
                 non_null = df[col].dropna()
                 if non_null.empty:
-                    tag_cols[col] = None  # Auto-detect if all null
+                    tag_cols[col] = None # Auto-detect if all null
                 elif all(isinstance(v, bool) for v in non_null):
-                    tag_cols[col] = [True, False]  # Boolean tag
+                    tag_cols[col] = [True, False] # Boolean tag
                 else:
                     # String tag: use unique values as categories
                     tag_cols[col] = non_null.unique().tolist()
@@ -436,9 +457,9 @@ class H5DataFrameStore:
 
         # Everything was persisted as plain strings (see upsert). Reconstruct the
         # in-memory representation for tag/discarded columns:
-        #   1. missing tokens ("nan"/"none"/"") → real NaN
-        #   2. boolean columns ("True"/"False") → real bool  (bool('False') is truthy,
-        #      so this MUST run before any bool checks)
+        # 1. missing tokens ("nan"/"none"/"") → real NaN
+        # 2. boolean columns ("True"/"False") → real bool (bool('False') is truthy,
+        # so this MUST run before any bool checks)
         # String categorical tags keep their string values here; their categorical
         # dtype + full category set is restored by _optimize_categorical_tags below.
         _BOOL_TOKENS = {"true": True, "false": False, "1": True, "0": False}
@@ -495,7 +516,7 @@ class H5DataFrameStore:
         try:
             checksum_key = f"{key}/_checksum"
             if checksum_key not in store:
-                return True  # No checksum to verify
+                return True # No checksum to verify
             checksum_df = store.get(checksum_key)
             stored_checksum = checksum_df["checksum"].iloc[0]
             return stored_checksum == expected_checksum
@@ -552,7 +573,7 @@ class H5DataFrameStore:
                                 return pd.DataFrame()
                             df = store.select(key, start=start, stop=stop, columns=list(columns) if columns else None)
                     except (FileNotFoundError, OSError, KeyError) as exc:
-                        if not non_blocking:  # Only warn on blocking reads
+                        if not non_blocking: # Only warn on blocking reads
                             logger.warning(f"[H5DataFrameStore] Failed to load {key} from {self._path}: {exc}")
                         return pd.DataFrame()
             except TimeoutError:
@@ -705,6 +726,7 @@ class H5DataFrameStore:
                                             if col not in existing.columns:
                                                 is_categorical = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
                                                 existing[col] = False if is_categorical else np.nan
+                                            _align_col_dtype_for_assign(existing, df_norm, col)
                                             existing.loc[matching_rows.index, col] = df_norm.loc[idx, col]
                                     elif isinstance(matching_rows, pd.Series):
                                         # Single row matched
@@ -712,6 +734,7 @@ class H5DataFrameStore:
                                             if col not in existing.columns:
                                                 is_categorical = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
                                                 existing[col] = False if is_categorical else np.nan
+                                            _align_col_dtype_for_assign(existing, df_norm, col)
                                             existing.loc[matching_rows.name, col] = df_norm.loc[idx, col]
                             else:
                                 # Normal case: same index structure
@@ -728,6 +751,7 @@ class H5DataFrameStore:
                                             is_categorical = col.startswith("tag") or col.startswith("TAG") or col == "discarded"
                                             existing[col] = False if is_categorical else np.nan
                                         # Update values for common rows
+                                        _align_col_dtype_for_assign(existing, df_norm, col)
                                         existing.loc[common_idx, col] = df_norm.loc[common_idx, col]
 
                                 # 2. Append strictly new rows
@@ -798,7 +822,7 @@ class H5DataFrameStore:
             True if successful, False otherwise
         """
         if not self._path.exists():
-            return True  # Nothing to delete
+            return True # Nothing to delete
 
         # Create backup BEFORE any modifications
         backup_path = self._create_backup()

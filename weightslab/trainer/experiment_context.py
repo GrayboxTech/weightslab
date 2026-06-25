@@ -83,7 +83,7 @@ class ExperimentContext:
         try:
             dnames = list_dataloaders()
             for dname in dnames:
-                data_loaders[dname] = get_dataloader(dname)  # pre-load to catch errors early
+                data_loaders[dname] = get_dataloader(dname) # pre-load to catch errors early
         except Exception:
             logger.error("Error while listing/resolving dataloaders", exc_info=True)
             pass
@@ -154,7 +154,7 @@ class ExperimentContext:
             "checkpoint_manager": checkpoint_manager,
             "df_manager": df_manager
         }
-        self._components.update(data_loaders)  # add all dataloaders found
+        self._components.update(data_loaders) # add all dataloaders found
         self._last_resolve_time = now
 
         # Build hyper-parameter descriptors used by the protocol. Use

@@ -140,7 +140,7 @@ def setup_logging(level, log_to_file=True):
         _LOG_FILE_PATH = os.path.join(log_dir, f'weightslab_{timestamp}.log')
 
         _FILE_HANDLER = logging.FileHandler(_LOG_FILE_PATH, mode='w', encoding='utf-8')
-        _FILE_HANDLER.setLevel(logging.DEBUG)  # Always log DEBUG+ to file
+        _FILE_HANDLER.setLevel(logging.DEBUG) # Always log DEBUG+ to file
         _FILE_HANDLER.setFormatter(formatter)
         root_logger.addHandler(_FILE_HANDLER)
 

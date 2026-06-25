@@ -6,8 +6,8 @@ immediately after computing the value so the platform captures it.
 
 Classes
 -------
-TripletLosses  differentiable loss functions (return torch.Tensor)
-FaceMetrics    evaluation metrics and clustering-oriented test signals
+TripletLosses differentiable loss functions (return torch.Tensor)
+FaceMetrics evaluation metrics and clustering-oriented test signals
 """
 
 import numpy as np
