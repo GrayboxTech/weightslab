@@ -46,14 +46,14 @@ data:
     preload_labels: true
     preload_metadata: true
     drop_last: false
-    num_workers: 4
+    num_workers: 0  # Force to 0 for windows for perfs. opt
   val_loader:
     batch_size: 2
     shuffle: false
     preload_labels: true
     preload_metadata: true
     drop_last: false
-    num_workers: 4
+    num_workers: 0  # Force to 0 for windows for perfs. opt
 
 signals_cfg:
   train_nms:

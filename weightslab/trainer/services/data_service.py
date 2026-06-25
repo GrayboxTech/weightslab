@@ -1362,6 +1362,8 @@ class DataService:
                             except Exception:
                                 label_arr = np.array([])
 
+                        if label_arr.ndim == 1 and label_arr.size >= 4:
+                            label_arr = label_arr.reshape(1, -1)
                         if label_arr.size > 0 and label_arr.ndim == 2 and label_arr.shape[-1] >= 4:
                             # 6-col rows when class+score present: [x,y,x,y,class,score]
                             # (or [tl_x,tl_y,w,h,class,score] for the xywh-top-left flavor).
@@ -2771,7 +2773,7 @@ class DataService:
         # detection) pred/target are large JSON arrays (~310 KB/record) that bloat the
         # response to 100s of MB and silently break the histogram fetch.
         if not requested_cols:
-            _HEAVY_BLOB_COLS = {"pred", "prediction", "prediction_raw", "target"}
+            _HEAVY_BLOB_COLS = {"prediction_raw"}
             requested_cols = [c for c in df_slice.columns if c not in _HEAVY_BLOB_COLS]
 
         metadata_cols = [
@@ -3808,6 +3810,8 @@ class DataService:
                         )
 
                     tag_col = f"{SampleStatsEx.TAG.value}:{tag_name}"
+                    if tag_col not in self._all_datasets_df.columns:
+                        self._slowUpdateInternals()
                     df = safe_reset_index(self._all_datasets_df)
                     if tag_col not in df.columns:
                         return pb2.DataEditsResponse(

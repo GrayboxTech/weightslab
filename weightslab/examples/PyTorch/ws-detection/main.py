@@ -49,7 +49,7 @@ def train(loader, model, optimizer, sig, device, grid_size, conf_thresh):
         targets = [t.to(device) for t in targets]
 
         optimizer.zero_grad()
-        outputs = model(inputs)  # [B, S, S, 5 + num_classes]
+        outputs = model(inputs) # [B, S, S, 5 + num_classes]
 
         # Decoded boxes for the UI overlay (detached — display only).
         preds = decode_predictions(outputs.detach(), grid_size, conf_thresh=conf_thresh)
@@ -90,7 +90,7 @@ def test(loader, model, sig, device, grid_size, conf_thresh, test_loader_len):
 
     loss = float((losses / test_loader_len).detach().cpu().item())
     iou = float((ious / test_loader_len).detach().cpu().item())
-    return loss, iou * 100.0  # Return mean IoU as percentage
+    return loss, iou * 100.0 # Return mean IoU as percentage
 
 
 # =============================================================================
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     parameters.setdefault("training_steps_to_do", 500)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     parameters.setdefault("number_of_workers", 4)
-    parameters.setdefault("num_classes", 1)       # Penn-Fudan: single class (person)
+    parameters.setdefault("num_classes", 1) # Penn-Fudan: single class (person)
     parameters.setdefault("image_size", 256)
     parameters.setdefault("grid_size", 8)
     parameters.setdefault("conf_thresh", 0.3)
@@ -119,33 +119,8 @@ if __name__ == "__main__":
     parameters.setdefault("freeze_backbone", True)
     parameters.setdefault("compute_natural_sort", True)
 
+    # --- 2) Register hyperparameters ---
     exp_name = parameters["experiment_name"]
-    num_classes = int(parameters["num_classes"])
-    image_size = int(parameters["image_size"])
-    grid_size = int(parameters["grid_size"])
-    conf_thresh = float(parameters["conf_thresh"])
-
-    # --- 2) Device selection ---
-    if parameters.get("device", "auto") == "auto":
-        parameters["device"] = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-    device = parameters["device"]
-
-    # --- 3) Logging directory ---
-    if not parameters.get("root_log_dir"):
-        tmp_dir = tempfile.mkdtemp()
-        parameters["root_log_dir"] = tmp_dir
-        print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
-    os.makedirs(parameters["root_log_dir"], exist_ok=True)
-
-    log_dir = parameters["root_log_dir"]
-    max_steps = parameters["training_steps_to_do"]
-    eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
-    verbose = parameters.get("verbose", True)
-    tqdm_display = parameters.get("tqdm_display", True)
-
-    # --- 4) Register hyperparameters ---
     wl.watch_or_edit(
         parameters,
         flag="hyperparameters",
@@ -153,6 +128,31 @@ if __name__ == "__main__":
         defaults=parameters,
         poll_interval=1.0,
     )
+
+    num_classes = int(parameters["num_classes"])
+    image_size = int(parameters["image_size"])
+    grid_size = int(parameters["grid_size"])
+    conf_thresh = float(parameters["conf_thresh"])
+
+    # --- 3) Device selection ---
+    if parameters.get("device", "auto") == "auto":
+        parameters["device"] = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+    device = parameters["device"]
+
+    # --- 4) Logging directory ---
+    if not parameters.get("root_log_dir"):
+        tmp_dir = tempfile.mkdtemp()
+        parameters["root_log_dir"] = tmp_dir
+        print(f"No root_log_dir specified, using temporary directory: {parameters['root_log_dir']}")
+    os.makedirs(parameters["root_log_dir"], exist_ok=True)
+    log_dir = parameters["root_log_dir"]
+    max_steps = parameters["training_steps_to_do"]
+    eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
+    verbose = parameters.get("verbose", True)
+    tqdm_display = parameters.get("tqdm_display", True)
+
 
     # --- 5) Data (Penn-Fudan pedestrians, downloaded on first run) ---
     default_data_root = os.path.abspath(
@@ -255,7 +255,7 @@ if __name__ == "__main__":
         class_counts = np.zeros(num_classes, dtype=np.float64)
         num_samples = min(len(dataset), max_samples)
 
-        for idx in tqdm.tqdm(range(num_samples), desc="📊 Analyzing Distribution"):
+        for idx in tqdm.tqdm(range(num_samples), desc=" Analyzing Distribution"):
             _, _, target, _ = dataset.get_items(idx, include_labels=True)
             if target is None or len(target) == 0:
                 continue
@@ -263,10 +263,10 @@ if __name__ == "__main__":
                 if 0 <= c < num_classes:
                     class_counts[c] += 1
 
-        class_counts = np.maximum(class_counts, 1)  # Avoid div by zero
+        class_counts = np.maximum(class_counts, 1) # Avoid div by zero
         total = class_counts.sum()
         class_weights = total / (num_classes * class_counts)
-        class_weights = class_weights / class_weights.mean()  # Normalize
+        class_weights = class_weights / class_weights.mean() # Normalize
 
         print("\nClass distribution and weights:", flush=True)
         for c in range(num_classes):
@@ -287,16 +287,16 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("🚀 STARTING PENN-FUDAN PEDESTRIAN DETECTION TRAINING")
-    print(f"📈 Total steps: {max_steps}")
-    print(f"🔄 Evaluation every {eval_full_to_train_steps_ratio} steps")
-    print(f"💾 Logs will be saved to: {log_dir}")
-    print(f"📂 Data root: {data_root}")
+    print(" STARTING PENN-FUDAN PEDESTRIAN DETECTION TRAINING")
+    print(f" Total steps: {max_steps}")
+    print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
+    print(f" Logs will be saved to: {log_dir}")
+    print(f" Data root: {data_root}")
     print("=" * 60 + "\n")
 
-    # ================
-    # Training Loop
-    wl.start_training(timeout=3)  # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
+    # # ================
+    # # Training Loop
+    # wl.start_training(timeout=3) # Blocks and keeps the main thread alive while background services run. Optionally set a timeout (seconds) to auto-stop.
 
     # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
@@ -310,7 +310,7 @@ if __name__ == "__main__":
 
         # Test
         if age == 0 or age % eval_full_to_train_steps_ratio == 0:
-            test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+            test_loader_len = len(test_loader) # Store length before wrapping with tqdm
             test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(test_loader_it, model, test_sig, device, grid_size, conf_thresh, test_loader_len)
 
@@ -332,8 +332,8 @@ if __name__ == "__main__":
             )
 
     print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
-    print(f"💾 Logs saved to: {log_dir}")
+    print(f" Training completed in {time.time() - start_time:.2f} seconds")
+    print(f" Logs saved to: {log_dir}")
     print("=" * 60)
 
     # Keep the main thread alive to allow background serving threads to run

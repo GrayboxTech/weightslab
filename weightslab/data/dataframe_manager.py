@@ -683,7 +683,7 @@ class LedgeredDataFrameManager:
                     # "Cannot setitem on a Categorical with a new category". The
                     # _optimize_dataframe_memory pass below re-applies categorical dtypes.
                     for col in all_cols:
-                        if col in self._df.columns and isinstance(self._df[col].dtype, pd.CategoricalDtype):
+                        if col in self._df.columns and col != SampleStatsEx.ORIGIN and isinstance(self._df[col].dtype, pd.CategoricalDtype):
                             self._df[col] = self._df[col].astype(object)
                     self._df.loc[existing_idx, all_cols] = df_norm.loc[existing_idx, all_cols]
 

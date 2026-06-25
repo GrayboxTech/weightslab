@@ -45,13 +45,13 @@ def _instance_batch_idx(labels):
 def _run_instance_signals(sig, outputs, labels, ids, preds, return_metric=False):
     """Compute + log/save the per-sample AND per-instance Dice (metric) and BCE (loss)."""
     bce_sample = sig["bce_sample"](outputs, labels, batch_ids=ids, preds=preds)
-    dice_sample = sig["dice_sample"](outputs, labels, batch_ids=ids)  # Register processed predictions one time only
+    dice_sample = sig["dice_sample"](outputs, labels, batch_ids=ids) # Register processed predictions one time only
 
-    sig["dice_instance"](outputs, labels, batch_ids=ids)  # Register processed predictions one time only
+    sig["dice_instance"](outputs, labels, batch_ids=ids) # Register processed predictions one time only
     sig["bce_instance"](outputs, labels, batch_ids=ids)
 
     avg_loss = 0.5 * dice_sample + 0.5 * bce_sample
-    wl.save_signals({"combined_bce_dice_per_sample": avg_loss}, ids)  # Save the per-sample aggregate loss for backward step
+    wl.save_signals({"combined_bce_dice_per_sample": avg_loss}, ids) # Save the per-sample aggregate loss for backward step
     if return_metric:
         return avg_loss, dice_sample
     return avg_loss
@@ -91,11 +91,11 @@ def train(loader, model, optimizer, sig, device):
     with guard_training_context:
         (inputs, ids, labels, _) = next(loader)
         inputs = inputs.to(device)
-        labels = [[m.to(device) for m in insts] for insts in labels]  # per-sample list of instances
+        labels = [[m.to(device) for m in insts] for insts in labels] # per-sample list of instances
 
         optimizer.zero_grad()
-        outputs = model(inputs)  # [B,C,H,W]
-        preds = outputs.argmax(dim=1)  # [B,H,W]
+        outputs = model(inputs) # [B,C,H,W]
+        preds = outputs.argmax(dim=1) # [B,H,W]
 
         # Per-instance + per-sample Dice/BCE (tracked & saved at annotation level).
         loss_per_sample = _run_instance_signals(sig, outputs, labels, ids, preds=preds)
@@ -110,7 +110,7 @@ def train(loader, model, optimizer, sig, device):
         wl.save_signals(
             _user_custom_signals(preds, labels),
             ids
-        )  # Save the per-sample predictions for visualization
+        ) # Save the per-sample predictions for visualization
 
     return float(loss.detach().cpu().item())
 
@@ -122,23 +122,23 @@ def test(loader, model, sig, device, test_loader_len):
     with guard_testing_context, torch.no_grad():
         for inputs, ids, labels, _ in loader:
             inputs = inputs.to(device)
-            labels = [[m.to(device) for m in insts] for insts in labels]  # per-sample list of instances
+            labels = [[m.to(device) for m in insts] for insts in labels] # per-sample list of instances
 
             outputs = model(inputs)
-            preds = outputs.argmax(dim=1)  # [B,H,W]
+            preds = outputs.argmax(dim=1) # [B,H,W]
 
             # Per-instance + per-sample Dice/BCE (tracked & saved at annotation level).
             loss_per_sample, dice_sample = _run_instance_signals(sig, outputs, labels, ids, preds=preds, return_metric=True)
 
-            losses += torch.mean(loss_per_sample)  # Average over the batch and accumulate
-            dices += torch.mean(dice_sample)  # Average over the batch and accumulate
+            losses += torch.mean(loss_per_sample) # Average over the batch and accumulate
+            dices += torch.mean(dice_sample) # Average over the batch and accumulate
 
             # I want to see in the UI the per-sample classes predicted by the model
-            wl.save_signals(_user_custom_signals(preds, labels), ids)  # Save the per-sample predictions for visualization
+            wl.save_signals(_user_custom_signals(preds, labels), ids) # Save the per-sample predictions for visualization
 
     loss = float((losses / test_loader_len).detach().cpu().item())
     dice = float((dices / test_loader_len).detach().cpu().item())
-    return loss, dice * 100.0  # Return average Dice as percentage
+    return loss, dice * 100.0 # Return average Dice as percentage
 
 
 # =============================================================================
@@ -159,13 +159,23 @@ if __name__ == "__main__":
     parameters.setdefault("training_steps_to_do", 500)
     parameters.setdefault("eval_full_to_train_steps_ratio", 50)
     parameters.setdefault("number_of_workers", 4)
-    parameters.setdefault("num_classes", 6)      # adjust to your label set
-    parameters.setdefault("ignore_index", 255)   # if you have void pixels
+    parameters.setdefault("num_classes", 6) # adjust to your label set
+    parameters.setdefault("class_names", None) # adjust to your label set
+    parameters.setdefault("ignore_index", 255) # if you have void pixels
     parameters.setdefault("image_size", 256)
     parameters.setdefault("compute_natural_sort", True)
 
+    # --- 4) Register hyperparameters ---
     exp_name = parameters["experiment_name"]
+    wl.watch_or_edit(
+        parameters,
+        flag="hyperparameters",
+        name=exp_name,
+        defaults=parameters,
+        poll_interval=1.0,
+    )
     num_classes = int(parameters["num_classes"])
+    class_names = parameters["class_names"]
     ignore_index = int(parameters["ignore_index"])
     image_size = int(parameters["image_size"])
 
@@ -186,17 +196,9 @@ if __name__ == "__main__":
     log_dir = parameters["root_log_dir"]
     max_steps = parameters["training_steps_to_do"]
     eval_full_to_train_steps_ratio = parameters["eval_full_to_train_steps_ratio"]
+    write_export_ratio = parameters.get("write_export_ratio", 100)
     verbose = parameters.get("verbose", True)
     tqdm_display = parameters.get("tqdm_display", True)
-
-    # --- 4) Register hyperparameters ---
-    wl.watch_or_edit(
-        parameters,
-        flag="hyperparameters",
-        name=exp_name,
-        defaults=parameters,
-        poll_interval=1.0,
-    )
 
     # --- 5) Data (BDD100k reduced) ---
     default_data_root = os.path.abspath(
@@ -211,17 +213,19 @@ if __name__ == "__main__":
         root=data_root,
         split="train",
         num_classes=num_classes,
+        class_names=class_names,
         ignore_index=ignore_index,
         image_size=image_size,
-        max_samples=train_cfg.get("max_samples", None)  # Optionally limit number of samples for faster testing
+        max_samples=train_cfg.get("max_samples", None) # Optionally limit number of samples for faster testing
     )
     _val_dataset = BDD100kSegDataset(
         root=data_root,
         split="val",
         num_classes=num_classes,
+        class_names=class_names,
         ignore_index=ignore_index,
         image_size=image_size,
-        max_samples=test_cfg.get("max_samples", None)  # Optionally limit number of samples for faster testing
+        max_samples=test_cfg.get("max_samples", None) # Optionally limit number of samples for faster testing
     )
 
     train_loader = wl.watch_or_edit(
@@ -300,8 +304,8 @@ if __name__ == "__main__":
         class_counts = np.zeros(num_classes, dtype=np.float64)
         num_samples = min(len(dataset), max_samples)
 
-        for idx in tqdm.tqdm(range(num_samples), desc="📊 Analyzing Distribution"):
-            _, _, label, _ = dataset.get_items(idx, include_labels=True)  # Get the label/mask for this sample
+        for idx in tqdm.tqdm(range(num_samples), desc=" Analyzing Distribution"):
+            _, _, label, _ = dataset.get_items(idx, include_labels=True) # Get the label/mask for this sample
             label_np = label.numpy() if hasattr(label, 'numpy') else np.array(label)
             for c in range(num_classes):
                 class_counts[c] += (label_np == c).sum()
@@ -330,32 +334,37 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("🚀 STARTING BDD100k SEGMENTATION TRAINING")
-    print(f"📈 Total steps: {max_steps}")
-    print(f"🔄 Evaluation every {eval_full_to_train_steps_ratio} steps")
-    print(f"💾 Logs will be saved to: {log_dir}")
-    print(f"📂 Data root: {data_root}")
+    print(" STARTING BDD100k SEGMENTATION TRAINING")
+    print(f" Total steps: {max_steps}")
+    print(f" Evaluation every {eval_full_to_train_steps_ratio} steps")
+    print(f" Logs will be saved to: {log_dir}")
+    print(f" Data root: {data_root}")
     print("=" * 60 + "\n")
 
     # ================
     # Training Loop
-    wl.start_training(timeout=3)  # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
+    # wl.start_training(timeout=3) # This will block and keep the main thread alive while background services run. You can optionally set a timeout (in seconds) to automatically stop after a certain duration.
 
     # ================
     train_range = tqdm.tqdm(itertools.count(), desc="Training") if tqdm_display else itertools.count()
     test_loss, test_metric = None, None
     start_time = time.time()
     for train_step in train_range:
-        age = model.get_age() if hasattr(model, "get_age") else train_step  # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
+        age = model.get_age() if hasattr(model, "get_age") else train_step # Get model age in steps (not necessarily equal to train_step if model was reloaded or has seen more data than training steps)
 
         # Train
         train_loss = train(train_loader, model, optimizer, train_sig, device)
 
         # Test
         if age == 0 or age % eval_full_to_train_steps_ratio == 0:
-            test_loader_len = len(test_loader)  # Store length before wrapping with tqdm
+            test_loader_len = len(test_loader) # Store length before wrapping with tqdm
             test_loader_it = tqdm.tqdm(test_loader, desc="Evaluating") if tqdm_display else test_loader
             test_loss, test_metric = test(test_loader_it, model, test_sig, device, test_loader_len)
+
+        # Periodic history + dataframe export (JSON/CSV snapshots to root_log_dir)
+        if age > 0 and age % write_export_ratio == 0:
+            wl.write_history()
+            wl.write_dataframe()
 
         # Verbose
         if verbose and not tqdm_display:
@@ -375,9 +384,13 @@ if __name__ == "__main__":
             )
 
     print("\n" + "=" * 60)
-    print(f"✅ Training completed in {time.time() - start_time:.2f} seconds")
-    print(f"💾 Logs saved to: {log_dir}")
+    print(f" Training completed in {time.time() - start_time:.2f} seconds")
+    print(f" Logs saved to: {log_dir}")
     print("=" * 60)
+
+    # Final export of signal history and data grid to root_log_dir
+    wl.write_history()
+    wl.write_dataframe()
 
     # Keep the main thread alive to allow background serving threads to run
     wl.keep_serving()
